@@ -61,6 +61,41 @@ uv sync
 
 该命令会根据 `pyproject.toml` 和 `uv.lock` 安装所有依赖，包括开发依赖（如 `pytest`、`pytest-cov`、`pytest-asyncio` 等）。
 
+### Leemine 双仓本地联调 `code-core`
+
+从同一个父目录分别克隆两个 Leemine 仓库：
+
+```bash
+git clone https://github.com/leemine/codeswarm.git
+git clone https://github.com/leemine/code-core.git
+cd codeswarm
+```
+
+当 `codeswarm` 与 `code-core` 并列检出时，先按锁文件同步依赖，再将当前虚拟环境中的 `openjiuwen` 指向本地 `code-core`：
+
+```bash
+# 在 codeswarm 仓库根目录执行
+uv sync
+# macOS / Linux
+uv pip install --python .venv/bin/python -e ../code-core --no-deps
+# Windows PowerShell / CMD
+uv pip install --python .venv\Scripts\python.exe -e ..\code-core --no-deps
+```
+
+确认实际导入的是本地源码：
+
+```bash
+uv run --no-sync python -c "import openjiuwen; print(openjiuwen.__file__)"
+```
+
+日常启动使用：
+
+```bash
+uv run --no-sync jiuwenswarm-start all
+```
+
+`uv sync` 会将 `openjiuwen` 恢复为 `uv.lock` 中固定的 Leemine Git 提交；执行同步后需重新安装本地 editable 依赖。现有 `jiuwenswarm-start debug` 会自动执行 `uv sync`，因此不用于保留本地 `code-core` 改动的联调。
+
 ## 3. 安装 Bun（编译 TUI 前端包）
 
 TUI 前端包需要使用 [Bun](https://bun.sh/) 进行编译。安装方式：

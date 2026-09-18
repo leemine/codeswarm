@@ -61,6 +61,41 @@ uv sync
 
 This command installs all dependencies based on `pyproject.toml` and `uv.lock`, including development dependencies (such as `pytest`, `pytest-cov`, `pytest-asyncio`, etc.).
 
+### Local Two-Repository Development with Leemine `code-core`
+
+Clone both Leemine repositories under the same parent directory:
+
+```bash
+git clone https://github.com/leemine/codeswarm.git
+git clone https://github.com/leemine/code-core.git
+cd codeswarm
+```
+
+When `codeswarm` and `code-core` are checked out side by side, sync the locked dependencies first, then point the current virtual environment's `openjiuwen` installation at the local `code-core` checkout:
+
+```bash
+# Run from the codeswarm repository root
+uv sync
+# macOS / Linux
+uv pip install --python .venv/bin/python -e ../code-core --no-deps
+# Windows PowerShell / CMD
+uv pip install --python .venv\Scripts\python.exe -e ..\code-core --no-deps
+```
+
+Verify that imports resolve to the local source:
+
+```bash
+uv run --no-sync python -c "import openjiuwen; print(openjiuwen.__file__)"
+```
+
+Start the services during local development with:
+
+```bash
+uv run --no-sync jiuwenswarm-start all
+```
+
+`uv sync` restores `openjiuwen` from the Leemine Git commit pinned in `uv.lock`; reinstall the local editable dependency after syncing. The existing `jiuwenswarm-start debug` command runs `uv sync` automatically, so do not use it when you need to keep local `code-core` changes active.
+
 ## 3. Install Bun (For Building TUI Frontend Packages)
 
 The TUI frontend packages require [Bun](https://bun.sh/) for compilation. Installation methods:

@@ -183,7 +183,7 @@ uv --version
 
 ```bash
 # Clone the repository
-git clone https://gitcode.com/openJiuwen/jiuwenswarm.git
+git clone https://github.com/leemine/codeswarm.git jiuwenswarm
 
 # Enter project directory
 cd jiuwenswarm
@@ -277,7 +277,7 @@ conda activate jiuwenswarm
 
 ```bash
 # Clone the repository
-git clone https://gitcode.com/openJiuwen/jiuwenswarm.git
+git clone https://github.com/leemine/codeswarm.git jiuwenswarm
 
 # Enter project directory
 cd jiuwenswarm
