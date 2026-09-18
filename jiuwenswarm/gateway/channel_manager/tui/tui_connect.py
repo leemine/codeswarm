@@ -104,10 +104,10 @@ class _ModelOpError(Exception):
     """模型操作校验失败：在 update_config 事务内抛出，事务外转成 RPC 错误响应。"""
 
 # Auto-Harness config file path
-_DEFAULT_REPO_URL = "https://gitcode.com/openJiuwen/agent-core.git"
+_DEFAULT_REPO_URL = "https://github.com/leemine/code-core.git"
 _AUTO_HARNESS_CONFIG_DIR = get_user_workspace_dir() / "auto-harness"
 _AUTO_HARNESS_CONFIG_FILE = _AUTO_HARNESS_CONFIG_DIR / "config.yaml"
-_AUTO_HARNESS_LOCAL_REPO = _AUTO_HARNESS_CONFIG_DIR / "repo" / "openJiuwen--agent-core"
+_AUTO_HARNESS_LOCAL_REPO = _AUTO_HARNESS_CONFIG_DIR / "repo" / "leemine--code-core"
 
 # Default values for ci_gate config
 _DEFAULT_CI_GATE_PYTHON_EXECUTABLE = sys.executable

@@ -73,9 +73,9 @@ _AUTO_HARNESS_DATA_DIR = get_user_workspace_dir() / "auto-harness"
 # Packages metadata file for version management
 _HARNESS_PACKAGES_FILE = _AUTO_HARNESS_DATA_DIR / "harness-packages.json"
 # Default repo URL if not specified in request (per §5.5)
-_DEFAULT_REPO_URL = "https://gitcode.com/openJiuwen/agent-core.git"
+_DEFAULT_REPO_URL = "https://github.com/leemine/code-core.git"
 # Default local repo path
-_DEFAULT_LOCAL_REPO = _AUTO_HARNESS_DATA_DIR / "repo" / "openJiuwen--agent-core"
+_DEFAULT_LOCAL_REPO = _AUTO_HARNESS_DATA_DIR / "repo" / "leemine--code-core"
 # Default values for ci_gate config
 _DEFAULT_CI_GATE_PYTHON_EXECUTABLE = sys.executable
 _DEFAULT_CI_GATE_INSTALL_COMMAND = "uv sync --active --group dev --extra cli"
@@ -699,7 +699,7 @@ class AutoHarnessService:
         """Extract repository name from URL.
 
         Examples:
-            https://gitcode.com/openJiuwen/agent-core.git -> openJiuwen--agent-core
+            https://github.com/leemine/code-core.git -> leemine--code-core
             https://github.com/user/project.git -> user--project
         """
         # Remove trailing .git
