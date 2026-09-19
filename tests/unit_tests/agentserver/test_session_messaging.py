@@ -2227,6 +2227,13 @@ async def test_execution_watchdog_moves_wedged_execution_to_unknown(
         assert record.status == "unknown"
         assert record.last_error_code == "EXECUTION_WATCHDOG_TIMEOUT"
         admission = service._admission
+        # The status transition precedes the worker's finally block that
+        # releases admission; observing the row is not a cleanup barrier.
+        async def wait_for_release() -> None:
+            while "target-1" in admission.active:
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_for_release(), timeout=1)
         assert "target-1" not in admission.active
     finally:
         release.set()
