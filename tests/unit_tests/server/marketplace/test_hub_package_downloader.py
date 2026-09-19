@@ -106,6 +106,7 @@ def test_checksum_must_be_exactly_64_hexadecimal_characters(checksum: str) -> No
         (_zip_bytes({"../escape.txt": b"bad"}), "非法路径"),
         (_zip_bytes({}, symlink="link"), "链接文件"),
     ],
+    ids=["path-traversal", "symlink"],
 )
 async def test_download_and_extract_rejects_unsafe_members(
     tmp_path: Path, body: bytes, error: str

@@ -27,6 +27,10 @@ python3 tools/testctl.py summarize artifacts/test-runs/<run-id>
 # 全量 pytest collect 的文件级分片计划
 python3 tools/shardplan.py /tmp/pytest-collect.log --target-cases 250 --output /tmp/shards.json
 
+# 完整 Python 诊断回归：全仓收集、文件级分片、逐例超时、闭合核对和失败清单
+uv sync --locked --group test --extra desktop --python 3.13
+.venv/bin/python tools/full_regression.py --workers 2
+
 # 列出归档、对比基线、预览到期清理
 python3 tools/archivectl.py list
 python3 tools/archivectl.py compare artifacts/test-runs/<base> artifacts/test-runs/<candidate>
@@ -45,3 +49,7 @@ python3 tools/archivectl.py recover artifacts/test-runs/<interrupted-run>
 在允许无密码 `sudo` 的专用 CI runner 上，可显式设置 `TESTCTL_BWRAP_SUDO=1`，使 strict 模式以 `sudo -n -E bwrap` 建立网络 namespace。普通本地运行保持非特权路径；若特权 probe 不可用，仍明确标为 `BLOCKED`，不会悄悄降级到 audit。
 
 `pr-stable` 仅覆盖首批稳定套件，不代表全量回归。Web 106 脚本和 TUI 完整入口已进入独立诊断 profile；Web 已知 6 个脚本失败，暂不进入 PR 绿色门禁。GitHub Actions 已提供 PR、主干及夜间稳定回归入口，结果上传为制品；远程执行状态与发布级不可变归档仍需在平台上验证。`archivectl.py prune --execute` 会删除已到期的本地运行目录，默认仅预览。
+
+`full_regression.py` 是独立于 PR 稳定门禁的全量 Python 诊断入口，夜间或手动触发。默认每片约 250 例、2 个 worker、单例 30 秒/分片 1,800 秒上限；显式保留 `--asyncio-mode=auto`，因为清除 pytest 默认 `addopts` 时该模式也会被清除。归档位于 `artifacts/test-runs/full-python-<UTC>/`，保存提交和锁文件指纹、全仓及分片收集日志、JUnit、闭合摘要与逐例 `failure_inventory.csv`。Desktop `webview` 来自 `desktop` extra；未安装时应报告 `not_run`，不能把模块级 collection skip 当作逐例跳过。当前全量基线仍含失败，夜间任务会如实标红并上传证据。
+
+全量入口要求 `summary.closed=true` 且 `not_run=0`；即使 pytest 本身退出 0，收集差异、缺失用例或归因清单生成失败也使任务失败。动态参数 ID 不自动按函数名合并；marketplace ZIP 用例使用稳定参数 ID。
