@@ -7,6 +7,7 @@ from pathlib import Path
 import socket
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "testctl.py"
@@ -21,6 +22,11 @@ SHARD_SPEC.loader.exec_module(shardplan)
 
 
 class TestProtocol(unittest.TestCase):
+    def test_privileged_bwrap_prefix_is_explicit(self) -> None:
+        with patch.dict(testctl.os.environ, {"TESTCTL_BWRAP_SUDO": "1"}):
+            with patch.object(testctl.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+                self.assertEqual(testctl.bwrap_prefix(), ["/usr/bin/sudo", "-n", "-E", "/usr/bin/bwrap"])
+
     def test_manifest_rejects_unknown_schema(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "manifest.json"

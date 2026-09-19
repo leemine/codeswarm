@@ -37,6 +37,7 @@ jobs:
         env:
           TESTCTL_RETENTION_DAYS: ${{ github.event_name == 'schedule' && '90' || '30' }}
           TESTCTL_NETWORK_MODE: strict
+          TESTCTL_BWRAP_SUDO: '1'
         run: python3 tools/testctl.py run --profile pr-stable
       - name: Upload test archive
         if: always()

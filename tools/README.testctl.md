@@ -42,4 +42,6 @@ python3 tools/archivectl.py recover artifacts/test-runs/<interrupted-run>
 
 `TESTCTL_NETWORK_MODE=strict` 使用 Bubblewrap 网络 namespace，能力不足会将必需套件标为 `BLOCKED`。未设置时为 `audit`，不具备强隔离保证。pytest 使用 signal 单例超时；本地 HTTP 服务可由 suite 的 `services` 声明，动态端口由服务绑定端口 0 并通过 `TESTCTL_PORT=<port>` 报告。
 
+在允许无密码 `sudo` 的专用 CI runner 上，可显式设置 `TESTCTL_BWRAP_SUDO=1`，使 strict 模式以 `sudo -n -E bwrap` 建立网络 namespace。普通本地运行保持非特权路径；若特权 probe 不可用，仍明确标为 `BLOCKED`，不会悄悄降级到 audit。
+
 `pr-stable` 仅覆盖首批稳定套件，不代表全量回归。Web 106 脚本和 TUI 完整入口已进入独立诊断 profile；Web 已知 6 个脚本失败，暂不进入 PR 绿色门禁。GitHub Actions 已提供 PR、主干及夜间稳定回归入口，结果上传为制品；远程执行状态与发布级不可变归档仍需在平台上验证。`archivectl.py prune --execute` 会删除已到期的本地运行目录，默认仅预览。

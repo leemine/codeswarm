@@ -248,11 +248,12 @@ def network_mode() -> str:
 
 
 def strict_network_available() -> tuple[bool, str | None]:
-    executable = shutil.which("bwrap")
-    if not executable:
-        return False, "bubblewrap executable not found"
+    try:
+        prefix = bwrap_prefix()
+    except TestCtlError as exc:
+        return False, str(exc)
     probe = subprocess.run(
-        [executable, "--unshare-net", "--ro-bind", "/", "/", "--bind", "/tmp", "/tmp", "--proc", "/proc", "--dev", "/dev", "--", "/bin/true"],
+        prefix + ["--unshare-net", "--ro-bind", "/", "/", "--bind", "/tmp", "/tmp", "--proc", "/proc", "--dev", "/dev", "--", "/bin/true"],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -261,12 +262,24 @@ def strict_network_available() -> tuple[bool, str | None]:
     return probe.returncode == 0, probe.stderr.strip() if probe.returncode else None
 
 
+def bwrap_prefix() -> list[str]:
+    executable = shutil.which("bwrap")
+    if not executable:
+        raise TestCtlError("bubblewrap executable not found")
+    if os.environ.get("TESTCTL_BWRAP_SUDO") == "1":
+        sudo = shutil.which("sudo")
+        if not sudo:
+            raise TestCtlError("sudo executable not found for privileged bubblewrap")
+        return [sudo, "-n", "-E", executable]
+    return [executable]
+
+
 def isolated_command(suite: dict, workdir: Path, command: list[str], junit_dir: Path | None = None) -> list[str]:
     if network_mode() != "strict":
         return command
     if suite.get("services") or "local_service" in suite.get("capabilities", []):
         raise TestCtlError(f"strict network namespace cannot host local service: {suite['id']}")
-    wrapper = ["bwrap", "--unshare-net", "--ro-bind", "/", "/", "--bind", "/tmp", "/tmp"]
+    wrapper = bwrap_prefix() + ["--unshare-net", "--ro-bind", "/", "/", "--bind", "/tmp", "/tmp"]
     if junit_dir is not None:
         wrapper.extend(["--bind", str(junit_dir), str(junit_dir)])
     if suite.get("runner") in {"vitest", "node-test", "web-scripts"} or suite.get("writable_workdir"):
