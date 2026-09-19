@@ -70,6 +70,7 @@ jobs:
           node-version: '22'
       - name: Install frontend test dependencies
         run: |
+          npm ci --prefix jiuwenswarm/channels/web/frontend
           npm ci --prefix jiuwenswarm/channels/browser/frontend
           npm ci --prefix jiuwenswarm/channels/tui/frontend
           npm run build --prefix jiuwenswarm/channels/tui/frontend

@@ -52,4 +52,6 @@ python3 tools/archivectl.py recover artifacts/test-runs/<interrupted-run>
 
 `full_regression.py` 是独立于 PR 稳定门禁的全量 Python 诊断入口，夜间或手动触发。默认每片约 250 例、2 个 worker、单例 30 秒/分片 1,800 秒上限；显式保留 `--asyncio-mode=auto`，因为清除 pytest 默认 `addopts` 时该模式也会被清除。归档位于 `artifacts/test-runs/full-python-<UTC>/`，保存提交和锁文件指纹、全仓及分片收集日志、JUnit、闭合摘要与逐例 `failure_inventory.csv`。Desktop `webview` 来自 `desktop` extra；未安装时应报告 `not_run`，不能把模块级 collection skip 当作逐例跳过。当前全量基线仍含失败，夜间任务会如实标红并上传证据。
 
+完整 Python 套件中有调用 Web 前端 `jsdom`/`vite` 的跨语言用例，因此夜间 job 同时对 Web、Browser、TUI 前端执行 `npm ci`；这不等于已经运行 Web 的 106 个独立脚本。
+
 全量入口要求 `summary.closed=true` 且 `not_run=0`；即使 pytest 本身退出 0，收集差异、缺失用例或归因清单生成失败也使任务失败。动态参数 ID 不自动按函数名合并；marketplace ZIP 用例使用稳定参数 ID。
