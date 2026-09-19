@@ -31,6 +31,8 @@ jobs:
         run: |
           npm ci --prefix jiuwenswarm/channels/browser/frontend
           npm ci --prefix jiuwenswarm/channels/tui/frontend
+      - name: Build TUI contract fixture
+        run: npm run build --prefix jiuwenswarm/channels/tui/frontend
       - name: Verify orchestrator
         run: python3 -m unittest tools.tests.test_testctl -v
       - name: Run stable regression
@@ -38,6 +40,7 @@ jobs:
           TESTCTL_RETENTION_DAYS: ${{ github.event_name == 'schedule' && '90' || '30' }}
           TESTCTL_NETWORK_MODE: strict
           TESTCTL_BWRAP_SUDO: '1'
+          PYTHONWARNINGS: 'ignore:invalid escape sequence:SyntaxWarning'
         run: python3 tools/testctl.py run --profile pr-stable
       - name: Upload test archive
         if: always()
