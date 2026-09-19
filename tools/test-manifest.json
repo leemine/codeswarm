@@ -1,0 +1,191 @@
+{
+  "schema_version": 1,
+  "repo": "codeswarm",
+  "python_requires": ">=3.11,<3.14",
+  "bootstrap": [
+    {
+      "id": "codeswarm.python.test-dependencies",
+      "workdir": ".",
+      "command": ["{uv}", "sync", "--locked", "--group", "test"],
+      "timeout_seconds": 1200
+    },
+    {
+      "id": "codeswarm.browser.dependencies",
+      "workdir": "jiuwenswarm/channels/browser/frontend",
+      "command": ["npm", "ci"],
+      "timeout_seconds": 1200
+    },
+    {
+      "id": "codeswarm.tui.dependencies",
+      "workdir": "jiuwenswarm/channels/tui/frontend",
+      "command": ["npm", "ci"],
+      "timeout_seconds": 1200
+    }
+  ],
+  "profiles": {
+    "mvp": {
+      "suites": [
+        "codeswarm.python.acp",
+        "codeswarm.browser.unit",
+        "codeswarm.tui.contract"
+      ],
+      "retention_days": 30
+    },
+    "pr-smoke": {
+      "suites": [
+        "codeswarm.python.acp",
+        "codeswarm.browser.unit",
+        "codeswarm.tui.contract"
+      ],
+      "retention_days": 30
+    },
+    "pr-stable": {
+      "suites": [
+        "codeswarm.python.acp",
+        "codeswarm.python.common",
+        "codeswarm.python.e2a",
+        "codeswarm.python.evolution",
+        "codeswarm.python.sdd",
+        "codeswarm.browser.unit",
+        "codeswarm.tui.contract"
+      ],
+      "retention_days": 30
+    },
+    "web-diagnostic": {
+      "suites": ["codeswarm.web.scripts"],
+      "retention_days": 90
+    },
+    "tui-diagnostic": {
+      "suites": ["codeswarm.tui.full"],
+      "retention_days": 90
+    }
+  },
+  "suites": [
+    {
+      "id": "codeswarm.python.acp",
+      "owner": "acp",
+      "tier": "unit",
+      "runner": "pytest",
+      "workdir": ".",
+      "capabilities": ["filesystem"],
+      "required": true,
+      "shard_timeout_seconds": 120,
+      "discover": {
+        "command": ["{python}", "-m", "pytest", "tests/unit_tests/acp", "--collect-only", "-q", "-o", "addopts=", "-p", "no:cacheprovider"],
+        "parser": "pytest",
+        "timeout_seconds": 60
+      },
+      "command": ["{python}", "-m", "pytest", "tests/unit_tests/acp", "-q", "-o", "addopts=", "-p", "no:cacheprovider", "--timeout=30", "--timeout-method=signal", "--junitxml={junit}"]
+    },
+    {
+      "id": "codeswarm.python.common",
+      "owner": "common",
+      "tier": "unit",
+      "runner": "pytest",
+      "workdir": ".",
+      "writable_workdir": true,
+      "capabilities": ["filesystem"],
+      "required": true,
+      "shard_timeout_seconds": 900,
+      "discover": {"command": ["{python}", "-m", "pytest", "tests/unit_tests/common", "--collect-only", "-q", "-o", "addopts=", "-p", "no:cacheprovider"], "parser": "pytest", "timeout_seconds": 180},
+      "command": ["{python}", "-m", "pytest", "tests/unit_tests/common", "-q", "-o", "addopts=", "-p", "no:cacheprovider", "--timeout=30", "--timeout-method=signal", "--junitxml={junit}"]
+    },
+    {
+      "id": "codeswarm.python.e2a",
+      "owner": "e2a",
+      "tier": "unit",
+      "runner": "pytest",
+      "workdir": ".",
+      "writable_workdir": true,
+      "capabilities": ["filesystem"],
+      "required": true,
+      "shard_timeout_seconds": 300,
+      "discover": {"command": ["{python}", "-m", "pytest", "tests/unit_tests/e2a", "--collect-only", "-q", "-o", "addopts=", "-p", "no:cacheprovider"], "parser": "pytest", "timeout_seconds": 120},
+      "command": ["{python}", "-m", "pytest", "tests/unit_tests/e2a", "-q", "-o", "addopts=", "-p", "no:cacheprovider", "--timeout=30", "--timeout-method=signal", "--junitxml={junit}"]
+    },
+    {
+      "id": "codeswarm.python.evolution",
+      "owner": "evolution",
+      "tier": "unit",
+      "runner": "pytest",
+      "workdir": ".",
+      "writable_workdir": true,
+      "capabilities": ["filesystem"],
+      "required": true,
+      "shard_timeout_seconds": 300,
+      "discover": {"command": ["{python}", "-m", "pytest", "tests/unit_tests/evolution", "--collect-only", "-q", "-o", "addopts=", "-p", "no:cacheprovider"], "parser": "pytest", "timeout_seconds": 120},
+      "command": ["{python}", "-m", "pytest", "tests/unit_tests/evolution", "-q", "-o", "addopts=", "-p", "no:cacheprovider", "--timeout=30", "--timeout-method=signal", "--junitxml={junit}"]
+    },
+    {
+      "id": "codeswarm.python.sdd",
+      "owner": "sdd",
+      "tier": "unit",
+      "runner": "pytest",
+      "workdir": ".",
+      "writable_workdir": true,
+      "capabilities": ["filesystem"],
+      "required": true,
+      "shard_timeout_seconds": 300,
+      "discover": {"command": ["{python}", "-m", "pytest", "tests/unit_tests/sdd", "--collect-only", "-q", "-o", "addopts=", "-p", "no:cacheprovider"], "parser": "pytest", "timeout_seconds": 120},
+      "command": ["{python}", "-m", "pytest", "tests/unit_tests/sdd", "-q", "-o", "addopts=", "-p", "no:cacheprovider", "--timeout=30", "--timeout-method=signal", "--junitxml={junit}"]
+    },
+    {
+      "id": "codeswarm.web.scripts",
+      "owner": "web",
+      "tier": "contract",
+      "runner": "web-scripts",
+      "workdir": "jiuwenswarm/channels/web/frontend",
+      "capabilities": ["filesystem", "dom"],
+      "required": true,
+      "shard_timeout_seconds": 3600,
+      "discover": {
+        "command": ["{python}", "{repo}/tools/run_web_scripts.py", "--package", "{repo}/jiuwenswarm/channels/web/frontend/package.json", "--list"],
+        "parser": "web-scripts-json",
+        "timeout_seconds": 30
+      },
+      "command": ["{python}", "{repo}/tools/run_web_scripts.py", "--package", "{repo}/jiuwenswarm/channels/web/frontend/package.json", "--junit", "{junit}", "--script-timeout", "120"]
+    },
+    {
+      "id": "codeswarm.browser.unit",
+      "owner": "browser",
+      "tier": "unit",
+      "runner": "vitest",
+      "workdir": "jiuwenswarm/channels/browser/frontend",
+      "capabilities": ["filesystem", "dom"],
+      "required": true,
+      "shard_timeout_seconds": 120,
+      "discover": {
+        "command": ["npx", "vitest", "list", "--json"],
+        "parser": "vitest-json",
+        "timeout_seconds": 60
+      },
+      "command": ["npx", "vitest", "run", "--reporter=junit", "--outputFile={junit}"]
+    },
+    {
+      "id": "codeswarm.tui.full",
+      "owner": "tui",
+      "tier": "system",
+      "runner": "node-test",
+      "workdir": "jiuwenswarm/channels/tui/frontend",
+      "capabilities": ["filesystem", "pty"],
+      "required": true,
+      "shard_timeout_seconds": 360,
+      "inventory_granularity": "aggregate-command",
+      "inventory": ["npm test"],
+      "command": ["{python}", "{repo}/tools/run_command_junit.py", "--junit", "{junit}", "--name", "tui-full", "--timeout", "300", "--", "npm", "test"]
+    },
+    {
+      "id": "codeswarm.tui.contract",
+      "owner": "tui",
+      "tier": "contract",
+      "runner": "node-test",
+      "workdir": "jiuwenswarm/channels/tui/frontend",
+      "capabilities": ["filesystem"],
+      "required": true,
+      "shard_timeout_seconds": 60,
+      "inventory_granularity": "file",
+      "inventory": ["tests/supervised-env.test.mjs"],
+      "command": ["node", "--test", "--test-timeout=20000", "--test-reporter=junit", "--test-reporter-destination={junit}", "tests/supervised-env.test.mjs"]
+    }
+  ]
+}

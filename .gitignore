@@ -72,6 +72,7 @@ docs/ai/
 
 # logs
 logs/
+artifacts/test-runs/
 
 # Browser automation runtime artifacts
 .browser/

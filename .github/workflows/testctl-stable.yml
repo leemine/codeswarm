@@ -1,0 +1,48 @@
+name: Testctl stable regression
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+  schedule:
+    - cron: '20 18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: '0.12.5'
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '22'
+      - name: Install network isolation runner
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Install locked test dependencies
+        run: uv sync --locked --group test --python 3.13
+      - name: Install Browser and TUI dependencies
+        run: |
+          npm ci --prefix jiuwenswarm/channels/browser/frontend
+          npm ci --prefix jiuwenswarm/channels/tui/frontend
+      - name: Verify orchestrator
+        run: python3 -m unittest tools.tests.test_testctl -v
+      - name: Run stable regression
+        env:
+          TESTCTL_RETENTION_DAYS: ${{ github.event_name == 'schedule' && '90' || '30' }}
+          TESTCTL_NETWORK_MODE: strict
+        run: python3 tools/testctl.py run --profile pr-stable
+      - name: Upload test archive
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: codeswarm-testctl-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/test-runs/
+          if-no-files-found: warn
+          retention-days: ${{ github.event_name == 'schedule' && 90 || 30 }}
