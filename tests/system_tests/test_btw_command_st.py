@@ -20,7 +20,9 @@ from pathlib import Path
 import pytest
 import websockets
 
-pytestmark = [pytest.mark.integration, pytest.mark.system]
+# These cases start two services and may wait up to 60s for each startup plus
+# 120s for the model-path response. Keep a finite budget above those waits.
+pytestmark = [pytest.mark.integration, pytest.mark.system, pytest.mark.timeout(300)]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BTW_MODEL_RESPONSE_TIMEOUT = 120.0
