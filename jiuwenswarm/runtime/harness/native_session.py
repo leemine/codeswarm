@@ -291,6 +291,20 @@ class NativeExecutionSession:
             raise RuntimeError("Native session has not started")
         return await self._goal_dispatcher(action=action, **kwargs)
 
+    async def attach_goal(self) -> SendReceipt:
+        """Attach the existing active Goal through the same Turn output route."""
+        token = uuid.uuid4().hex
+        self._requests[token] = _HostRequest(attach_goal=True)
+        try:
+            receipt = await self._send(
+                HarnessInput(content="", metadata={_REQUEST_KEY: token})
+            )
+        except BaseException:
+            self._requests.pop(token, None)
+            raise
+        self._remember_turn(receipt, token)
+        return receipt
+
     async def _dispatch(
         self,
         agent: DeepAgent,

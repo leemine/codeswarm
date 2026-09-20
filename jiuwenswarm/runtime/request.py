@@ -474,6 +474,22 @@ async def prepare_chat_turn(
         "sub_mode": sub_mode,
         "admit_request": admit_request,
     }
+    if session_id and (
+        session_metadata.get("execution_profile_id") is not None
+        or params.get("execution_profile_id") is not None
+    ):
+        from jiuwenswarm.runtime.harness.request_binding import (
+            bind_admitted_request_execution,
+        )
+
+        agent_kwargs["on_admitted"] = lambda admitted_project_dir: (
+            bind_admitted_request_execution(
+                agent_manager,
+                request,
+                admitted_project_dir,
+                session_metadata=session_metadata,
+            )
+        )
     if agent_definition is not None:
         agent_kwargs["agent_definition"] = agent_definition
         agent_kwargs["agent_definition_fingerprint"] = (

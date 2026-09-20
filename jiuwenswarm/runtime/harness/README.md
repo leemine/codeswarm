@@ -6,8 +6,11 @@ Use `parse_execution_config` for a dedicated execution configuration, not model-
 identifiers for selection. A chat request may name a profile ID; it must not
 supply raw `provider_config`. The caller validates the subject and any Project
 candidate before calling `catalog.source(...)`. Unknown explicit IDs fail
-without changing to a different engine. The catalog is a selection primitive;
-the current Runtime request route does not yet load or use it.
+without changing to a different engine. `session.create` now resolves the
+catalog before prewarm, stores the selected profile ID and revision in Session
+metadata, and bypasses the legacy warm slot for selected sessions. The
+approved request binds the server-owned snapshot after Workspace admission and
+before Agent construction. A chat turn cannot change the Session's profile.
 
 The optional server `config.yaml` section is parsed by
 `load_execution_catalog(get_config())`:
@@ -22,10 +25,13 @@ execution:
 ```
 
 When the section is absent the loader returns `None`; a present but malformed
-section (including `execution: null`) fails validation. Reading this section
-alone does not enable the new chat route or expose a new selection UI.
+section (including `execution: null`) fails validation. Existing sessions
+without a selection retain the legacy route. This draft does not expose a
+selection UI or switch the default product configuration.
 
-The result is an unstarted core `HarnessEngine`. No existing chat or Team routing is changed in this slice. The Runtime caller will own `start`, the single event consumer and `stop` in R1-02; it must validate HarnessContext identity against the binding at that integration boundary. No provider instances are cached here.
+The generic `prepare_execution` result is an unstarted core `HarnessEngine`.
+The Native Single route below uses the already assembled DeepAgent instead of
+building a second instance. Team routing remains on its original Runtime.
 
 A bound scope retains its original snapshot when defaults change. An explicit attempt to change it fails rather than switching an active execution. `release` removes only the same binding object, protecting a replacement from stale cleanup. The store is process-local and contains provider configuration: never log it or treat it as durable session restore. Persistence, policy adaptation and UI integration remain separate tasks.
 
@@ -92,9 +98,14 @@ this class is neither a new persistence layer nor a replacement for generation.
 
 The session adapter also has `start_native_interaction` and an exclusive legacy
 `start_interaction` path. Its `stop_interaction` releases the selected binding
-after the protocol session stops. The current warm pool still starts the legacy
-path unconditionally, so this is an **explicit integration entry**, not a
-change to the default Web/TUI chat route. The warm pool selection and request
-route, output handoff across Web disconnect, historical replay and real Native
-preservation acceptance remain before R1-02 completion. Passing deterministic
-adapter tests is not live-model E2E.
+after the protocol session stops. The facade selects the admitted Native route
+before its first MCP reconciliation can create the child. The existing Deep
+adapter keeps request setup and UI/history projection; only lifecycle,
+dispatch and the Turn output reader change. A question temporarily detaches
+the same reader and its answer resumes it, without starting another Turn.
+
+This is still a draft integration. Goal output generated after a request reader
+ends needs an authoritative durable/UI projection; cancel, disconnect, cold
+restore and real Single request acceptance remain before switching the default
+product configuration. External providers and Team selection have no product
+route in this slice. Deterministic adapter tests are not live-model E2E.

@@ -62,6 +62,10 @@ class ExecutionConfigCatalog:
         """List selectable identifiers without exposing provider configuration."""
         return tuple(self._profiles)
 
+    @property
+    def default_profile_id(self) -> str:
+        return self._default_profile_id
+
     def source(
         self,
         *,

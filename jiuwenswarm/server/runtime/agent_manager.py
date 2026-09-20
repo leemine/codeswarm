@@ -188,6 +188,10 @@ class AgentManager:
 
     def __init__(self) -> None:
         self.agents: dict[str, dict[str, "JiuWenSwarm"]] = {}
+        from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
+
+        self.execution_bindings = ExecutionBindingStore()
+        self._session_execution_bindings: dict[tuple[str, str], Any] = {}
         # Snapshot of the optional PersonalContext runtime switch.  New
         # cached agents inherit it before their first rail synchronization.
         self._personal_context_runtime_enabled: bool = False
@@ -913,7 +917,18 @@ class AgentManager:
                 f"{failed_agents} agent(s): channel_id={channel_key} "
                 f"session_id={sid}"
             )
+        binding = self._session_execution_bindings.pop((channel_key, sid), None)
+        if binding is not None:
+            self.execution_bindings.release(binding)
         return cleaned
+
+    def remember_execution_binding(self, channel_id: str, session_id: str, binding: Any) -> None:
+        """Retain an admitted scope until its product Session is cleaned up."""
+        key = (_normalize_channel_id(channel_id), session_id)
+        current = self._session_execution_bindings.get(key)
+        if current is not None and current.cache_key != binding.cache_key:
+            raise RuntimeError("session execution binding changed")
+        self._session_execution_bindings[key] = binding
 
     async def release_subagent_runtime_for_session(
         self,
@@ -1160,6 +1175,7 @@ class AgentManager:
         persist_session: bool = False,
         prewarm_eligible: bool = True,
         create_token: str | None = None,
+        execution_profile_id: str | None = None,
     ):
         token = str(create_token or "").strip()
         key = self.warm_pool.make_key(
@@ -1172,7 +1188,9 @@ class AgentManager:
         # persist_session 不属于 WarmKey：同一预热 Agent 可服务开启或关闭的
         # Session，避免为布尔开关复制预热槽。但它属于 session.create 的幂等
         # 身份，同一 create_token 不允许用不同值重试。
-        create_signature = (key, bool(prewarm_eligible), bool(persist_session))
+        create_signature = (
+            key, bool(prewarm_eligible), bool(persist_session), execution_profile_id,
+        )
         token_key = (key.channel_id, token)
         async with self._session_create_token_lock:
             if token:
@@ -1910,10 +1928,15 @@ class AgentManager:
         sub_mode: str | None = None,
         project_dir: str | None = None,
         admit_request: Callable[[], str | None] | None = None,
+        on_admitted: Callable[[str | None], None] | None = None,
         agent_definition: dict[str, Any] | None = None,
         agent_definition_fingerprint: str | None = None,
     ) -> "JiuWenSwarm | None":
         """Admit one request and pin Auto sessions to their first owner/root."""
+
+        def bind_admitted_execution(admitted_project_dir: str | None) -> None:
+            if on_admitted is not None:
+                on_admitted(admitted_project_dir)
 
         channel_id = getattr(request, "channel_id", "")
         params = getattr(request, "params", {})
@@ -2006,6 +2029,7 @@ class AgentManager:
                     validator(request)
                 if admit_request is not None:
                     project_dir = admit_request()
+                bind_admitted_execution(project_dir)
                 params = getattr(request, "params", {})
                 params = params if isinstance(params, dict) else {}
                 auto_workspace = _auto_permission_request_workspace(request)
@@ -2058,6 +2082,7 @@ class AgentManager:
         else:
             if admit_request is not None:
                 project_dir = admit_request()
+            bind_admitted_execution(project_dir)
         get_kwargs = {
             "channel_id": channel_id,
             "mode": selected_mode,
@@ -2081,9 +2106,14 @@ class AgentManager:
             AgentResponse 对象
         """
         try:
-            await self.wait_for_session_prewarm(getattr(request, "session_id", None))
             channel_id = getattr(request, "channel_id", "")
-            agent = await self.get_agent_for_request(request)
+            if self._session_has_execution_choice(getattr(request, "session_id", None)):
+                from jiuwenswarm.runtime.request import prepare_chat_turn
+
+                _, _, agent = await prepare_chat_turn(self, request, channel_id)
+            else:
+                await self.wait_for_session_prewarm(getattr(request, "session_id", None))
+                agent = await self.get_agent_for_request(request)
             if agent is None:
                 raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")
 
@@ -2102,9 +2132,14 @@ class AgentManager:
             AgentResponseChunk 对象
         """
         try:
-            await self.wait_for_session_prewarm(getattr(request, "session_id", None))
             channel_id = getattr(request, "channel_id", "")
-            agent = await self.get_agent_for_request(request)
+            if self._session_has_execution_choice(getattr(request, "session_id", None)):
+                from jiuwenswarm.runtime.request import prepare_chat_turn
+
+                _, _, agent = await prepare_chat_turn(self, request, channel_id)
+            else:
+                await self.wait_for_session_prewarm(getattr(request, "session_id", None))
+                agent = await self.get_agent_for_request(request)
             if agent is None:
                 raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")
 
@@ -2114,6 +2149,21 @@ class AgentManager:
         except Exception as e:
             logger.error(f"[AgentManager] Error in process_message_stream: {e}", exc_info=True)
             raise
+
+    @staticmethod
+    def _session_has_execution_choice(session_id: str | None) -> bool:
+        if not session_id:
+            return False
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+        )
+
+        metadata = get_session_metadata(
+            session_id, cache_bust=True, enable_writeback=False
+        )
+        return isinstance(metadata, dict) and isinstance(
+            metadata.get("execution_profile_id"), str
+        )
 
     async def cleanup(self) -> None:
         """清理所有 agent 实例."""
@@ -2148,6 +2198,9 @@ class AgentManager:
                         logger.warning("[AgentManager] Agent cleanup failed: %s", e)
             del self.agents[key]
         self._agent_create_params.clear()
+        for binding in self._session_execution_bindings.values():
+            self.execution_bindings.release(binding)
+        self._session_execution_bindings.clear()
         self._client_capabilities_by_channel.clear()
         self._session_create_tokens.clear()
         self._agent_borrowers.clear()

@@ -148,6 +148,88 @@ async def test_turn_output_reader_keeps_one_session_consumer_across_requests(tmp
 
 
 @pytest.mark.asyncio
+async def test_deep_adapter_dispatch_uses_native_turn_reader_for_two_requests(tmp_path):
+    from jiuwenswarm.common.schema.agent import AgentRequest
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+
+    execution, agent, _, context, _, _ = _setup(
+        tmp_path, [[_answer()], [_answer()]]
+    )
+    adapter = object.__new__(JiuWenSwarmDeepAdapter)
+    adapter._native_execution = execution
+    adapter._resolve_input_dispatch_mode = lambda _params: InputDispatchMode.FOLLOW_UP
+    adapter._permission_inputs_for_dispatch = lambda _request, inputs, _mode: inputs
+    adapter._permission_dispatch = SimpleNamespace(release=lambda _inputs: None)
+    await execution.start(context)
+    execution.enable_turn_outputs()
+    try:
+        for request_id in ("first", "second"):
+            request = AgentRequest(request_id=request_id, session_id="s")
+            stream, dispatched = await adapter._attach_and_send_inputs(
+                request, {"query": request_id}, send_without_output=False
+            )
+            assert stream is not None and not dispatched
+            chunks = [chunk async for chunk in stream]
+            await stream.close(abort_active_round=False)
+            assert len(chunks) == 1 and chunks[0].type == "answer"
+        assert agent.send_input.await_count == 2
+        assert execution._output_router._mailboxes == {}
+    finally:
+        await execution.stop()
+
+
+@pytest.mark.asyncio
+async def test_deep_adapter_reuses_suspended_turn_reader_after_question(tmp_path):
+    from jiuwenswarm.common.schema.agent import AgentRequest
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+
+    interrupt = OutputSchema(
+        type=INTERACTION, index=0, payload={"id": "q", "value": "Continue?"}
+    )
+    execution, agent, _, context, _, _ = _setup(
+        tmp_path, [[interrupt], [_answer()]]
+    )
+    adapter = object.__new__(JiuWenSwarmDeepAdapter)
+    adapter._native_execution = execution
+    adapter._resolve_input_dispatch_mode = lambda _params: InputDispatchMode.FOLLOW_UP
+    adapter._permission_inputs_for_dispatch = lambda _request, inputs, _mode: inputs
+    adapter._permission_dispatch = SimpleNamespace(release=lambda _inputs: None)
+    await execution.start(context)
+    execution.enable_turn_outputs()
+    try:
+        question_request = AgentRequest(request_id="first", session_id="s")
+        stream, _ = await adapter._attach_and_send_inputs(
+            question_request, {"query": "first"}, send_without_output=False
+        )
+        question_chunks = [chunk async for chunk in stream]
+        assert [chunk.type for chunk in question_chunks] == [INTERACTION]
+        await stream.close(abort_active_round=False)
+
+        answer = InteractiveInput()
+        answer.update("q", "yes")
+        answer_request = AgentRequest(request_id="answer", session_id="s")
+        resumed, _ = await adapter._attach_and_send_inputs(
+            answer_request, {"query": answer}, send_without_output=False
+        )
+        assert resumed is stream
+        answer_chunks = [chunk async for chunk in resumed]
+        assert [chunk.type for chunk in answer_chunks] == ["answer"]
+        await resumed.close(abort_active_round=False)
+        assert agent.send_input.await_count == 2
+        assert execution._output_router._mailboxes == {}
+        with pytest.raises(RuntimeError, match="no longer pending"):
+            await adapter._attach_and_send_inputs(
+                answer_request, {"query": answer}, send_without_output=False
+            )
+    finally:
+        await execution.stop()
+
+
+@pytest.mark.asyncio
 async def test_closed_turn_reader_does_not_stop_next_turn(tmp_path):
     execution, _, _, ctx, _, _ = _setup(
         tmp_path, [[_answer() for _ in range(8)], [_answer()]]
@@ -698,6 +780,77 @@ async def test_adapter_selects_one_native_lifecycle_before_legacy_start(
     assert execution is not adapter._native_execution
     agent.stop.assert_awaited_once()
     assert not bindings._bindings
+
+
+@pytest.mark.asyncio
+async def test_first_mcp_child_construction_starts_selected_native_route(
+    tmp_path, monkeypatch,
+):
+    from jiuwenswarm.common.schema.agent import AgentRequest
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+
+    source = ExecutionConfigSource(
+        explicit=AgentExecutionSpec("native", "selected-r1")
+    )
+    bindings = ExecutionBindingStore()
+    bound = bindings.bind(
+        source, subject_id="alice", host_session_id="s", workspace=str(tmp_path)
+    )
+    request = AgentRequest(request_id="r", session_id="s")
+    request._bound_execution = bound
+    request._execution_source = source
+    request._execution_bindings = bindings
+    parent = JiuWenSwarmDeepAdapter()
+    parent.select_execution_for_request(request)
+    execution = SimpleNamespace(enable_turn_outputs=MagicMock())
+    child = SimpleNamespace(
+        _instance=SimpleNamespace(card=SimpleNamespace(id="agent")),
+        _agent_name="main_agent",
+        create_instance=AsyncMock(),
+        persist_skill_retrieval_session_profile=MagicMock(),
+        restore_skill_retrieval_session=MagicMock(),
+        start_native_interaction=AsyncMock(return_value=execution),
+        start_interaction=AsyncMock(),
+        mark_session_mcp_reconcile_started=MagicMock(),
+        _session_selected_mcp=set(),
+        _pending_skill_scan_mcp_names=set(),
+        register_mcp_by_name=AsyncMock(),
+        clear_pending_skill_scan_mcp_names=MagicMock(),
+        refresh_skill_rails=AsyncMock(),
+    )
+    monkeypatch.setattr(parent, "_new_session_scoped_adapter", lambda _sid: child)
+    monkeypatch.setattr(parent, "_load_skill_retrieval_session_profile", lambda _sid: None)
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.session_ops_service.warmup_session_context",
+        AsyncMock(),
+    )
+    await parent.reconcile_session_mcp("s", ["filesystem"])
+    assert parent._session_adapters["s"] is child
+    child.start_native_interaction.assert_awaited_once()
+    child.start_interaction.assert_not_awaited()
+    execution.enable_turn_outputs.assert_called_once_with()
+    child.register_mcp_by_name.assert_awaited_once_with("filesystem")
+    assert child._session_selected_mcp == {"filesystem"}
+
+
+@pytest.mark.asyncio
+async def test_session_cleanup_releases_binding_even_before_child_construction(tmp_path):
+    from jiuwenswarm.server.runtime.agent_manager import AgentManager
+
+    manager = object.__new__(AgentManager)
+    manager.agents = {}
+    manager._agent_create_params = {}
+    manager.execution_bindings = ExecutionBindingStore()
+    manager._session_execution_bindings = {}
+    bound = manager.execution_bindings.bind(
+        ExecutionConfigSource(explicit=AgentExecutionSpec("native", "r1")),
+        subject_id="alice", host_session_id="s", workspace=str(tmp_path),
+    )
+    manager.remember_execution_binding("web", "s", bound.binding)
+    assert await manager.cleanup_session_runtime(channel_id="web", session_id="s") is False
+    assert manager.execution_bindings._bindings == {}
 
 
 @pytest.mark.asyncio

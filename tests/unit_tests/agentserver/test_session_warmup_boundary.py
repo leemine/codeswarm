@@ -109,6 +109,19 @@ async def test_stream_chat_passes_history_boundary_to_mcp_reconcile(monkeypatch)
     )
 
 
+def test_facade_installs_selected_route_on_adapter():
+    seen = []
+
+    class SelectedAdapter:
+        def select_execution_for_request(self, request):
+            seen.append(request.request_id)
+
+    request = _request(stream=True)
+    request._bound_execution = object()
+    JiuWenSwarm._select_execution_before_mcp(SelectedAdapter(), request)
+    assert seen == ["request-current"]
+
+
 @pytest.mark.asyncio
 async def test_deep_mcp_reconcile_passes_boundary_to_session_creation():
     adapter = object.__new__(JiuWenSwarmDeepAdapter)

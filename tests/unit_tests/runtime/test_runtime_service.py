@@ -847,6 +847,63 @@ async def test_prepare_chat_turn_requires_atomic_manager_admission() -> None:
 
 
 @pytest.mark.asyncio
+async def test_execution_binds_after_admission_before_agent_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from openjiuwen.harness.engine.config import config_fingerprint
+    from openjiuwen.harness_protocol import AgentExecutionSpec
+    from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
+
+    workspace = tmp_path / "approved"
+    workspace.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        lambda *_args, **_kwargs: {
+            "mode": "agent.work.normal",
+            "work_mode": "work",
+            "execution_profile_id": "native",
+            "execution_config_revision": "r1",
+            "execution_config_fingerprint": config_fingerprint(
+                AgentExecutionSpec("native", "r1")
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config.get_config",
+        lambda: {"execution": {
+            "default_profile_id": "native",
+            "profiles": {"native": {
+                "provider_id": "native", "config_revision": "r1",
+            }},
+        }},
+    )
+    events: list[str] = []
+
+    class Manager:
+        execution_bindings = ExecutionBindingStore()
+
+        async def wait_for_session_prewarm(self, _session_id):
+            events.append("wait")
+
+        async def get_agent_for_request(self, request, *, admit_request, on_admitted, **_kwargs):
+            events.append("admit")
+            admitted_workspace = admit_request()
+            on_admitted(admitted_workspace)
+            events.append("construct")
+            assert request._bound_execution.binding.workspace == str(workspace)
+            return object()
+
+    request = AgentRequest(
+        request_id="r1", channel_id="web", session_id="s1",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"query": "hello", "mode": "agent.work.normal", "project_dir": str(workspace)},
+    )
+    await prepare_chat_turn(cast(Any, Manager()), request, "web", sync_metadata=False)
+    assert events == ["wait", "admit", "construct"]
+    assert request._bound_execution.spec.provider_id == "native"
+
+
+@pytest.mark.asyncio
 async def test_cancel_and_cleanup_session_are_runtime_operations() -> None:
     manager = FakeAgentManager()
 
