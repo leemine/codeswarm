@@ -127,6 +127,9 @@ class TurnOutputRouter:
                 pass
         self._mailboxes.clear()
         self._unclaimed.clear()
+        close_detached = getattr(self._detached_output, "close", None)
+        if callable(close_detached):
+            await close_detached()
 
     async def _pump(self) -> None:
         try:

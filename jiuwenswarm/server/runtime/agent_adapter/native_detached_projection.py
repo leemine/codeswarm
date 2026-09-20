@@ -33,15 +33,29 @@ class _DetachedTurn:
     streamed: bool = False
     final_seen: bool = False
     error_seen: bool = False
+    runtime_execution_id: str | None = None
 
 
 class NativeDetachedProjection:
     """Persist then push envelopes with no live request owner."""
 
-    def __init__(self, session_id: str, adapter: Any) -> None:
+    def __init__(self, session_id: str, adapter: Any, *, runtime: Any = None) -> None:
         self._session_id = session_id
         self._adapter = adapter
+        self._runtime = runtime
         self._turns: dict[str, _DetachedTurn] = {}
+
+    async def close(self) -> None:
+        """Settle detached Runtime owners if their provider Session stops early."""
+        if self._runtime is not None:
+            for state in self._turns.values():
+                if state.runtime_execution_id is not None:
+                    self._runtime.finish_detached_native_turn(
+                        self._session_id,
+                        state.runtime_execution_id,
+                        TurnEventKind.ABORTED,
+                    )
+        self._turns.clear()
 
     async def __call__(self, item: ProjectedOutput) -> None:
         turn_id = item.turn_id
@@ -49,6 +63,11 @@ class NativeDetachedProjection:
             return
         state = self._turns.setdefault(turn_id, _DetachedTurn())
         try:
+            if self._runtime is not None and state.runtime_execution_id is None:
+                snapshot = self._runtime.begin_detached_native_turn(
+                    self._session_id, turn_id
+                )
+                state.runtime_execution_id = snapshot.execution_id
             if item.chunk is not None:
                 from jiuwenswarm.server.runtime.session.history_io import (
                     run_stream_parser,
@@ -94,10 +113,23 @@ class NativeDetachedProjection:
             )
         finally:
             if item.terminal is not None:
+                if self._runtime is not None and state.runtime_execution_id is not None:
+                    self._runtime.finish_detached_native_turn(
+                        self._session_id, state.runtime_execution_id, item.terminal
+                    )
                 self._turns.pop(turn_id, None)
 
     async def _publish(self, turn_id: str, payload: dict[str, Any]) -> None:
         from jiuwenswarm.server.runtime.session.history_io import run_history_io
+
+        state = self._turns[turn_id]
+        if self._runtime is not None and (
+            state.runtime_execution_id is None
+            or not await self._runtime.observe_detached_native_turn(
+                self._session_id, state.runtime_execution_id, payload
+            )
+        ):
+            return
 
         delivery = get_session_delivery_context(self._session_id) or {}
         metadata = get_session_metadata(

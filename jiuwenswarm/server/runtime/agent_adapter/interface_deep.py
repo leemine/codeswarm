@@ -3608,9 +3608,12 @@ class JiuWenSwarmDeepAdapter:
                 from jiuwenswarm.server.runtime.agent_adapter.native_detached_projection import (
                     NativeDetachedProjection,
                 )
+                from jiuwenswarm.runtime.context import get_current_runtime
 
                 execution.enable_turn_outputs(
-                    detached_output=NativeDetachedProjection(sid, adapter)
+                    detached_output=NativeDetachedProjection(
+                        sid, adapter, runtime=get_current_runtime()
+                    )
                 )
             interaction_ready_at = time.monotonic()
 

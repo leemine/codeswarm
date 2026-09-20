@@ -849,6 +849,10 @@ async def test_first_mcp_child_construction_starts_selected_native_route(
     tmp_path, monkeypatch,
 ):
     from jiuwenswarm.common.schema.agent import AgentRequest
+    from jiuwenswarm.runtime.context import (
+        reset_runtime_context,
+        set_runtime_context,
+    )
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
         JiuWenSwarmDeepAdapter,
     )
@@ -888,12 +892,18 @@ async def test_first_mcp_child_construction_starts_selected_native_route(
         "jiuwenswarm.agents.harness.common.session_ops_service.warmup_session_context",
         AsyncMock(),
     )
-    await parent.reconcile_session_mcp("s", ["filesystem"])
+    runtime = object()
+    token = set_runtime_context(runtime, object())
+    try:
+        await parent.reconcile_session_mcp("s", ["filesystem"])
+    finally:
+        reset_runtime_context(token)
     assert parent._session_adapters["s"] is child
     child.start_native_interaction.assert_awaited_once()
     child.start_interaction.assert_not_awaited()
     execution.enable_turn_outputs.assert_called_once()
     assert callable(execution.enable_turn_outputs.call_args.kwargs["detached_output"])
+    assert execution.enable_turn_outputs.call_args.kwargs["detached_output"]._runtime is runtime
     child.register_mcp_by_name.assert_awaited_once_with("filesystem")
     assert child._session_selected_mcp == {"filesystem"}
 

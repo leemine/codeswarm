@@ -103,6 +103,7 @@ class SessionExecutionHandle:
     task: asyncio.Task[Any] | None = field(default=None, repr=False)
     terminal_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     retain_owner_task: bool = field(default=False, repr=False)
+    retain_after_control: bool = field(default=False, repr=False)
 
     def snapshot(self) -> SessionExecutionSnapshot:
         return SessionExecutionSnapshot(

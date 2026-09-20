@@ -126,9 +126,11 @@ class NativeExecutionSession:
 
     async def stop(self) -> None:
         self._closing = True
-        if self._output_router is not None:
-            await self._output_router.stop()
-        await self.io.stop()
+        try:
+            if self._output_router is not None:
+                await self._output_router.stop()
+        finally:
+            await self.io.stop()
         for entry in self._requests.values():
             if entry.result is not None and not entry.result.done():
                 entry.result.cancel()

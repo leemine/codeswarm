@@ -54,7 +54,10 @@ from jiuwenswarm.runtime.session_lifecycle import (
     SessionPrepareDisposition,
     SessionPrepareEvent,
 )
-from jiuwenswarm.runtime.session.model import SessionExecutionSnapshot
+from jiuwenswarm.runtime.session.model import (
+    SessionExecutionSnapshot,
+    SessionExecutionState,
+)
 from jiuwenswarm.runtime.session_input import resolve_session_input_mode, validate_session_input
 from jiuwenswarm.server.runtime.agent_manager import AgentManager
 
@@ -410,6 +413,48 @@ class AgentRuntime:
         )
         if callable(clearer):
             await clearer(session_id, request_id)
+
+    def begin_detached_native_turn(
+        self, session_id: str, turn_id: str
+    ) -> SessionExecutionSnapshot:
+        """Give a provider Turn with no Web reader an existing Runtime owner."""
+        return self._session_coordinator.begin_detached_turn(
+            session_id, f"native-turn-{turn_id}"
+        )
+
+    async def observe_detached_native_turn(
+        self, session_id: str, execution_id: str, payload: dict[str, Any]
+    ) -> bool:
+        """Register a detached question before it becomes visible to clients."""
+        event_type = payload.get("event_type")
+        key = (
+            "request_id" if event_type == "chat.ask_user_question"
+            else "interaction_id" if event_type == "harness.activate_interaction"
+            else None
+        )
+        control_id = str(payload.get(key) or "").strip() if key else None
+        alive = self._session_coordinator.observe_detached_turn(
+            session_id, execution_id, control_id
+        )
+        if alive and control_id:
+            await self._mark_pending_interaction_id(session_id, control_id)
+        return alive
+
+    def finish_detached_native_turn(
+        self, session_id: str, execution_id: str, terminal: Any
+    ) -> bool:
+        from openjiuwen.harness_protocol import TurnEventKind
+
+        state = {
+            TurnEventKind.FINISHED: SessionExecutionState.SUCCEEDED,
+            TurnEventKind.FAILED: SessionExecutionState.FAILED,
+            TurnEventKind.ABORTED: SessionExecutionState.CANCELLED,
+        }.get(terminal)
+        if state is None:
+            raise ValueError("unknown detached Native terminal event")
+        return self._session_coordinator.finish_detached_turn(
+            session_id, execution_id, state
+        )
 
     @property
     def session_message_service(self) -> Any | None:

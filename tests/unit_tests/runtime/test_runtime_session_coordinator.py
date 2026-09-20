@@ -32,6 +32,45 @@ async def _register(
 
 
 @pytest.mark.asyncio
+async def test_detached_turn_keeps_runtime_control_owner_until_provider_terminal() -> None:
+    coordinator = RuntimeSessionCoordinator()
+    await _register(coordinator)
+    detached = coordinator.begin_detached_turn("session-a", "native-turn")
+    assert coordinator.observe_detached_turn(
+        "session-a", detached.execution_id, "question-1"
+    )
+    assert coordinator.has_control_target("session-a", "question-1")
+
+    async def accepted():
+        yield "accepted"
+
+    first = coordinator.deliver_control_stream(
+        "session-a", "question-1", accepted
+    )
+    assert [item async for item in first] == ["accepted"]
+    assert coordinator.observe_detached_turn(
+        "session-a", detached.execution_id, "question-2"
+    )
+    assert coordinator.has_control_target("session-a", "question-2")
+    assert await coordinator.deliver_control(
+        "session-a", "question-2", lambda: asyncio.sleep(0, result="accepted")
+    ) == "accepted"
+    assert coordinator.observe_detached_turn(
+        "session-a", detached.execution_id, "question-3"
+    )
+    assert coordinator.has_control_target("session-a", "question-3")
+
+    assert coordinator.finish_detached_turn(
+        "session-a", detached.execution_id, SessionExecutionState.SUCCEEDED
+    )
+    assert not coordinator.has_control_target("session-a", "question-3")
+    assert not coordinator.observe_detached_turn(
+        "session-a", detached.execution_id, "late-question"
+    )
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
 async def test_latest_first_within_session_and_parallel_across_sessions() -> None:
     coordinator = RuntimeSessionCoordinator()
     await _register(coordinator, "a")
