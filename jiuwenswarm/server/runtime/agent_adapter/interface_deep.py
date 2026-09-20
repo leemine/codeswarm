@@ -13832,7 +13832,13 @@ class JiuWenSwarmDeepAdapter:
         self._cancel_scheduler_running_tasks()
         if self._instance is not None:
             try:
-                await self._instance.abort()
+                native_execution = getattr(self, "_native_execution", None)
+                if native_execution is not None:
+                    from openjiuwen.harness_protocol import AbortMode
+
+                    await native_execution.engine.harness.abort(mode=AbortMode.FORCE)
+                else:
+                    await self._instance.abort()
             except Exception as exc:
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] abort_on_gateway_disconnect instance.abort failed: %s",
