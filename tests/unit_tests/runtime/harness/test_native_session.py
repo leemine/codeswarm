@@ -265,6 +265,95 @@ async def test_deep_adapter_dispatch_uses_native_turn_reader_for_two_requests(tm
 
 
 @pytest.mark.asyncio
+async def test_native_product_stream_uses_existing_adapter_projection(
+    tmp_path, monkeypatch
+):
+    from jiuwenswarm.common.schema.agent import AgentRequest
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+
+    native_round = [
+        OutputSchema(type="llm_output", index=1, payload={"content": "done"}),
+        OutputSchema(
+            type="tool_result",
+            index=2,
+            payload={
+                "tool_result": {
+                    "tool_call_id": "call-1",
+                    "tool_name": "read_file",
+                    "result": {"ok": True},
+                    "rendered_result": "file read",
+                }
+            },
+        ),
+        _answer(),
+    ]
+    execution, agent, _, context, _, _ = _setup(tmp_path, [native_round, native_round])
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._instance = agent
+    adapter._native_execution = execution
+    adapter._is_session_scoped_adapter = True
+    adapter._parent_session_id = "s"
+    monkeypatch.setattr(adapter, "_has_valid_model_config", lambda _model_name="": True)
+    monkeypatch.setattr(adapter, "_bind_runtime_cron_context", lambda **_kwargs: None)
+    monkeypatch.setattr(adapter, "_reset_runtime_cron_context", lambda _tokens: None)
+    monkeypatch.setattr(adapter, "_resolve_model_for_request", lambda _request: None)
+    monkeypatch.setattr(
+        adapter, "_apply_model_to_react_agent", lambda _model, **_kwargs: None
+    )
+    monkeypatch.setattr(adapter, "_mark_session_active", lambda _session_id: None)
+    monkeypatch.setattr(
+        adapter, "_register_session_agent_task", lambda _session_id: None
+    )
+    monkeypatch.setattr(
+        adapter, "_unregister_session_agent_task", lambda _session_id: None
+    )
+    monkeypatch.setattr(
+        adapter, "_unmark_session_active", lambda _session_id, **_kwargs: None
+    )
+    monkeypatch.setattr(adapter, "_update_runtime_config", AsyncMock())
+
+    await execution.start(context)
+    execution.enable_turn_outputs()
+    try:
+        request = AgentRequest(
+            request_id="product-stream",
+            channel_id="web",
+            session_id="s",
+            params={"query": "hi", "mode": "agent"},
+            is_stream=True,
+        )
+        chunks = [
+            item
+            async for item in adapter.process_message_stream_impl(
+                request, {"query": "hi"}
+            )
+        ]
+        events = [item.payload for item in chunks if isinstance(item.payload, dict)]
+        assert any(item.get("event_type") == "chat.final" for item in events)
+        assert any(
+            item.get("event_type") == "chat.tool_result"
+            and item.get("rendered_result") == "file read"
+            for item in events
+        )
+        response = await adapter.process_message_impl(
+            AgentRequest(
+                request_id="product-unary",
+                channel_id="web",
+                session_id="s",
+                params={"query": "again", "mode": "agent"},
+            ),
+            {"query": "again"},
+        )
+        assert response.ok is True
+        assert response.payload.get("content") == "done"
+        assert agent.send_input.await_count == 2
+    finally:
+        await execution.stop()
+
+
+@pytest.mark.asyncio
 async def test_deep_adapter_reuses_suspended_turn_reader_after_question(tmp_path):
     from jiuwenswarm.common.schema.agent import AgentRequest
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
