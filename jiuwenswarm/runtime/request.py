@@ -475,7 +475,10 @@ async def prepare_chat_turn(
         "admit_request": admit_request,
     }
     if session_id and (
-        session_metadata.get("execution_profile_id") is not None
+        (
+            isinstance(session_metadata, dict)
+            and session_metadata.get("execution_profile_id") is not None
+        )
         or params.get("execution_profile_id") is not None
     ):
         from jiuwenswarm.runtime.harness.request_binding import (
