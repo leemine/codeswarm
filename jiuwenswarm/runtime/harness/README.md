@@ -80,12 +80,15 @@ not yet switched to it.
 `TurnOutputRouter` before the first input. `send_request` registers its Turn
 while submitting to the provider; `turn_outputs(receipt.turn_id)` yields the
 original projected chunks and one terminal envelope, then ends. The mailbox
-is bounded; closing a request iterator releases that mailbox while the sole
+is bounded; closing a request iterator drains queued and in-flight output to
+the detached projection before later envelopes for that Turn. The sole
 session reader continues. Output without a live request owner is handed to an
 optional detached projection callback by the same router. The Native product
 route parses, records and pushes Goal continuation output after request EOF;
 it registers detached questions in the existing Runtime Session coordinator
 before pushing them, so subsequent control input has a live owner. The raw
+Native host request ID is retained while its Turn is active, including when
+the Web reader closes, so targeted Runtime cancellation still finds it. The raw
 protocol observer remains for lifecycle/telemetry. If a request fails before opening its
 iterator, call `abandon_turn_output(turn_id)` to release the mailbox. Do not
 also read `io.outputs()` or
