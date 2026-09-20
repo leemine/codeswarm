@@ -580,6 +580,7 @@ async def test_real_facade_control_wrapper_closes_retained_adapter_stream(
             )
         ),
         _adapter_mode_for_request=Mock(return_value="normal"),
+        _select_execution_before_mcp=interface.JiuWenSwarm._select_execution_before_mcp,
         _session_manager=SimpleNamespace(get_session_id=Mock(return_value=SESSION_ID)),
         _build_inputs=Mock(return_value=({}, "", False)),
         reconcile_session_mcp=AsyncMock(),
