@@ -31,6 +31,8 @@ def bind_admitted_request_execution(
         session_metadata = get_session_metadata(
             session_id, cache_bust=True, enable_writeback=False
         )
+    if not isinstance(session_metadata, dict):
+        session_metadata = {}
     selected_profile_id = session_metadata.get("execution_profile_id")
     params = getattr(request, "params", None)
     requested_profile_id = (

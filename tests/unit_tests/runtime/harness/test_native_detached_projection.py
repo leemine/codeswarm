@@ -105,3 +105,39 @@ async def test_failed_detached_turn_does_not_write_success_final(monkeypatch):
     assert [call.kwargs["event_type"] for call in history.call_args_list] == [
         "chat.delta", "chat.error"
     ]
+
+
+@pytest.mark.asyncio
+async def test_detached_goal_completion_uses_existing_card_writer(monkeypatch):
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+
+    card_writer = AsyncMock()
+    monkeypatch.setattr(
+        JiuWenSwarmDeepAdapter,
+        "_record_goal_completed_history_if_needed",
+        card_writer,
+    )
+    push = AsyncMock(return_value=True)
+    monkeypatch.setattr(mod, "send_runtime_push", push)
+    monkeypatch.setattr(mod, "build_server_push_message", lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        mod, "get_session_delivery_context",
+        lambda _sid: {"channel_id": "web", "route_metadata": {"topic": "goal"}},
+    )
+    monkeypatch.setattr(mod, "get_session_metadata", lambda *_args, **_kwargs: {"mode": "code"})
+    goal = {"goal_id": "g", "status": "completed"}
+    projection = mod.NativeDetachedProjection(
+        "s", SimpleNamespace(_parse_stream_chunk=lambda *_args, **_kwargs: {
+            "event_type": "goal.updated", "goal": goal
+        })
+    )
+    await projection(ProjectedOutput("turn", chunk=OutputSchema(
+        type="goal.updated", index=1, payload={"goal": goal}
+    )))
+    card_writer.assert_awaited_once_with(
+        session_id="s", channel_id="web",
+        channel_metadata={"topic": "goal"}, mode="code", goal_payload=goal,
+    )
+    assert push.await_args.args[0]["payload"]["goal"] == goal
