@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,15 +35,20 @@ class _DetachedTurn:
     final_seen: bool = False
     error_seen: bool = False
     runtime_execution_id: str | None = None
+    request_id: str | None = None
 
 
 class NativeDetachedProjection:
     """Persist then push envelopes with no live request owner."""
 
-    def __init__(self, session_id: str, adapter: Any, *, runtime: Any = None) -> None:
+    def __init__(
+        self, session_id: str, adapter: Any, *, runtime: Any = None,
+        request_id_for_turn: Callable[[str], str | None] | None = None,
+    ) -> None:
         self._session_id = session_id
         self._adapter = adapter
         self._runtime = runtime
+        self._request_id_for_turn = request_id_for_turn
         self._turns: dict[str, _DetachedTurn] = {}
 
     async def close(self) -> None:
@@ -63,9 +69,11 @@ class NativeDetachedProjection:
             return
         state = self._turns.setdefault(turn_id, _DetachedTurn())
         try:
+            if state.request_id is None and self._request_id_for_turn is not None:
+                state.request_id = self._request_id_for_turn(turn_id)
             if self._runtime is not None and state.runtime_execution_id is None:
                 snapshot = self._runtime.begin_detached_native_turn(
-                    self._session_id, turn_id
+                    self._session_id, turn_id, state.request_id
                 )
                 state.runtime_execution_id = snapshot.execution_id
             if item.chunk is not None:
@@ -139,7 +147,7 @@ class NativeDetachedProjection:
             delivery.get("channel_id") or metadata.get("channel_id") or "web"
         )
         mode = str(metadata.get("mode") or "unknown")
-        request_id = f"native-turn-{turn_id}"
+        request_id = state.request_id or f"native-turn-{turn_id}"
         event_type = payload.get("event_type")
         if event_type == "goal.updated":
             from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (

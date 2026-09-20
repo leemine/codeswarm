@@ -3612,7 +3612,8 @@ class JiuWenSwarmDeepAdapter:
 
                 execution.enable_turn_outputs(
                     detached_output=NativeDetachedProjection(
-                        sid, adapter, runtime=get_current_runtime()
+                        sid, adapter, runtime=get_current_runtime(),
+                        request_id_for_turn=execution.request_id_for_turn,
                     )
                 )
             interaction_ready_at = time.monotonic()

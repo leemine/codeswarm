@@ -158,6 +158,12 @@ class NativeExecutionSession:
     def has_turn_output_owner(self, turn_id: str) -> bool:
         return self._output_router is not None and self._output_router.has_owner(turn_id)
 
+    def request_id_for_turn(self, turn_id: str) -> str | None:
+        """Return the original host request ID while a Native Turn is active."""
+        token = self._turn_requests.get(turn_id)
+        entry = self._requests.get(token)
+        return entry.request.request_id if entry and entry.request else None
+
     def turn_outputs(self, turn_id: str) -> AsyncIterator[ProjectedOutput]:
         """Read one finite Turn; closing this iterator keeps the session alive."""
         if self._output_router is None:

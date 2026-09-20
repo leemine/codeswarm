@@ -415,11 +415,11 @@ class AgentRuntime:
             await clearer(session_id, request_id)
 
     def begin_detached_native_turn(
-        self, session_id: str, turn_id: str
+        self, session_id: str, turn_id: str, request_id: str | None = None
     ) -> SessionExecutionSnapshot:
         """Give a provider Turn with no Web reader an existing Runtime owner."""
         return self._session_coordinator.begin_detached_turn(
-            session_id, f"native-turn-{turn_id}"
+            session_id, request_id or f"native-turn-{turn_id}"
         )
 
     async def observe_detached_native_turn(

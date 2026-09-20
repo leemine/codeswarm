@@ -15,14 +15,21 @@ from openjiuwen.harness_providers.io_adapter import HarnessIOAdapter, ProjectedO
 class _Mailbox:
     queue: asyncio.Queue[ProjectedOutput]
     closed: asyncio.Event = field(default_factory=asyncio.Event)
+    idle: asyncio.Event = field(default_factory=asyncio.Event)
+    drained: asyncio.Event = field(default_factory=asyncio.Event)
+    drain_task: asyncio.Task[None] | None = None
+
+    def __post_init__(self) -> None:
+        self.idle.set()
+        self.drained.set()
 
 
 class TurnOutputRouter:
     """Consume one IO queue and hand finite Turn streams to request owners.
 
-    ``submit`` installs a mailbox before the provider can publish output. An
-    abandoned request closes only its mailbox; the session reader continues.
-    The protocol event observer remains responsible for durable observations.
+    ``submit`` associates output with the receipt before returning. Closing a
+    request transfers unread queued output to the detached product projection;
+    the session still has exactly one protocol output reader.
     """
 
     def __init__(
@@ -36,6 +43,8 @@ class TurnOutputRouter:
         self._queue_size = max(1, queue_size)
         self._detached_output = detached_output
         self._mailboxes: dict[str, _Mailbox] = {}
+        self._closing_mailboxes: dict[str, _Mailbox] = {}
+        self._drain_tasks: set[asyncio.Task[None]] = set()
         self._submitting = 0
         self._unclaimed: dict[str, list[ProjectedOutput]] = {}
         self._lock = asyncio.Lock()
@@ -97,16 +106,42 @@ class TurnOutputRouter:
                 if item.terminal is not None:
                     return
         finally:
-            mailbox.closed.set()
-            async with self._lock:
-                if self._mailboxes.get(turn_id) is mailbox:
-                    self._mailboxes.pop(turn_id)
+            await self._release_mailbox(turn_id, mailbox)
 
     def abandon(self, turn_id: str) -> None:
         """Release a registered Turn even if its iterator was never started."""
-        mailbox = self._mailboxes.pop(turn_id, None)
+        mailbox = self._mailboxes.get(turn_id)
         if mailbox is not None:
-            mailbox.closed.set()
+            self._schedule_release(turn_id, mailbox)
+
+    def _schedule_release(self, turn_id: str, mailbox: _Mailbox) -> asyncio.Task[None]:
+        if mailbox.drain_task is not None:
+            return mailbox.drain_task
+        mailbox.closed.set()
+        mailbox.drained.clear()
+        if self._mailboxes.get(turn_id) is mailbox:
+            self._mailboxes.pop(turn_id)
+        self._closing_mailboxes[turn_id] = mailbox
+        task = asyncio.create_task(self._drain_mailbox(turn_id, mailbox))
+        mailbox.drain_task = task
+        self._drain_tasks.add(task)
+        task.add_done_callback(self._drain_tasks.discard)
+        return task
+
+    async def _release_mailbox(self, turn_id: str, mailbox: _Mailbox) -> None:
+        await self._schedule_release(turn_id, mailbox)
+
+    async def _drain_mailbox(self, turn_id: str, mailbox: _Mailbox) -> None:
+        try:
+            await mailbox.idle.wait()
+            while not mailbox.queue.empty():
+                item = mailbox.queue.get_nowait()
+                if self._detached_output is not None:
+                    await self._detached_output(item)
+        finally:
+            mailbox.drained.set()
+            if self._closing_mailboxes.get(turn_id) is mailbox:
+                self._closing_mailboxes.pop(turn_id)
 
     def has_owner(self, turn_id: str) -> bool:
         mailbox = self._mailboxes.get(turn_id)
@@ -116,8 +151,8 @@ class TurnOutputRouter:
         if self._closed:
             return
         self._closed = True
-        for mailbox in self._mailboxes.values():
-            mailbox.closed.set()
+        for turn_id, mailbox in list(self._mailboxes.items()):
+            self._schedule_release(turn_id, mailbox)
         task = self._task
         if task is not None:
             task.cancel()
@@ -127,6 +162,8 @@ class TurnOutputRouter:
                 pass
         self._mailboxes.clear()
         self._unclaimed.clear()
+        if self._drain_tasks:
+            await asyncio.gather(*self._drain_tasks)
         close_detached = getattr(self._detached_output, "close", None)
         if callable(close_detached):
             await close_detached()
@@ -140,19 +177,31 @@ class TurnOutputRouter:
                         self._unclaimed.setdefault(item.turn_id or "", []).append(item)
                         continue
                 if mailbox is not None and not mailbox.closed.is_set():
-                    await self._put_or_closed(mailbox, item)
+                    mailbox.idle.clear()
+                    try:
+                        queued = await self._put_or_closed(mailbox, item)
+                    finally:
+                        mailbox.idle.set()
+                    if not queued:
+                        await mailbox.drained.wait()
+                        if self._detached_output is not None:
+                            await self._detached_output(item)
                 elif self._detached_output is not None:
+                    closing = self._closing_mailboxes.get(item.turn_id or "")
+                    if closing is not None:
+                        await closing.drained.wait()
                     await self._detached_output(item)
         finally:
             for mailbox in self._mailboxes.values():
                 mailbox.closed.set()
 
     @staticmethod
-    async def _put_or_closed(mailbox: _Mailbox, item: ProjectedOutput) -> None:
+    async def _put_or_closed(mailbox: _Mailbox, item: ProjectedOutput) -> bool:
         put = asyncio.create_task(mailbox.queue.put(item))
         closed = asyncio.create_task(mailbox.closed.wait())
         try:
             await asyncio.wait({put, closed}, return_when=asyncio.FIRST_COMPLETED)
+            return put.done() and not put.cancelled()
         finally:
             for task in (put, closed):
                 if not task.done():

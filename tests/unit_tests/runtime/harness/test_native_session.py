@@ -126,6 +126,25 @@ async def test_request_identity_and_host_session_are_preserved(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_active_turn_exposes_original_request_id_for_detached_cancel(tmp_path):
+    gate = asyncio.Event()
+    execution, _, _, ctx, terminal, _ = _setup(
+        tmp_path, [[_answer()]], gate=gate
+    )
+    await execution.start(ctx)
+    try:
+        receipt = await execution.send_request(
+            SendInputRequest(request_id="host-request", inputs={"query": "hi"})
+        )
+        assert execution.request_id_for_turn(receipt.turn_id) == "host-request"
+        gate.set()
+        await asyncio.wait_for(terminal.wait(), 3)
+        assert execution.request_id_for_turn(receipt.turn_id) is None
+    finally:
+        await execution.stop()
+
+
+@pytest.mark.asyncio
 async def test_turn_output_reader_keeps_one_session_consumer_across_requests(tmp_path):
     execution, _, _, ctx, _, _ = _setup(tmp_path, [[_answer()], [_answer()]])
     detached = AsyncMock()
@@ -298,6 +317,42 @@ async def test_abandon_unopened_turn_reader_preserves_next_request(tmp_path):
             return [item async for item in execution.turn_outputs(second.turn_id)]
 
         items = await asyncio.wait_for(collect(), 3)
+        assert items[-1].terminal is TurnEventKind.FINISHED
+    finally:
+        await execution.stop()
+
+
+@pytest.mark.asyncio
+async def test_abandon_drains_queued_and_inflight_output_once(tmp_path):
+    execution, _, _, ctx, _, _ = _setup(
+        tmp_path, [[_answer() for _ in range(8)]]
+    )
+    detached = AsyncMock()
+    await execution.start(ctx)
+    execution.enable_turn_outputs(queue_size=1, detached_output=detached)
+    try:
+        receipt = await execution.send_request(
+            SendInputRequest(request_id="first", inputs={"query": "first"})
+        )
+
+        async def mailbox_is_full():
+            while execution._output_router._mailboxes[receipt.turn_id].queue.qsize() < 1:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(mailbox_is_full(), 3)
+        execution.abandon_turn_output(receipt.turn_id)
+
+        async def all_detached():
+            while not any(
+                call.args[0].terminal is TurnEventKind.FINISHED
+                for call in detached.await_args_list
+            ):
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(all_detached(), 3)
+        items = [call.args[0] for call in detached.await_args_list]
+        assert len(items) == 9
+        assert [item.chunk.type for item in items[:-1]] == ["answer"] * 8
         assert items[-1].terminal is TurnEventKind.FINISHED
     finally:
         await execution.stop()
@@ -870,7 +925,10 @@ async def test_first_mcp_child_construction_starts_selected_native_route(
     request._execution_bindings = bindings
     parent = JiuWenSwarmDeepAdapter()
     parent.select_execution_for_request(request)
-    execution = SimpleNamespace(enable_turn_outputs=MagicMock())
+    execution = SimpleNamespace(
+        enable_turn_outputs=MagicMock(),
+        request_id_for_turn=MagicMock(return_value=None),
+    )
     child = SimpleNamespace(
         _instance=SimpleNamespace(card=SimpleNamespace(id="agent")),
         _agent_name="main_agent",

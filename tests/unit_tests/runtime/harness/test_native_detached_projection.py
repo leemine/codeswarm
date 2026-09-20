@@ -192,3 +192,38 @@ async def test_detached_question_is_runtime_control_target_before_push(monkeypat
     await projection.close()
     assert not runtime._session_coordinator.has_control_target("s", "question-id")
     await runtime._session_coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_detached_turn_keeps_original_request_id_for_targeted_cancel(monkeypatch):
+    from jiuwenswarm.runtime.service import AgentRuntime
+    from jiuwenswarm.runtime.session import RuntimeSessionCoordinator
+
+    runtime = object.__new__(AgentRuntime)
+    runtime._session_coordinator = RuntimeSessionCoordinator()
+    runtime._admission_controller = None
+    await runtime._session_coordinator.register_session("s", "web")
+    monkeypatch.setattr(mod, "get_session_delivery_context", lambda _sid: {"channel_id": "web"})
+    monkeypatch.setattr(mod, "get_session_metadata", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(mod, "build_server_push_message", lambda **kwargs: kwargs)
+    monkeypatch.setattr(mod, "send_runtime_push", AsyncMock(return_value=True))
+    projection = mod.NativeDetachedProjection(
+        "s", SimpleNamespace(_parse_stream_chunk=lambda *_args, **_kwargs: {
+            "event_type": "goal.updated", "goal": {"status": "running"}
+        }),
+        runtime=runtime,
+        request_id_for_turn=lambda _turn_id: "original-request",
+    )
+    await projection(ProjectedOutput("turn", chunk=OutputSchema(
+        type="goal.updated", index=1, payload={"goal": {"status": "running"}}
+    )))
+    active = runtime._session_coordinator._registry.select(
+        session_id="s", request_id="original-request", active_only=True
+    )
+    assert len(active) == 1
+    cancelled = await runtime._session_coordinator.cancel_execution(
+        "s", request_id="original-request"
+    )
+    assert cancelled.matched == 1 and cancelled.cancelled == 1
+    await projection(ProjectedOutput("turn", terminal=TurnEventKind.ABORTED))
+    await runtime._session_coordinator.close()
