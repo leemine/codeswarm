@@ -13444,7 +13444,10 @@ class JiuWenSwarmDeepAdapter:
         # the current user OR goal attempt but never clears GoalRecord.
         if (
             self._instance is not None
-            and self._instance_interaction_started()
+            and (
+                getattr(self, "_native_execution", None) is not None
+                or self._instance_interaction_started()
+            )
             and intent in ("cancel", "supplement")
         ):
             return await self._process_interaction_interrupt(request, intent, new_input)
@@ -13683,9 +13686,16 @@ class JiuWenSwarmDeepAdapter:
             reset_for_new_task=(intent == "cancel"),
         )
         try:
-            cancelled = await self._instance.cancel_round(
-                reason="user_cancel",
-            )
+            native_execution = getattr(self, "_native_execution", None)
+            if native_execution is not None:
+                from openjiuwen.harness_protocol import AbortMode
+
+                await native_execution.engine.harness.abort(mode=AbortMode.FORCE)
+                cancelled = True
+            else:
+                cancelled = await self._instance.cancel_round(
+                    reason="user_cancel",
+                )
             cancel_call_completed = True
             logger.info(
                 "[JiuWenSwarmDeepAdapter] interrupt(%s): interaction round cancel "

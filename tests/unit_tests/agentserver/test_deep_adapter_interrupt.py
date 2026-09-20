@@ -555,6 +555,39 @@ async def test_interaction_cancel_pauses_active_goal_before_cancel_round() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("intent", ["cancel", "supplement"])
+async def test_native_interrupt_aborts_protocol_turn_without_direct_cancel_round(intent) -> None:
+    from openjiuwen.harness_protocol import AbortMode
+
+    instance = MagicMock()
+    instance._interaction_started = False
+    instance.goal_manager = None
+    instance.cancel_round = AsyncMock()
+    harness = SimpleNamespace(active_turn=object(), abort=AsyncMock())
+    execution = SimpleNamespace(engine=SimpleNamespace(harness=harness))
+    rail = MagicMock()
+    rail.get_cancelled_tool_results.return_value = []
+    adapter = _make_adapter(
+        _active_session_ids={"sess-native": 1},
+        _stream_event_rail=rail,
+        _instance=instance,
+        _native_execution=execution,
+    )
+    adapter._cancel_pending_todos = AsyncMock(return_value=None)
+
+    request = (
+        _build_cancel_request("sess-native") if intent == "cancel"
+        else _build_supplement_request("sess-native")
+    )
+    response = await adapter.process_interrupt(request)
+
+    harness.abort.assert_awaited_once_with(mode=AbortMode.FORCE)
+    instance.cancel_round.assert_not_awaited()
+    assert response.ok is True
+    assert response.payload["event_type"] == "chat.interrupt_result"
+
+
+@pytest.mark.asyncio
 async def test_unconfirmed_interaction_cancel_quarantines_inflight_permission() -> None:
     queue = RootPermissionQueue(id_factory=lambda: "tiv-inflight")
     card = _begin_invocation(
