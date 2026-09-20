@@ -9,6 +9,22 @@ candidate before calling `catalog.source(...)`. Unknown explicit IDs fail
 without changing to a different engine. The catalog is a selection primitive;
 the current Runtime request route does not yet load or use it.
 
+The optional server `config.yaml` section is parsed by
+`load_execution_catalog(get_config())`:
+
+```yaml
+execution:
+  default_profile_id: native
+  profiles:
+    native:
+      provider_id: native
+      config_revision: r1
+```
+
+When the section is absent the loader returns `None`; malformed configured
+sections fail validation. Reading this section alone does not enable the new
+chat route or expose a new selection UI.
+
 The result is an unstarted core `HarnessEngine`. No existing chat or Team routing is changed in this slice. The Runtime caller will own `start`, the single event consumer and `stop` in R1-02; it must validate HarnessContext identity against the binding at that integration boundary. No provider instances are cached here.
 
 A bound scope retains its original snapshot when defaults change. An explicit attempt to change it fails rather than switching an active execution. `release` removes only the same binding object, protecting a replacement from stale cleanup. The store is process-local and contains provider configuration: never log it or treat it as durable session restore. Persistence, policy adaptation and UI integration remain separate tasks.

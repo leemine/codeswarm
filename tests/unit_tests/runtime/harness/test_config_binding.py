@@ -10,6 +10,7 @@ from jiuwenswarm.runtime.harness.bridge import prepare_execution
 from jiuwenswarm.runtime.harness.config_source import (
     ExecutionConfigCatalog,
     ExecutionConfigSource,
+    load_execution_catalog,
     parse_execution_config,
 )
 
@@ -49,6 +50,28 @@ def test_catalog_resolves_only_server_owned_snapshots_by_id():
         catalog.source(explicit_profile_id="missing")
     with pytest.raises(ValueError, match="unknown execution profile ID"):
         catalog.source(explicit_profile_id={"provider_id": "native"})
+
+
+def test_optional_server_config_catalog_does_not_silently_fall_back():
+    assert load_execution_catalog({"models": {}}) is None
+    catalog = load_execution_catalog({
+        "execution": {
+            "default_profile_id": "native",
+            "profiles": {
+                "native": {"provider_id": "native", "config_revision": "r1"},
+            },
+        },
+    })
+    assert catalog.source().resolve().provider_id == "native"
+    with pytest.raises(ValueError, match="default execution profile"):
+        load_execution_catalog({
+            "execution": {
+                "default_profile_id": "missing",
+                "profiles": {"native": {"provider_id": "native", "config_revision": "r1"}},
+            },
+        })
+    with pytest.raises(TypeError, match="execution configuration"):
+        load_execution_catalog({"execution": "native"})
 
 
 def test_defaults_change_only_new_sessions_and_explicit_change_is_rejected():

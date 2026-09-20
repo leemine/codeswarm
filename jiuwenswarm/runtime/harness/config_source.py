@@ -81,3 +81,28 @@ class ExecutionConfigCatalog:
             project=selected(project_profile_id),
             default=self._profiles[self._default_profile_id],
         )
+
+
+def load_execution_catalog(
+    config: Mapping[str, object],
+) -> ExecutionConfigCatalog | None:
+    """Load the optional execution section of an already resolved server config.
+
+    Absence keeps legacy sessions on their existing path. A present but broken
+    section is an error, so a typo cannot silently select another engine.
+    """
+    if not isinstance(config, Mapping):
+        raise TypeError("server configuration must be an object")
+    section = config.get("execution")
+    if section is None:
+        return None
+    if not isinstance(section, Mapping):
+        raise TypeError("execution configuration must be an object")
+    profiles = section.get("profiles")
+    default_profile_id = section.get("default_profile_id")
+    if not isinstance(default_profile_id, str):
+        raise ValueError("execution default_profile_id is required")
+    return ExecutionConfigCatalog(
+        profiles,
+        default_profile_id=default_profile_id,
+    )
