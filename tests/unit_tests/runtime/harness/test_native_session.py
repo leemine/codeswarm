@@ -126,6 +126,100 @@ async def test_request_identity_and_host_session_are_preserved(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_turn_output_reader_keeps_one_session_consumer_across_requests(tmp_path):
+    execution, _, _, ctx, _, _ = _setup(tmp_path, [[_answer()], [_answer()]])
+    await execution.start(ctx)
+    execution.enable_turn_outputs()
+    try:
+        for request_id in ("first", "second"):
+            receipt = await execution.send_request(
+                SendInputRequest(request_id=request_id, inputs={"query": request_id})
+            )
+
+            async def collect():
+                return [item async for item in execution.turn_outputs(receipt.turn_id)]
+
+            items = await asyncio.wait_for(collect(), 3)
+            assert [item.turn_id for item in items] == [receipt.turn_id] * 2
+            assert items[0].chunk.type == "answer"
+            assert items[1].terminal is TurnEventKind.FINISHED
+    finally:
+        await execution.stop()
+
+
+@pytest.mark.asyncio
+async def test_closed_turn_reader_does_not_stop_next_turn(tmp_path):
+    execution, _, _, ctx, _, _ = _setup(
+        tmp_path, [[_answer() for _ in range(8)], [_answer()]]
+    )
+    await execution.start(ctx)
+    execution.enable_turn_outputs(queue_size=1)
+    try:
+        first = await execution.send_request(
+            SendInputRequest(request_id="first", inputs={"query": "first"})
+        )
+        stream = execution.turn_outputs(first.turn_id)
+        assert (await asyncio.wait_for(anext(stream), 3)).chunk.type == "answer"
+        await stream.aclose()
+        second = await execution.send_request(
+            SendInputRequest(request_id="second", inputs={"query": "second"})
+        )
+
+        async def collect():
+            return [item async for item in execution.turn_outputs(second.turn_id)]
+
+        items = await asyncio.wait_for(collect(), 3)
+        assert items[-1].terminal is TurnEventKind.FINISHED
+    finally:
+        await execution.stop()
+
+
+@pytest.mark.asyncio
+async def test_stopping_session_unblocks_waiting_turn_reader(tmp_path):
+    gate = asyncio.Event()
+    execution, _, _, ctx, _, _ = _setup(tmp_path, [[_answer()]], gate=gate)
+    await execution.start(ctx)
+    execution.enable_turn_outputs()
+    receipt = await execution.send_request(
+        SendInputRequest(request_id="waiting", inputs={"query": "wait"})
+    )
+    stream = execution.turn_outputs(receipt.turn_id)
+    waiting = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    stopping = asyncio.create_task(execution.stop())
+    with pytest.raises(RuntimeError, match="before a terminal event"):
+        await asyncio.wait_for(waiting, 3)
+    gate.set()
+    await asyncio.wait_for(stopping, 3)
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_abandon_unopened_turn_reader_preserves_next_request(tmp_path):
+    execution, _, _, ctx, _, _ = _setup(
+        tmp_path, [[_answer() for _ in range(8)], [_answer()]]
+    )
+    await execution.start(ctx)
+    execution.enable_turn_outputs(queue_size=1)
+    try:
+        first = await execution.send_request(
+            SendInputRequest(request_id="first", inputs={"query": "first"})
+        )
+        execution.abandon_turn_output(first.turn_id)
+        second = await execution.send_request(
+            SendInputRequest(request_id="second", inputs={"query": "second"})
+        )
+
+        async def collect():
+            return [item async for item in execution.turn_outputs(second.turn_id)]
+
+        items = await asyncio.wait_for(collect(), 3)
+        assert items[-1].terminal is TurnEventKind.FINISHED
+    finally:
+        await execution.stop()
+
+
+@pytest.mark.asyncio
 async def test_answer_retains_handoff_and_does_not_duplicate_prompt(tmp_path):
     value = {
         "kind": "ask_user",

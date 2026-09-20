@@ -12,7 +12,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable
 
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.harness.engine import HarnessEngine
@@ -27,7 +27,7 @@ from openjiuwen.harness_protocol import (
     TurnEventKind,
     TurnLifecycleEvent,
 )
-from openjiuwen.harness_providers.io_adapter import HarnessIOAdapter
+from openjiuwen.harness_providers.io_adapter import HarnessIOAdapter, ProjectedOutput
 from openjiuwen.harness_providers.native import (
     AgentFactory,
     DeepAgentHarness,
@@ -35,6 +35,7 @@ from openjiuwen.harness_providers.native import (
 )
 
 from jiuwenswarm.runtime.harness.binding_store import BoundExecution
+from jiuwenswarm.runtime.harness.output_router import TurnOutputRouter
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -109,6 +110,7 @@ class NativeExecutionSession:
             auto_approve_tools=False,
             event_observer=self._observe,
         )
+        self._output_router: TurnOutputRouter | None = None
 
     async def start(self, context: HarnessContext) -> None:
         if self._closing:
@@ -124,6 +126,8 @@ class NativeExecutionSession:
 
     async def stop(self) -> None:
         self._closing = True
+        if self._output_router is not None:
+            await self._output_router.stop()
         await self.io.stop()
         for entry in self._requests.values():
             if entry.result is not None and not entry.result.done():
@@ -132,6 +136,33 @@ class NativeExecutionSession:
         self._turn_requests.clear()
         self._goal_handoffs.clear()
         self._terminal_turns.clear()
+
+    def enable_turn_outputs(self, *, queue_size: int = 128) -> None:
+        """Select one session-level output reader before sending the first Turn."""
+        if self._closing or self._output_router is not None:
+            raise RuntimeError("Native turn output route is already selected or closed")
+        if self._turn_requests or self._terminal_turns:
+            raise RuntimeError("Native turn output route must be selected before input")
+        self._output_router = TurnOutputRouter(self.io, queue_size=queue_size)
+        self._output_router.start()
+
+    def turn_outputs(self, turn_id: str) -> AsyncIterator[ProjectedOutput]:
+        """Read one finite Turn; closing this iterator keeps the session alive."""
+        if self._output_router is None:
+            raise RuntimeError("Native turn output route is not selected")
+        return self._output_router.outputs(turn_id)
+
+    def abandon_turn_output(self, turn_id: str) -> None:
+        """Release a request mailbox after admission or transport failure."""
+        if self._output_router is not None:
+            self._output_router.abandon(turn_id)
+
+    async def _send(self, content: HarnessInput, *, immediate: bool = False) -> SendReceipt:
+        if self._output_router is None:
+            return await self.io.send(content, immediate=immediate)
+        return await self._output_router.submit(
+            lambda: self.io.send(content, immediate=immediate)
+        )
 
     async def send_request(self, request: SendInputRequest) -> SendReceipt:
         """Accept a host request without serializing its permission/context objects."""
@@ -144,7 +175,7 @@ class NativeExecutionSession:
         self._requests[token] = _HostRequest(request=request)
         content = HarnessInput(content=query, metadata={_REQUEST_KEY: token})
         try:
-            receipt = await self.io.send(
+            receipt = await self._send(
                 content, immediate=request.mode is InputDispatchMode.STEER
             )
         except BaseException:

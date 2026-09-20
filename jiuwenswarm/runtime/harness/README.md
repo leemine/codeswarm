@@ -70,6 +70,18 @@ that Turn's terminal marker. This shares the same single-consumer queue as
 keep one consumer for the entire session. The current default chat route has
 not yet switched to it.
 
+`NativeExecutionSession.enable_turn_outputs()` opts into a session-level
+`TurnOutputRouter` before the first input. `send_request` registers its Turn
+while submitting to the provider; `turn_outputs(receipt.turn_id)` yields the
+original projected chunks and one terminal envelope, then ends. The mailbox
+is bounded; closing a request iterator releases that mailbox while the sole
+session reader continues. Output not attached to a live request still reaches
+the protocol event observer, which the eventual product route must connect to
+its durable history/UI projection. If a request fails before opening its
+iterator, call `abandon_turn_output(turn_id)` to release the mailbox. Do not
+also read `io.outputs()` or
+`io.output_envelopes()` after opting into this router.
+
 The binding store is still owned/released by the Runtime caller. Runtime
 must enforce authorization and session generation before passing answers;
 this class is neither a new persistence layer nor a replacement for generation.
