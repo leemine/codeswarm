@@ -12036,6 +12036,55 @@ class JiuWenSwarmDeepAdapter:
             return False
         return has_runtime_capability
 
+    def build_native_execution(self, bound: Any, *, event_observer: Any = None) -> Any:
+        """Build an unstarted protocol execution from this session's assembled agent.
+
+        A caller using this path owns NativeExecutionSession.start/stop/inputs;
+        it must not also start or drive this adapter's legacy interaction loop.
+        Original rails, tools and permission dispatch remain on this adapter.
+        """
+        if not self._is_session_scoped_adapter or self._instance is None:
+            raise RuntimeError("Native execution requires an assembled session adapter")
+        if self._parent_session_id != bound.binding.host_session_id:
+            raise ValueError("Native adapter session does not match the execution binding")
+        from jiuwenswarm.runtime.harness.native_session import NativeExecutionSession
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_application_runtime import (
+            get_kv_cache_runtime,
+        )
+
+        prepared_instance = self._instance
+
+        def agent_factory(context: Any) -> Any:
+            if self._instance is not prepared_instance:
+                raise RuntimeError("Native adapter instance changed after execution binding")
+            return prepared_instance
+
+        async def session_factory(context: Any, instance: Any) -> Any:
+            return create_agent_session(
+                session_id=context.host_session_id, card=instance.card,
+                kv_cache_runtime=get_kv_cache_runtime(),
+            )
+
+        async def before_start(instance: Any, session: Any) -> None:
+            agent_factory(None)
+            await self.install_session_input_guard()
+
+        async def dispatch_guard(request: Any, *, send: Any) -> Any:
+            agent_factory(None)
+            return await self._send_input_with_permission_resume_guard(request, send=send)
+
+        async def goal_dispatcher(**kwargs: Any) -> Any:
+            agent_factory(None)
+            return await self._dispatch_goal_control(**kwargs)
+
+        return NativeExecutionSession(
+            bound, agent_factory=agent_factory,
+            session_factory=session_factory, before_start=before_start,
+            dispatch_guard=dispatch_guard,
+            goal_dispatcher=goal_dispatcher,
+            event_observer=event_observer,
+        )
+
     async def start_interaction(self, session_id: str) -> None:
         """Bind a product Session and start this adapter's DeepAgent interaction loop.
 
