@@ -41,6 +41,7 @@
     },
     "pr-stable": {
       "suites": [
+        "codeswarm.python.execution-construction",
         "codeswarm.python.acp",
         "codeswarm.python.common",
         "codeswarm.python.e2a",
@@ -186,6 +187,51 @@
       "inventory_granularity": "file",
       "inventory": ["tests/supervised-env.test.mjs"],
       "command": ["node", "--test", "--test-timeout=20000", "--test-reporter=junit", "--test-reporter-destination={junit}", "tests/supervised-env.test.mjs"]
+    },
+    {
+      "id": "codeswarm.python.execution-construction",
+      "owner": "runtime",
+      "tier": "unit",
+      "runner": "pytest",
+      "workdir": ".",
+      "writable_workdir": true,
+      "capabilities": [
+        "filesystem"
+      ],
+      "required": true,
+      "shard_timeout_seconds": 120,
+      "discover": {
+        "command": [
+          "{python}",
+          "-m",
+          "pytest",
+          "tests/unit_tests/runtime/harness",
+          "--collect-only",
+          "-q",
+          "-o",
+          "addopts=",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "parser": "pytest",
+        "timeout_seconds": 60
+      },
+      "command": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/unit_tests/runtime/harness",
+        "-q",
+        "-o",
+        "addopts=",
+        "-o",
+        "asyncio_mode=auto",
+        "-p",
+        "no:cacheprovider",
+        "--timeout=30",
+        "--timeout-method=signal",
+        "--junitxml={junit}"
+      ]
     }
   ]
 }
