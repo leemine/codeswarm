@@ -27,6 +27,30 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - name: Install locked test dependencies
         run: uv sync --locked --group test --python 3.13
+      - name: Verify installed core matches locked commit
+        run: |
+          .venv/bin/python - <<'PYCORE'
+          import importlib.metadata
+          import importlib.util
+          import json
+          from pathlib import Path
+          import sys
+          import tomllib
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())
+          source = project["tool"]["uv"]["sources"]["openjiuwen"]
+          expected = source["rev"]
+          lock = tomllib.loads(Path("uv.lock").read_text())
+          package = next(p for p in lock["package"] if p["name"] == "openjiuwen")
+          assert package["source"]["git"].endswith("#" + expected), "core lock SHA mismatch"
+          dist = importlib.metadata.distribution("openjiuwen")
+          direct = json.loads(dist.read_text("direct_url.json"))
+          assert direct["url"].removesuffix(".git") == source["git"].removesuffix(".git")
+          assert direct["vcs_info"]["commit_id"] == expected, "installed core SHA mismatch"
+          origin = Path(importlib.util.find_spec("openjiuwen").origin).resolve()
+          assert origin.is_relative_to(Path(sys.prefix).resolve()), "local core override detected"
+          print(f"Verified locked core: {expected}; import: {origin}")
+          PYCORE
       - name: Warm legacy pysbd bytecode
         run: .venv/bin/python -W 'ignore:invalid escape sequence:SyntaxWarning' -c 'import pysbd'
       - name: Install Browser and TUI dependencies
@@ -63,6 +87,30 @@ jobs:
           version: '0.12.5'
       - name: Install full Python environment
         run: uv sync --locked --group test --extra desktop --python 3.13
+      - name: Verify installed core matches locked commit
+        run: |
+          .venv/bin/python - <<'PYCORE'
+          import importlib.metadata
+          import importlib.util
+          import json
+          from pathlib import Path
+          import sys
+          import tomllib
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())
+          source = project["tool"]["uv"]["sources"]["openjiuwen"]
+          expected = source["rev"]
+          lock = tomllib.loads(Path("uv.lock").read_text())
+          package = next(p for p in lock["package"] if p["name"] == "openjiuwen")
+          assert package["source"]["git"].endswith("#" + expected), "core lock SHA mismatch"
+          dist = importlib.metadata.distribution("openjiuwen")
+          direct = json.loads(dist.read_text("direct_url.json"))
+          assert direct["url"].removesuffix(".git") == source["git"].removesuffix(".git")
+          assert direct["vcs_info"]["commit_id"] == expected, "installed core SHA mismatch"
+          origin = Path(importlib.util.find_spec("openjiuwen").origin).resolve()
+          assert origin.is_relative_to(Path(sys.prefix).resolve()), "local core override detected"
+          print(f"Verified locked core: {expected}; import: {origin}")
+          PYCORE
       - name: Warm legacy pysbd bytecode
         run: .venv/bin/python -W 'ignore:invalid escape sequence:SyntaxWarning' -c 'import pysbd'
       - uses: actions/setup-node@v7.0.0
