@@ -12047,6 +12047,10 @@ class JiuWenSwarmDeepAdapter:
             raise RuntimeError("Native execution requires an assembled session adapter")
         if self._parent_session_id != bound.binding.host_session_id:
             raise ValueError("Native adapter session does not match the execution binding")
+        if getattr(self._instance, "_interaction_started", False) is True:
+            raise RuntimeError(
+                "Native session already runs through the legacy interaction path"
+            )
         from jiuwenswarm.runtime.harness.native_session import NativeExecutionSession
         from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_application_runtime import (
             get_kv_cache_runtime,
@@ -12085,6 +12089,42 @@ class JiuWenSwarmDeepAdapter:
             event_observer=event_observer,
         )
 
+    async def start_native_interaction(
+        self, *, source: Any, bindings: Any, subject_id: str,
+        workspace: str, context: Any, event_observer: Any = None,
+    ) -> Any:
+        """Select and start the protocol route before legacy session startup."""
+        if getattr(self, "_native_execution", None) is not None:
+            raise RuntimeError("Native execution is already started for this session")
+        if not self._is_session_scoped_adapter or not self._parent_session_id:
+            raise RuntimeError("Native execution requires a session-owned adapter")
+        from jiuwenswarm.runtime.harness.bridge import prepare_native_session
+
+        execution = prepare_native_session(
+            source,
+            bindings=bindings,
+            subject_id=subject_id,
+            host_session_id=self._parent_session_id,
+            workspace=workspace,
+            adapter=self,
+            event_observer=event_observer,
+        )
+        self._native_execution = execution
+        self._native_execution_bindings = bindings
+        try:
+            await execution.start(context)
+        except BaseException:
+            try:
+                await execution.stop()
+            except Exception:
+                logger.exception("Native session startup rollback failed")
+            else:
+                self._native_execution = None
+                self._native_execution_bindings = None
+                bindings.release(execution.engine.binding)
+            raise
+        return execution
+
     async def start_interaction(self, session_id: str) -> None:
         """Bind a product Session and start this adapter's DeepAgent interaction loop.
 
@@ -12094,6 +12134,8 @@ class JiuWenSwarmDeepAdapter:
         """
         if self._instance is None:
             raise RuntimeError("DeepAgent instance is not initialized")
+        if getattr(self, "_native_execution", None) is not None:
+            raise RuntimeError("Native execution already owns this session")
 
         from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_application_runtime import (
             get_kv_cache_runtime,
@@ -12137,6 +12179,14 @@ class JiuWenSwarmDeepAdapter:
 
     async def stop_interaction(self) -> None:
         """Stop this adapter's DeepAgent interaction loop if it was started."""
+        execution = getattr(self, "_native_execution", None)
+        if execution is not None:
+            bindings = self._native_execution_bindings
+            await execution.stop()
+            self._native_execution = None
+            self._native_execution_bindings = None
+            bindings.release(execution.engine.binding)
+            return
         if self._instance is None:
             return
         await self._instance.stop()

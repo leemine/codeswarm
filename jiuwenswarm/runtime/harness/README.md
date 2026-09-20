@@ -28,10 +28,12 @@ HarnessIOAdapter event pump:
   once. Single-answer dispatch preserves the exact original request object.
   Multi-answer dispatch combines query answers and rejects conflicting host
   metadata instead of silently dropping it.
-- `submit_goal("set" | "resume", **kwargs)` queues a protocol Turn and returns
-  its receipt plus a Future for the original Goal control response. The
-  original operation runs after RUNNING and output attachment. A confirmation
-  or error result does not wait for nonexistent output.
+- `submit_goal("set" | "resume", **kwargs)` starts a protocol Turn while idle,
+  or controls the current Turn immediately while work is running. It returns
+  the receipt plus a Future for the original Goal control response. A
+  confirmation or error does not wait for nonexistent output. If the current
+  output reaches EOF during a running Goal replacement, an active Goal gets
+  one new output attachment through the same protocol scheduler.
 - `control_goal("get" | "pause" | "clear", **kwargs)` calls the original manager
   directly so control cannot be queued behind the work it needs to stop.
 - `io.outputs()` is the sole projected output reader. Native cards come only
@@ -42,9 +44,11 @@ The binding store is still owned/released by the Runtime caller. Runtime
 must enforce authorization and session generation before passing answers;
 this class is neither a new persistence layer nor a replacement for generation.
 
-This is an **explicit integration entry**, not a change to the default Web/TUI
-chat route. In particular queued set/resume does not yet reproduce legacy
-in-flight Goal replacement semantics. Enabling the default route requires
-that behavior, output handoff across Web disconnect, historical replay and
-real Native preservation acceptance to be completed first. Full R1-02 remains
-in progress; passing these deterministic adapter tests is not live-model E2E.
+The session adapter also has `start_native_interaction` and an exclusive legacy
+`start_interaction` path. Its `stop_interaction` releases the selected binding
+after the protocol session stops. The current warm pool still starts the legacy
+path unconditionally, so this is an **explicit integration entry**, not a
+change to the default Web/TUI chat route. The warm pool selection and request
+route, output handoff across Web disconnect, historical replay and real Native
+preservation acceptance remain before R1-02 completion. Passing deterministic
+adapter tests is not live-model E2E.

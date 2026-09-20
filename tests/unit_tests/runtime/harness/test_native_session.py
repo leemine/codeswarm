@@ -18,6 +18,7 @@ from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.interaction import SendInputRequest
 from openjiuwen.harness_protocol import (
     AgentExecutionSpec,
+    DeliveryMode,
     HarnessContext,
     HarnessState,
     TurnEventKind,
@@ -218,6 +219,102 @@ async def test_goal_starts_inside_turn_and_pause_can_bypass_running_work(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_running_goal_replacement_uses_current_output_turn(tmp_path):
+    gate = asyncio.Event()
+    calls = []
+
+    async def goal(*, action, **kwargs):
+        if action == "get":
+            return {"result_type": "goal_control", "goal": {"status": "completed"}}
+        calls.append((action, kwargs.get("objective")))
+        return {"result_type": "goal_stream", "goal": {"status": "active"}}
+
+    execution, agent, _, ctx, terminal, events = _setup(
+        tmp_path, [[_answer()]], goal=goal, gate=gate
+    )
+    await execution.start(ctx)
+    try:
+        original, first = await execution.submit_goal("set", objective="first")
+        await asyncio.wait_for(first, 3)
+        replacement, second = await asyncio.wait_for(
+            execution.submit_goal(
+                "set", objective="second", overwrite_confirmed=True
+            ),
+            3,
+        )
+        await asyncio.wait_for(second, 3)
+        assert replacement.accepted_mode is DeliveryMode.STEER
+        assert replacement.turn_id == original.turn_id
+        assert calls == [("set", "first"), ("set", "second")]
+        assert len(execution._requests) == 1
+        gate.set()
+        await asyncio.wait_for(terminal.wait(), 3)
+        assert len({event.turn_id for event in events if event.turn_id}) == 1
+        agent.send_input.assert_not_awaited()
+    finally:
+        gate.set()
+        await execution.stop()
+
+
+@pytest.mark.asyncio
+async def test_running_goal_replacement_reattaches_if_output_reaches_eof(tmp_path):
+    output_gate = asyncio.Event()
+    goal_entered = asyncio.Event()
+    goal_gate = asyncio.Event()
+
+    async def goal(*, action, **kwargs):
+        if action == "get":
+            return {"result_type": "goal_control", "goal": {"status": "active"}}
+        goal_entered.set()
+        await goal_gate.wait()
+        return {"result_type": "goal_stream", "goal": {"status": "active"}}
+
+    execution, agent, _, ctx, _, events = _setup(
+        tmp_path, [[_answer()], [_answer()]], goal=goal, gate=output_gate
+    )
+    await execution.start(ctx)
+    try:
+        original = await execution.send_request(
+            SendInputRequest(request_id="original", inputs={"query": "start"})
+        )
+        async def wait_for_first_lease():
+            while agent.attach_output.await_count == 0:
+                await asyncio.sleep(0)
+        await asyncio.wait_for(wait_for_first_lease(), 3)
+        replacement_task = asyncio.create_task(
+            execution.submit_goal("set", objective="replacement")
+        )
+        await asyncio.wait_for(goal_entered.wait(), 3)
+        output_gate.set()
+        async def wait_for_first_terminal():
+            while not any(
+                isinstance(event.event, TurnLifecycleEvent)
+                and event.event.kind is TurnEventKind.FINISHED
+                for event in events
+            ):
+                await asyncio.sleep(0)
+        await asyncio.wait_for(wait_for_first_terminal(), 3)
+        goal_gate.set()
+        replacement, result = await asyncio.wait_for(replacement_task, 3)
+        assert replacement.turn_id == original.turn_id
+        assert (await result)["result_type"] == "goal_stream"
+        async def wait_for_new_lease():
+            while agent.attach_output.await_count < 2:
+                await asyncio.sleep(0)
+        await asyncio.wait_for(wait_for_new_lease(), 3)
+        async def wait_for_second_turn():
+            while len({event.turn_id for event in events if event.turn_id}) < 2:
+                await asyncio.sleep(0)
+        await asyncio.wait_for(wait_for_second_turn(), 3)
+        assert len({event.turn_id for event in events if event.turn_id}) == 2
+        agent.send_input.assert_awaited_once()
+    finally:
+        goal_gate.set()
+        output_gate.set()
+        await execution.stop()
+
+
+@pytest.mark.asyncio
 async def test_rejected_goal_does_not_hang_on_output(tmp_path):
     goal = AsyncMock(return_value={"result_type": "goal_confirm_required"})
     execution, agent, _, ctx, terminal, _ = _setup(
@@ -280,9 +377,6 @@ async def test_stop_cancels_queued_goal_without_dispatch(tmp_path):
     )
     agent.stop.side_effect = gate.set
     await execution.start(ctx)
-    await execution.send_request(
-        SendInputRequest(request_id="r1", inputs={"query": "hi"})
-    )
     _, result = await execution.submit_goal("set", objective="queued")
     await asyncio.wait_for(execution.stop(), 3)
     assert result.cancelled()
@@ -354,6 +448,74 @@ async def test_existing_adapter_builds_with_product_session_and_permission_guard
         assert agent.send_input.await_args.args[0] is request
     finally:
         await execution.stop()
+
+
+def test_started_legacy_session_cannot_be_claimed_by_native_execution(tmp_path):
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+
+    adapter = object.__new__(JiuWenSwarmDeepAdapter)
+    adapter._instance = SimpleNamespace(_interaction_started=True)
+    adapter._is_session_scoped_adapter = True
+    adapter._parent_session_id = "s"
+    bound = ExecutionBindingStore().bind(
+        ExecutionConfigSource(explicit=AgentExecutionSpec("native", "r1")),
+        subject_id="alice",
+        host_session_id="s",
+        workspace=str(tmp_path),
+    )
+    with pytest.raises(RuntimeError, match="legacy interaction path"):
+        adapter.build_native_execution(bound)
+
+
+@pytest.mark.asyncio
+async def test_adapter_selects_one_native_lifecycle_before_legacy_start(
+    tmp_path, monkeypatch
+):
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+    from jiuwenswarm.server.runtime.session.kv_cache import kv_cache_application_runtime
+
+    _, agent, session, context, _, _ = _setup(tmp_path, [])
+    adapter = object.__new__(interface_deep.JiuWenSwarmDeepAdapter)
+    adapter._instance = agent
+    adapter._is_session_scoped_adapter = True
+    adapter._parent_session_id = "s"
+    adapter.install_session_input_guard = AsyncMock()
+    adapter._send_input_with_permission_resume_guard = AsyncMock()
+    monkeypatch.setattr(interface_deep, "create_agent_session", lambda **_: session)
+    monkeypatch.setattr(
+        kv_cache_application_runtime, "get_kv_cache_runtime", lambda: None
+    )
+    source = ExecutionConfigSource(
+        explicit=AgentExecutionSpec("native", "lifecycle-r1")
+    )
+    bindings = ExecutionBindingStore()
+
+    execution = await adapter.start_native_interaction(
+        source=source,
+        bindings=bindings,
+        subject_id="alice",
+        workspace=str(tmp_path),
+        context=context,
+    )
+    try:
+        agent.start.assert_awaited_once()
+        with pytest.raises(RuntimeError, match="already owns"):
+            await adapter.start_interaction("s")
+        with pytest.raises(RuntimeError, match="already started"):
+            await adapter.start_native_interaction(
+                source=source,
+                bindings=bindings,
+                subject_id="alice",
+                workspace=str(tmp_path),
+                context=context,
+            )
+    finally:
+        await adapter.stop_interaction()
+    assert execution is not adapter._native_execution
+    agent.stop.assert_awaited_once()
+    assert not bindings._bindings
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -17,9 +18,11 @@ from openjiuwen.core.session.interaction.interactive_input import InteractiveInp
 from openjiuwen.harness.engine import HarnessEngine
 from openjiuwen.harness.schema.interaction import InputDispatchMode, SendInputRequest
 from openjiuwen.harness_protocol import (
+    DeliveryMode,
     HarnessContext,
     HarnessEvent,
     HarnessInput,
+    HarnessStateError,
     SendReceipt,
     TurnEventKind,
     TurnLifecycleEvent,
@@ -46,6 +49,7 @@ class _HostRequest:
     goal: Callable[[Any], Awaitable[dict[str, Any]]] | None = field(
         default=None, repr=False
     )
+    attach_goal: bool = False
     result: asyncio.Future | None = field(default=None, repr=False)
     resumes: list[SendInputRequest] = field(default_factory=list, repr=False)
     answered: set[str] = field(default_factory=set, repr=False)
@@ -82,6 +86,9 @@ class NativeExecutionSession:
         self._observer = event_observer
         self._requests: dict[str, _HostRequest] = {}
         self._turn_requests: dict[str, str] = {}
+        self._goal_handoffs: set[str] = set()
+        self._terminal_turns: deque[str] = deque(maxlen=16)
+        self._closing = False
         hooks = NativeHostHooks(
             create_session=session_factory,
             before_start=before_start,
@@ -104,6 +111,8 @@ class NativeExecutionSession:
         )
 
     async def start(self, context: HarnessContext) -> None:
+        if self._closing:
+            raise RuntimeError("Native execution session has been closed")
         binding = self.engine.binding
         if context.host_session_id != binding.host_session_id or context.cwd is None:
             raise ValueError(
@@ -114,12 +123,15 @@ class NativeExecutionSession:
         await self.io.start(context)
 
     async def stop(self) -> None:
+        self._closing = True
         await self.io.stop()
         for entry in self._requests.values():
             if entry.result is not None and not entry.result.done():
                 entry.result.cancel()
         self._requests.clear()
         self._turn_requests.clear()
+        self._goal_handoffs.clear()
+        self._terminal_turns.clear()
 
     async def send_request(self, request: SendInputRequest) -> SendReceipt:
         """Accept a host request without serializing its permission/context objects."""
@@ -140,7 +152,7 @@ class NativeExecutionSession:
             raise
         # STEER is dispatched immediately and owns no additional Turn entry.
         if token in self._requests:
-            self._turn_requests[receipt.turn_id] = token
+            self._remember_turn(receipt, token)
         return receipt
 
     async def answer_request(self, request: SendInputRequest) -> bool:
@@ -177,11 +189,11 @@ class NativeExecutionSession:
     async def submit_goal(
         self, action: str, **kwargs: Any
     ) -> tuple[SendReceipt, asyncio.Future]:
-        """Queue a work-producing Goal operation inside the existing Turn skeleton.
+        """Dispatch Goal work in the current Turn, or start one while idle.
 
-        Set/resume run only after RUNNING and output attachment. The returned
-        future contains the original host control result; it is cancelled if
-        the queued operation is stopped before dispatch.
+        An active Native output lease continues after an in-flight set/resume;
+        a fresh Turn attaches its own lease before calling GoalManager. The
+        returned future contains the original host control result.
         """
         if action not in {"set", "resume"} or self._goal_dispatcher is None:
             raise ValueError("submit_goal requires a configured set/resume dispatcher")
@@ -194,14 +206,32 @@ class NativeExecutionSession:
         self._requests[token] = _HostRequest(goal=operation, result=result)
         try:
             receipt = await self.io.send(
-                HarnessInput(content="", metadata={_REQUEST_KEY: token})
+                HarnessInput(content="", metadata={_REQUEST_KEY: token}),
+                immediate=True,
             )
         except BaseException:
             self._requests.pop(token, None)
             result.cancel()
             raise
-        self._turn_requests[receipt.turn_id] = token
+        if receipt.accepted_mode is DeliveryMode.STEER:
+            self._requests.pop(token, None)
+            if result.done() and not result.cancelled() and result.result().get("result_type") == "goal_stream":
+                if receipt.turn_id in self._terminal_turns:
+                    await self._attach_active_goal_after_eof()
+                else:
+                    self._goal_handoffs.add(receipt.turn_id)
+        else:
+            self._remember_turn(receipt, token)
         return receipt, result
+
+    def _remember_turn(self, receipt: SendReceipt, token: str) -> None:
+        # A fast terminal event can be observed before send() returns its receipt.
+        if receipt.turn_id in self._terminal_turns:
+            entry = self._requests.pop(token, None)
+            if entry is not None and entry.result is not None and not entry.result.done():
+                entry.result.cancel()
+            return
+        self._turn_requests[receipt.turn_id] = token
 
     async def control_goal(self, action: str, **kwargs: Any) -> dict[str, Any]:
         """Run get/pause/clear against the original manager, without starting work.
@@ -229,6 +259,8 @@ class NativeExecutionSession:
             raise ValueError(
                 "Native host request is missing or belongs to another execution"
             )
+        if entry.attach_goal:
+            return True
         if entry.goal is not None and not resuming:
             try:
                 result = await entry.goal(agent)
@@ -272,6 +304,7 @@ class NativeExecutionSession:
             isinstance(event.event, TurnLifecycleEvent)
             and event.event.kind in _TERMINAL
         ):
+            self._terminal_turns.append(event.turn_id)
             token = self._turn_requests.pop(event.turn_id, None)
             entry = self._requests.pop(token, None)
             if (
@@ -280,8 +313,38 @@ class NativeExecutionSession:
                 and not entry.result.done()
             ):
                 entry.result.cancel()
+            if event.turn_id in self._goal_handoffs:
+                self._goal_handoffs.discard(event.turn_id)
+                if event.event.kind is TurnEventKind.FINISHED:
+                    await self._attach_active_goal_after_eof()
         if self._observer is not None:
             await self._observer(event)
+
+    async def _attach_active_goal_after_eof(self) -> None:
+        """Keep a replacement Goal running if the previous lease reached EOF."""
+        if self._closing or self._goal_dispatcher is None:
+            return
+        current = await self._goal_dispatcher(action="get")
+        if self._closing:
+            return
+        goal = current.get("goal") if isinstance(current, dict) else None
+        if not isinstance(goal, dict) or goal.get("status") != "active":
+            return
+        token = uuid.uuid4().hex
+        self._requests[token] = _HostRequest(attach_goal=True)
+        try:
+            receipt = await self.io.send(
+                HarnessInput(content="", metadata={_REQUEST_KEY: token})
+            )
+        except HarnessStateError:
+            self._requests.pop(token, None)
+            if not self._closing:
+                raise
+            return
+        except BaseException:
+            self._requests.pop(token, None)
+            raise
+        self._remember_turn(receipt, token)
 
 
 def _combined_resume(
