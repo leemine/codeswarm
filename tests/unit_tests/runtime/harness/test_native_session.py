@@ -15,7 +15,7 @@ from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream.base import OutputSchema
 from openjiuwen.harness.deep_agent import DeepAgent
-from openjiuwen.harness.schema.interaction import SendInputRequest
+from openjiuwen.harness.schema.interaction import InputDispatchMode, SendInputRequest
 from openjiuwen.harness_protocol import (
     AgentExecutionSpec,
     DeliveryMode,
@@ -215,6 +215,87 @@ async def test_abandon_unopened_turn_reader_preserves_next_request(tmp_path):
 
         items = await asyncio.wait_for(collect(), 3)
         assert items[-1].terminal is TurnEventKind.FINISHED
+    finally:
+        await execution.stop()
+
+
+@pytest.mark.asyncio
+async def test_steer_does_not_reopen_abandoned_turn_output(tmp_path):
+    gate = asyncio.Event()
+    execution, _, _, ctx, terminal, _ = _setup(
+        tmp_path, [[_answer()]], gate=gate
+    )
+    await execution.start(ctx)
+    execution.enable_turn_outputs(queue_size=1)
+    try:
+        first = await execution.send_request(
+            SendInputRequest(request_id="first", inputs={"query": "first"})
+        )
+
+        async def wait_until_running():
+            while execution.engine.harness.state is not HarnessState.RUNNING:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_until_running(), 3)
+        execution.abandon_turn_output(first.turn_id)
+        steered = await execution.send_request(
+            SendInputRequest(
+                request_id="steered", inputs={"query": "more"},
+                mode=InputDispatchMode.STEER,
+            )
+        )
+        assert steered.turn_id == first.turn_id
+        assert steered.accepted_mode is DeliveryMode.STEER
+        with pytest.raises(ValueError, match="no registered owner"):
+            await anext(execution.turn_outputs(first.turn_id))
+        gate.set()
+        await asyncio.wait_for(terminal.wait(), 3)
+    finally:
+        gate.set()
+        await execution.stop()
+
+
+@pytest.mark.asyncio
+async def test_idle_goal_uses_same_turn_output_reader(tmp_path):
+    async def goal(*, action, **kwargs):
+        assert action == "set"
+        return {"result_type": "goal_stream", "goal": {"status": "active"}}
+
+    execution, _, _, ctx, _, _ = _setup(
+        tmp_path, [[_answer()]], goal=goal
+    )
+    await execution.start(ctx)
+    execution.enable_turn_outputs()
+    try:
+        receipt, result = await execution.submit_goal("set", objective="finish")
+        assert (await asyncio.wait_for(result, 3))["result_type"] == "goal_stream"
+
+        async def collect():
+            return [item async for item in execution.turn_outputs(receipt.turn_id)]
+
+        items = await asyncio.wait_for(collect(), 3)
+        assert items[0].chunk.type == "answer"
+        assert items[-1].terminal is TurnEventKind.FINISHED
+    finally:
+        await execution.stop()
+
+
+@pytest.mark.asyncio
+async def test_goal_control_without_stream_releases_turn_mailbox(tmp_path):
+    async def goal(*, action, **kwargs):
+        assert action == "set"
+        return {"result_type": "goal_confirm_required"}
+
+    execution, _, _, ctx, terminal, _ = _setup(tmp_path, [[]], goal=goal)
+    await execution.start(ctx)
+    execution.enable_turn_outputs()
+    try:
+        receipt, result = await execution.submit_goal("set", objective="replace")
+        assert (await asyncio.wait_for(result, 3))["result_type"] == "goal_confirm_required"
+        await asyncio.wait_for(terminal.wait(), 3)
+        await asyncio.sleep(0)
+        with pytest.raises(ValueError, match="no registered owner"):
+            await anext(execution.turn_outputs(receipt.turn_id))
     finally:
         await execution.stop()
 

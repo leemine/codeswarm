@@ -236,7 +236,7 @@ class NativeExecutionSession:
         result = asyncio.get_running_loop().create_future()
         self._requests[token] = _HostRequest(goal=operation, result=result)
         try:
-            receipt = await self.io.send(
+            receipt = await self._send(
                 HarnessInput(content="", metadata={_REQUEST_KEY: token}),
                 immediate=True,
             )
@@ -244,6 +244,20 @@ class NativeExecutionSession:
             self._requests.pop(token, None)
             result.cancel()
             raise
+        if self._output_router is not None and receipt.accepted_mode is not DeliveryMode.STEER:
+            def release_if_no_stream(done: asyncio.Future) -> None:
+                if done.cancelled():
+                    self.abandon_turn_output(receipt.turn_id)
+                    return
+                try:
+                    control = done.result()
+                except BaseException:
+                    self.abandon_turn_output(receipt.turn_id)
+                    return
+                if not isinstance(control, dict) or control.get("result_type") != "goal_stream":
+                    self.abandon_turn_output(receipt.turn_id)
+
+            result.add_done_callback(release_if_no_stream)
         if receipt.accepted_mode is DeliveryMode.STEER:
             self._requests.pop(token, None)
             if result.done() and not result.cancelled() and result.result().get("result_type") == "goal_stream":

@@ -93,9 +93,9 @@ def load_execution_catalog(
     """
     if not isinstance(config, Mapping):
         raise TypeError("server configuration must be an object")
-    section = config.get("execution")
-    if section is None:
+    if "execution" not in config:
         return None
+    section = config["execution"]
     if not isinstance(section, Mapping):
         raise TypeError("execution configuration must be an object")
     profiles = section.get("profiles")

@@ -7,7 +7,7 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 
-from openjiuwen.harness_protocol import SendReceipt
+from openjiuwen.harness_protocol import DeliveryMode, SendReceipt
 from openjiuwen.harness_providers.io_adapter import HarnessIOAdapter, ProjectedOutput
 
 
@@ -46,7 +46,9 @@ class TurnOutputRouter:
             raise RuntimeError("turn output reader stopped")
         async with self._lock:
             receipt = await send()
-            if receipt.turn_id not in self._mailboxes:
+            # STEER joins an existing Turn. It must never resurrect a mailbox
+            # abandoned by a disconnected request or claim a Goal-only Turn.
+            if receipt.accepted_mode is not DeliveryMode.STEER and receipt.turn_id not in self._mailboxes:
                 self._mailboxes[receipt.turn_id] = _Mailbox(
                     asyncio.Queue(maxsize=self._queue_size)
                 )

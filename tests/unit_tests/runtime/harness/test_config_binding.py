@@ -72,6 +72,8 @@ def test_optional_server_config_catalog_does_not_silently_fall_back():
         })
     with pytest.raises(TypeError, match="execution configuration"):
         load_execution_catalog({"execution": "native"})
+    with pytest.raises(TypeError, match="execution configuration"):
+        load_execution_catalog({"execution": None})
 
 
 def test_defaults_change_only_new_sessions_and_explicit_change_is_rejected():

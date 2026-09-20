@@ -21,9 +21,9 @@ execution:
       config_revision: r1
 ```
 
-When the section is absent the loader returns `None`; malformed configured
-sections fail validation. Reading this section alone does not enable the new
-chat route or expose a new selection UI.
+When the section is absent the loader returns `None`; a present but malformed
+section (including `execution: null`) fails validation. Reading this section
+alone does not enable the new chat route or expose a new selection UI.
 
 The result is an unstarted core `HarnessEngine`. No existing chat or Team routing is changed in this slice. The Runtime caller will own `start`, the single event consumer and `stop` in R1-02; it must validate HarnessContext identity against the binding at that integration boundary. No provider instances are cached here.
 
@@ -81,6 +81,10 @@ its durable history/UI projection. If a request fails before opening its
 iterator, call `abandon_turn_output(turn_id)` to release the mailbox. Do not
 also read `io.outputs()` or
 `io.output_envelopes()` after opting into this router.
+An accepted STEER joins its active Turn and never creates a new mailbox; it
+cannot reopen a mailbox abandoned after a client disconnect.
+An idle Goal set/resume uses the same mailbox path; a control-only result
+releases its mailbox without waiting for a nonexistent output stream.
 
 The binding store is still owned/released by the Runtime caller. Runtime
 must enforce authorization and session generation before passing answers;
