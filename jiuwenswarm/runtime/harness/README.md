@@ -81,9 +81,10 @@ not yet switched to it.
 while submitting to the provider; `turn_outputs(receipt.turn_id)` yields the
 original projected chunks and one terminal envelope, then ends. The mailbox
 is bounded; closing a request iterator releases that mailbox while the sole
-session reader continues. Output not attached to a live request still reaches
-the protocol event observer, which the eventual product route must connect to
-its durable history/UI projection. If a request fails before opening its
+session reader continues. Output without a live request owner is handed to an
+optional detached projection callback by the same router. The Native product
+route parses, records and pushes Goal continuation output after request EOF;
+the raw protocol observer remains for lifecycle/telemetry. If a request fails before opening its
 iterator, call `abandon_turn_output(turn_id)` to release the mailbox. Do not
 also read `io.outputs()` or
 `io.output_envelopes()` after opting into this router.
@@ -100,12 +101,14 @@ The session adapter also has `start_native_interaction` and an exclusive legacy
 `start_interaction` path. Its `stop_interaction` releases the selected binding
 after the protocol session stops. The facade selects the admitted Native route
 before its first MCP reconciliation can create the child. The existing Deep
-adapter keeps request setup and UI/history projection; only lifecycle,
-dispatch and the Turn output reader change. A question temporarily detaches
+adapter keeps request setup and request-owned UI/history projection; the
+detached sink reuses its chunk parser and product history/push services. Only
+lifecycle, dispatch and the Turn output reader change. A question temporarily detaches
 the same reader and its answer resumes it, without starting another Turn.
 
-This is still a draft integration. Goal output generated after a request reader
-ends needs an authoritative durable/UI projection; cancel, disconnect, cold
-restore and real Single request acceptance remain before switching the default
+This is still a draft integration. Detached Goal output has a product
+history/push path and a pending question can resume its original Turn without
+a Web reader. Cancel/disconnect races, cold restore and real Single request
+acceptance remain before switching the default
 product configuration. External providers and Team selection have no product
 route in this slice. Deterministic adapter tests are not live-model E2E.

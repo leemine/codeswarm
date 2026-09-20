@@ -137,14 +137,24 @@ class NativeExecutionSession:
         self._goal_handoffs.clear()
         self._terminal_turns.clear()
 
-    def enable_turn_outputs(self, *, queue_size: int = 128) -> None:
+    def enable_turn_outputs(
+        self,
+        *,
+        queue_size: int = 128,
+        detached_output: Callable[[ProjectedOutput], Awaitable[None]] | None = None,
+    ) -> None:
         """Select one session-level output reader before sending the first Turn."""
         if self._closing or self._output_router is not None:
             raise RuntimeError("Native turn output route is already selected or closed")
         if self._turn_requests or self._terminal_turns:
             raise RuntimeError("Native turn output route must be selected before input")
-        self._output_router = TurnOutputRouter(self.io, queue_size=queue_size)
+        self._output_router = TurnOutputRouter(
+            self.io, queue_size=queue_size, detached_output=detached_output
+        )
         self._output_router.start()
+
+    def has_turn_output_owner(self, turn_id: str) -> bool:
+        return self._output_router is not None and self._output_router.has_owner(turn_id)
 
     def turn_outputs(self, turn_id: str) -> AsyncIterator[ProjectedOutput]:
         """Read one finite Turn; closing this iterator keeps the session alive."""

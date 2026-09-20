@@ -128,8 +128,9 @@ async def test_request_identity_and_host_session_are_preserved(tmp_path):
 @pytest.mark.asyncio
 async def test_turn_output_reader_keeps_one_session_consumer_across_requests(tmp_path):
     execution, _, _, ctx, _, _ = _setup(tmp_path, [[_answer()], [_answer()]])
+    detached = AsyncMock()
     await execution.start(ctx)
-    execution.enable_turn_outputs()
+    execution.enable_turn_outputs(detached_output=detached)
     try:
         for request_id in ("first", "second"):
             receipt = await execution.send_request(
@@ -143,6 +144,7 @@ async def test_turn_output_reader_keeps_one_session_consumer_across_requests(tmp
             assert [item.turn_id for item in items] == [receipt.turn_id] * 2
             assert items[0].chunk.type == "answer"
             assert items[1].terminal is TurnEventKind.FINISHED
+        detached.assert_not_awaited()
     finally:
         await execution.stop()
 
@@ -579,6 +581,66 @@ async def test_running_goal_replacement_reattaches_if_output_reaches_eof(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_goal_output_after_request_eof_reaches_detached_projection(tmp_path):
+    output_gate = asyncio.Event()
+    goal_entered = asyncio.Event()
+    goal_gate = asyncio.Event()
+
+    async def goal(*, action, **kwargs):
+        if action == "get":
+            return {"result_type": "goal_control", "goal": {"status": "active"}}
+        goal_entered.set()
+        await goal_gate.wait()
+        return {"result_type": "goal_stream", "goal": {"status": "active"}}
+
+    execution, agent, _, ctx, _, _ = _setup(
+        tmp_path, [[_answer()], [_answer()]], goal=goal, gate=output_gate
+    )
+    detached = AsyncMock()
+    await execution.start(ctx)
+    execution.enable_turn_outputs(detached_output=detached)
+    try:
+        original = await execution.send_request(
+            SendInputRequest(request_id="original", inputs={"query": "start"})
+        )
+        async def first_lease_ready():
+            while agent.attach_output.await_count == 0:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(first_lease_ready(), 3)
+        replacement_task = asyncio.create_task(
+            execution.submit_goal("set", objective="replacement")
+        )
+        await asyncio.wait_for(goal_entered.wait(), 3)
+        output_gate.set()
+        async def drain_original():
+            return [item async for item in execution.turn_outputs(original.turn_id)]
+
+        await asyncio.wait_for(drain_original(), 3)
+        goal_gate.set()
+        replacement, result = await asyncio.wait_for(replacement_task, 3)
+        assert replacement.turn_id == original.turn_id
+        assert (await result)["result_type"] == "goal_stream"
+
+        async def detached_terminal():
+            while not any(
+                call.args[0].terminal is TurnEventKind.FINISHED
+                for call in detached.await_args_list
+            ):
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(detached_terminal(), 3)
+        items = [call.args[0] for call in detached.await_args_list]
+        assert items[0].chunk.type == "answer"
+        assert items[0].turn_id != original.turn_id
+        assert items[-1].terminal is TurnEventKind.FINISHED
+    finally:
+        output_gate.set()
+        goal_gate.set()
+        await execution.stop()
+
+
+@pytest.mark.asyncio
 async def test_rejected_goal_does_not_hang_on_output(tmp_path):
     goal = AsyncMock(return_value={"result_type": "goal_confirm_required"})
     execution, agent, _, ctx, terminal, _ = _setup(
@@ -830,9 +892,40 @@ async def test_first_mcp_child_construction_starts_selected_native_route(
     assert parent._session_adapters["s"] is child
     child.start_native_interaction.assert_awaited_once()
     child.start_interaction.assert_not_awaited()
-    execution.enable_turn_outputs.assert_called_once_with()
+    execution.enable_turn_outputs.assert_called_once()
+    assert callable(execution.enable_turn_outputs.call_args.kwargs["detached_output"])
     child.register_mcp_by_name.assert_awaited_once_with("filesystem")
     assert child._session_selected_mcp == {"filesystem"}
+
+
+@pytest.mark.asyncio
+async def test_detached_native_question_resumes_without_request_reader():
+    from jiuwenswarm.common.schema.agent import AgentRequest
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+
+    adapter = object.__new__(JiuWenSwarmDeepAdapter)
+    execution = SimpleNamespace(
+        _native=SimpleNamespace(active_turn=SimpleNamespace(turn_id="goal-turn")),
+        has_turn_output_owner=MagicMock(return_value=False),
+        answer_request=AsyncMock(return_value=True),
+    )
+    adapter._native_execution = execution
+    adapter._native_interaction_stream = None
+    adapter._resolve_input_dispatch_mode = MagicMock(return_value=None)
+    adapter._permission_inputs_for_dispatch = MagicMock(
+        side_effect=lambda _request, inputs, _mode: inputs
+    )
+    answer = InteractiveInput()
+    answer.update("question", "continue")
+    stream, dispatched = await adapter._attach_and_send_inputs(
+        AgentRequest(request_id="answer", session_id="s"),
+        {"query": answer},
+        send_without_output=False,
+    )
+    assert stream is None and dispatched is True
+    execution.answer_request.assert_awaited_once()
 
 
 @pytest.mark.asyncio

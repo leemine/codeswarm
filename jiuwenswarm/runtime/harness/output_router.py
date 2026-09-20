@@ -25,10 +25,19 @@ class TurnOutputRouter:
     The protocol event observer remains responsible for durable observations.
     """
 
-    def __init__(self, io: HarnessIOAdapter, *, queue_size: int = 128) -> None:
+    def __init__(
+        self,
+        io: HarnessIOAdapter,
+        *,
+        queue_size: int = 128,
+        detached_output: Callable[[ProjectedOutput], Awaitable[None]] | None = None,
+    ) -> None:
         self._io = io
         self._queue_size = max(1, queue_size)
+        self._detached_output = detached_output
         self._mailboxes: dict[str, _Mailbox] = {}
+        self._submitting = 0
+        self._unclaimed: dict[str, list[ProjectedOutput]] = {}
         self._lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self._closed = False
@@ -45,14 +54,37 @@ class TurnOutputRouter:
             self._task.result()
             raise RuntimeError("turn output reader stopped")
         async with self._lock:
+            self._submitting += 1
+        receipt: SendReceipt | None = None
+        detached: list[ProjectedOutput] = []
+        try:
+            # A STEER may wait for GoalManager while the previous Turn reaches
+            # EOF. Never hold the router lock across provider admission.
             receipt = await send()
-            # STEER joins an existing Turn. It must never resurrect a mailbox
-            # abandoned by a disconnected request or claim a Goal-only Turn.
-            if receipt.accepted_mode is not DeliveryMode.STEER and receipt.turn_id not in self._mailboxes:
-                self._mailboxes[receipt.turn_id] = _Mailbox(
-                    asyncio.Queue(maxsize=self._queue_size)
-                )
             return receipt
+        finally:
+            async with self._lock:
+                if (
+                    receipt is not None
+                    and receipt.accepted_mode is not DeliveryMode.STEER
+                    and receipt.turn_id not in self._mailboxes
+                ):
+                    buffered = self._unclaimed.pop(receipt.turn_id, [])
+                    mailbox = _Mailbox(
+                        asyncio.Queue(maxsize=max(self._queue_size, len(buffered)))
+                    )
+                    for item in buffered:
+                        mailbox.queue.put_nowait(item)
+                    self._mailboxes[receipt.turn_id] = mailbox
+                self._submitting -= 1
+                if self._submitting == 0 and self._unclaimed:
+                    detached = [
+                        item for items in self._unclaimed.values() for item in items
+                    ]
+                    self._unclaimed.clear()
+            for item in detached:
+                if self._detached_output is not None:
+                    await self._detached_output(item)
 
     async def outputs(self, turn_id: str) -> AsyncIterator[ProjectedOutput]:
         mailbox = self._mailboxes.get(turn_id)
@@ -76,6 +108,10 @@ class TurnOutputRouter:
         if mailbox is not None:
             mailbox.closed.set()
 
+    def has_owner(self, turn_id: str) -> bool:
+        mailbox = self._mailboxes.get(turn_id)
+        return mailbox is not None and not mailbox.closed.is_set()
+
     async def stop(self) -> None:
         if self._closed:
             return
@@ -90,14 +126,20 @@ class TurnOutputRouter:
             except asyncio.CancelledError:
                 pass
         self._mailboxes.clear()
+        self._unclaimed.clear()
 
     async def _pump(self) -> None:
         try:
             async for item in self._io.output_envelopes():
                 async with self._lock:
                     mailbox = self._mailboxes.get(item.turn_id)
+                    if (mailbox is None or mailbox.closed.is_set()) and self._submitting:
+                        self._unclaimed.setdefault(item.turn_id or "", []).append(item)
+                        continue
                 if mailbox is not None and not mailbox.closed.is_set():
                     await self._put_or_closed(mailbox, item)
+                elif self._detached_output is not None:
+                    await self._detached_output(item)
         finally:
             for mailbox in self._mailboxes.values():
                 mailbox.closed.set()

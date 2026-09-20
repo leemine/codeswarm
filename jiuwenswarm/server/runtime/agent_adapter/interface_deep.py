@@ -3605,7 +3605,13 @@ class JiuWenSwarmDeepAdapter:
                     workspace=bound.binding.workspace,
                     context=context,
                 )
-                execution.enable_turn_outputs()
+                from jiuwenswarm.server.runtime.agent_adapter.native_detached_projection import (
+                    NativeDetachedProjection,
+                )
+
+                execution.enable_turn_outputs(
+                    detached_output=NativeDetachedProjection(sid, adapter)
+                )
             interaction_ready_at = time.monotonic()
 
             self._session_adapters[sid] = adapter
@@ -13116,6 +13122,11 @@ class JiuWenSwarmDeepAdapter:
             )
             try:
                 if isinstance(host_request.inputs.get("query"), InteractiveInput):
+                    active = native_execution._native.active_turn
+                    detached_turn = (
+                        active is not None
+                        and not native_execution.has_turn_output_owner(active.turn_id)
+                    )
                     accepted = await native_execution.answer_request(host_request)
                     if not accepted:
                         raise RuntimeError("interaction answer is no longer pending")
@@ -13123,6 +13134,11 @@ class JiuWenSwarmDeepAdapter:
                     if suspended is not None and suspended._suspended:
                         await suspended.resume()
                         return suspended, False
+                    if detached_turn:
+                        # A Goal continuation can ask after its originating Web
+                        # request has ended. Its sole session reader remains the
+                        # detached projection; this answer resumes that Turn.
+                        return None, True
                     raise RuntimeError("interaction output owner is unavailable")
                 suspended = getattr(self, "_native_interaction_stream", None)
                 if suspended is not None and suspended._suspended:
