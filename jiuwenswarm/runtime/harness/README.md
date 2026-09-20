@@ -40,6 +40,13 @@ HarnessIOAdapter event pump:
   from the authoritative interaction handler, retaining their original JSON
   shape. Observations do not create additional approvals.
 
+For a host serving multiple Web requests over one session, core also exposes
+`io.output_envelopes()`: each chunk carries its protocol Turn ID, followed by
+that Turn's terminal marker. This shares the same single-consumer queue as
+`io.outputs()`; the eventual Web route must choose the envelope iterator and
+keep one consumer for the entire session. The current default chat route has
+not yet switched to it.
+
 The binding store is still owned/released by the Runtime caller. Runtime
 must enforce authorization and session generation before passing answers;
 this class is neither a new persistence layer nor a replacement for generation.

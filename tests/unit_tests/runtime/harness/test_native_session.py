@@ -112,6 +112,13 @@ async def test_request_identity_and_host_session_are_preserved(tmp_path):
         assert agent.send_input.await_args.args[0] is original
         assert agent.start.await_args.kwargs["session"] is session
         assert events[-1].turn_id == receipt.turn_id or events[-1].turn_id is None
+        outputs = execution.io.output_envelopes()
+        projected = await asyncio.wait_for(anext(outputs), 3)
+        finished = await asyncio.wait_for(anext(outputs), 3)
+        assert projected.turn_id == receipt.turn_id
+        assert projected.chunk.type == "answer"
+        assert finished.turn_id == receipt.turn_id
+        assert finished.terminal is TurnEventKind.FINISHED
     finally:
         await execution.stop()
     assert not execution._requests and not execution._turn_requests
