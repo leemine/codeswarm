@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 
@@ -14,13 +15,16 @@ from openjiuwen.harness_providers.io_adapter import HarnessIOAdapter, ProjectedO
 @dataclass(slots=True)
 class _Mailbox:
     queue: asyncio.Queue[ProjectedOutput]
+    recovered: deque[ProjectedOutput] = field(default_factory=deque)
     closed: asyncio.Event = field(default_factory=asyncio.Event)
     idle: asyncio.Event = field(default_factory=asyncio.Event)
+    reader_idle: asyncio.Event = field(default_factory=asyncio.Event)
     drained: asyncio.Event = field(default_factory=asyncio.Event)
     drain_task: asyncio.Task[None] | None = None
 
     def __post_init__(self) -> None:
         self.idle.set()
+        self.reader_idle.set()
         self.drained.set()
 
 
@@ -134,8 +138,12 @@ class TurnOutputRouter:
     async def _drain_mailbox(self, turn_id: str, mailbox: _Mailbox) -> None:
         try:
             await mailbox.idle.wait()
-            while not mailbox.queue.empty():
-                item = mailbox.queue.get_nowait()
+            await mailbox.reader_idle.wait()
+            while mailbox.recovered or not mailbox.queue.empty():
+                item = (
+                    mailbox.recovered.popleft()
+                    if mailbox.recovered else mailbox.queue.get_nowait()
+                )
                 if self._detached_output is not None:
                     await self._detached_output(item)
         finally:
@@ -210,19 +218,28 @@ class TurnOutputRouter:
 
     @staticmethod
     async def _next(mailbox: _Mailbox) -> ProjectedOutput:
-        if not mailbox.queue.empty():
-            return mailbox.queue.get_nowait()
         if mailbox.closed.is_set():
             raise RuntimeError("turn output ended before a terminal event")
+        if mailbox.recovered:
+            return mailbox.recovered.popleft()
+        if not mailbox.queue.empty():
+            return mailbox.queue.get_nowait()
+        mailbox.reader_idle.clear()
         get = asyncio.create_task(mailbox.queue.get())
         closed = asyncio.create_task(mailbox.closed.wait())
+        delivered = False
         try:
             await asyncio.wait({get, closed}, return_when=asyncio.FIRST_COMPLETED)
-            if get.done():
-                return get.result()
+            if not mailbox.closed.is_set() and get.done():
+                item = get.result()
+                delivered = True
+                return item
             raise RuntimeError("turn output ended before a terminal event")
         finally:
             for task in (get, closed):
                 if not task.done():
                     task.cancel()
             await asyncio.gather(get, closed, return_exceptions=True)
+            if not delivered and get.done() and not get.cancelled():
+                mailbox.recovered.appendleft(get.result())
+            mailbox.reader_idle.set()

@@ -359,6 +359,27 @@ async def test_abandon_drains_queued_and_inflight_output_once(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cancelled_reader_recovers_item_taken_during_close():
+    from jiuwenswarm.runtime.harness.output_router import _Mailbox, TurnOutputRouter
+    from openjiuwen.harness_providers.io_adapter import ProjectedOutput
+
+    mailbox = _Mailbox(asyncio.Queue(maxsize=1))
+    reader = asyncio.create_task(TurnOutputRouter._next(mailbox))
+    await asyncio.sleep(0)
+    item = ProjectedOutput("turn", chunk=_answer())
+    mailbox.queue.put_nowait(item)
+    mailbox.closed.set()
+    reader.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reader
+    recovered = list(mailbox.recovered)
+    while not mailbox.queue.empty():
+        recovered.append(mailbox.queue.get_nowait())
+    assert recovered == [item]
+    assert mailbox.reader_idle.is_set()
+
+
+@pytest.mark.asyncio
 async def test_steer_does_not_reopen_abandoned_turn_output(tmp_path):
     gate = asyncio.Event()
     execution, _, _, ctx, terminal, _ = _setup(
