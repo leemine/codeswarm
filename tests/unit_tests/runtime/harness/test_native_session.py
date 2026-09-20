@@ -169,6 +169,69 @@ async def test_turn_output_reader_keeps_one_session_consumer_across_requests(tmp
 
 
 @pytest.mark.asyncio
+async def test_native_feature_chunks_retain_product_payload_through_turn_route(
+    tmp_path, monkeypatch
+):
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+
+    monkeypatch.setattr(
+        JiuWenSwarmDeepAdapter, "_persist_subagent_roster_history", MagicMock()
+    )
+    chunks = [
+        OutputSchema(
+            type="tool_result", index=1,
+            payload={"tool_result": {
+                "tool_call_id": "call-1", "result": {"ok": True},
+                "rendered_result": "完成", "raw_output": "raw",
+            }},
+        ),
+        OutputSchema(
+            type="subagent_updated", index=2,
+            payload={"subagent_updated": {
+                "subagent_id": "child-1", "parent_session_id": "s",
+                "revision": 2, "status": "running",
+            }},
+        ),
+        OutputSchema(
+            type="stage_result", index=3,
+            payload={"stage": "review", "status": "success", "task_id": "task-1"},
+        ),
+    ]
+    execution, _, _, ctx, _, _ = _setup(tmp_path, [chunks])
+    await execution.start(ctx)
+    execution.enable_turn_outputs()
+    try:
+        receipt = await execution.send_request(
+            SendInputRequest(request_id="features", inputs={"query": "run"})
+        )
+        observed = await asyncio.wait_for(
+            _collect_turn(execution, receipt.turn_id), 3
+        )
+        assert [(item.chunk.type, item.chunk.payload) for item in observed[:-1]] == [
+            (chunk.type, chunk.payload) for chunk in chunks
+        ]
+        projected = [
+            JiuWenSwarmDeepAdapter._parse_stream_chunk(item.chunk)
+            for item in observed[:-1]
+        ]
+        assert [item["event_type"] for item in projected] == [
+            "chat.tool_result", "chat.subtask_update", "harness.stage_result"
+        ]
+        assert projected[0]["rendered_result"] == "完成"
+        assert projected[1]["task_id"] == "child-1"
+        assert projected[2]["task_id"] == "task-1"
+        assert observed[-1].terminal is TurnEventKind.FINISHED
+    finally:
+        await execution.stop()
+
+
+async def _collect_turn(execution, turn_id):
+    return [item async for item in execution.turn_outputs(turn_id)]
+
+
+@pytest.mark.asyncio
 async def test_deep_adapter_dispatch_uses_native_turn_reader_for_two_requests(tmp_path):
     from jiuwenswarm.common.schema.agent import AgentRequest
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
