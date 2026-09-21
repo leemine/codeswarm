@@ -814,6 +814,24 @@ async def test_gateway_disconnect_does_not_abort_protected_heartbeat_session() -
     adapter._instance.abort.assert_not_awaited()
 
 
+async def test_gateway_disconnect_aborts_native_turn_through_protocol() -> None:
+    from openjiuwen.harness_protocol import AbortMode
+
+    adapter = JiuWenSwarmDeepAdapter.__new__(JiuWenSwarmDeepAdapter)
+    adapter._is_session_scoped_adapter = True
+    adapter._parent_session_id = "native-session"
+    adapter._stream_event_rail = None
+    adapter._instance = SimpleNamespace(abort=AsyncMock())
+    harness = SimpleNamespace(abort=AsyncMock())
+    adapter._native_execution = SimpleNamespace(engine=SimpleNamespace(harness=harness))
+    adapter._cancel_scheduler_running_tasks = lambda: None
+
+    await adapter.abort_on_gateway_disconnect()
+
+    harness.abort.assert_awaited_once_with(mode=AbortMode.FORCE)
+    adapter._instance.abort.assert_not_awaited()
+
+
 async def test_active_heartbeat_prevents_session_adapter_cleanup() -> None:
     adapter = JiuWenSwarmDeepAdapter.__new__(JiuWenSwarmDeepAdapter)
     adapter._heartbeat_service = SimpleNamespace(

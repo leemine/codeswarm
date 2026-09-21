@@ -11009,6 +11009,7 @@ class AgentWebSocketServer:
                     ).strip(),
                     model_name=str(params.get("model_name") or "").strip(),
                     cron_id=str(params.get("cron_id") or "").strip(),
+                    execution_profile_id=params.get("execution_profile_id"),
                 )
             )
             params.pop("_work_mode_explicit", None)

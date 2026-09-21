@@ -1247,6 +1247,15 @@ class JiuWenSwarm:
             logger.info("[JiuWenSwarm] Initialized adapter: sdk=%s, mode=%s", self._sdk_name, mode)
         return self._adapter
 
+    @staticmethod
+    def _select_execution_before_mcp(adapter: AgentAdapter, request: AgentRequest) -> None:
+        if getattr(request, "_bound_execution", None) is None:
+            return
+        select = getattr(adapter, "select_execution_for_request", None)
+        if not callable(select):
+            raise RuntimeError("selected execution provider has no adapter route")
+        select(request)
+
     def set_personal_context_runtime_enabled(self, enabled: bool) -> None:
         """Store and forward the PersonalContext Host runtime switch."""
 
@@ -2816,6 +2825,7 @@ class JiuWenSwarm:
         if request.req_method == ReqMethod.COMMAND_GOAL:
             try:
                 adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+                self._select_execution_before_mcp(adapter, request)
                 params = request.params if isinstance(request.params, dict) else {}
                 action = params.get("action", "get")
                 session_id = self._session_manager.get_session_id(request.session_id)
@@ -2933,6 +2943,7 @@ class JiuWenSwarm:
             return package_catalog_response
 
         adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+        self._select_execution_before_mcp(adapter, request)
         validator = getattr(adapter, "validate_auto_permission_workspace_request", None)
         if callable(validator):
             validator(request)
@@ -3106,6 +3117,7 @@ class JiuWenSwarm:
         if not is_interrupt_resume_payload(request.params):
             raise ValueError("control input must answer an active interaction")
         adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+        self._select_execution_before_mcp(adapter, request)
         session_id = self._session_manager.get_session_id(request.session_id)
         params = request.params if isinstance(request.params, dict) else {}
         restore_chat_send_equipment_params(session_id, params)
@@ -3135,6 +3147,7 @@ class JiuWenSwarm:
             if action not in {"set", "resume"}:
                 try:
                     adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+                    self._select_execution_before_mcp(adapter, request)
                     session_id = self._session_manager.get_session_id(request.session_id)
                     goal_result = await adapter.handle_goal_command_structured(params, session_id)
                     if goal_result is None:
@@ -3233,6 +3246,7 @@ class JiuWenSwarm:
                 return
 
         adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+        self._select_execution_before_mcp(adapter, request)
         validator = getattr(adapter, "validate_auto_permission_workspace_request", None)
         if callable(validator):
             validator(request)

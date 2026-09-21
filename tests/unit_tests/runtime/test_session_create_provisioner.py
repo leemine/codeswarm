@@ -31,9 +31,11 @@ class _State:
 class _Manager:
     def __init__(self, state: _State) -> None:
         self.state = state
+        self.last_claim: dict[str, Any] | None = None
 
     async def claim_prewarmed_session(self, **kwargs: Any) -> Any:
         self.state.events.append("claim")
+        self.last_claim = kwargs
         return SimpleNamespace(
             session_id="created-session",
             prewarm_hit=True,
@@ -145,6 +147,67 @@ async def test_create_prepares_metadata_and_commits_kvc_after_delivery(
     await asyncio.sleep(0)
     assert provisioner._participant_registry.target("created-session") is not None
     assert state.released == []
+
+
+@pytest.mark.asyncio
+async def test_execution_choice_is_locked_before_legacy_prewarm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+
+    state = _State()
+    _install_product_hooks(monkeypatch, tmp_path, state)
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config.get_config",
+        lambda: {
+            "execution": {
+                "default_profile_id": "native",
+                "profiles": {
+                    "native": {"provider_id": "native", "config_revision": "r1"},
+                    "codex": {"provider_id": "codex", "config_revision": "r2"},
+                },
+            }
+        },
+    )
+    manager = _Manager(state)
+    provisioner = RuntimeSessionProvisioner(
+        agent_manager=cast(Any, manager),
+        plan_controller=cast(Any, _PlanController()),
+    )
+    await provisioner.prepare_session_create(_input(execution_profile_id="codex"))
+
+    assert manager.last_claim is not None
+    assert manager.last_claim["prewarm_eligible"] is False
+    metadata = get_session_metadata("created-session", cache_bust=True)
+    assert metadata["execution_profile_id"] == "codex"
+    assert metadata["execution_config_revision"] == "r2"
+    assert len(metadata["execution_config_fingerprint"]) == 64
+
+
+@pytest.mark.asyncio
+async def test_unknown_execution_choice_does_not_claim_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    state = _State()
+    _install_product_hooks(monkeypatch, tmp_path, state)
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config.get_config",
+        lambda: {
+            "execution": {
+                "default_profile_id": "native",
+                "profiles": {
+                    "native": {"provider_id": "native", "config_revision": "r1"},
+                },
+            }
+        },
+    )
+    with pytest.raises(SessionProvisionError, match="unknown execution profile ID"):
+        await _provisioner(state).prepare_session_create(
+            _input(execution_profile_id="missing")
+        )
+    assert "claim" not in state.events
 
 
 @pytest.mark.asyncio

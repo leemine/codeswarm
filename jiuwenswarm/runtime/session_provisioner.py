@@ -137,6 +137,7 @@ class SessionCreateInput:
     user_id: str = ""
     model_name: str = ""
     cron_id: str = ""
+    execution_profile_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_bool("persist_session", self.persist_session)
@@ -144,6 +145,12 @@ class SessionCreateInput:
         _require_bool("is_swarm", self.is_swarm)
         _require_bool("team_hint", self.team_hint)
         _require_optional_bool("work_mode_explicit", self.work_mode_explicit)
+        if self.execution_profile_id is not None and (
+            not isinstance(self.execution_profile_id, str)
+            or not self.execution_profile_id.strip()
+            or self.execution_profile_id != self.execution_profile_id.strip()
+        ):
+            raise ValueError("execution_profile_id must be a normalized string")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -731,8 +738,56 @@ class RuntimeSessionProvisioner:
             )
             canonical_mode = resolved.canonical_mode
             is_swarm = provision_input.is_swarm or resolved.is_team
+            from jiuwenswarm.common.config import get_config
+            from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
+
+            catalog = load_execution_catalog(get_config())
+            requested_profile_id = provision_input.execution_profile_id
+            if requested_profile_id is not None and catalog is None:
+                raise SessionProvisionError(
+                    "execution profile is not configured", code="BAD_REQUEST"
+                )
+            stored_profile_id = existing_metadata.get("execution_profile_id")
+            if existing_metadata:
+                if requested_profile_id is not None and requested_profile_id != stored_profile_id:
+                    raise SessionProvisionError(
+                        "execution profile is immutable after session creation",
+                        code="CONFLICT",
+                    )
+                execution_profile_id = stored_profile_id
+            else:
+                execution_profile_id = (
+                    (requested_profile_id or catalog.default_profile_id)
+                    if catalog is not None
+                    else None
+                )
+            execution_revision = None
+            execution_fingerprint = None
+            if execution_profile_id is not None:
+                if catalog is None:
+                    raise SessionProvisionError(
+                        "session execution profile is no longer configured",
+                        code="CONFLICT",
+                    )
+                try:
+                    selected_spec = catalog.source(
+                        explicit_profile_id=execution_profile_id
+                    ).resolve()
+                except ValueError as exc:
+                    raise SessionProvisionError(str(exc), code="BAD_REQUEST") from exc
+                execution_revision = selected_spec.config_revision
+                from openjiuwen.harness.engine.config import config_fingerprint
+
+                execution_fingerprint = config_fingerprint(selected_spec)
+                if existing_metadata and existing_metadata.get(
+                    "execution_config_fingerprint"
+                ) != execution_fingerprint:
+                    raise SessionProvisionError(
+                        "session execution configuration changed", code="CONFLICT"
+                    )
             prewarm_eligible = (
-                not is_swarm
+                execution_profile_id is None
+                and not is_swarm
                 and canonical_mode
                 in {
                     "agent",
@@ -761,6 +816,7 @@ class RuntimeSessionProvisioner:
                     persist_session=persist_session,
                     prewarm_eligible=prewarm_eligible,
                     create_token=create_token,
+                    execution_profile_id=execution_profile_id,
                 )
                 session_id = claim.session_id
                 claimed_session_id = session_id
@@ -773,8 +829,40 @@ class RuntimeSessionProvisioner:
                 get_agent_sessions_dir() / session_id / "metadata.json"
             ).is_file()
             if metadata_exists and not explicit_tui_session:
-                self._agent_manager.activate_session_prewarm(session_id)
                 stored = get_session_metadata(session_id)
+                if (
+                    requested_profile_id is not None
+                    and stored.get("execution_profile_id") != requested_profile_id
+                ):
+                    raise SessionProvisionError(
+                        "execution profile is immutable after session creation",
+                        code="CONFLICT",
+                    )
+                stored_profile = stored.get("execution_profile_id")
+                if stored_profile is not None:
+                    if catalog is None:
+                        raise SessionProvisionError(
+                            "session execution profile is no longer configured",
+                            code="CONFLICT",
+                        )
+                    try:
+                        stored_spec = catalog.source(
+                            explicit_profile_id=stored_profile
+                        ).resolve()
+                    except ValueError as exc:
+                        raise SessionProvisionError(
+                            str(exc), code="CONFLICT"
+                        ) from exc
+                    from openjiuwen.harness.engine.config import config_fingerprint
+
+                    if config_fingerprint(stored_spec) != stored.get(
+                        "execution_config_fingerprint"
+                    ):
+                        raise SessionProvisionError(
+                            "session execution configuration changed",
+                            code="CONFLICT",
+                        )
+                self._agent_manager.activate_session_prewarm(session_id)
                 result = SessionCreateResult(
                     channel_id=channel_id,
                     session_id=session_id,
@@ -819,6 +907,9 @@ class RuntimeSessionProvisioner:
                     model=str(provision_input.model_name or "").strip(),
                     cron_id=str(provision_input.cron_id or "").strip(),
                     channel_metadata=channel_metadata,
+                    execution_profile_id=execution_profile_id,
+                    execution_config_revision=execution_revision,
+                    execution_config_fingerprint=execution_fingerprint,
                 )
                 if not explicit_tui_session:
                     self._agent_manager.activate_session_prewarm(session_id)

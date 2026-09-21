@@ -1784,6 +1784,70 @@ class _GeneralPurposeAskUserRail(StructuredAskUserRail):
         return type(self)(language=self._language, strict_continuation_contract=False)
 
 
+class _NativeTurnOutput:
+    """Present the one protocol Turn reader to the existing UI projection loop."""
+
+    def __init__(self, execution: Any, turn_id: str) -> None:
+        self._execution = execution
+        self._turn_id = turn_id
+        self._outputs = execution.turn_outputs(turn_id)
+        self._closed = False
+        self._suspended = False
+        self._detached = asyncio.Event()
+
+    def __aiter__(self) -> "_NativeTurnOutput":
+        return self
+
+    async def __anext__(self) -> Any:
+        from openjiuwen.core.common.constants.constant import INTERACTION
+
+        if self._suspended:
+            raise StopAsyncIteration
+        while True:
+            projected = await anext(self._outputs)
+            if projected.chunk is not None:
+                if projected.chunk.type == INTERACTION:
+                    # The product stream ends at a question; the protocol Turn
+                    # stays open and this exact reader resumes after the answer.
+                    self._suspended = True
+                return projected.chunk
+            if projected.terminal is not None:
+                self._closed = True
+                await self._outputs.aclose()
+                from openjiuwen.harness_protocol import TurnEventKind
+
+                if projected.terminal is TurnEventKind.FAILED:
+                    raise RuntimeError("Native execution Turn failed")
+                raise StopAsyncIteration
+
+    async def resume(self) -> None:
+        if self._closed or not self._suspended:
+            raise RuntimeError("Native output is not waiting for an answer")
+        await self._detached.wait()
+        self._suspended = False
+        self._detached.clear()
+
+    async def close(self, *, abort_active_round: bool = False) -> None:
+        if self._suspended and not abort_active_round:
+            self._detached.set()
+            return
+        if not self._closed:
+            self._closed = True
+            self._execution.abandon_turn_output(self._turn_id)
+            await self._outputs.aclose()
+        if abort_active_round:
+            active = self._execution._native.active_turn
+            if active is not None and active.turn_id == self._turn_id:
+                from openjiuwen.harness_protocol import AbortMode
+
+                await self._execution.engine.harness.abort(mode=AbortMode.FORCE)
+
+    async def dispose(self) -> None:
+        """Release a suspended reader when its whole Session closes."""
+        self._suspended = False
+        await self.close(abort_active_round=False)
+
+
 class JiuWenSwarmDeepAdapter:
     SESSION_ADAPTER_IDLE_TTL_SEC = 2 * 60 * 60
     SESSION_ADAPTER_EVICT_BATCH_SIZE = 3
@@ -1979,6 +2043,7 @@ class JiuWenSwarmDeepAdapter:
         self._root_instance_lock: asyncio.Lock | None = None
         self._session_adapters: dict[str, JiuWenSwarmDeepAdapter] = {}
         self._session_adapter_locks: dict[str, asyncio.Lock] = {}
+        self._native_session_routes: dict[str, tuple[Any, Any, Any]] = {}
         self._session_adapter_last_used: dict[str, float] = {}
         self._session_adapter_config_version: int = 0
         self._session_adapter_versions: dict[str, int] = {}
@@ -3254,6 +3319,8 @@ class JiuWenSwarmDeepAdapter:
                 cleaned = True
         if remove_lock_after_release and self._is_session_lock_idle(sid, lock):
             self._session_adapter_locks.pop(sid, None)
+        if remove_lock_after_release:
+            self._native_session_routes.pop(sid, None)
         if cleaned:
             logger.info("[JiuWenSwarmDeepAdapter] session scoped DeepAgent removed: session_id=%s", sid)
         return cleaned
@@ -3353,6 +3420,29 @@ class JiuWenSwarmDeepAdapter:
         if selected is None:
             raise RuntimeError("permission_external_input_adapter_unavailable")
         return selected
+
+    def select_execution_for_request(self, request: AgentRequest) -> None:
+        """Pin an admitted Native session before MCP can create its child."""
+        bound = getattr(request, "_bound_execution", None)
+        if bound is None:
+            return
+        if bound.spec.provider_id != "native":
+            raise RuntimeError("selected execution provider has no product route")
+        sid = self._session_adapter_key(request.session_id)
+        if sid != bound.binding.host_session_id:
+            raise ValueError("execution session identity changed")
+        route = (
+            getattr(request, "_execution_source"),
+            getattr(request, "_execution_bindings"),
+            bound,
+        )
+        existing = self._native_session_routes.get(sid)
+        if existing is not None and existing[2].binding is not bound.binding:
+            raise RuntimeError("session execution binding changed")
+        child = self._session_adapters.get(sid)
+        if child is not None and getattr(child, "_native_execution", None) is None:
+            raise RuntimeError("session already uses the legacy interaction route")
+        self._native_session_routes[sid] = route
 
     async def _get_or_create_session_adapter(
         self,
@@ -3490,7 +3580,42 @@ class JiuWenSwarmDeepAdapter:
             adapter.persist_skill_retrieval_session_profile()
             instance_ready_at = time.monotonic()
 
-            await adapter.start_interaction(session_id=sid)
+            native_route = self._native_session_routes.get(sid)
+            if native_route is None:
+                await adapter.start_interaction(session_id=sid)
+            else:
+                from openjiuwen.harness_protocol import HarnessContext
+
+                await self._reload_session_adapter_if_stale(
+                    sid, adapter, host_external_input=host_external_input,
+                )
+                source, bindings, bound = native_route
+                card = getattr(adapter._instance, "card", None)
+                context = HarnessContext(
+                    agent_name=adapter._agent_name,
+                    agent_id=str(getattr(card, "id", "") or adapter._agent_name),
+                    host_session_id=sid,
+                    cwd=bound.binding.workspace,
+                    system_prompt="",
+                )
+                execution = await adapter.start_native_interaction(
+                    source=source,
+                    bindings=bindings,
+                    subject_id=bound.binding.subject_id,
+                    workspace=bound.binding.workspace,
+                    context=context,
+                )
+                from jiuwenswarm.server.runtime.agent_adapter.native_detached_projection import (
+                    NativeDetachedProjection,
+                )
+                from jiuwenswarm.runtime.context import get_current_runtime
+
+                execution.enable_turn_outputs(
+                    detached_output=NativeDetachedProjection(
+                        sid, adapter, runtime=get_current_runtime(),
+                        request_id_for_turn=execution.request_id_for_turn,
+                    )
+                )
             interaction_ready_at = time.monotonic()
 
             self._session_adapters[sid] = adapter
@@ -3500,11 +3625,12 @@ class JiuWenSwarmDeepAdapter:
             # same configuration as already-existing sessions that reload lazily.
             # ``_reload_session_adapter_if_stale`` owns the version bookkeeping
             # (including the no-pending case, where it silently catches up).
-            await self._reload_session_adapter_if_stale(
-                sid,
-                adapter,
-                host_external_input=host_external_input,
-            )
+            if native_route is None:
+                await self._reload_session_adapter_if_stale(
+                    sid,
+                    adapter,
+                    host_external_input=host_external_input,
+                )
             # 服务重启 / adapter 被驱逐后重建时，context_engine 内存池为空，
             # 而 chat.send 主路径不会回灌磁盘 history.jsonl——继续历史会话时
             # 模型将拿到空上下文。这里在新建 adapter 后从磁盘恢复上下文
@@ -12036,6 +12162,95 @@ class JiuWenSwarmDeepAdapter:
             return False
         return has_runtime_capability
 
+    def build_native_execution(self, bound: Any, *, event_observer: Any = None) -> Any:
+        """Build an unstarted protocol execution from this session's assembled agent.
+
+        A caller using this path owns NativeExecutionSession.start/stop/inputs;
+        it must not also start or drive this adapter's legacy interaction loop.
+        Original rails, tools and permission dispatch remain on this adapter.
+        """
+        if not self._is_session_scoped_adapter or self._instance is None:
+            raise RuntimeError("Native execution requires an assembled session adapter")
+        if self._parent_session_id != bound.binding.host_session_id:
+            raise ValueError("Native adapter session does not match the execution binding")
+        if getattr(self._instance, "_interaction_started", False) is True:
+            raise RuntimeError(
+                "Native session already runs through the legacy interaction path"
+            )
+        from jiuwenswarm.runtime.harness.native_session import NativeExecutionSession
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_application_runtime import (
+            get_kv_cache_runtime,
+        )
+
+        prepared_instance = self._instance
+
+        def agent_factory(context: Any) -> Any:
+            if self._instance is not prepared_instance:
+                raise RuntimeError("Native adapter instance changed after execution binding")
+            return prepared_instance
+
+        async def session_factory(context: Any, instance: Any) -> Any:
+            return create_agent_session(
+                session_id=context.host_session_id, card=instance.card,
+                kv_cache_runtime=get_kv_cache_runtime(),
+            )
+
+        async def before_start(instance: Any, session: Any) -> None:
+            agent_factory(None)
+            await self.install_session_input_guard()
+
+        async def dispatch_guard(request: Any, *, send: Any) -> Any:
+            agent_factory(None)
+            return await self._send_input_with_permission_resume_guard(request, send=send)
+
+        async def goal_dispatcher(**kwargs: Any) -> Any:
+            agent_factory(None)
+            return await self._dispatch_goal_control(**kwargs)
+
+        return NativeExecutionSession(
+            bound, agent_factory=agent_factory,
+            session_factory=session_factory, before_start=before_start,
+            dispatch_guard=dispatch_guard,
+            goal_dispatcher=goal_dispatcher,
+            event_observer=event_observer,
+        )
+
+    async def start_native_interaction(
+        self, *, source: Any, bindings: Any, subject_id: str,
+        workspace: str, context: Any, event_observer: Any = None,
+    ) -> Any:
+        """Select and start the protocol route before legacy session startup."""
+        if getattr(self, "_native_execution", None) is not None:
+            raise RuntimeError("Native execution is already started for this session")
+        if not self._is_session_scoped_adapter or not self._parent_session_id:
+            raise RuntimeError("Native execution requires a session-owned adapter")
+        from jiuwenswarm.runtime.harness.bridge import prepare_native_session
+
+        execution = prepare_native_session(
+            source,
+            bindings=bindings,
+            subject_id=subject_id,
+            host_session_id=self._parent_session_id,
+            workspace=workspace,
+            adapter=self,
+            event_observer=event_observer,
+        )
+        self._native_execution = execution
+        self._native_execution_bindings = bindings
+        try:
+            await execution.start(context)
+        except BaseException:
+            try:
+                await execution.stop()
+            except Exception:
+                logger.exception("Native session startup rollback failed")
+            else:
+                self._native_execution = None
+                self._native_execution_bindings = None
+                bindings.release(execution.engine.binding)
+            raise
+        return execution
+
     async def start_interaction(self, session_id: str) -> None:
         """Bind a product Session and start this adapter's DeepAgent interaction loop.
 
@@ -12045,6 +12260,8 @@ class JiuWenSwarmDeepAdapter:
         """
         if self._instance is None:
             raise RuntimeError("DeepAgent instance is not initialized")
+        if getattr(self, "_native_execution", None) is not None:
+            raise RuntimeError("Native execution already owns this session")
 
         from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_application_runtime import (
             get_kv_cache_runtime,
@@ -12088,6 +12305,18 @@ class JiuWenSwarmDeepAdapter:
 
     async def stop_interaction(self) -> None:
         """Stop this adapter's DeepAgent interaction loop if it was started."""
+        execution = getattr(self, "_native_execution", None)
+        if execution is not None:
+            bindings = self._native_execution_bindings
+            native_stream = getattr(self, "_native_interaction_stream", None)
+            if native_stream is not None:
+                await native_stream.dispose()
+                self._native_interaction_stream = None
+            await execution.stop()
+            self._native_execution = None
+            self._native_execution_bindings = None
+            bindings.release(execution.engine.binding)
+            return
         if self._instance is None:
             return
         await self._instance.stop()
@@ -12118,6 +12347,7 @@ class JiuWenSwarmDeepAdapter:
             self._session_adapter_last_used.clear()
             self._session_adapter_versions.clear()
             self._session_adapter_reload_failures.clear()
+            self._native_session_routes.clear()
         else:
             try:
                 if self._parent_session_id:
@@ -12582,6 +12812,9 @@ class JiuWenSwarmDeepAdapter:
             # The 0-token empty-run guard emits chat.error below; a synthetic
             # success final after it would contradict the error to the client.
             return False
+        native_stream = getattr(self, "_native_interaction_stream", None)
+        if native_stream is not None and native_stream._suspended:
+            return False
         return not self._goal_record_is_active()
 
     def _detect_empty_llm_run(
@@ -12880,6 +13113,52 @@ class JiuWenSwarmDeepAdapter:
         *,
         send_without_output: bool,
     ) -> tuple[Any | None, bool]:
+        native_execution = getattr(self, "_native_execution", None)
+        if native_execution is not None:
+            from openjiuwen.harness_protocol import DeliveryMode
+            from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+
+            mode = self._resolve_input_dispatch_mode(request.params)
+            host_request = SendInputRequest(
+                request_id=request.request_id,
+                inputs=self._permission_inputs_for_dispatch(request, inputs, mode),
+                mode=mode,
+            )
+            try:
+                if isinstance(host_request.inputs.get("query"), InteractiveInput):
+                    active = native_execution._native.active_turn
+                    detached_turn = (
+                        active is not None
+                        and not native_execution.has_turn_output_owner(active.turn_id)
+                    )
+                    accepted = await native_execution.answer_request(host_request)
+                    if not accepted:
+                        raise RuntimeError("interaction answer is no longer pending")
+                    suspended = getattr(self, "_native_interaction_stream", None)
+                    if suspended is not None and suspended._suspended:
+                        await suspended.resume()
+                        return suspended, False
+                    if detached_turn:
+                        # A Goal continuation can ask after its originating Web
+                        # request has ended. Its sole session reader remains the
+                        # detached projection; this answer resumes that Turn.
+                        return None, True
+                    raise RuntimeError("interaction output owner is unavailable")
+                suspended = getattr(self, "_native_interaction_stream", None)
+                if suspended is not None and suspended._suspended:
+                    from openjiuwen.harness_protocol import AbortMode
+
+                    await suspended.dispose()
+                    await native_execution.engine.harness.abort(mode=AbortMode.FORCE)
+                receipt = await native_execution.send_request(host_request)
+                if receipt.accepted_mode is DeliveryMode.STEER:
+                    return None, False
+                stream = _NativeTurnOutput(native_execution, receipt.turn_id)
+                self._native_interaction_stream = stream
+                return stream, False
+            except BaseException:
+                self._permission_dispatch.release(inputs)
+                raise
         answer = inputs.get(_ROOT_PERMISSION_ANSWER_KEY)
         if answer is not None and not isinstance(answer, RootPermissionAnswer):
             raise RootPermissionQueueError("permission_queue_answer_invalid")
@@ -13165,7 +13444,10 @@ class JiuWenSwarmDeepAdapter:
         # the current user OR goal attempt but never clears GoalRecord.
         if (
             self._instance is not None
-            and self._instance_interaction_started()
+            and (
+                getattr(self, "_native_execution", None) is not None
+                or self._instance_interaction_started()
+            )
             and intent in ("cancel", "supplement")
         ):
             return await self._process_interaction_interrupt(request, intent, new_input)
@@ -13404,9 +13686,16 @@ class JiuWenSwarmDeepAdapter:
             reset_for_new_task=(intent == "cancel"),
         )
         try:
-            cancelled = await self._instance.cancel_round(
-                reason="user_cancel",
-            )
+            native_execution = getattr(self, "_native_execution", None)
+            if native_execution is not None:
+                from openjiuwen.harness_protocol import AbortMode
+
+                await native_execution.engine.harness.abort(mode=AbortMode.FORCE)
+                cancelled = True
+            else:
+                cancelled = await self._instance.cancel_round(
+                    reason="user_cancel",
+                )
             cancel_call_completed = True
             logger.info(
                 "[JiuWenSwarmDeepAdapter] interrupt(%s): interaction round cancel "
@@ -13543,7 +13832,13 @@ class JiuWenSwarmDeepAdapter:
         self._cancel_scheduler_running_tasks()
         if self._instance is not None:
             try:
-                await self._instance.abort()
+                native_execution = getattr(self, "_native_execution", None)
+                if native_execution is not None:
+                    from openjiuwen.harness_protocol import AbortMode
+
+                    await native_execution.engine.harness.abort(mode=AbortMode.FORCE)
+                else:
+                    await self._instance.abort()
             except Exception as exc:
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] abort_on_gateway_disconnect instance.abort failed: %s",
@@ -15099,7 +15394,18 @@ class JiuWenSwarmDeepAdapter:
                         payload={"event_type": "runtime.accepted", "request_id": request.request_id},
                         metadata=request.metadata,
                     )
-                interaction_stream = await self._instance.attach_output()
+                native_execution = getattr(self, "_native_execution", None)
+                if native_execution is None:
+                    interaction_stream = await self._instance.attach_output()
+                else:
+                    from openjiuwen.harness_protocol import DeliveryMode
+
+                    receipt = await native_execution.attach_goal()
+                    if receipt.accepted_mode is not DeliveryMode.STEER:
+                        interaction_stream = _NativeTurnOutput(
+                            native_execution, receipt.turn_id
+                        )
+                        self._native_interaction_stream = interaction_stream
                 self._permission_dispatch.release(inputs)
             elif self._should_inject_into_existing_interaction(request.params):
                 # Idle → become the reader; busy → inject into the existing stream.
@@ -15293,6 +15599,30 @@ class JiuWenSwarmDeepAdapter:
             sdk_input_mode,
         )
 
+        native_execution = getattr(self, "_native_execution", None)
+        if native_execution is not None:
+            mode = sdk_input_mode(request.params)
+            if mode is not InputDispatchMode.STEER:
+                # A queued follow-up needs its own Turn reader in the normal
+                # stream path; this ACK-only path is for active-turn steering.
+                return False
+            if native_execution._native.active_turn is None:
+                return False
+            prepared = await self._prepare_root_input_dispatch(request, inputs)
+            try:
+                await native_execution.send_request(
+                    SendInputRequest(
+                        request_id=request.request_id,
+                        inputs=self._permission_inputs_for_dispatch(
+                            request, prepared, mode
+                        ),
+                        mode=mode,
+                    )
+                )
+                return True
+            finally:
+                self._permission_dispatch.finalize(prepared)
+
         instance = self._instance
         if instance is None or instance.active_round is None:
             return False
@@ -15393,7 +15723,11 @@ class JiuWenSwarmDeepAdapter:
                 return
             # The original execution can finish between Runtime routing and
             # SDK admission. Reuse normal output ownership for the idle case.
-            if self._instance is not None and self._instance.has_output_stream():
+            if (
+                getattr(self, "_native_execution", None) is None
+                and self._instance is not None
+                and self._instance.has_output_stream()
+            ):
                 raise RuntimeError(
                     "session output is finishing; supplemental input was not "
                     "sent, retry after it settles"
@@ -16090,9 +16424,8 @@ class JiuWenSwarmDeepAdapter:
                 self._permission_dispatch.release(inputs)
                 # dispatch 前采样：之后 active_round 可能已切到 goal
                 defer_goal_history = self._should_defer_goal_objective_history(session_id)
-                interaction_stream = await self._instance.attach_output()
-                control = await self._dispatch_goal_control(
-                    action=str(pending_goal_op.get("action") or "get"),
+                native_execution = getattr(self, "_native_execution", None)
+                goal_kwargs = dict(
                     objective=pending_goal_op.get("objective")
                     if isinstance(pending_goal_op.get("objective"), str)
                     else None,
@@ -16101,6 +16434,25 @@ class JiuWenSwarmDeepAdapter:
                     max_attempts=pending_goal_op.get("max_attempts"),
                     session_id=session_id,
                 )
+                if native_execution is None:
+                    interaction_stream = await self._instance.attach_output()
+                    control = await self._dispatch_goal_control(
+                        action=str(pending_goal_op.get("action") or "get"),
+                        **goal_kwargs,
+                    )
+                else:
+                    from openjiuwen.harness_protocol import DeliveryMode
+
+                    receipt, control_result = await native_execution.submit_goal(
+                        str(pending_goal_op.get("action") or "get"),
+                        **goal_kwargs,
+                    )
+                    if receipt.accepted_mode is not DeliveryMode.STEER:
+                        interaction_stream = _NativeTurnOutput(
+                            native_execution, receipt.turn_id
+                        )
+                        self._native_interaction_stream = interaction_stream
+                    control = await control_result
                 result_type = (control or {}).get("result_type")
                 if result_type == "goal_confirm_required":
                     if interaction_stream is not None:
@@ -16216,7 +16568,18 @@ class JiuWenSwarmDeepAdapter:
                             yield chunk
                         interaction_stream_abort = False
                         return
-                interaction_stream = await self._instance.attach_output()
+                native_execution = getattr(self, "_native_execution", None)
+                if native_execution is None:
+                    interaction_stream = await self._instance.attach_output()
+                else:
+                    from openjiuwen.harness_protocol import DeliveryMode
+
+                    receipt = await native_execution.attach_goal()
+                    if receipt.accepted_mode is not DeliveryMode.STEER:
+                        interaction_stream = _NativeTurnOutput(
+                            native_execution, receipt.turn_id
+                        )
+                        self._native_interaction_stream = interaction_stream
                 if interaction_stream is None:
                     async for chunk in _yield_runtime_accepted():
                         yield chunk
@@ -16878,6 +17241,9 @@ class JiuWenSwarmDeepAdapter:
 
     def _stream_completion_state(self, *, had_interaction: bool) -> str:
         """Distinguish an interrupt flush from a text-free completed round."""
+        native_stream = getattr(self, "_native_interaction_stream", None)
+        if native_stream is not None and native_stream._suspended:
+            return "suspended"
         loop_session = getattr(self._instance, "loop_session", None)
         if loop_session is None:
             return "suspended" if had_interaction else "completed"

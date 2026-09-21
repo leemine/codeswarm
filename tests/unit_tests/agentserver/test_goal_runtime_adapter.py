@@ -320,6 +320,73 @@ async def test_command_goal_unary_response_stays_rpc_payload() -> None:
     assert response.payload["message"] == "No goal in this session."
 
 
+@pytest.mark.asyncio
+async def test_command_goal_get_selects_bound_native_route_before_child_start() -> None:
+    class SelectedGoalAdapter(_FakeGoalAdapter):
+        selected = False
+
+        def select_execution_for_request(self, request: AgentRequest) -> None:
+            assert request.session_id == "session-1"
+            self.selected = True
+
+        async def handle_goal_command_structured(
+            self, params: dict[str, object], session_id: str
+        ) -> dict[str, object]:
+            assert self.selected, "Goal read must not start the legacy child first"
+            return await super().handle_goal_command_structured(params, session_id)
+
+    facade = JiuWenSwarm.__new__(JiuWenSwarm)
+    adapter = SelectedGoalAdapter()
+    facade._adapter = adapter
+    facade._session_manager = _FakeSessionManager()
+    request = AgentRequest(
+        request_id="goal-get-native", channel_id="web", session_id="session-1",
+        req_method=ReqMethod.COMMAND_GOAL, params={"action": "get"},
+    )
+    request._bound_execution = object()
+
+    response = await facade.process_message(request)
+
+    assert response.ok is True
+    assert adapter.selected is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["get", "pause", "clear"])
+async def test_streaming_goal_control_selects_bound_native_route_before_child_start(
+    action: str,
+) -> None:
+    class SelectedGoalAdapter(_FakeGoalAdapter):
+        selected = False
+
+        def select_execution_for_request(self, request: AgentRequest) -> None:
+            assert request.session_id == "session-1"
+            self.selected = True
+
+        async def handle_goal_command_structured(
+            self, params: dict[str, object], session_id: str
+        ) -> dict[str, object]:
+            assert self.selected, "Goal control must not start the legacy child first"
+            return await super().handle_goal_command_structured(params, session_id)
+
+    facade = JiuWenSwarm.__new__(JiuWenSwarm)
+    adapter = SelectedGoalAdapter()
+    facade._adapter = adapter
+    facade._session_manager = _FakeSessionManager()
+    request = AgentRequest(
+        request_id=f"goal-{action}-native-stream", channel_id="web",
+        session_id="session-1", req_method=ReqMethod.COMMAND_GOAL,
+        params={"action": action}, is_stream=True,
+    )
+    request._bound_execution = object()
+
+    chunks = [chunk async for chunk in facade.process_message_stream(request)]
+
+    assert adapter.selected is True
+    assert len(chunks) == 1
+    assert chunks[0].payload["event_type"] == "goal.snapshot"
+
+
 def test_active_goal_demotes_goal_round_chat_final_to_delta() -> None:
     """Goal multi-attempt middle: demote final so the frontend does not split."""
     goals = _FakeGoals()

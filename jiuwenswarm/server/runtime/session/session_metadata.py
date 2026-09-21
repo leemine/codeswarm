@@ -876,6 +876,9 @@ def init_session_metadata(
     cron_id: str = "",
     work_mode: str = "",
     channel_metadata: dict[str, Any] | None = None,
+    execution_profile_id: str | None = None,
+    execution_config_revision: str | None = None,
+    execution_config_fingerprint: str | None = None,
 ) -> None:
     """初始化会话元数据(同步写,确保创建后立即可读)
 
@@ -913,6 +916,10 @@ def init_session_metadata(
     }
     if isinstance(channel_metadata, dict) and channel_metadata:
         metadata["channel_metadata"] = channel_metadata
+    if execution_profile_id is not None:
+        metadata["execution_profile_id"] = execution_profile_id
+        metadata["execution_config_revision"] = execution_config_revision
+        metadata["execution_config_fingerprint"] = execution_config_fingerprint
     _write_metadata_sync(session_id, metadata)
 
 

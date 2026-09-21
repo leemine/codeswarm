@@ -157,6 +157,58 @@ class RuntimeSessionCoordinator:
         task.add_done_callback(self._consume_task)
         return handle.snapshot()
 
+    def begin_detached_turn(
+        self, session_id: str, request_id: str
+    ) -> SessionExecutionSnapshot:
+        """Track an already-running provider Turn without acquiring another lane."""
+        record = self._require_open_session(session_id)
+        handle = self._new_execution(record, request_id, SessionWorkKind.GOAL_ATTACH)
+        handle.retain_after_control = True
+        self._registry.mark_running(handle)
+        self._refresh_session_state(record)
+        return handle.snapshot()
+
+    def observe_detached_turn(
+        self, session_id: str, execution_id: str, control_id: str | None
+    ) -> bool:
+        """Apply one projected control locator to the existing execution registry."""
+        record = self._sessions.get(session_id)
+        handle = self._registry.get(execution_id)
+        if (
+            record is None
+            or record.state in {RuntimeSessionState.QUIESCING, RuntimeSessionState.CLOSED}
+            or handle is None
+            or handle.session_id != session_id
+            or handle.generation != record.generation
+            or handle.state.terminal
+        ):
+            return False
+        if control_id:
+            self._registry.mark_awaiting_control(handle, control_id)
+            self._registry.mark_waiting(handle)
+            self._refresh_control_gate(record)
+        return True
+
+    def finish_detached_turn(
+        self, session_id: str, execution_id: str,
+        state: SessionExecutionState,
+    ) -> bool:
+        """Settle the detached Turn only if it still owns this generation."""
+        if not state.terminal:
+            raise ValueError("detached Turn requires a terminal state")
+        record = self._sessions.get(session_id)
+        handle = self._registry.get(execution_id)
+        if (
+            record is None or handle is None
+            or handle.session_id != session_id
+            or handle.generation != record.generation
+            or handle.state.terminal
+        ):
+            return False
+        self._registry.mark_terminal(handle, state)
+        self._refresh_session_state(record)
+        return True
+
     async def _run_unary(
         self,
         record: _SessionRecord,
@@ -361,7 +413,7 @@ class RuntimeSessionCoordinator:
                     parent.state is SessionExecutionState.WAITING_FOR_CONTROL
                     and parent.waiting_control_id == request_id
                 )
-                if parent_was_waiting or parent_finished_while_delivering:
+                if (parent_was_waiting or parent_finished_while_delivering) and not parent.retain_after_control:
                     self._registry.mark_terminal(
                         parent, SessionExecutionState.SUCCEEDED
                     )
@@ -453,7 +505,7 @@ class RuntimeSessionCoordinator:
                 self._registry.mark_waiting(parent)
             raise
         else:
-            if parent_was_waiting:
+            if parent_was_waiting and not parent.retain_after_control:
                 self._registry.mark_terminal(parent, SessionExecutionState.SUCCEEDED)
             elif parent.waiting_control_id == request_id:
                 # The original producer may already have published another
