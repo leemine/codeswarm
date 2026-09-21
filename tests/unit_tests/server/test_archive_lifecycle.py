@@ -1,6 +1,7 @@
 """Disk-backed lifecycle scenarios; runtime calls are isolated from LLMs."""
 
 import asyncio
+import sys
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -212,6 +213,105 @@ async def test_moved_directory_recovers_original_timestamp(archive):
     result = await service.session("sess_a", "archive", "web")
     assert result["archived_at"] == operation["archived_at"]
     assert lc.raw_metadata("sess_a")["archived_at"] == operation["archived_at"]
+
+
+@pytest.mark.asyncio
+async def test_listing_skips_unusable_entries_instead_of_failing(archive):
+    service, create, root, _ = archive
+    create()
+    await service.session("sess_a", "archive", "web")
+    # 非法资源 ID（前后空白）：validate_id 拒绝，但目录在两个平台都能创建。
+    stray = root / "sessions_archived/ bad_name"
+    stray.mkdir()
+    lc.atomic_json(stray / "metadata.json", dict(session_id=" bad_name", title="x"))
+    # 损坏的 metadata.json：JSON 解析失败。
+    corrupt = root / "sessions_archived/sess_corrupt"
+    corrupt.mkdir()
+    (corrupt / "metadata.json").write_text("{not json")
+    # 空目录：会话在扫描期间被移走或外部垃圾，不得进入列表。
+    (root / "sessions_archived/sess_gone").mkdir()
+    result = service.list_sessions({})
+    assert result["total"] == 1
+    item = result["sessions"][0]
+    assert item["session_id"] == "sess_a"
+    assert item["archived"] is True
+    assert isinstance(item["archived_at"], float)
+    assert item["execution_blocked"] is True
+    assert item["lifecycle_operation"] is None
+
+
+@pytest.mark.asyncio
+async def test_listing_is_read_only_and_backfill_persists_archive_time(archive):
+    service, create, root, _ = archive
+    directory = create()
+    # 模拟老版本遗留：手动移入归档区，元数据没有 archived_at。
+    destination = root / "sessions_archived/sess_a"
+    destination.parent.mkdir()
+    directory.rename(destination)
+    mtime = destination.stat().st_mtime
+    result = service.list_sessions({})
+    assert result["total"] == 1
+    assert result["sessions"][0]["archived_at"] == pytest.approx(mtime)
+    # 只读：列表请求不得写元数据或生命周期状态。
+    assert "archived_at" not in lc.read_json(destination / "metadata.json")
+    assert lc.state("session", "sess_a") == {}
+    # 启动回填持久化后，列表返回持久化的值。
+    service._backfill_archive_times()
+    persisted = lc.read_json(destination / "metadata.json")["archived_at"]
+    assert persisted == pytest.approx(mtime)
+    assert service.list_sessions({})["sessions"][0]["archived_at"] == persisted
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="directory junctions are Windows-only"
+)
+async def test_listing_skips_junction_escaping_managed_root(archive, tmp_path):
+    import _winapi
+
+    service, create, root, _ = archive
+    create()
+    await service.session("sess_a", "archive", "web")
+    # junction 指向受管存储之外：is_symlink 识别不了，必须由
+    # resolve 后的父目录比对拦下（与 session_paths 守卫同判定）。
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    lc.atomic_json(
+        outside / "metadata.json",
+        dict(session_id="sess_escape", title="escape", project_id="default"),
+    )
+    junction = root / "sessions_archived" / "sess_escape"
+    _winapi.CreateJunction(str(outside), str(junction))
+    result = service.list_sessions({})
+    assert result["total"] == 1
+    assert result["sessions"][0]["session_id"] == "sess_a"
+    # 启动回填同样不得读取或修复越界目标。
+    service._backfill_archive_times()
+    assert "archived_at" not in lc.read_json(outside / "metadata.json")
+
+
+@pytest.mark.asyncio
+async def test_listing_survives_permission_error_on_one_entry(archive, monkeypatch):
+    import pathlib
+
+    service, create, root, _ = archive
+    create()
+    await service.session("sess_a", "archive", "web")
+    locked = root / "sessions_archived" / "sess_locked"
+    locked.mkdir()
+    (locked / "metadata.json").write_text("{}")
+    original = pathlib.Path.is_dir
+
+    def denying_is_dir(self):
+        if self.name == "sess_locked":
+            raise PermissionError("denied")
+        return original(self)
+
+    monkeypatch.setattr(pathlib.Path, "is_dir", denying_is_dir)
+    # 单个条目的权限错误不得让整个列表失败。
+    result = service.list_sessions({})
+    assert result["total"] == 1
+    assert result["sessions"][0]["session_id"] == "sess_a"
 
 
 @pytest.mark.asyncio
@@ -948,3 +1048,147 @@ async def test_batch_default_empty_and_deleting_project(archive):
     assert error.value.code == "BAD_REQUEST"
     await service.project_batch(project.project_id, "archive", "web")
     assert not lc.state("project", project.project_id).get("operation")
+
+
+@pytest.mark.asyncio
+async def test_parked_team_stream_archive_proceeds_without_touching_stream(
+    archive, monkeypatch
+):
+    from jiuwenswarm.agents.harness.team import team_manager
+
+    service, create, root, runtime = archive
+    create()
+    stop_session_runtime = AsyncMock()
+    manager = SimpleNamespace(
+        has_stream_task=lambda sid: True,
+        is_round_ended_request=lambda sid, rid: True,
+        stop_session_runtime=stop_session_runtime,
+    )
+    monkeypatch.setattr(team_manager, "_team_manager", manager)
+    # The runtime would report the session busy (parked handler pending);
+    # only the parked exemption lets the archive through.
+    runtime.is_session_running = Mock(return_value=True)
+    runtime.has_parked_team_streams = Mock(return_value=True)
+
+    original_begin = lc.begin
+    begin_calls = []
+
+    def begin(*args, **kwargs):
+        begin_calls.append(kwargs.get("block_execution", True))
+        return original_begin(*args, **kwargs)
+
+    monkeypatch.setattr(lc, "begin", begin)
+    payload = await service.session("sess_a", "archive", "web")
+
+    assert payload["ok"] is True
+    # Only the busy check changes: archive keeps its unfenced lifecycle
+    # generation, so a failed move cannot leave the session blocked.
+    assert begin_calls == [False]
+    assert (root / "sessions_archived/sess_a/history.json").exists()
+    assert not (root / "sessions/sess_a").exists()
+    # The parked leader stream is released by its own lifecycle (disconnect,
+    # runtime teardown), never as a side effect of archiving.
+    stop_session_runtime.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_parked_team_stream_still_blocks_delete(archive, monkeypatch):
+    from jiuwenswarm.agents.harness.team import team_manager
+
+    service, create, _, runtime = archive
+    create()
+    stop_session_runtime = AsyncMock()
+    monkeypatch.setattr(
+        team_manager,
+        "_team_manager",
+        SimpleNamespace(
+            has_stream_task=lambda sid: True,
+            is_round_ended_request=lambda sid, rid: True,
+            stop_session_runtime=stop_session_runtime,
+        ),
+    )
+    runtime.is_session_running = Mock(return_value=True)
+    runtime.has_parked_team_streams = Mock(return_value=True)
+    with pytest.raises(lc.LifecycleError) as error:
+        await service.session("sess_a", "delete", "web")
+    assert error.value.code == "SESSION_BUSY"
+    stop_session_runtime.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_release_round_marks_request_ended_until_stream_pops():
+    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
+
+    manager = TeamManager()
+    manager._stream_tasks["sess_a"] = asyncio.get_running_loop().create_future()
+    manager.begin_round("sess_a", "req_1")
+    assert not manager.is_round_ended_request("sess_a", "req_1")
+    assert await manager.release_round("sess_a", "req_1")
+    assert manager.is_round_ended_request("sess_a", "req_1")
+    # Stream end releases every handler parked on it; the marker dies with
+    # the stream instead of surviving into the next stream generation.
+    assert manager.pop_stream_task("sess_a") is not None
+    assert not manager.is_round_ended_request("sess_a", "req_1")
+
+
+@pytest.mark.asyncio
+async def test_stream_cancel_clears_ended_round_markers():
+    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
+
+    manager = TeamManager()
+    stream_task = asyncio.get_running_loop().create_future()
+    manager._stream_tasks["sess_a"] = stream_task
+    manager.begin_round("sess_a", "req_1")
+    assert await manager.release_round("sess_a", "req_1")
+    assert manager.is_round_ended_request("sess_a", "req_1")
+    # Disconnect/shutdown cancellation is a third stream-pop site: markers
+    # must not outlive their stream into the next generation, or a reused
+    # request id would read as parked while it is still live.
+    await manager._cancel_stream_task("sess_a", "disconnect")
+    assert "sess_a" not in manager._stream_tasks
+    assert not manager.is_round_ended_request("sess_a", "req_1")
+
+
+@pytest.mark.asyncio
+async def test_release_round_without_stream_does_not_leave_parked_marker():
+    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
+
+    manager = TeamManager()
+    manager.begin_round("sess_a", "req_1")
+    assert await manager.release_round("sess_a", "req_1")
+    assert not manager.is_round_ended_request("sess_a", "req_1")
+
+
+def test_has_parked_team_streams_requires_all_requests_round_ended(monkeypatch):
+    from jiuwenswarm.runtime.service import AgentRuntime
+    from jiuwenswarm.agents.harness.team import team_manager
+
+    assert not AgentRuntime.has_parked_team_streams(
+        SimpleNamespace(_pending_chat_requests={}), "sess_a"
+    )
+    runtime = SimpleNamespace(_pending_chat_requests={"sess_a": {"req_1", "req_2"}})
+    ended = {"req_1"}
+    manager = SimpleNamespace(
+        has_stream_task=lambda sid: True,
+        has_inflight_request=lambda sid: False,
+        is_round_active=lambda sid: False,
+        is_round_ended_request=lambda sid, rid: rid in ended,
+    )
+    monkeypatch.setattr(team_manager, "_team_manager", manager)
+    # A request without a released round (preparing or mid-round) is live.
+    assert not AgentRuntime.has_parked_team_streams(runtime, "sess_a")
+    ended.add("req_2")
+    assert AgentRuntime.has_parked_team_streams(runtime, "sess_a")
+    # Non-Web requests such as heartbeat/cron do not appear in the Runtime's
+    # pending WebSocket request set, but they must still keep archive busy.
+    manager.has_inflight_request = lambda sid: True
+    assert not AgentRuntime.has_parked_team_streams(runtime, "sess_a")
+    manager.has_inflight_request = lambda sid: False
+    manager.is_round_active = lambda sid: True
+    assert not AgentRuntime.has_parked_team_streams(runtime, "sess_a")
+    manager.is_round_active = lambda sid: False
+    # Stream already gone: the handlers are exiting, not parked.
+    manager.has_stream_task = lambda sid: False
+    assert not AgentRuntime.has_parked_team_streams(runtime, "sess_a")
+    monkeypatch.setattr(team_manager, "_team_manager", None)
+    assert not AgentRuntime.has_parked_team_streams(runtime, "sess_a")
