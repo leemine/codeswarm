@@ -2825,6 +2825,7 @@ class JiuWenSwarm:
         if request.req_method == ReqMethod.COMMAND_GOAL:
             try:
                 adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+                self._select_execution_before_mcp(adapter, request)
                 params = request.params if isinstance(request.params, dict) else {}
                 action = params.get("action", "get")
                 session_id = self._session_manager.get_session_id(request.session_id)
