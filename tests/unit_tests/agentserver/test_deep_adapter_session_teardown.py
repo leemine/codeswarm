@@ -20,6 +20,7 @@ from jiuwenswarm.server.runtime.agent_adapter.permission_runtime_state import (
 def _make_adapter(**state: object) -> JiuWenSwarmDeepAdapter:
     """Create a bare adapter with internal state set via setattr."""
     adapter = object.__new__(JiuWenSwarmDeepAdapter)
+    adapter._native_session_routes = {}  # pylint: disable=protected-access
     for name, value in state.items():
         setattr(adapter, name, value)
     return adapter
