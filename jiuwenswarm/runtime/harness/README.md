@@ -1,4 +1,4 @@
-# R1-01 execution construction
+# Execution selection and Native Single integration
 
 Use `parse_execution_config` for a dedicated execution configuration, not model-provider settings. Pass complete snapshots through `ExecutionConfigSource` (explicit > project > default) to `prepare_execution`, together with a host-owned `ExecutionBindingStore` and an authorized subject/session/absolute workspace.
 
@@ -25,9 +25,9 @@ execution:
 ```
 
 When the section is absent the loader returns `None`; a present but malformed
-section (including `execution: null`) fails validation. Existing sessions
-without a selection retain the legacy route. This draft does not expose a
-selection UI or switch the default product configuration.
+section (including `execution: null`) fails validation. A configured default
+selects new sessions; existing sessions without a selection retain the legacy
+route. There is no selection UI or packaged default `execution` section yet.
 
 The generic `prepare_execution` result is an unstarted core `HarnessEngine`.
 The Native Single route below uses the already assembled DeepAgent instead of
@@ -72,9 +72,8 @@ HarnessIOAdapter event pump:
 For a host serving multiple Web requests over one session, core also exposes
 `io.output_envelopes()`: each chunk carries its protocol Turn ID, followed by
 that Turn's terminal marker. This shares the same single-consumer queue as
-`io.outputs()`; the eventual Web route must choose the envelope iterator and
-keep one consumer for the entire session. The current default chat route has
-not yet switched to it.
+`io.outputs()`; the selected Native route keeps one consumer for the entire
+session.
 
 `NativeExecutionSession.enable_turn_outputs()` opts into a session-level
 `TurnOutputRouter` before the first input. `send_request` registers its Turn
@@ -111,9 +110,9 @@ detached sink reuses its chunk parser and product history/push services. Only
 lifecycle, dispatch and the Turn output reader change. A question temporarily detaches
 the same reader and its answer resumes it, without starting another Turn.
 
-This is still a draft integration. Detached Goal output has a product
-history/push path and a pending question can resume its original Turn without
-a Web reader. Cancel/disconnect races, cold restore and real Single request
-acceptance remain before switching the default
-product configuration. External providers and Team selection have no product
-route in this slice. Deterministic adapter tests are not live-model E2E.
+The configured Native path has been exercised through real Web Single text,
+tool, ask-user, Goal, cancel, subagent and cold-restore flows. A separate
+cutover check showed an unbound legacy session and a new default-bound Native
+session both continuing after service restart. This does not change the
+packaged default configuration or existing user config files. External
+providers and Team selection have no product route in this slice.
