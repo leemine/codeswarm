@@ -3147,6 +3147,7 @@ class JiuWenSwarm:
             if action not in {"set", "resume"}:
                 try:
                     adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+                    self._select_execution_before_mcp(adapter, request)
                     session_id = self._session_manager.get_session_id(request.session_id)
                     goal_result = await adapter.handle_goal_command_structured(params, session_id)
                     if goal_result is None:
