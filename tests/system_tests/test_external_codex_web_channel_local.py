@@ -325,7 +325,11 @@ def _configure_workspace(data_dir: Path, codex_home: Path, base_url: str) -> Pat
                         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                     },
                     "startup_source_roots": [str(root), str(codex_home / "skills")],
-                    "mcp_required": False,
+                    # ProductToolGateway injects a managed loopback MCP into
+                    # this real channel path; restricted Codex sessions only
+                    # admit that server when the profile marks it required.
+                    "mcp_required": True,
+                    "mcp_default_tools_approval_mode": "prompt",
                     "model": {
                         "model": "gpt-5.6-sol",
                         "provider": "r1_a2_web_fixture",

@@ -60,6 +60,7 @@ _TRUNCATE_SUFFIX = " [truncated]"
 _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES = frozenset(
     {
         "chat.reasoning",
+        "chat.ask_user_question",
         "chat.final",
         "chat.tool_call",
         "chat.tool_result",
@@ -72,6 +73,7 @@ _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES = frozenset(
         "context.compact_boundary",
         "context.compact_summary",
         "context.rewind_summary",
+        "harness.activate_interaction",
     }
 )
 

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -28,6 +30,7 @@ async def test_detached_text_persists_before_push_and_finishes_once(monkeypatch)
         operations.append(("push", message))
         return True
 
+    monkeypatch.setattr(mod, "append_history_record_durable", history)
     monkeypatch.setattr(mod, "append_history_record", history)
     monkeypatch.setattr(history_io, "run_history_io", _direct_history)
     monkeypatch.setattr(mod, "send_runtime_push", push)
@@ -64,6 +67,7 @@ async def test_detached_text_persists_before_push_and_finishes_once(monkeypatch)
 @pytest.mark.asyncio
 async def test_detached_terminal_persists_unfinished_text(monkeypatch):
     history = MagicMock()
+    monkeypatch.setattr(mod, "append_history_record_durable", history)
     monkeypatch.setattr(mod, "append_history_record", history)
     monkeypatch.setattr(history_io, "run_history_io", _direct_history)
     monkeypatch.setattr(mod, "send_runtime_push", AsyncMock(return_value=False))
@@ -85,8 +89,74 @@ async def test_detached_terminal_persists_unfinished_text(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_detached_native_terminal_waits_for_durable_history(monkeypatch):
+    receipt: Future[bool] = Future()
+    pushes = []
+    monkeypatch.setattr(mod, "append_history_record", MagicMock())
+    monkeypatch.setattr(
+        mod,
+        "append_history_record_durable",
+        MagicMock(return_value=receipt),
+    )
+    monkeypatch.setattr(history_io, "run_history_io", _direct_history)
+    monkeypatch.setattr(mod, "build_server_push_message", lambda **kwargs: kwargs)
+    monkeypatch.setattr(mod, "get_session_delivery_context", lambda _sid: {})
+    monkeypatch.setattr(mod, "get_session_metadata", lambda *_args, **_kwargs: {})
+
+    async def push(message):
+        pushes.append(message)
+
+    monkeypatch.setattr(mod, "send_runtime_push", push)
+    projection = mod.NativeDetachedProjection("s", SimpleNamespace())
+    projection._turns["turn"] = mod._DetachedTurn(text="durable result")
+
+    delivery = asyncio.create_task(
+        projection(ProjectedOutput("turn", terminal=TurnEventKind.FINISHED))
+    )
+    await asyncio.sleep(0)
+    assert pushes == []
+    assert "turn" in projection._turns
+
+    receipt.set_result(True)
+    await delivery
+    assert pushes[-1]["payload"]["event_type"] == "chat.final"
+    assert projection._turns == {}
+
+
+@pytest.mark.asyncio
+async def test_detached_native_persistence_failure_is_product_visible(monkeypatch):
+    receipt: Future[bool] = Future()
+    receipt.set_exception(OSError("injected durable write failure"))
+    pushes = []
+    monkeypatch.setattr(
+        mod,
+        "append_history_record_durable",
+        MagicMock(return_value=receipt),
+    )
+    monkeypatch.setattr(history_io, "run_history_io", _direct_history)
+    monkeypatch.setattr(mod, "build_server_push_message", lambda **kwargs: kwargs)
+    monkeypatch.setattr(mod, "get_session_delivery_context", lambda _sid: {})
+    monkeypatch.setattr(mod, "get_session_metadata", lambda *_args, **_kwargs: {})
+
+    async def push(message):
+        pushes.append(message)
+
+    monkeypatch.setattr(mod, "send_runtime_push", push)
+    projection = mod.NativeDetachedProjection("s", SimpleNamespace())
+    projection._turns["turn"] = mod._DetachedTurn(text="unconfirmed result")
+
+    await projection(ProjectedOutput("turn", terminal=TurnEventKind.FINISHED))
+
+    assert "turn" in projection._turns
+    assert len(pushes) == 1
+    assert pushes[0]["payload"]["code"] == "HISTORY_PERSISTENCE_UNCONFIRMED"
+    assert pushes[0]["payload"]["event_type"] == "chat.error"
+
+
+@pytest.mark.asyncio
 async def test_failed_detached_turn_does_not_write_success_final(monkeypatch):
     history = MagicMock()
+    monkeypatch.setattr(mod, "append_history_record_durable", history)
     monkeypatch.setattr(mod, "append_history_record", history)
     monkeypatch.setattr(history_io, "run_history_io", _direct_history)
     monkeypatch.setattr(mod, "send_runtime_push", AsyncMock(return_value=False))
@@ -155,7 +225,11 @@ async def test_detached_question_is_runtime_control_target_before_push(monkeypat
     )
     await runtime._session_coordinator.register_session("s", "web")
     monkeypatch.setattr(history_io, "run_history_io", _direct_history)
-    monkeypatch.setattr(mod, "append_history_record", MagicMock())
+    monkeypatch.setattr(
+        mod,
+        "append_history_record_durable",
+        MagicMock(return_value=None),
+    )
     monkeypatch.setattr(mod, "get_session_delivery_context", lambda _sid: {"channel_id": "web"})
     monkeypatch.setattr(mod, "get_session_metadata", lambda *_args, **_kwargs: {"mode": "code"})
     monkeypatch.setattr(mod, "build_server_push_message", lambda **kwargs: kwargs)

@@ -789,6 +789,203 @@ async def test_detached_external_output_reuses_history_and_push_paths(
 
 
 @pytest.mark.asyncio
+async def test_detached_external_push_waits_for_durable_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from concurrent.futures import Future
+
+    from jiuwenswarm.runtime.harness import event_projection as module
+
+    receipt: Future[None] = Future()
+    history: list[dict[str, Any]] = []
+    pushes: list[dict[str, Any]] = []
+
+    async def record_history(_call, **kwargs):
+        history.append(kwargs)
+        return receipt
+
+    async def record_push(message) -> None:
+        pushes.append(message)
+
+    monkeypatch.setattr(module, "run_history_io", record_history)
+    monkeypatch.setattr(module, "send_runtime_push", record_push)
+    monkeypatch.setattr(module, "build_server_push_message", lambda **kwargs: kwargs)
+    projection = ExternalEventProjection("session-1")
+    projection.register_turn(
+        "turn-1",
+        request_id="request-1",
+        channel_id="web",
+        mode="code",
+    )
+    item = ProjectedOutput(
+        turn_id="turn-1",
+        terminal=TurnEventKind.FINISHED,
+    )
+
+    delivery = asyncio.create_task(projection(item))
+    await asyncio.sleep(0)
+    assert len(history) == 1
+    assert history[0]["delivery_id"] == (
+        "harness:turn-1:terminal:finished:chat.final"
+    )
+    assert pushes == []
+
+    receipt.set_result(None)
+    await delivery
+    assert len(pushes) == 1
+
+
+@pytest.mark.asyncio
+async def test_detached_external_replay_after_push_failure_does_not_duplicate_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from concurrent.futures import Future
+
+    from jiuwenswarm.runtime.harness import event_projection as module
+
+    monkeypatch.setattr(module, "build_server_push_message", lambda **kwargs: kwargs)
+    pushes: list[dict[str, Any]] = []
+    persisted: dict[str, dict[str, Any]] = {}
+    failed_once = False
+
+    def append_durable(**kwargs):
+        persisted.setdefault(kwargs["delivery_id"], kwargs)
+        receipt: Future[None] = Future()
+        receipt.set_result(None)
+        return receipt
+
+    async def direct_history(fn, **kwargs):
+        return fn(**kwargs)
+
+    async def push(message: dict[str, Any]) -> None:
+        nonlocal failed_once
+        pushes.append(message)
+        if message["payload"].get("event_type") == "chat.final" and not failed_once:
+            failed_once = True
+            raise ConnectionError("injected push failure")
+
+    monkeypatch.setattr(module, "send_runtime_push", push)
+    monkeypatch.setattr(module, "append_history_record_durable", append_durable)
+    monkeypatch.setattr(module, "run_history_io", direct_history)
+    projection = ExternalEventProjection("session-replay")
+    projection.register_turn(
+        "turn-replay",
+        request_id="request-replay",
+        channel_id="web",
+        mode="code",
+    )
+    monkeypatch.setattr(
+        projection,
+        "payload",
+        lambda _item, *, state=None: {
+            "event_type": "chat.final",
+            "content": "durable result",
+        },
+    )
+    item = ProjectedOutput(
+        turn_id="turn-replay",
+        terminal=TurnEventKind.FINISHED,
+    )
+
+    await projection(item)
+    assert "turn-replay" in projection._turns
+    assert pushes[-1]["payload"]["code"] == "DETACHED_DELIVERY_UNCONFIRMED"
+
+    await projection(item)
+    assert projection._turns == {}
+    assert len(persisted) == 1
+    assert next(iter(persisted.values()))["content"] == "durable result"
+
+
+@pytest.mark.asyncio
+async def test_detached_external_persistence_failure_is_product_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from concurrent.futures import Future
+
+    from jiuwenswarm.runtime.harness import event_projection as module
+
+    receipt: Future[None] = Future()
+    receipt.set_exception(OSError("injected durable write failure"))
+    pushes: list[dict[str, Any]] = []
+
+    async def record_history(_call, **_kwargs):
+        return receipt
+
+    async def record_push(message: dict[str, Any]) -> None:
+        pushes.append(message)
+
+    monkeypatch.setattr(module, "run_history_io", record_history)
+    monkeypatch.setattr(module, "send_runtime_push", record_push)
+    monkeypatch.setattr(module, "build_server_push_message", lambda **kwargs: kwargs)
+    projection = ExternalEventProjection("session-failure")
+    projection.register_turn(
+        "turn-failure",
+        request_id="request-failure",
+        channel_id="web",
+        mode="code",
+    )
+    monkeypatch.setattr(
+        projection,
+        "payload",
+        lambda _item, *, state=None: {
+            "event_type": "chat.final",
+            "content": "result",
+        },
+    )
+
+    await projection(
+        ProjectedOutput(
+            turn_id="turn-failure",
+            terminal=TurnEventKind.FINISHED,
+        )
+    )
+
+    assert "turn-failure" in projection._turns
+    assert len(pushes) == 1
+    assert pushes[0]["payload"]["code"] == "HISTORY_PERSISTENCE_UNCONFIRMED"
+    assert pushes[0]["payload"]["event_type"] == "chat.error"
+
+
+@pytest.mark.asyncio
+async def test_request_owned_critical_history_waits_for_durable_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from concurrent.futures import Future
+
+    from jiuwenswarm.server.runtime.agent_adapter import interface as module
+
+    receipt: Future[None] = Future()
+    calls: list[dict[str, Any]] = []
+
+    async def direct_history(fn, **kwargs):
+        calls.append(kwargs)
+        return receipt
+
+    monkeypatch.setattr(module, "_run_history_io", direct_history)
+    persistence = asyncio.create_task(
+        module._append_request_assistant_history(
+            session_id="session-1",
+            request_id="request-1",
+            channel_id="web",
+            event_type="chat.final",
+            content="done",
+            timestamp=1.0,
+            extra={"completed_at": 2.0},
+            mode="code",
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert persistence.done() is False
+    assert calls[0]["delivery_id"].startswith(
+        "request:request-1:chat.final:"
+    )
+    receipt.set_result(None)
+    await persistence
+
+
+@pytest.mark.asyncio
 async def test_external_route_skips_native_deep_agent_plan_state() -> None:
     class ExternalAgent:
         _runtime_execution_route = SimpleNamespace(provider_id="codex")

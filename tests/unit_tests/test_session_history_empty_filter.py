@@ -6,6 +6,7 @@ from concurrent.futures import Future
 import pytest
 
 from jiuwenswarm.server.runtime.session import session_history
+from jiuwenswarm.server.runtime.session import session_metadata
 
 
 def _wait_history(session_id: str, *, min_count: int = 1):
@@ -254,6 +255,38 @@ def test_has_persistable_assistant_payload_processing_status_still_rejected():
     ) is False
 
 
+def test_has_persistable_assistant_payload_pending_question():
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
+        event_type="chat.ask_user_question",
+        extra={
+            "request_id": "question-1",
+            "questions": [{"question": "Continue?"}],
+        },
+    ) is True
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
+        event_type="chat.ask_user_question",
+        extra={"request_id": "question-1", "questions": []},
+    ) is False
+
+
+def test_has_persistable_assistant_payload_activation_interaction():
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
+        event_type="harness.activate_interaction",
+        extra={
+            "interaction_id": "activation-1",
+            "interaction_type": "activate_confirm",
+        },
+    ) is True
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
+        event_type="harness.activate_interaction",
+        extra={"interaction_id": ""},
+    ) is False
+
+
 def test_has_persistable_assistant_payload_tool_update_still_rejected():
     assert session_history._has_persistable_assistant_payload(
         content_text="",
@@ -371,6 +404,117 @@ def test_request_completion_is_persisted_after_prior_history(tmp_path, monkeypat
         session_history.SESSION_REQUEST_COMPLETED_EVENT,
     ]
     assert records[-1]["status"] == "success"
+
+    duplicate = session_history.enqueue_history_request_completion(
+        "s-complete",
+        "r1",
+        terminal_status="success",
+    )
+    assert duplicate is not None
+    duplicate.result(timeout=2)
+    records = session_history.load_history_records("s-complete")
+    assert [
+        record for record in records
+        if record.get("event_type") == session_history.SESSION_REQUEST_COMPLETED_EVENT
+    ] == [records[-1]]
+
+
+def test_durable_history_append_is_idempotent_by_delivery_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_history, "get_agent_sessions_dir", lambda: tmp_path)
+    metadata_updates = []
+    monkeypatch.setattr(
+        session_metadata,
+        "update_session_metadata",
+        lambda **kwargs: metadata_updates.append(kwargs),
+    )
+    delivery_id = "harness:turn-1:terminal:finished:chat.final"
+
+    first = session_history.append_history_record_durable(
+        session_id="s-durable",
+        request_id="r1",
+        channel_id="web",
+        role="assistant",
+        event_type="chat.final",
+        content="Done",
+        timestamp=1.0,
+        delivery_id=delivery_id,
+    )
+    assert first is not None
+    first.result(timeout=2)
+
+    duplicate = session_history.append_history_record_durable(
+        session_id="s-durable",
+        request_id="r1",
+        channel_id="web",
+        role="assistant",
+        event_type="chat.final",
+        content="Done again",
+        timestamp=2.0,
+        delivery_id=delivery_id,
+    )
+    assert duplicate is not None
+    duplicate.result(timeout=2)
+
+    records = session_history.load_history_records("s-durable")
+    assert len(records) == 1
+    assert records[0]["content"] == "Done"
+    assert records[0]["delivery_id"] == delivery_id
+    assert len(metadata_updates) == 1
+
+
+def test_durable_history_append_retries_one_io_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_history, "get_agent_sessions_dir", lambda: tmp_path)
+    original = session_history._append_record_unfenced
+    attempts = 0
+
+    def flaky_append(path, record, *, durable=False):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("injected transient write failure")
+        return original(path, record, durable=durable)
+
+    monkeypatch.setattr(session_history, "_append_record_unfenced", flaky_append)
+    receipt = session_history.append_history_record_durable(
+        session_id="s-retry",
+        request_id="r1",
+        channel_id="web",
+        role="assistant",
+        event_type="chat.final",
+        content="Recovered",
+        timestamp=1.0,
+        delivery_id="harness:turn-retry:terminal:finished:chat.final",
+    )
+    assert receipt is not None
+    receipt.result(timeout=2)
+
+    assert attempts == 2
+    assert session_history.load_history_records("s-retry")[0]["content"] == "Recovered"
+
+
+def test_pending_question_is_durably_persisted_with_delivery_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_history, "get_agent_sessions_dir", lambda: tmp_path)
+    receipt = session_history.append_history_record_durable(
+        session_id="s-question",
+        request_id="turn-request",
+        channel_id="web",
+        role="assistant",
+        event_type="chat.ask_user_question",
+        content="",
+        timestamp=1.0,
+        extra={
+            "request_id": "question-1",
+            "questions": [{"question": "Continue?"}],
+        },
+        delivery_id="harness:turn-1:chunk:interaction:3:chat.ask_user_question",
+    )
+    assert receipt is not None
+    receipt.result(timeout=2)
+
+    record = session_history.load_history_records("s-question")[0]
+    assert record["event_type"] == "chat.ask_user_question"
+    assert record["request_id"] == "question-1"
+    assert record["questions"] == [{"question": "Continue?"}]
 
 
 @pytest.mark.asyncio

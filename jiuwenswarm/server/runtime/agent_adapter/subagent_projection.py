@@ -15,10 +15,40 @@ from openjiuwen.harness.subagent_runtime import (
     SUBAGENT_UPDATED_EVENT_TYPE,
 )
 
-from jiuwenswarm.server.runtime.session.session_history import append_history_record
+from jiuwenswarm.server.runtime.session.session_history import (
+    append_history_record,
+    append_history_record_durable,
+)
 
 _progress_batches: dict[str, list[str]] = {}
 _progress_batches_lock = threading.Lock()
+_DURABLE_TRANSCRIPT_EVENT_TYPES = frozenset(
+    {
+        "chat.ask_user_question",
+        "chat.error",
+        "chat.final",
+        "chat.tool_result",
+        "harness.activate_interaction",
+    }
+)
+
+
+def _append_subagent_history(
+    *,
+    durable: bool,
+    delivery_id: str,
+    **kwargs: Any,
+) -> None:
+    """Use one history FIFO and wait only for product-critical child records."""
+
+    if not durable:
+        append_history_record(delivery_id=delivery_id, **kwargs)
+        return
+    receipt = append_history_record_durable(delivery_id=delivery_id, **kwargs)
+    if receipt is not None:
+        # Subagent parsing is routed through run_history_io/run_stream_parser,
+        # so this blocks its worker thread rather than the event loop.
+        receipt.result(timeout=5.0)
 
 
 def _legacy_status(projection: dict[str, Any]) -> tuple[str, str]:
@@ -107,7 +137,15 @@ def persist_subagent_roster_history(
         return
     updated_at_ms = projection.get("updated_at_ms") or projection.get("created_at_ms")
     revision = projection.get("revision")
-    append_history_record(
+    legacy_status = str(web_payload.get("legacy_status") or "")
+    delivery_id = (
+        f"subagent:{subagent_id}:roster:{revision}"
+        if revision is not None
+        else f"subagent:{subagent_id}:roster:initial"
+    )
+    _append_subagent_history(
+        durable=legacy_status in {"completed", "error"},
+        delivery_id=delivery_id,
         session_id=parent_session_id,
         subagent_id=subagent_id,
         request_id=(
@@ -148,7 +186,9 @@ def persist_subagent_activity(projection: dict[str, Any]) -> None:
     )
     timestamp_ms = projection.get("at_ms")
     activity = {**projection, "parent_session_id": parent_session_id}
-    append_history_record(
+    _append_subagent_history(
+        durable=False,
+        delivery_id=f"subagent:{subagent_id}:activity:{task_id}:{seq_part}",
         session_id=parent_session_id,
         subagent_id=subagent_id,
         request_id=f"{subagent_id}:activity:{task_id}:{seq_part}",
@@ -184,7 +224,22 @@ def persist_subagent_transcript_message(projection: dict[str, Any]) -> None:
     extra["parent_session_id"] = parent_session_id
     timestamp_ms = projection.get("at_ms")
     role = str(projection.get("role") or "assistant")
-    append_history_record(
+    event_type = (
+        str(projection.get("event_type") or "").strip() or None
+        if role == "assistant"
+        else None
+    )
+    transcript_key = str(seq) if seq is not None else hashlib.sha256(
+        json.dumps(
+            projection,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    _append_subagent_history(
+        durable=event_type in _DURABLE_TRANSCRIPT_EVENT_TYPES,
+        delivery_id=f"subagent:{subagent_id}:transcript:{transcript_key}",
         session_id=parent_session_id,
         subagent_id=subagent_id,
         request_id=f"{subagent_id}:{seq}" if seq is not None else subagent_id,
@@ -192,11 +247,7 @@ def persist_subagent_transcript_message(projection: dict[str, Any]) -> None:
         role=role,
         content=str(projection.get("content") or ""),
         timestamp=float(timestamp_ms) / 1000 if timestamp_ms else time.time(),
-        event_type=(
-            str(projection.get("event_type") or "").strip() or None
-            if role == "assistant"
-            else None
-        ),
+        event_type=event_type,
         extra=extra,
         mode="subagent",
     )

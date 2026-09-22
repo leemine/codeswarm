@@ -62,6 +62,28 @@ def test_subagent_activity_history_record_is_restorable():
     ) is True
 
 
+def test_pending_interaction_history_records_are_restorable():
+    assert agent_ws_server_module._is_restorable_history_record(
+        {
+            "id": "question-1",
+            "role": "assistant",
+            "event_type": "chat.ask_user_question",
+            "request_id": "question-1",
+            "questions": [{"question": "Continue?"}],
+            "content": "",
+        }
+    ) is True
+    assert agent_ws_server_module._is_restorable_history_record(
+        {
+            "id": "activation-1",
+            "role": "assistant",
+            "event_type": "harness.activate_interaction",
+            "interaction_id": "activation-1",
+            "content": "",
+        }
+    ) is True
+
+
 @pytest.fixture(autouse=True)
 def patch_wire_encoder(monkeypatch):
     monkeypatch.setattr(

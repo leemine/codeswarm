@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future
+
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+from jiuwenswarm.server.runtime.agent_adapter import subagent_projection
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
 )
@@ -40,6 +43,55 @@ def test_subagent_history_writes_use_dedicated_child_bucket(monkeypatch) -> None
     assert all(item["session_id"] == "parent-session" for item in persisted)
     assert all(item["subagent_id"] == "subagent-1" for item in persisted)
     assert all(item["mode"] == "subagent" for item in persisted)
+
+
+def test_shared_subagent_terminal_records_use_stable_durable_delivery_ids(
+    monkeypatch,
+) -> None:
+    durable = []
+    asynchronous = []
+
+    def append_durable(**kwargs):
+        durable.append(kwargs)
+        receipt: Future[None] = Future()
+        receipt.set_result(None)
+        return receipt
+
+    monkeypatch.setattr(
+        subagent_projection,
+        "append_history_record_durable",
+        append_durable,
+    )
+    monkeypatch.setattr(
+        subagent_projection,
+        "append_history_record",
+        lambda **kwargs: asynchronous.append(kwargs),
+    )
+    base = {
+        "parent_session_id": "parent-session",
+        "subagent_id": "child-1",
+        "seq": 7,
+        "role": "assistant",
+        "content": "done",
+        "event_type": "chat.final",
+    }
+
+    subagent_projection.persist_subagent_transcript_message(base)
+    subagent_projection.persist_subagent_roster_history(
+        {**base, "revision": 3},
+        {"legacy_status": "completed", "description": "worker"},
+    )
+    subagent_projection.persist_subagent_activity(
+        {**base, "task_id": "task-1", "summary": "working"}
+    )
+
+    assert [item["delivery_id"] for item in durable] == [
+        "subagent:child-1:transcript:7",
+        "subagent:child-1:roster:3",
+    ]
+    assert asynchronous[0]["delivery_id"] == (
+        "subagent:child-1:activity:task-1:7"
+    )
 
 
 def test_subagent_user_history_does_not_replace_parent_delivery_context(

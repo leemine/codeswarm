@@ -14,7 +14,9 @@ import asyncio
 from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import replace
+import hashlib
 import inspect
+import json
 import logging
 import re
 import shutil
@@ -43,7 +45,9 @@ from jiuwenswarm.server.runtime.session.history_io import run_history_io as _run
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
     append_history_record,
+    append_history_record_durable,
     collapse_file_content_blocks,
+    wait_for_history_receipt,
 )
 from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
 from jiuwenswarm.server.runtime.agent_adapter.statusline_setup_agent import (
@@ -339,6 +343,87 @@ def _should_record_user_history(params: Any) -> bool:
     if is_interrupt_resume_payload(params):
         return False
     return str(params.get("source") or "") != "proactive_recommendation"
+
+
+_REQUEST_DURABLE_EVENT_TYPES = frozenset(
+    {
+        "chat.ask_user_question",
+        "chat.error",
+        "chat.final",
+        "chat.tool_result",
+        "context.usage",
+        "harness.activate_interaction",
+    }
+)
+_DELIVERY_VOLATILE_FIELDS = frozenset(
+    {"completed_at", "reasoning_updated_at", "timestamp"}
+)
+
+
+def _request_history_delivery_id(
+    *,
+    request_id: str,
+    event_type: str,
+    content: Any,
+    extra: dict[str, Any] | None,
+) -> str:
+    """Build a replay-stable key without locally generated timing fields."""
+
+    stable_extra = {
+        key: value
+        for key, value in (extra or {}).items()
+        if key not in _DELIVERY_VOLATILE_FIELDS
+    }
+    encoded = json.dumps(
+        {"content": content, "extra": stable_extra},
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()[:24]
+    return f"request:{request_id}:{event_type}:{digest}"
+
+
+async def _append_request_assistant_history(
+    *,
+    session_id: str,
+    request_id: str,
+    channel_id: str,
+    event_type: str,
+    content: Any,
+    timestamp: float,
+    extra: dict[str, Any] | None = None,
+    mode: str | None = None,
+) -> None:
+    """Persist critical request-owned output before it becomes observable."""
+
+    history_kwargs = dict(
+        session_id=session_id,
+        request_id=request_id,
+        channel_id=channel_id,
+        role="assistant",
+        event_type=event_type,
+        content=content,
+        timestamp=timestamp,
+        extra=extra,
+        mode=mode,
+    )
+    if event_type not in _REQUEST_DURABLE_EVENT_TYPES:
+        await _run_history_io(append_history_record, **history_kwargs)
+        return
+    receipt = await _run_history_io(
+        append_history_record_durable,
+        **history_kwargs,
+        delivery_id=_request_history_delivery_id(
+            request_id=request_id,
+            event_type=event_type,
+            content=content,
+            extra=extra,
+        ),
+    )
+    if receipt is not None:
+        await wait_for_history_receipt(receipt)
 
 
 def _resolve_final_record_timestamp(
@@ -3076,12 +3161,10 @@ class JiuWenSwarm:
                 request.channel_id,
                 event_type="chat.final",
             )
-            await _run_history_io(
-                append_history_record,
+            await _append_request_assistant_history(
                 session_id=session_id,
                 request_id=request.request_id,
                 channel_id=request.channel_id,
-                role="assistant",
                 event_type="chat.final",
                 content=content_str,
                 timestamp=time.time(),
@@ -3498,12 +3581,10 @@ class JiuWenSwarm:
                 segment_started_at=segment_started_at,
                 extra_fields=extra_fields,
             )
-            await _run_history_io(
-                append_history_record,
+            await _append_request_assistant_history(
                 session_id=session_id,
                 request_id=rid,
                 channel_id=cid,
-                role="assistant",
                 event_type="chat.final",
                 content=pending_text,
                 timestamp=record_timestamp,
@@ -3735,12 +3816,10 @@ class JiuWenSwarm:
                     }
                     if error_type:
                         error_payload["error_type"] = error_type
-                    await _run_history_io(
-                        append_history_record,
+                    await _append_request_assistant_history(
                         session_id=session_id,
                         request_id=rid,
                         channel_id=cid,
-                        role="assistant",
                         event_type="chat.error",
                         content=str(data),
                         timestamp=time.time(),
@@ -3779,7 +3858,11 @@ class JiuWenSwarm:
                         if isinstance(data.payload, dict) and isinstance(data.payload.get("event_type"), str):
                             et = str(data.payload.get("event_type"))
                             _note_goal_stream_payload(et, data.payload)
-                            should_record = et.startswith("chat.") or et == "context.usage"
+                            should_record = (
+                                et.startswith("chat.")
+                                or et == "context.usage"
+                                or et == "harness.activate_interaction"
+                            )
                             final_segment_started_at: float | None = None
                             if not should_record and et == EventType.TEAM_MESSAGE.value:
                                 should_record = True
@@ -3949,12 +4032,10 @@ class JiuWenSwarm:
                                     ),
                                     extra_fields=extra_fields,
                                 )
-                                await _run_history_io(
-                                    append_history_record,
+                                await _append_request_assistant_history(
                                     session_id=session_id,
                                     request_id=rid,
                                     channel_id=cid,
-                                    role="assistant",
                                     event_type=et,
                                     content=data.payload.get("content") or data.payload.get("error") or "",
                                     timestamp=record_timestamp,
@@ -3977,7 +4058,11 @@ class JiuWenSwarm:
                         ) or data
                         et = str(data.get("event_type"))
                         _note_goal_stream_payload(et, data)
-                        should_record = et.startswith("chat.") or et == "context.usage"
+                        should_record = (
+                            et.startswith("chat.")
+                            or et == "context.usage"
+                            or et == "harness.activate_interaction"
+                        )
                         final_segment_started_at = None
                         if not should_record and et == EventType.TEAM_MESSAGE.value:
                             should_record = True
@@ -4140,12 +4225,10 @@ class JiuWenSwarm:
                                 ),
                                 extra_fields=extra_fields,
                             )
-                            await _run_history_io(
-                                append_history_record,
+                            await _append_request_assistant_history(
                                 session_id=session_id,
                                 request_id=rid,
                                 channel_id=cid,
-                                role="assistant",
                                 event_type=et,
                                 content=data.get("content") or data.get("error") or "",
                                 timestamp=record_timestamp,
@@ -4239,12 +4322,10 @@ class JiuWenSwarm:
             ):
                 if key in request.params:
                     history_metadata[key] = request.params[key]
-            await _run_history_io(
-                append_history_record,
+            await _append_request_assistant_history(
                 session_id=session_id,
                 request_id=rid,
                 channel_id=cid,
-                role="assistant",
                 event_type="chat.final",
                 content=finalized_assistant_message,
                 timestamp=time.time(),

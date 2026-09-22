@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+from concurrent.futures import Future
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, List
 
@@ -269,6 +270,18 @@ async def _run_stream(
     monkeypatch.setattr(facade, "_sdk_name", "harness")
     monkeypatch.setattr(
         interface_module, "append_history_record", lambda **kwargs: recorded.append(kwargs)
+    )
+
+    def append_durable(**kwargs: Any) -> Future[None]:
+        recorded.append(kwargs)
+        receipt: Future[None] = Future()
+        receipt.set_result(None)
+        return receipt
+
+    monkeypatch.setattr(
+        interface_module,
+        "append_history_record_durable",
+        append_durable,
     )
     monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
     monkeypatch.setattr(interface_module, "get_memory_mode", lambda _cfg: "off")

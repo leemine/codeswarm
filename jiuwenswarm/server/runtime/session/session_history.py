@@ -24,7 +24,7 @@ from jiuwenswarm.common.session_message import SESSION_MESSAGE_ORIGIN
 logger = logging.getLogger(__name__)
 _FILE_LOCK = threading.Lock()
 _WRITE_QUEUE: queue.Queue[
-    tuple[str, dict[str, Any], str | None, Future[None] | None, int]
+    tuple[str, dict[str, Any], str | None, Future[bool] | None, int]
 ] = queue.Queue(maxsize=20000)
 _QUEUE_ENQUEUE_LOCK = threading.Lock()
 _WORKER_STARTED = False
@@ -160,6 +160,18 @@ def _has_persistable_assistant_payload(
         payload.get("tool_call") or payload.get("tool_calls")
     ):
         return True
+    if et == "chat.ask_user_question":
+        request_id = payload.get("request_id")
+        questions = payload.get("questions")
+        return (
+            isinstance(request_id, str)
+            and bool(request_id.strip())
+            and isinstance(questions, list)
+            and bool(questions)
+        )
+    if et == "harness.activate_interaction":
+        interaction_id = payload.get("interaction_id")
+        return isinstance(interaction_id, str) and bool(interaction_id.strip())
     if payload.get("error") or payload.get("files"):
         return True
     if payload.get("tool_call") or payload.get("tool_calls"):
@@ -480,21 +492,34 @@ def _write_records_unfenced(path: Path, records: list[dict[str, Any]]) -> None:
         os.replace(temporary_path, path)
 
 
-def _append_record_jsonl(path: Path, record: dict[str, Any]) -> None:
+def _append_record_jsonl(
+    path: Path,
+    record: dict[str, Any],
+    *,
+    durable: bool = False,
+) -> None:
     from jiuwenswarm.server.runtime.session import lifecycle as lc
     sid = _managed_history_session_id(path)
     if sid is None:
-        return _append_record_unfenced(path, record)
+        return _append_record_unfenced(path, record, durable=durable)
     with lc.resource_lock("session", sid):
         lc.write_guard(sid)
-        return _append_record_unfenced(path, record)
+        return _append_record_unfenced(path, record, durable=durable)
 
 
-def _append_record_unfenced(path: Path, record: dict[str, Any]) -> None:
+def _append_record_unfenced(
+    path: Path,
+    record: dict[str, Any],
+    *,
+    durable: bool = False,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False))
         fh.write("\n")
+        if durable:
+            fh.flush()
+            os.fsync(fh.fileno())
 
 
 def _ensure_jsonl_bootstrap(session_id: str) -> Path:
@@ -936,12 +961,25 @@ def read_session_history_records(session_id: str) -> list[dict[str, Any]]:
     return [item for item in all_records if isinstance(item, dict)]
 
 
+def _history_contains_delivery_id(path: Path, delivery_id: str) -> bool:
+    records = (
+        _read_history_jsonl(path)
+        if path.suffix.lower() == ".jsonl"
+        else _read_history(path)
+    )
+    return any(
+        isinstance(item, dict) and item.get("delivery_id") == delivery_id
+        for item in records
+    )
+
+
 def _write_item(
     session_id: str,
     item: dict[str, Any],
     *,
     subagent_id: str | None = None,
-) -> None:
+    durable: bool = False,
+) -> bool:
     with _FILE_LOCK:
         if subagent_id:
             target_path, error = resolve_subagent_history_path(
@@ -956,24 +994,45 @@ def _write_item(
                     subagent_id,
                     error,
                 )
-                return
+                return False
+            delivery_id = item.get("delivery_id")
+            if (
+                isinstance(delivery_id, str)
+                and delivery_id
+                and _history_contains_delivery_id(target_path, delivery_id)
+            ):
+                return False
             if target_path.suffix.lower() == ".jsonl":
-                _append_record_jsonl(target_path, item)
+                _append_record_jsonl(target_path, item, durable=durable)
             else:
                 records = _read_history(target_path)
                 records.append(item)
                 _write_records_to_path(target_path, records)
-            return
+            return True
 
         if use_legacy_history_json():
             target_path = _ensure_legacy_json_bootstrap(session_id)
+            delivery_id = item.get("delivery_id")
+            if (
+                isinstance(delivery_id, str)
+                and delivery_id
+                and _history_contains_delivery_id(target_path, delivery_id)
+            ):
+                return False
             records = _read_history(target_path)
             records.append(item)
             _write_records_to_path(target_path, records)
-            return
-
-        target_path = _ensure_jsonl_bootstrap(session_id)
-        _append_record_jsonl(target_path, item)
+        else:
+            target_path = _ensure_jsonl_bootstrap(session_id)
+            delivery_id = item.get("delivery_id")
+            if (
+                isinstance(delivery_id, str)
+                and delivery_id
+                and _history_contains_delivery_id(target_path, delivery_id)
+            ):
+                return False
+            _append_record_jsonl(target_path, item, durable=durable)
+        return True
 
 
 def _ensure_worker_started() -> None:
@@ -994,12 +1053,32 @@ def _ensure_worker_started() -> None:
                     from jiuwenswarm.server.runtime.session import lifecycle as lc
                     with lc.resource_lock("session", sid):
                         lc.write_guard(sid, generation)
-                        _write_item(sid, item, subagent_id=subagent_id)
+                        try:
+                            written = _write_item(
+                                sid,
+                                item,
+                                subagent_id=subagent_id,
+                                durable=receipt is not None,
+                            )
+                        except OSError:
+                            if receipt is None:
+                                raise
+                            logger.warning(
+                                "history durable write failed; retrying once: session_id=%s",
+                                sid,
+                                exc_info=True,
+                            )
+                            written = _write_item(
+                                sid,
+                                item,
+                                subagent_id=subagent_id,
+                                durable=True,
+                            )
                 except Exception as exc:  # noqa: BLE001
                     _settle_history_receipt(receipt, error=exc)
                     logger.warning("history 异步写入失败: %s", exc)
                 else:
-                    _settle_history_receipt(receipt)
+                    _settle_history_receipt(receipt, written=written)
                 finally:
                     _WRITE_QUEUE.task_done()
 
@@ -1020,8 +1099,9 @@ def flush_pending_writes(timeout: float = 10) -> bool:
 
 
 def _settle_history_receipt(
-    receipt: Future[None] | None,
+    receipt: Future[bool] | None,
     *,
+    written: bool = True,
     error: BaseException | None = None,
 ) -> None:
     """Complete a writer receipt without letting caller cancellation kill the worker."""
@@ -1030,7 +1110,7 @@ def _settle_history_receipt(
         return
     try:
         if error is None:
-            receipt.set_result(None)
+            receipt.set_result(written)
         else:
             receipt.set_exception(error)
     except InvalidStateError:
@@ -1040,7 +1120,7 @@ def _settle_history_receipt(
 
 
 async def wait_for_history_receipt(
-    receipt: Future[None],
+    receipt: Future[Any],
     *,
     timeout: float = 5.0,
 ) -> None:
@@ -1055,7 +1135,7 @@ def _enqueue_history_item(
     item: dict[str, Any],
     *,
     subagent_id: str | None = None,
-    receipt: Future[None] | None = None,
+    receipt: Future[bool] | None = None,
 ) -> None:
     """Keep all history records on one FIFO path, including under pressure."""
 
@@ -1085,7 +1165,9 @@ def append_history_record(
     channel_metadata: dict[str, Any] | None = None,
     mode: str | None = None,
     subagent_id: str | None = None,
-) -> None:
+    delivery_id: str | None = None,
+    _persistence_receipt: Future[bool] | None = None,
+) -> bool | None:
     """向指定 session 的当前激活历史文件异步追加一条记录."""
     sid = (session_id or "default").strip() or "default"
     if _is_ephemeral_heartbeat_session(sid):
@@ -1094,7 +1176,7 @@ def append_history_record(
             sid,
             event_type,
         )
-        return
+        return False if _persistence_receipt is not None else None
     rid = str(request_id or "").strip()
     cid = str(channel_id or "").strip()
     role_norm = "assistant" if role == "assistant" else "user"
@@ -1109,7 +1191,7 @@ def append_history_record(
             sid,
             event_type or "",
         )
-        return
+        return False if _persistence_receipt is not None else None
 
     item: dict[str, Any] = {
         "id": f"{rid}:{role_norm}",
@@ -1135,6 +1217,11 @@ def append_history_record(
                     event_type or "",
                     list(serialized_extra.keys()),
                 )
+    # The host-generated idempotency key is authoritative.  Structured
+    # provider payload must not replace it through ``extra``.
+    normalized_delivery_id = str(delivery_id or "").strip()
+    if normalized_delivery_id:
+        item["delivery_id"] = normalized_delivery_id
     if mode:
         item["mode"] = str(mode)
 
@@ -1144,52 +1231,80 @@ def append_history_record(
         and extra.get("message_origin") == SESSION_MESSAGE_ORIGIN
     )
 
-    _enqueue_history_item(sid, item, subagent_id=subagent_id)
-
-    # 更新会话元数据
-    try:
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            set_session_delivery_context,
-            update_session_metadata,
+    if _persistence_receipt is None:
+        _enqueue_history_item(sid, item, subagent_id=subagent_id)
+    else:
+        _enqueue_history_item(
+            sid,
+            item,
+            subagent_id=subagent_id,
+            receipt=_persistence_receipt,
         )
 
-        update_session_metadata(
-            session_id=sid,
-            channel_id=cid,
-            increment_message_count=True,
-            # 传入用户消息内容,用于自动生成标题
-            user_content=(
-                content_text
-                if role_norm == "user" and not is_cross_session_user
-                else None
-            ),
-            # 传入渠道元数据,首次写入时持久化
-            channel_metadata=channel_metadata,
-            # A subagent record carries its own history mode, but it belongs
-            # to the parent product Session and must not replace that Session's
-            # routing mode with the internal ``subagent`` label.
-            mode=None if subagent_id else mode,
-            # 用户消息时刷新 last_user_message_at(用消息时间戳,比请求到达时刻更精确;
-            # 与 AgentServer 的 _sync_chat_request_metadata 互补,覆盖所有记录用户消息的路径)
-            last_user_message_at=(
-                float(timestamp)
-                if role_norm == "user" and not is_cross_session_user
-                else None
-            ),
-        )
-        # Child transcript entries are stored under the parent Session only as
-        # an ownership relationship.  Their internal ``subagent`` channel is
-        # not an external return route and must not replace the parent's
-        # delivery context.
-        if role_norm == "user" and not subagent_id and not is_cross_session_user:
-            set_session_delivery_context(
+    def _update_metadata() -> None:
+        try:
+            from jiuwenswarm.server.runtime.session.session_metadata import (
+                set_session_delivery_context,
+                update_session_metadata,
+            )
+
+            update_session_metadata(
                 session_id=sid,
                 channel_id=cid,
-                source_request_id=rid,
-                route_metadata=channel_metadata,
+                increment_message_count=True,
+                user_content=(
+                    content_text
+                    if role_norm == "user" and not is_cross_session_user
+                    else None
+                ),
+                channel_metadata=channel_metadata,
+                mode=None if subagent_id else mode,
+                last_user_message_at=(
+                    float(timestamp)
+                    if role_norm == "user" and not is_cross_session_user
+                    else None
+                ),
             )
-    except Exception as exc:
-        logger.warning("更新会话元数据失败: %s", exc)
+            if role_norm == "user" and not subagent_id and not is_cross_session_user:
+                set_session_delivery_context(
+                    session_id=sid,
+                    channel_id=cid,
+                    source_request_id=rid,
+                    route_metadata=channel_metadata,
+                )
+        except Exception as exc:
+            logger.warning("更新会话元数据失败: %s", exc)
+
+    if _persistence_receipt is None:
+        _update_metadata()
+    else:
+        def _update_after_persisted(receipt: Future[bool]) -> None:
+            if receipt.cancelled() or receipt.exception() is not None:
+                return
+            if receipt.result():
+                _update_metadata()
+
+        _persistence_receipt.add_done_callback(_update_after_persisted)
+    return True if _persistence_receipt is not None else None
+
+
+def append_history_record_durable(**kwargs: Any) -> Future[bool] | None:
+    """Enqueue one record and return its durable-write receipt.
+
+    The receipt settles only after the writer has flushed the target history
+    file.  A supplied ``delivery_id`` also makes retries idempotent.  Existing
+    fire-and-forget callers keep using ``append_history_record``.
+    """
+
+    receipt: Future[bool] = Future()
+    accepted = append_history_record(
+        **kwargs,
+        _persistence_receipt=receipt,
+    )
+    if accepted:
+        return receipt
+    receipt.set_result(False)
+    return receipt
 
 
 def enqueue_history_request_completion(
@@ -1197,7 +1312,7 @@ def enqueue_history_request_completion(
     request_id: str,
     *,
     terminal_status: str = "success",
-) -> Future[None] | None:
+) -> Future[bool] | None:
     """Persist a request boundary after its previously enqueued history."""
 
     sid = (session_id or "default").strip() or "default"
@@ -1205,11 +1320,12 @@ def enqueue_history_request_completion(
     if not rid or _is_ephemeral_heartbeat_session(sid):
         return None
     status = str(terminal_status or "success").strip().lower() or "success"
-    receipt: Future[None] = Future()
+    receipt: Future[bool] = Future()
     _enqueue_history_item(
         sid,
         {
             "id": f"{rid}:request_completed",
+            "delivery_id": f"request:{rid}:completed:{status}",
             "role": "assistant",
             "request_id": rid,
             "channel_id": "",
