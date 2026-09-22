@@ -14,6 +14,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from openjiuwen.core.foundation.tool.schema import ToolOutput
 from openjiuwen.harness.engine import HarnessEngine
+from openjiuwen.harness.execution_subject import current_execution_subject
 from openjiuwen.harness_protocol import (
     AgentExecutionSpec,
     HarnessCapability,
@@ -98,6 +99,57 @@ async def test_gateway_delegates_original_tool_under_bound_scope(tmp_path: Path)
     assert result.is_error is False
     assert tool.calls == [({"value": "hello"}, {"session": session})]
     assert admitted == [(gateway.scope, "echo")]
+
+
+@pytest.mark.asyncio
+async def test_gateway_restores_mutable_json_arrays_for_product_tools(
+    tmp_path: Path,
+) -> None:
+    class ArrayTool(_Tool):
+        async def invoke(self, inputs, **kwargs):
+            assert isinstance(inputs["values"], list)
+            assert isinstance(inputs["nested"]["items"], list)
+            return ToolOutput(success=True, data={"content": "ok"})
+
+    tool = ArrayTool("arrays")
+    tool.card.input_params = {
+        "type": "object",
+        "properties": {"values": {"type": "array"}},
+    }
+    gateway = ProductToolGateway([tool], scope=_scope(tmp_path))
+
+    result = await gateway.invoke(
+        ToolInvocation(
+            "call-arrays",
+            "arrays",
+            {"values": ["a", "b"], "nested": {"items": [1, 2]}},
+        )
+    )
+
+    assert result.is_error is False
+
+
+@pytest.mark.asyncio
+async def test_gateway_binds_server_owned_execution_subject(tmp_path: Path) -> None:
+    observed = []
+
+    class SubjectTool(_Tool):
+        async def invoke(self, inputs, **kwargs):
+            observed.append(current_execution_subject())
+            return await super().invoke(inputs, **kwargs)
+
+    gateway = ProductToolGateway([SubjectTool()], scope=_scope(tmp_path))
+
+    result = await gateway.invoke(
+        ToolInvocation("call-1", "echo", {"value": "hello"})
+    )
+
+    assert result.is_error is False
+    assert len(observed) == 1
+    assert observed[0].subject_id == "alice"
+    assert observed[0].session_id == "parent-1"
+    assert observed[0].kind == "agent"
+    assert current_execution_subject() is None
 
 
 @pytest.mark.asyncio

@@ -13,6 +13,10 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel
 
+from openjiuwen.harness.execution_subject import (
+    ExecutionSubject,
+    execution_subject_scope,
+)
 from openjiuwen.harness_protocol import (
     ToolDefinition,
     ToolExecutionResult,
@@ -64,6 +68,16 @@ def _input_schema(tool: ProductTool) -> dict[str, Any]:
     if not isinstance(schema, Mapping):
         raise TypeError(f"product tool {tool.card.name!r} has no JSON input schema")
     return dict(schema)
+
+
+def _mutable_tool_value(value: Any) -> Any:
+    """Restore ordinary JSON containers expected by existing product tools."""
+
+    if isinstance(value, Mapping):
+        return {str(key): _mutable_tool_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_mutable_tool_value(item) for item in value]
+    return value
 
 
 class ProductToolGateway:
@@ -136,17 +150,24 @@ class ProductToolGateway:
                     is_error=True,
                 )
         try:
-            if invocation.name in self._unsafe_names:
-                async with self._unsafe_lock:
+            subject = ExecutionSubject(
+                subject_id=self._scope.subject_id,
+                display_name=self._scope.subject_id,
+                kind="agent",
+                session_id=self._scope.host_session_id,
+            )
+            with execution_subject_scope(subject):
+                if invocation.name in self._unsafe_names:
+                    async with self._unsafe_lock:
+                        output = await tool.invoke(
+                            _mutable_tool_value(invocation.arguments),
+                            **self._invoke_kwargs,
+                        )
+                else:
                     output = await tool.invoke(
-                        dict(invocation.arguments),
+                        _mutable_tool_value(invocation.arguments),
                         **self._invoke_kwargs,
                     )
-            else:
-                output = await tool.invoke(
-                    dict(invocation.arguments),
-                    **self._invoke_kwargs,
-                )
             rendered = tool.render_for_llm(output)
             success = getattr(output, "success", True)
             return ToolExecutionResult(
