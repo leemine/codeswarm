@@ -1,0 +1,717 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Real Codex CLI through the JiuwenSwarm External Single product adapter."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import shlex
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from openjiuwen.harness_protocol import AgentExecutionSpec
+from openjiuwen.core.foundation.tool.schema import ToolOutput
+from openjiuwen.harness_providers.codex import native_plugin_content_digest
+
+from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
+from jiuwenswarm.common.schema.agent import AgentRequest
+from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
+from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
+from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
+from jiuwenswarm.runtime.harness.tool_gateway import (
+    ProductToolGateway,
+    ProductToolScope,
+)
+from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import EngineAgentAdapter
+
+pytestmark = [pytest.mark.integration, pytest.mark.system]
+
+
+class _ResponsesFixture:
+    """Minimal loopback Responses endpoint for the bundled real Codex CLI."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict] = []
+        self.items: list[dict] = []
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, _format, *_args):
+                return None
+
+            def do_POST(self):
+                body = json.loads(
+                    self.rfile.read(int(self.headers["Content-Length"]))
+                )
+                owner.requests.append(body)
+                index = len(owner.requests)
+                item = owner.items.pop(0) if owner.items else {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": f"msg_{index}",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "R1-A2-PRODUCT-ROUTE-OK",
+                            "annotations": [],
+                        }
+                    ],
+                }
+                response = {
+                    "id": f"resp_{index}",
+                    "object": "response",
+                    "status": "in_progress",
+                    "output": [],
+                }
+                events = [
+                    ("response.created", {"response": response}),
+                    (
+                        "response.output_item.added",
+                        {"output_index": 0, "item": item},
+                    ),
+                    (
+                        "response.output_item.done",
+                        {"output_index": 0, "item": item},
+                    ),
+                    (
+                        "response.completed",
+                        {
+                            "response": {
+                                **response,
+                                "status": "completed",
+                                "output": [item],
+                                "usage": {
+                                    "input_tokens": 1,
+                                    "output_tokens": 1,
+                                    "total_tokens": 2,
+                                },
+                            }
+                        },
+                    ),
+                ]
+                data = "".join(
+                    "event: "
+                    + name
+                    + "\ndata: "
+                    + json.dumps({"type": name, **payload})
+                    + "\n\n"
+                    for name, payload in events
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_port}/v1"
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_args):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+
+def _route(root, spec: AgentExecutionSpec) -> AdmittedExecutionRoute:
+    source = ExecutionConfigSource(explicit=spec)
+    bindings = ExecutionBindingStore()
+    bound = bindings.bind(
+        source,
+        subject_id="local-test",
+        host_session_id="r1-a2-session",
+        workspace=str(root),
+    )
+    paths = RuntimeWorkspacePaths(
+        internal_workspace_dir=root,
+        runtime_workspace_root=root,
+        cwd=root,
+        project_root=root,
+    )
+    return AdmittedExecutionRoute("web", source, bindings, bound, paths)
+
+
+@pytest.mark.asyncio
+async def test_real_codex_cli_runs_through_external_product_adapter(tmp_path):
+    sdk = pytest.importorskip(
+        "openai_codex", reason="optional Codex SDK and bundled CLI required"
+    )
+    root = (tmp_path / "project").resolve()
+    home = (tmp_path / "home").resolve()
+    codex_home = (tmp_path / "codex-home").resolve()
+    for path in (root, home, codex_home):
+        path.mkdir()
+    (codex_home / "skills").mkdir()
+    binary = sdk.client._resolve_codex_bin(sdk.CodexConfig())
+    readable = {
+        ":minimal": "read",
+        str(root): "read",
+        str(codex_home / "tmp"): "read",
+        str(os.path.dirname(binary)): "read",
+    }
+    permission_config = (
+        'default_permissions = "r1-a2-read"\n'
+        "[permissions.r1-a2-read.filesystem]\n"
+        + "\n".join(
+            f"{json.dumps(path)} = {json.dumps(access)}"
+            for path, access in readable.items()
+        )
+        + "\n[permissions.r1-a2-read.network]\nenabled=false\n"
+    )
+    (codex_home / "config.toml").write_text(permission_config, encoding="utf-8")
+    (root / "JIUWENSWARM.md").write_text(
+        "R1-A2-PROJECT-CONTEXT", encoding="utf-8"
+    )
+
+    with _ResponsesFixture() as responses:
+        spec = AgentExecutionSpec(
+            "codex",
+            "r1-a2-local",
+            provider_config={
+                "inherit_process_env": False,
+                "env": {
+                    "HOME": str(home),
+                    "CODEX_HOME": str(codex_home),
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                },
+                "startup_source_roots": [str(root), str(codex_home / "skills")],
+                "mcp_required": False,
+                "model": {
+                    "model": "gpt-5.6-sol",
+                    "provider": "r1_a2_fixture",
+                    "api_base": responses.base_url,
+                    "api_key": "local-only",
+                },
+            },
+        )
+        route = _route(root, spec)
+        adapter = EngineAgentAdapter(route)
+        request = AgentRequest(
+            request_id="r1-a2-request",
+            channel_id="web",
+            session_id="r1-a2-session",
+            params={"mode": "code", "query": "R1-A2-USER-QUERY"},
+            is_stream=True,
+        )
+        request._execution_route = route
+
+        try:
+            await adapter.create_instance(mode="code")
+            adapter.select_execution_for_request(request)
+            chunks = [
+                chunk
+                async for chunk in adapter.process_message_stream_impl(
+                    request, {"query": "R1-A2-USER-QUERY"}
+                )
+            ]
+        finally:
+            await adapter.cleanup()
+
+    payloads = [chunk.payload for chunk in chunks if chunk.payload]
+    assert any(
+        payload.get("event_type") == "chat.delta"
+        and "R1-A2-PRODUCT-ROUTE-OK" in str(payload.get("content"))
+        for payload in payloads
+    ), payloads
+    assert payloads[-1]["event_type"] == "chat.final"
+    assert responses.requests
+    sent = json.dumps(responses.requests[0], ensure_ascii=False)
+    assert "R1-A2-USER-QUERY" in sent
+    assert "R1-A2-PROJECT-CONTEXT" in sent
+
+
+@pytest.mark.asyncio
+async def test_real_codex_cli_calls_session_owned_product_gateway(tmp_path):
+    sdk = pytest.importorskip(
+        "openai_codex", reason="optional Codex SDK and bundled CLI required"
+    )
+    root = (tmp_path / "project").resolve()
+    home = (tmp_path / "home").resolve()
+    codex_home = (tmp_path / "codex-home").resolve()
+    for path in (root, home, codex_home, codex_home / "skills"):
+        path.mkdir()
+    binary = sdk.client._resolve_codex_bin(sdk.CodexConfig())
+    readable = {
+        ":minimal": "read",
+        str(root): "read",
+        str(codex_home / "tmp"): "read",
+        str(os.path.dirname(binary)): "read",
+    }
+    permission_config = (
+        'default_permissions = "r1-b1-read"\n'
+        "[permissions.r1-b1-read.filesystem]\n"
+        + "\n".join(
+            f"{json.dumps(path)} = {json.dumps(access)}"
+            for path, access in readable.items()
+        )
+        + "\n[permissions.r1-b1-read.network]\nenabled=false\n"
+    )
+    (codex_home / "config.toml").write_text(permission_config, encoding="utf-8")
+
+    class EchoTool:
+        card = SimpleNamespace(
+            name="echo",
+            description="Return the fixed B1 product marker.",
+            input_params={
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+            parallel_safe=True,
+        )
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def invoke(self, inputs, **_kwargs):
+            self.calls.append(dict(inputs))
+            return ToolOutput(success=True, data={"content": "R1-B1-PRODUCT-MCP-OK"})
+
+        def render_for_llm(self, output) -> str:
+            return str(output.data["content"])
+
+    tool = EchoTool()
+    gateway = ProductToolGateway(
+        [tool],
+        scope=ProductToolScope("local-test", "r1-a2-session", str(root)),
+    )
+
+    with _ResponsesFixture() as responses:
+        responses.items.append(
+            {
+                "type": "function_call",
+                "namespace": "mcp__jiuwenswarm_product_tools",
+                "name": "echo",
+                "id": "fc_r1_b1",
+                "call_id": "call_r1_b1",
+                "arguments": json.dumps({"value": "from-codex"}),
+            }
+        )
+        spec = AgentExecutionSpec(
+            "codex",
+            "r1-b1-product-tools-local",
+            provider_config={
+                "inherit_process_env": False,
+                "env": {
+                    "HOME": str(home),
+                    "CODEX_HOME": str(codex_home),
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                },
+                "startup_source_roots": [str(root), str(codex_home / "skills")],
+                "mcp_required": True,
+                "mcp_default_tools_approval_mode": "prompt",
+                "model": {
+                    "model": "gpt-5.6-sol",
+                    "provider": "r1_b1_fixture",
+                    "api_base": responses.base_url,
+                    "api_key": "local-only",
+                },
+            },
+        )
+        route = _route(root, spec)
+        adapter = EngineAgentAdapter(route, tool_gateway=gateway)
+        request = AgentRequest(
+            request_id="r1-b1-product-tool-request",
+            channel_id="web",
+            session_id="r1-a2-session",
+            params={"mode": "code", "query": "Call the prescribed product tool once."},
+            is_stream=True,
+        )
+        request._execution_route = route
+        chunks = []
+        approval_count = 0
+        transport = None
+        try:
+            await adapter.create_instance(mode="code")
+            adapter.select_execution_for_request(request)
+            stream = adapter.process_message_stream_impl(
+                request, {"query": "Call the prescribed product tool once."}
+            )
+            while True:
+                try:
+                    chunk = await anext(stream)
+                except StopAsyncIteration:
+                    break
+                chunks.append(chunk)
+                payload = chunk.payload or {}
+                if payload.get("event_type") != "chat.ask_user_question":
+                    continue
+                approval_count += 1
+                answer = AgentRequest(
+                    request_id=f"r1-b1-answer-{approval_count}",
+                    channel_id="web",
+                    session_id="r1-a2-session",
+                    params={
+                        "request_id": payload["request_id"],
+                        "source": payload["source"],
+                        "answers": [{"selected_options": ["allow_once"]}],
+                    },
+                )
+                accepted = await adapter.handle_user_answer(answer)
+                assert accepted.payload == {"accepted": True, "resolved": True}
+            transport = adapter.execution_session._tool_transport
+            assert transport is not None and transport.started
+        finally:
+            await adapter.cleanup()
+
+    assert approval_count == 1
+    assert tool.calls == [{"value": "from-codex"}]
+    assert "R1-B1-PRODUCT-MCP-OK" in json.dumps(responses.requests)
+    assert any((chunk.payload or {}).get("event_type") == "chat.final" for chunk in chunks)
+    assert transport is not None and not transport.started
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allow", [False, True])
+async def test_real_codex_tool_approval_roundtrips_through_product_adapter(
+    tmp_path, allow, monkeypatch
+):
+    pytest.importorskip(
+        "openai_codex", reason="optional Codex SDK and bundled CLI required"
+    )
+    root = (tmp_path / "project").resolve()
+    home = (tmp_path / "home").resolve()
+    codex_home = (tmp_path / "codex-home").resolve()
+    for path in (root, home, codex_home):
+        path.mkdir()
+    marker = root / "approval-marker.txt"
+    sessions = tmp_path / "sessions"
+    upload = sessions / "r1-a2-session" / "uploads" / "attachment.txt"
+    upload.parent.mkdir(parents=True)
+    upload.write_text("R1-A2-ATTACHMENT", encoding="utf-8")
+    from jiuwenswarm.runtime.harness import context_bridge
+
+    monkeypatch.setattr(context_bridge, "get_agent_sessions_dir", lambda: sessions)
+    staged = (
+        root
+        / ".jiuwenswarm"
+        / "session-inputs"
+        / "r1-a2-session"
+        / "r1-a2-approval-request"
+        / "attachment.txt"
+    )
+
+    with _ResponsesFixture() as responses:
+        responses.items.append(
+            {
+                "type": "function_call",
+                "name": "exec_command",
+                "id": "fc_r1_a2",
+                "call_id": "call_r1_a2",
+                "arguments": json.dumps(
+                    {
+                        "cmd": (
+                            f"cat {shlex.quote(str(staged))} "
+                            "> approval-marker.txt"
+                        ),
+                        "workdir": str(root),
+                    }
+                ),
+            }
+        )
+        spec = AgentExecutionSpec(
+            "codex",
+            "r1-a2-approval-local",
+            provider_config={
+                "inherit_process_env": False,
+                "env": {
+                    "HOME": str(home),
+                    "CODEX_HOME": str(codex_home),
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                },
+                "mcp_required": False,
+                "model": {
+                    "model": "gpt-5.6-sol",
+                    "provider": "r1_a2_fixture",
+                    "api_base": responses.base_url,
+                    "api_key": "local-only",
+                },
+            },
+        )
+        route = _route(root, spec)
+        adapter = EngineAgentAdapter(route)
+        request = AgentRequest(
+            request_id="r1-a2-approval-request",
+            channel_id="web",
+            session_id="r1-a2-session",
+            params={
+                "mode": "code",
+                "query": "Run the prescribed tool once.",
+                "files": {
+                    "uploaded_documents": [
+                        {"filename": "attachment.txt", "path": str(upload)}
+                    ]
+                },
+            },
+            is_stream=True,
+        )
+        request._execution_route = route
+        chunks = []
+
+        try:
+            await adapter.create_instance(mode="code")
+            adapter.select_execution_for_request(request)
+            stream = adapter.process_message_stream_impl(
+                request, {"query": "Run the prescribed tool once."}
+            )
+            while True:
+                chunk = await anext(stream)
+                chunks.append(chunk)
+                payload = chunk.payload or {}
+                if payload.get("event_type") == "chat.ask_user_question":
+                    break
+            answer = AgentRequest(
+                request_id="r1-a2-answer",
+                channel_id="web",
+                session_id="r1-a2-session",
+                params={
+                    "request_id": payload["request_id"],
+                    "source": payload["source"],
+                    "answers": [
+                        {
+                            "selected_options": [
+                                "allow_once" if allow else "deny"
+                            ]
+                        }
+                    ],
+                },
+            )
+            answer_response = await adapter.handle_user_answer(answer)
+            assert answer_response.payload == {"accepted": True, "resolved": True}
+            chunks.extend([chunk async for chunk in stream])
+        finally:
+            await adapter.cleanup()
+
+    assert marker.exists() is allow
+    if allow:
+        assert marker.read_text(encoding="utf-8") == "R1-A2-ATTACHMENT"
+    assert not staged.exists()
+    assert any(
+        (chunk.payload or {}).get("event_type") == "chat.final"
+        for chunk in chunks
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_codex_native_plugin_runs_through_product_adapter(tmp_path):
+    sdk = pytest.importorskip(
+        "openai_codex", reason="optional Codex SDK and bundled CLI required"
+    )
+    root = (tmp_path / "project").resolve()
+    home = (tmp_path / "home").resolve()
+    codex_home = (tmp_path / "codex-home").resolve()
+    market = (tmp_path / "market").resolve()
+    plugin = market / "plugins" / "c1-probe"
+    for path in (
+        root,
+        home,
+        codex_home,
+        codex_home / "skills",
+        market / ".agents/plugins",
+        plugin / ".codex-plugin",
+        plugin / "skills/marker",
+    ):
+        path.mkdir(parents=True)
+    (market / ".agents/plugins/marketplace.json").write_text(
+        json.dumps(
+            {
+                "name": "c1-local",
+                "plugins": [
+                    {
+                        "name": "c1-probe",
+                        "source": {"source": "local", "path": "./plugins/c1-probe"},
+                        "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (plugin / ".codex-plugin/plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "c1-probe",
+                "version": "1.0.0",
+                "skills": "./skills",
+                "mcpServers": "./.mcp.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (plugin / "skills/marker/SKILL.md").write_text(
+        "---\nname: marker\ndescription: Read the C1 product marker and call its MCP tool.\n---\n"
+        "C1-PRODUCT-SKILL\n",
+        encoding="utf-8",
+    )
+    marker = root / "c1-mcp-called.txt"
+    pidfile = root / "c1-mcp.pid"
+    server_code = (
+        "import os\nfrom pathlib import Path\nfrom mcp.server.fastmcp import FastMCP\n"
+        f"Path({str(pidfile)!r}).write_text(str(os.getpid()))\n"
+        "m=FastMCP('c1-product')\n@m.tool()\ndef marker() -> str:\n"
+        '    """Return the C1 product marker."""\n'
+        f"    Path({str(marker)!r}).write_text('C1-PRODUCT-MCP-CALLED')\n"
+        "    return 'C1-PRODUCT-MCP-OK'\nm.run(transport='stdio')\n"
+    )
+    (plugin / ".mcp.json").write_text(
+        json.dumps(
+            {"mcpServers": {"c1_probe": {"command": sys.executable, "args": ["-c", server_code]}}}
+        ),
+        encoding="utf-8",
+    )
+    env = {
+        "HOME": str(home),
+        "CODEX_HOME": str(codex_home),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+    }
+    binary = str(sdk.client._resolve_codex_bin(sdk.CodexConfig()))
+    for args in (("plugin", "marketplace", "add", str(market)), ("plugin", "add", "c1-probe@c1-local")):
+        process = await asyncio.create_subprocess_exec(
+            binary,
+            *args,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), 20)
+        assert process.returncode == 0, (stdout, stderr)
+    config_path = codex_home / "config.toml"
+    installed_config = config_path.read_text(encoding="utf-8")
+    readable = {
+        ":minimal": "read",
+        str(root): "read",
+        str(codex_home): "read",
+        str(Path(binary).parent): "read",
+        str(Path(sys.executable).parent): "read",
+    }
+    permission_config = 'default_permissions = "c1-product"\n[permissions.c1-product.filesystem]\n'
+    permission_config += "\n".join(
+        f"{json.dumps(path)} = {json.dumps(access)}" for path, access in readable.items()
+    )
+    permission_config += "\n[permissions.c1-product.network]\nenabled=false\n"
+    config_path.write_text(permission_config + installed_config, encoding="utf-8")
+    installed_plugin = codex_home / "plugins/cache/c1-local/c1-probe/1.0.0"
+    skill = installed_plugin / "skills/marker/SKILL.md"
+
+    with _ResponsesFixture() as responses:
+        responses.items.extend(
+            [
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "id": "fc_c1_skill",
+                    "call_id": "call_c1_skill",
+                    "arguments": json.dumps({"cmd": f"cat {shlex.quote(str(skill))}", "login": False}),
+                },
+                {
+                    "type": "function_call",
+                    "namespace": "mcp__c1_probe",
+                    "name": "marker",
+                    "id": "fc_c1_mcp",
+                    "call_id": "call_c1_mcp",
+                    "arguments": "{}",
+                },
+            ]
+        )
+        spec = AgentExecutionSpec(
+            "codex",
+            "r1-c1-plugin-local",
+            provider_config={
+                "inherit_process_env": False,
+                "env": env,
+                "startup_source_roots": [
+                    str(root),
+                    str(codex_home / "plugins"),
+                    str(codex_home / "skills"),
+                    str(market),
+                ],
+                "native_plugins": [
+                    {
+                        "plugin_id": "c1-probe@c1-local",
+                        "source_type": "local",
+                        "source_locator": str(plugin),
+                        "version": "1.0.0",
+                        "content_sha256": native_plugin_content_digest(installed_plugin),
+                        "enabled": True,
+                        "required_components": ["skills", "mcp"],
+                        "mcp_server_names": ["c1_probe"],
+                    }
+                ],
+                "model": {
+                    "model": "gpt-5.6-sol",
+                    "provider": "r1_c1_fixture",
+                    "api_base": responses.base_url,
+                    "api_key": "local-only",
+                },
+            },
+        )
+        route = _route(root, spec)
+        adapter = EngineAgentAdapter(route)
+        request = AgentRequest(
+            request_id="r1-c1-plugin-request",
+            channel_id="web",
+            session_id="r1-a2-session",
+            params={"mode": "code", "query": "Use the C1 native plugin once."},
+            is_stream=True,
+        )
+        request._execution_route = route
+        chunks = []
+        approval_count = 0
+        try:
+            await adapter.create_instance(mode="code")
+            adapter.select_execution_for_request(request)
+            stream = adapter.process_message_stream_impl(
+                request, {"query": "Use the C1 native plugin once."}
+            )
+            while True:
+                try:
+                    chunk = await anext(stream)
+                except StopAsyncIteration:
+                    break
+                chunks.append(chunk)
+                payload = chunk.payload or {}
+                if payload.get("event_type") != "chat.ask_user_question":
+                    continue
+                approval_count += 1
+                answer = AgentRequest(
+                    request_id=f"r1-c1-answer-{approval_count}",
+                    channel_id="web",
+                    session_id="r1-a2-session",
+                    params={
+                        "request_id": payload["request_id"],
+                        "source": payload["source"],
+                        "answers": [{"selected_options": ["allow_once"]}],
+                    },
+                )
+                accepted = await adapter.handle_user_answer(answer)
+                assert accepted.payload == {"accepted": True, "resolved": True}
+        finally:
+            await adapter.cleanup()
+
+    assert approval_count == 2
+    assert marker.read_text(encoding="utf-8") == "C1-PRODUCT-MCP-CALLED"
+    rendered_requests = json.dumps(responses.requests)
+    assert "C1-PRODUCT-SKILL" in rendered_requests
+    assert "C1-PRODUCT-MCP-OK" in rendered_requests
+    assert any((chunk.payload or {}).get("event_type") == "chat.final" for chunk in chunks)
+    pid = int(pidfile.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 5
+    while Path(f"/proc/{pid}").exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+    assert not Path(f"/proc/{pid}").exists()

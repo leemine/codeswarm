@@ -37,6 +37,7 @@ from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     create_adapter,
     resolve_sdk_choice,
 )
+from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
 from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_auto_memory_enabled, is_memory_enabled
 from jiuwenswarm.server.runtime.session.history_io import run_history_io as _run_history_io
 from jiuwenswarm.server.runtime.session.session_history import (
@@ -1146,6 +1147,7 @@ class JiuWenSwarm:
             str | None,
             dict[str, Any],
         ] | None = None
+        self._runtime_execution_route: AdmittedExecutionRoute | None = None
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
 
@@ -1219,11 +1221,20 @@ class JiuWenSwarm:
         logger.info("[JiuWenSwarm] SkillDevService 初始化完成")
         return self._skilldev_service
 
-    def _ensure_adapter(self, *, mode: str = "agent") -> AgentAdapter:
+    def _ensure_adapter(
+        self,
+        *,
+        mode: str = "agent",
+        execution_route: AdmittedExecutionRoute | None = None,
+    ) -> AgentAdapter:
         """确保 adapter 已初始化，如果未初始化则根据环境变量和 mode 创建."""
         if self._adapter is None:
             self._sdk_name = resolve_sdk_choice()
-            self._adapter = create_adapter(self._sdk_name, mode=mode)
+            self._adapter = create_adapter(
+                self._sdk_name,
+                mode=mode,
+                execution_route=execution_route,
+            )
             if hasattr(self._adapter, "set_skill_manager"):
                 self._adapter.set_skill_manager(self._skill_manager)
             if hasattr(self._adapter, "set_heartbeat_service"):
@@ -1245,6 +1256,12 @@ class JiuWenSwarm:
                 self._on_skillnet_install_complete
             )
             logger.info("[JiuWenSwarm] Initialized adapter: sdk=%s, mode=%s", self._sdk_name, mode)
+        elif execution_route is not None:
+            bind_route = getattr(self._adapter, "bind_route", None)
+            if execution_route.provider_id != "native" and not callable(bind_route):
+                raise RuntimeError("External execution cannot reuse a Native adapter")
+            if callable(bind_route):
+                bind_route(execution_route)
         return self._adapter
 
     @staticmethod
@@ -1329,6 +1346,7 @@ class JiuWenSwarm:
         mode: str = "agent",
         sub_mode: str = None,
         agent_definition: dict[str, Any] | None = None,
+        execution_route: AdmittedExecutionRoute | None = None,
     ) -> None:
         """初始化 Agent 实例.
 
@@ -1347,7 +1365,11 @@ class JiuWenSwarm:
             if agent_definition is not None
             else None
         )
-        adapter = self._ensure_adapter(mode=mode)
+        adapter = (
+            self._ensure_adapter(mode=mode, execution_route=execution_route)
+            if execution_route is not None
+            else self._ensure_adapter(mode=mode)
+        )
         create_kwargs: dict[str, Any] = {"mode": mode, "sub_mode": sub_mode}
         if agent_definition is not None:
             if mode != "code":
@@ -1357,6 +1379,7 @@ class JiuWenSwarm:
             create_kwargs["agent_definition"] = dict(agent_definition)
         await adapter.create_instance(config, **create_kwargs)
         self._runtime_agent_create_snapshot = runtime_agent_snapshot
+        self._runtime_execution_route = execution_route
         logger.info(
             "[JiuWenSwarm] Agent instance created: sdk=%s, mode=%s, sub_mode=%s",
             self._sdk_name, mode, sub_mode,
@@ -1369,6 +1392,11 @@ class JiuWenSwarm:
 
     async def _on_skillnet_install_complete(self) -> None:
         """Reload the agent and refresh live team skill rails after async install."""
+        if getattr(self, "_runtime_execution_route", None) is not None:
+            # External Provider plugins are frozen per Session and are wired by
+            # R1-03C1. A Native SkillNet change must not rebuild this binding.
+            await self._reload_team_skill_rails()
+            return
         snapshot = self._runtime_agent_create_snapshot
         if snapshot is None:
             await self.create_instance()
@@ -4642,6 +4670,16 @@ class JiuWenSwarm:
             return bool(has_runtime())
         return bool(has_runtime(session_id))
 
+    def owns_external_execution(self, session_id: str | None = None) -> bool:
+        """Return whether this facade is the isolated root for one External binding."""
+        route = self._runtime_execution_route
+        if route is None:
+            return False
+        return (
+            session_id is None
+            or route.bound.binding.host_session_id == str(session_id or "")
+        )
+
     def has_auto_permission_session(self, session_id: str | None) -> bool:
         adapter = self._adapter
         checker = getattr(adapter, "has_auto_permission_session", None)
@@ -4694,5 +4732,6 @@ class JiuWenSwarm:
             except Exception as e:
                 logger.warning("[JiuWenSwarm] Adapter cleanup failed: %s", e)
             self._adapter = None
+            self._runtime_execution_route = None
 
         logger.info("[JiuWenSwarm] cleanup: 完成")

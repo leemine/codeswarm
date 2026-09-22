@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, AsyncIterator, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, AsyncIterator, Protocol, runtime_checkable
 
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+
+if TYPE_CHECKING:
+    from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +128,12 @@ def resolve_sdk_choice() -> str:
     return _DEFAULT_SDK
 
 
-def create_adapter(sdk: str | None = None, *, mode: str = "agent") -> AgentAdapter:
+def create_adapter(
+    sdk: str | None = None,
+    *,
+    mode: str = "agent",
+    execution_route: "AdmittedExecutionRoute | None" = None,
+) -> AgentAdapter:
     """Factory function to create SDK adapter instance.
 
     Args:
@@ -139,6 +147,13 @@ def create_adapter(sdk: str | None = None, *, mode: str = "agent") -> AgentAdapt
         NotImplementedError: If SDK is 'pi' (not yet implemented).
         RuntimeError: If SDK is unknown.
     """
+    if execution_route is not None and execution_route.provider_id != "native":
+        from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import (
+            EngineAgentAdapter,
+        )
+
+        return EngineAgentAdapter(execution_route)
+
     sdk_name = sdk or resolve_sdk_choice()
 
     if sdk_name == "harness":

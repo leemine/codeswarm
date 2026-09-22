@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -40,6 +41,7 @@ from jiuwenswarm.agents.harness.common.rails.permissions.root_permission_queue i
 from jiuwenswarm.agents.harness.common.rsi.errors import RsiHarnessInstallConflict
 
 if TYPE_CHECKING:
+    from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
     from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
 
 
@@ -157,6 +159,26 @@ def _make_defined_agent_cache_key(
     ):
         raise ValueError("invalid Agent definition fingerprint")
     return f"{_make_agent_cache_key(mode, sub_mode, project_dir)}:agent:{fingerprint}"
+
+
+def _make_execution_agent_cache_key(
+    mode: str | None,
+    sub_mode: str | None,
+    route: "AdmittedExecutionRoute",
+) -> str:
+    """Isolate an External root by its complete admitted binding identity."""
+    identity = getattr(route, "cache_identity", None)
+    binding = getattr(getattr(route, "bound", None), "binding", None)
+    if not isinstance(identity, tuple) or binding is None:
+        raise TypeError("invalid admitted execution route")
+    scope = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    base = _make_agent_cache_key(mode, sub_mode, None)
+    return (
+        f"{base}:execution:{binding.provider_id}:{binding.config_revision}:"
+        f"{binding.fingerprint}:{scope}"
+    )
 
 
 def _build_acp_agent_config(extra_config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -634,6 +656,7 @@ class AgentManager:
         *,
         agent_definition: dict[str, Any] | None = None,
         agent_definition_fingerprint: str | None = None,
+        execution_route: "AdmittedExecutionRoute | None" = None,
     ) -> "JiuWenSwarm":
         """创建 Agent 实例.
 
@@ -686,6 +709,8 @@ class AgentManager:
         }
         if definition_snapshot is not None:
             create_kwargs["agent_definition"] = deepcopy(definition_snapshot)
+        if execution_route is not None:
+            create_kwargs["execution_route"] = execution_route
         try:
             await agent.create_instance(config, **create_kwargs)
         except BaseException as create_error:
@@ -693,7 +718,7 @@ class AgentManager:
             # before it is inserted into the manager cache.  Runtime.close()
             # cannot discover that partial instance, so unwind it here while
             # preserving the original construction failure.
-            if definition_snapshot is not None:
+            if definition_snapshot is not None or execution_route is not None:
                 cleanup = getattr(agent, "cleanup", None)
                 if callable(cleanup):
                     try:
@@ -728,6 +753,8 @@ class AgentManager:
             create_params["agent_definition_fingerprint"] = (
                 agent_definition_fingerprint
             )
+        if execution_route is not None:
+            create_params["execution_route"] = execution_route
         self._agent_create_params.setdefault(channel_key, {})[
             agent_cache_key
         ] = create_params
@@ -891,6 +918,35 @@ class AgentManager:
                     sid,
                     cache_key,
                 )
+                continue
+
+            owns_external = getattr(agent, "owns_external_execution", None)
+            if (
+                session_cleaned
+                and callable(owns_external)
+                and owns_external(sid)
+                and channel_agents.get(cache_key) is agent
+            ):
+                # External roots are binding-scoped rather than shared channel
+                # roots. Detach the exact cache entry after its Session closes.
+                try:
+                    create_lock = self._get_agent_create_lock(channel_key, cache_key)
+                    async with create_lock:
+                        if channel_agents.get(cache_key) is agent:
+                            await agent.cleanup()
+                            channel_agents.pop(cache_key, None)
+                            channel_params = self._agent_create_params.get(channel_key)
+                            if isinstance(channel_params, dict):
+                                channel_params.pop(cache_key, None)
+                except Exception:
+                    failed_agents += 1
+                    logger.exception(
+                        "[AgentManager] External root cleanup failed: "
+                        "channel_id=%s session_id=%s cache_key=%s",
+                        channel_key,
+                        sid,
+                        cache_key,
+                    )
                 continue
 
             if channel_key != "tui":
@@ -1244,6 +1300,7 @@ class AgentManager:
             *,
             agent_definition: dict[str, Any] | None = None,
             agent_definition_fingerprint: str | None = None,
+            execution_route: "AdmittedExecutionRoute | None" = None,
     ) -> "JiuWenSwarm | None":
         """获取 Agent 实例（自动创建）.
 
@@ -1268,8 +1325,26 @@ class AgentManager:
             raise ValueError(
                 "Agent definition and fingerprint must be provided together"
             )
+        if execution_route is not None:
+            route_channel = _normalize_channel_id(
+                getattr(execution_route, "channel_id", "")
+            )
+            if route_channel != channel_key:
+                raise ValueError("execution route channel does not match request")
+        external_route = (
+            execution_route
+            if execution_route is not None
+            and getattr(execution_route, "provider_id", None) != "native"
+            else None
+        )
+        if external_route is not None and agent_definition is not None:
+            raise ValueError(
+                "External execution cannot use a Native Agent definition"
+            )
         cache_key = (
-            _make_defined_agent_cache_key(
+            _make_execution_agent_cache_key(mode_key, sub_mode_key, external_route)
+            if external_route is not None
+            else _make_defined_agent_cache_key(
                 mode_key,
                 sub_mode_key,
                 project_key,
@@ -1307,6 +1382,8 @@ class AgentManager:
                 create_kwargs["agent_definition_fingerprint"] = (
                     agent_definition_fingerprint
                 )
+            if external_route is not None:
+                create_kwargs["execution_route"] = external_route
             agent = await self._create_agent(
                 channel_key,
                 mode_key,
@@ -1853,8 +1930,24 @@ class AgentManager:
             )
             return
 
-        # 1. 备份 (mode -> create_params)
-        existing_modes = list(agents.keys())
+        # 1. 备份 (mode -> create_params). External bindings are immutable
+        # session roots; a Native sandbox/config rebuild must not restart them.
+        rebuild_agents = {
+            mode_key: agent
+            for mode_key, agent in agents.items()
+            if not (
+                callable(getattr(agent, "owns_external_execution", None))
+                and agent.owns_external_execution()
+            )
+        }
+        existing_modes = list(rebuild_agents)
+        if not existing_modes:
+            logger.info(
+                "[AgentManager] recreate_agent: channel %s has only bound "
+                "External roots, skip",
+                channel_key,
+            )
+            return
         backup_params: dict[str, dict[str, Any]] = {}
         channel_params = self._agent_create_params.get(channel_key) or {}
         for mode_key in existing_modes:
@@ -1865,7 +1958,7 @@ class AgentManager:
             backup_params[mode_key] = dict(params)
 
         # 2. cleanup + 删除
-        for mode_key, agent in list(agents.items()):
+        for mode_key, agent in list(rebuild_agents.items()):
             if hasattr(agent, "cleanup"):
                 try:
                     await agent.cleanup()
@@ -1875,8 +1968,12 @@ class AgentManager:
                         mode_key,
                         exc,
                     )
-        del self.agents[channel_key]
-        self._agent_create_params.pop(channel_key, None)
+            agents.pop(mode_key, None)
+            channel_params.pop(mode_key, None)
+        if not agents:
+            self.agents.pop(channel_key, None)
+        if not channel_params:
+            self._agent_create_params.pop(channel_key, None)
         logger.info(
             "[AgentManager] recreate_agent: channel %s agents dropped (modes=%s)",
             channel_key,
@@ -1901,6 +1998,9 @@ class AgentManager:
                     create_kwargs["agent_definition_fingerprint"] = params.get(
                         "agent_definition_fingerprint"
                     )
+                execution_route = params.get("execution_route")
+                if execution_route is not None:
+                    create_kwargs["execution_route"] = execution_route
                 await self._create_agent(
                     channel_key,
                     mode=params.get("mode") or mode_key,
@@ -2066,6 +2166,9 @@ class AgentManager:
                         get_kwargs["agent_definition_fingerprint"] = (
                             agent_definition_fingerprint
                         )
+                    execution_route = getattr(request, "_execution_route", None)
+                    if execution_route is not None:
+                        get_kwargs["execution_route"] = execution_route
                     agent = await self.get_agent(
                         **get_kwargs,
                     )
@@ -2094,6 +2197,9 @@ class AgentManager:
             get_kwargs["agent_definition_fingerprint"] = (
                 agent_definition_fingerprint
             )
+        execution_route = getattr(request, "_execution_route", None)
+        if execution_route is not None:
+            get_kwargs["execution_route"] = execution_route
         return await self.get_agent(**get_kwargs)
 
     async def process_message(self, request: Any) -> Any:

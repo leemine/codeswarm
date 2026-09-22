@@ -1,4 +1,4 @@
-# Execution selection and Native Single integration
+# Execution selection and Single integration
 
 Use `parse_execution_config` for a dedicated execution configuration, not model-provider settings. Pass complete snapshots through `ExecutionConfigSource` (explicit > project > default) to `prepare_execution`, together with a host-owned `ExecutionBindingStore` and an authorized subject/session/absolute workspace.
 
@@ -31,7 +31,10 @@ route. There is no selection UI or packaged default `execution` section yet.
 
 The generic `prepare_execution` result is an unstarted core `HarnessEngine`.
 The Native Single route below uses the already assembled DeepAgent instead of
-building a second instance. Team routing remains on its original Runtime.
+building a second instance. An admitted External binding instead selects the
+shared `EngineAgentAdapter` before facade/SDK construction and creates an
+unstarted `ExecutionSession`; it never constructs DeepAgent. Team routing
+remains on its original Runtime.
 
 A bound scope retains its original snapshot when defaults change. An explicit attempt to change it fails rather than switching an active execution. `release` removes only the same binding object, protecting a replacement from stale cleanup. The store is process-local and contains provider configuration: never log it or treat it as durable session restore. Persistence, policy adaptation and UI integration remain separate tasks.
 
@@ -101,6 +104,49 @@ The binding store is still owned/released by the Runtime caller. Runtime
 must enforce authorization and session generation before passing answers;
 this class is neither a new persistence layer nor a replacement for generation.
 
+## External Single route (R1-03A1/A2)
+
+`bind_admitted_request_execution` resolves one `RuntimeWorkspacePaths` snapshot
+and freezes it with the selected Binding in `AdmittedExecutionRoute`. External
+facade cache identity includes channel, subject, host session, workspace,
+provider, revision and configuration fingerprint. Native cache keys remain
+compatible. Global Native rebuilds do not restart an active External binding;
+session cleanup removes only the matching External root and Binding.
+
+All non-Native Providers use one `EngineAgentAdapter`. Its
+`ExecutionSession` combines the core `HarnessEngine`, one `HarnessIOAdapter`
+event consumer and one `TurnOutputRouter`, with tool auto-approval disabled.
+It validates the bound runtime root and cwd before start and stops only its own
+resources. It lazily starts the Provider on the first Turn, using only the
+admitted runtime paths and immutable binding; construction and execution never
+fall back to DeepAgent.
+
+`context_bridge` builds a per-Turn input snapshot. It reads bounded project
+rules only when their resolved paths remain under the admitted runtime root.
+Session uploads are accepted only from that session's upload directory (or
+when already inside the runtime root), bounded by count and byte limits, copied
+to `.jiuwenswarm/session-inputs/<session>/<request>`, and removed on Session
+cleanup. Arbitrary request paths and symlink escapes fail closed. The existing
+fixed PersonalContext publication is read only when its product switch is on;
+the External path does not construct Native rails.
+
+The IO adapter remains the sole Provider event consumer and the Turn router
+keeps exactly one output owner. Request-owned output uses the shared stream
+parser and the existing facade history/UI path. If the Web reader disappears,
+the same router transfers later envelopes to `ExternalEventProjection`, which
+uses the existing history writer and runtime push service. A raw event observer
+retains normalized terminal failure detail for projection; it does not read a
+second event stream. Connection loss releases output ownership but does not
+cancel the Provider Turn.
+
+Tool approvals and user questions surface through the existing ask-user event
+shape. `chat.answer` resolves the pending core interaction on the same Turn;
+stale answers do not become new input. Pause, resume and cancel delegate to the
+Provider IO adapter. Session stop owns Provider/CLI cleanup plus staged-input
+cleanup. The legacy fork path rejects External sessions before target
+allocation or Native context/history copying; persistent resume and supported
+External fork remain R1-04/A5 work.
+
 The session adapter also has `start_native_interaction` and an exclusive legacy
 `start_interaction` path. Its `stop_interaction` releases the selected binding
 after the protocol session stops. The facade selects the admitted Native route
@@ -114,5 +160,48 @@ The configured Native path has been exercised through real Web Single text,
 tool, ask-user, Goal, cancel, subagent and cold-restore flows. A separate
 cutover check showed an unbound legacy session and a new default-bound Native
 session both continuing after service restart. This does not change the
-packaged default configuration or existing user config files. External
-providers and Team selection have no product route in this slice.
+packaged default configuration or existing user config files. Team selection
+remains on its original route; Product sub-Agent inheritance and persistent
+cold recovery are later R1-03B and R1-04 scopes.
+
+## Codex native plugins (R1-03C1)
+
+Native plugins are selected only inside the server-owned Codex profile's
+`provider_config.native_plugins`. The frozen profile records the prepared local
+marketplace identity, source path, exact version, package SHA-256, enabled
+state, required Skills/MCP components and native MCP names. A request can only
+select the profile ID; it cannot submit or mutate a plugin snapshot. An active
+Binding keeps its original snapshot, while a changed profile applies to a new
+Session and receives a different configuration fingerprint.
+
+Core remains responsible for fail-closed package and native-loader validation,
+approval routing, checkpoint binding and process cleanup. Swarm supplies the
+authorized isolated HOME/CODEX_HOME and source roots, then reuses the existing
+interaction/history/UI path for plugin tool events. C1 does not install or
+update packages, add a plugin UI, expose hooks/commands/agents/apps, or route
+product ToolGateway calls; deployment, C2 and the B1 product-tool path remain
+separate concerns.
+
+## Product ToolGateway and managed MCP (R1-03B1)
+
+`ProductToolGateway` adapts an explicit catalog of existing product tool
+instances. Definitions, invocation, output rendering and tool callbacks remain
+owned by those instances; the gateway adds no duplicate tool implementation.
+Every gateway is bound to one subject, parent Session and absolute workspace.
+Those values come from the admitted ExecutionBinding and cannot be replaced by
+model arguments. Non-parallel-safe tools share a per-gateway serialization
+lock, while an optional host admission callback can reject an invocation.
+
+An External provider with native ToolGateway support receives the gateway
+directly. A provider such as Codex receives one Session-owned Streamable HTTP
+MCP endpoint bound to 127.0.0.1 with a random Bearer credential. The endpoint
+is required and uses prompt approval in the Codex profile. Readiness completes
+before provider startup; startup failure, normal stop and router failure close
+only that Session's endpoint. The reserved product server namespace cannot be
+overridden by request MCP configuration.
+
+B1 deliberately stops at this injectable boundary. B2 supplies the existing
+six product sub-Agent tools and their parent-session invocation context; B3/B4
+validate the Codex child runtime and complete product/channel behavior. This
+module is not a general MCP registry and does not import Team runtime or reuse
+Team operator permissions.

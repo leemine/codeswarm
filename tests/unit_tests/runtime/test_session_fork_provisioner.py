@@ -94,6 +94,52 @@ def _result(target_session_id: str = "fork-target") -> dict[str, str]:
 
 
 @pytest.mark.asyncio
+async def test_external_fork_is_rejected_before_allocation_or_history_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.common import config as config_module
+    from jiuwenswarm.server.runtime.session import session_metadata
+
+    state = _ForkState()
+    monkeypatch.setattr(
+        session_metadata,
+        "get_session_metadata",
+        lambda *_args, **_kwargs: {"execution_profile_id": "codex"},
+    )
+    monkeypatch.setattr(
+        config_module,
+        "get_config",
+        lambda: {
+            "execution": {
+                "default_profile_id": "native",
+                "profiles": {
+                    "native": {
+                        "provider_id": "native",
+                        "config_revision": "r1",
+                    },
+                    "codex": {
+                        "provider_id": "codex",
+                        "config_revision": "r1",
+                    },
+                },
+            }
+        },
+    )
+    runtime = _runtime(state)
+    try:
+        await runtime.start()
+        with pytest.raises(SessionProvisionError) as captured:
+            await runtime.prepare_session_fork(_input(target_session_id=None))
+
+        assert captured.value.code == "EXTERNAL_FORK_UNSUPPORTED"
+        assert state.allocation_calls == []
+        assert state.lookup_calls == []
+        assert state.events == ["runtime.start"]
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_explicit_target_preserves_business_order_agent_arguments_and_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

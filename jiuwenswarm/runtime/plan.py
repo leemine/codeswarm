@@ -92,6 +92,18 @@ class PlanModeController:
         return is_plan_mode(params.get(PREVIOUS_SESSION_MODE_KEY))
 
     @staticmethod
+    def _uses_native_plan_state(agent: Any) -> bool:
+        """Return whether ``agent`` owns the Native DeepAgent plan state.
+
+        External Providers receive the resolved request mode through their
+        harness Turn. They deliberately do not construct a DeepAgent, so the
+        Native plan-state bridge must not call ``ensure_instance`` on their
+        product adapter.
+        """
+        route = getattr(agent, "_runtime_execution_route", None)
+        return route is None or getattr(route, "provider_id", None) == "native"
+
+    @staticmethod
     async def open_state_session(
         agent: Any,
         session_id: str | None,
@@ -182,6 +194,8 @@ class PlanModeController:
         agent: Any,
     ) -> PlanStateResult:
         """Synchronize plan state before execution and return control events."""
+        if not self._uses_native_plan_state(agent):
+            return PlanStateResult()
         resolved = resolve_request_runtime_mode(request)
         if resolved.is_team:
             return PlanStateResult()
@@ -264,6 +278,8 @@ class PlanModeController:
         agent: Any,
     ) -> list[dict[str, Any]]:
         """Detect an exit_plan_mode transition performed by a tool."""
+        if not self._uses_native_plan_state(agent):
+            return []
         session_id = request.session_id
         if not session_id:
             return []

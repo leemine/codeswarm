@@ -1311,6 +1311,50 @@ class RuntimeSessionProvisioner:
                 code="BAD_REQUEST",
             )
 
+        # The legacy fork path below copies DeepAgent context/checkpoint state.
+        # Reject an External binding before allocating a target Session or
+        # copying history; history visibility alone is not executable resume.
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+        )
+
+        source_metadata = get_session_metadata(
+            source_session_id,
+            cache_bust=True,
+            enable_writeback=False,
+        )
+        profile_id = (
+            source_metadata.get("execution_profile_id")
+            if isinstance(source_metadata, dict)
+            else None
+        )
+        if isinstance(profile_id, str) and profile_id:
+            from jiuwenswarm.common.config import get_config
+            from jiuwenswarm.runtime.harness.config_source import (
+                load_execution_catalog,
+            )
+
+            catalog = load_execution_catalog(get_config())
+            if catalog is None:
+                raise SessionProvisionError(
+                    "source execution profile is no longer configured",
+                    code="EXECUTION_CONFIG_CHANGED",
+                )
+            try:
+                provider_id = catalog.source(
+                    explicit_profile_id=profile_id
+                ).resolve().provider_id
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SessionProvisionError(
+                    "source execution profile is no longer configured",
+                    code="EXECUTION_CONFIG_CHANGED",
+                ) from exc
+            if provider_id != "native":
+                raise SessionProvisionError(
+                    "External session fork is not supported; create a new session",
+                    code="EXTERNAL_FORK_UNSUPPORTED",
+                )
+
         try:
             if not target_session_id:
                 target_session_id = await self._agent_manager.create_session(

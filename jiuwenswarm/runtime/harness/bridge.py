@@ -2,8 +2,10 @@
 """Opt-in construction entry point; existing chat routing is unchanged."""
 from openjiuwen.harness.engine import HarnessEngine, create_harness_engine
 
+from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
 from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
 from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
+from jiuwenswarm.runtime.harness.execution_session import ExecutionSession
 
 
 def prepare_execution(source: ExecutionConfigSource, *, bindings: ExecutionBindingStore,
@@ -30,3 +32,33 @@ def prepare_native_session(source: ExecutionConfigSource, *, bindings: Execution
     bound = bindings.bind(source, subject_id=subject_id,
                           host_session_id=host_session_id, workspace=workspace)
     return adapter.build_native_execution(bound, event_observer=event_observer)
+
+
+def prepare_execution_session(
+    source: ExecutionConfigSource,
+    *,
+    bindings: ExecutionBindingStore,
+    subject_id: str,
+    host_session_id: str,
+    runtime_paths: RuntimeWorkspacePaths,
+    event_observer=None,
+    detached_output=None,
+    tool_gateway=None,
+) -> ExecutionSession:
+    """Construct an unstarted External session from one admitted path snapshot."""
+    engine = prepare_execution(
+        source,
+        bindings=bindings,
+        subject_id=subject_id,
+        host_session_id=host_session_id,
+        workspace=str(runtime_paths.runtime_workspace_root),
+    )
+    if engine.binding.provider_id == "native":
+        raise ValueError("Native execution must use prepare_native_session")
+    return ExecutionSession(
+        engine,
+        runtime_paths,
+        event_observer=event_observer,
+        detached_output=detached_output,
+        tool_gateway=tool_gateway,
+    )
