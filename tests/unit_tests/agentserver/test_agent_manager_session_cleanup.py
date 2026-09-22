@@ -321,9 +321,6 @@ async def test_release_subagent_runtime_uses_existing_agent_adapter() -> None:
         ) -> None:
             calls.append((session_id, reason))
 
-        async def apply_sandbox_runtime_patch(self) -> None:
-            return None
-
     class Agent:
         def __init__(self) -> None:
             self._adapter = Adapter()

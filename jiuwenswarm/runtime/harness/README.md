@@ -200,8 +200,51 @@ before provider startup; startup failure, normal stop and router failure close
 only that Session's endpoint. The reserved product server namespace cannot be
 overridden by request MCP configuration.
 
-B1 deliberately stops at this injectable boundary. B2 supplies the existing
-six product sub-Agent tools and their parent-session invocation context; B3/B4
-validate the Codex child runtime and complete product/channel behavior. This
-module is not a general MCP registry and does not import Team runtime or reuse
-Team operator permissions.
+B1 deliberately stops at this injectable boundary. B2 later supplied the
+provider-neutral child port, B3 the Codex child composition, and B4 the six-tool
+product/channel acceptance. This module is not a general MCP registry and does
+not import Team runtime or reuse Team operator permissions.
+
+## Codex child execution (R1-03B3)
+
+`CodexSubagentExecutionFactory` is the Swarm composition for the core B2
+`SubagentExecutionFactory` port. It accepts one admitted Codex parent route and
+captures that route's exact `AgentExecutionSpec`, Binding, subject, Session and
+`RuntimeWorkspacePaths`. Each child receives its own `subagent:<id>` subject,
+host Session ID, Binding, Codex harness and SDK/CLI session while retaining the
+parent configuration fingerprint, workspace root and task cwd. There is no
+child Provider, profile, model, workspace or cwd override input.
+
+Construction checks the parent subject and Session again before allocating a
+child. An existing child Binding for another Provider or configuration fails
+closed. The child reuses `ExecutionSession` and its single event consumer;
+projected chunks flow through the B2 `SubagentExecution` callbacks and the
+Provider terminal event settles exactly one `SubagentTurnResult`. Child cancel
+aborts only the child Provider; close stops it and releases only its exact
+Binding. Durable child checkpoint lookup remains R1-04 rather than guessing
+from the parent checkpoint.
+
+`ProductToolGateway` binds the server-owned parent `ExecutionSubject` while an
+existing product tool runs, so B2 obtains the admitted parent lineage instead
+of a caller-supplied identity.
+
+## External product sub-Agents (R1-03B4)
+
+`ExternalSubagentRuntime` is the Codex parent composition root for the existing
+six product tools. It builds those original tools with the B3 execution factory,
+binds their gateway to the admitted parent subject/Session/workspace, and uses a
+minimal live parent Session port for product state and `OutputSchema` events. It
+does not own a second registry, queue or status machine.
+
+`subagent_updated`, `subagent_activity` and `subagent_message` use the shared
+`server.runtime.agent_adapter.subagent_projection` path. Native and External
+therefore persist the same roster/activity/transcript history records and feed
+the same browser stores and panels. JSON arrays frozen at the protocol boundary
+are thawed before invoking legacy product tools, preserving list-valued inputs
+such as `subagent_wait.subagent_ids` without weakening the admitted scope.
+
+Parent cleanup releases the exact cached control, cancels live children, closes
+each child execution and its Binding, flushes product state, and stops the
+activity emitter. Durable child checkpoint lookup and cold resume still belong
+to R1-04; B4 intentionally fails `subagent_resume` closed when B3 reports that
+the execution cannot be restored.

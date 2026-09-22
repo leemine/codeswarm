@@ -18,11 +18,17 @@ import pytest
 
 from openjiuwen.harness_protocol import AgentExecutionSpec
 from openjiuwen.core.foundation.tool.schema import ToolOutput
+from openjiuwen.harness.subagent_runtime import (
+    ParentExecutionContext,
+    SubagentBuildRequest,
+    SubagentTurnRequest,
+)
 from openjiuwen.harness_providers.codex import native_plugin_content_digest
 
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
+from jiuwenswarm.runtime.harness.codex_subagent import CodexSubagentExecutionFactory
 from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
 from jiuwenswarm.runtime.harness.tool_gateway import (
@@ -40,6 +46,7 @@ class _ResponsesFixture:
     def __init__(self) -> None:
         self.requests: list[dict] = []
         self.items: list[dict] = []
+        self.responder = None
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -52,7 +59,10 @@ class _ResponsesFixture:
                 )
                 owner.requests.append(body)
                 index = len(owner.requests)
-                item = owner.items.pop(0) if owner.items else {
+                item = (
+                    owner.responder(body, index)
+                    if owner.responder is not None
+                    else owner.items.pop(0) if owner.items else {
                     "type": "message",
                     "role": "assistant",
                     "id": f"msg_{index}",
@@ -65,6 +75,7 @@ class _ResponsesFixture:
                         }
                     ],
                 }
+                )
                 response = {
                     "id": f"resp_{index}",
                     "object": "response",
@@ -236,6 +247,130 @@ async def test_real_codex_cli_runs_through_external_product_adapter(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_real_codex_cli_runs_independently_bound_child(tmp_path):
+    sdk = pytest.importorskip(
+        "openai_codex", reason="optional Codex SDK and bundled CLI required"
+    )
+    root = (tmp_path / "project").resolve()
+    task_cwd = root / "task"
+    home = (tmp_path / "home").resolve()
+    codex_home = (tmp_path / "codex-home").resolve()
+    for path in (root, task_cwd, home, codex_home, codex_home / "skills"):
+        path.mkdir(exist_ok=True)
+    binary = sdk.client._resolve_codex_bin(sdk.CodexConfig())
+    readable = {
+        ":minimal": "read",
+        str(root): "read",
+        str(codex_home / "tmp"): "read",
+        str(os.path.dirname(binary)): "read",
+    }
+    permission_config = (
+        'default_permissions = "r1-b3-read"\n'
+        "[permissions.r1-b3-read.filesystem]\n"
+        + "\n".join(
+            f"{json.dumps(path)} = {json.dumps(access)}"
+            for path, access in readable.items()
+        )
+        + "\n[permissions.r1-b3-read.network]\nenabled=false\n"
+    )
+    (codex_home / "config.toml").write_text(permission_config, encoding="utf-8")
+
+    with _ResponsesFixture() as responses:
+        responses.items.append(
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "msg_r1_b3_child",
+                "status": "completed",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "R1-B3-CODEX-CHILD-OK",
+                        "annotations": [],
+                    }
+                ],
+            }
+        )
+        spec = AgentExecutionSpec(
+            "codex",
+            "r1-b3-child-local",
+            provider_config={
+                "inherit_process_env": False,
+                "env": {
+                    "HOME": str(home),
+                    "CODEX_HOME": str(codex_home),
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                },
+                "cwd": str(task_cwd),
+                "startup_source_roots": [
+                    str(root),
+                    str(codex_home / "skills"),
+                ],
+                "mcp_required": False,
+                "model": {
+                    "model": "gpt-5.6-sol",
+                    "provider": "r1_b3_fixture",
+                    "api_base": responses.base_url,
+                    "api_key": "local-only",
+                },
+            },
+        )
+        route = _route(root, spec)
+        route = AdmittedExecutionRoute(
+            route.channel_id,
+            route.source,
+            route.bindings,
+            route.bound,
+            RuntimeWorkspacePaths(
+                internal_workspace_dir=root,
+                runtime_workspace_root=root,
+                cwd=task_cwd,
+                project_root=root,
+            ),
+        )
+        factory = CodexSubagentExecutionFactory(route)
+        execution = await factory.create(
+            SubagentBuildRequest(
+                subagent_id="r1-a2-session_sub_explore_b3",
+                subagent_type="explore_agent",
+                display_name="B3 Explorer",
+                role="Return the delegated result",
+            ),
+            ParentExecutionContext(
+                parent_session_id="r1-a2-session",
+                parent_subject_id="local-test",
+            ),
+        )
+        results = []
+
+        async def settle(result):
+            results.append(result)
+
+        try:
+            await execution.run_turn(
+                SubagentTurnRequest(
+                    task_id="r1-b3-task",
+                    query="R1-B3-CHILD-QUERY",
+                ),
+                on_result=settle,
+            )
+        finally:
+            await execution.close("test_complete")
+
+    assert execution.binding is not route.bound.binding
+    assert execution.binding.subject_id == "subagent:r1-a2-session_sub_explore_b3"
+    assert execution.binding.workspace == route.bound.binding.workspace
+    assert execution.binding.fingerprint == route.bound.binding.fingerprint
+    assert len(results) == 1
+    assert results[0].output == "R1-B3-CODEX-CHILD-OK"
+    assert results[0].is_error is False
+    assert responses.requests
+    rendered = json.dumps(responses.requests[0], ensure_ascii=False)
+    assert "R1-B3-CHILD-QUERY" in rendered
+    assert str(task_cwd) in rendered
+
+
+@pytest.mark.asyncio
 async def test_real_codex_cli_calls_session_owned_product_gateway(tmp_path):
     sdk = pytest.importorskip(
         "openai_codex", reason="optional Codex SDK and bundled CLI required"
@@ -375,6 +510,187 @@ async def test_real_codex_cli_calls_session_owned_product_gateway(tmp_path):
     assert "R1-B1-PRODUCT-MCP-OK" in json.dumps(responses.requests)
     assert any((chunk.payload or {}).get("event_type") == "chat.final" for chunk in chunks)
     assert transport is not None and not transport.started
+
+
+@pytest.mark.asyncio
+async def test_real_codex_cli_runs_six_tool_same_engine_child_chain(tmp_path):
+    sdk = pytest.importorskip(
+        "openai_codex", reason="optional Codex SDK and bundled CLI required"
+    )
+    root = (tmp_path / "project").resolve()
+    home = (tmp_path / "home").resolve()
+    codex_home = (tmp_path / "codex-home").resolve()
+    for path in (root, home, codex_home, codex_home / "skills"):
+        path.mkdir()
+    binary = sdk.client._resolve_codex_bin(sdk.CodexConfig())
+    readable = {
+        ":minimal": "read",
+        str(root): "read",
+        str(codex_home / "tmp"): "read",
+        str(os.path.dirname(binary)): "read",
+    }
+    permission_config = (
+        'default_permissions = "r1-b4-read"\n'
+        "[permissions.r1-b4-read.filesystem]\n"
+        + "\n".join(
+            f"{json.dumps(path)} = {json.dumps(access)}"
+            for path, access in readable.items()
+        )
+        + "\n[permissions.r1-b4-read.network]\nenabled=false\n"
+    )
+    (codex_home / "config.toml").write_text(permission_config, encoding="utf-8")
+
+    with _ResponsesFixture() as responses:
+        parent_calls = 0
+        parent_provider_session = None
+
+        def respond(body, index):
+            nonlocal parent_calls, parent_provider_session
+            provider_session = str(
+                (body.get("client_metadata") or {}).get("session_id") or ""
+            )
+            if parent_provider_session is None:
+                parent_provider_session = provider_session
+            if provider_session != parent_provider_session:
+                return {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": f"msg_child_{index}",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "R1-B4-CHILD-OK",
+                            "annotations": [],
+                        }
+                    ],
+                }
+            parent_calls += 1
+            if parent_calls == 1:
+                return {
+                    "type": "function_call",
+                    "namespace": "mcp__jiuwenswarm_product_tools",
+                    "name": "subagent_spawn",
+                    "id": "fc_r1_b4_spawn",
+                    "call_id": "call_r1_b4_spawn",
+                    "arguments": json.dumps(
+                        {
+                            "subagent_type": "verification_agent",
+                            "task_description": "R1-B4-CHILD-QUERY",
+                            "display_name": "B4 verifier",
+                            "role": "Return the fixed child marker",
+                        }
+                    ),
+                }
+            if parent_calls == 2:
+                return {
+                    "type": "function_call",
+                    "namespace": "mcp__jiuwenswarm_product_tools",
+                    "name": "subagent_wait",
+                    "id": "fc_r1_b4_wait",
+                    "call_id": "call_r1_b4_wait",
+                    "arguments": json.dumps(
+                        {
+                            "subagent_ids": [
+                                "r1-a2-session_sub_verification_agent"
+                            ],
+                            "timeout_ms": 120_000,
+                        }
+                    ),
+                }
+            return {
+                "type": "message",
+                "role": "assistant",
+                "id": f"msg_parent_{index}",
+                "status": "completed",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "R1-B4-PARENT-OK",
+                        "annotations": [],
+                    }
+                ],
+            }
+
+        responses.responder = respond
+        spec = AgentExecutionSpec(
+            "codex",
+            "r1-b4-product-subagents-local",
+            provider_config={
+                "inherit_process_env": False,
+                "env": {
+                    "HOME": str(home),
+                    "CODEX_HOME": str(codex_home),
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                },
+                "startup_source_roots": [str(root), str(codex_home / "skills")],
+                "mcp_required": True,
+                "mcp_default_tools_approval_mode": "prompt",
+                "model": {
+                    "model": "gpt-5.6-sol",
+                    "provider": "r1_b4_fixture",
+                    "api_base": responses.base_url,
+                    "api_key": "local-only",
+                },
+            },
+        )
+        route = _route(root, spec)
+        adapter = EngineAgentAdapter(route)
+        request = AgentRequest(
+            request_id="r1-b4-product-subagent-request",
+            channel_id="web",
+            session_id="r1-a2-session",
+            params={"mode": "code", "query": "R1-B4-PARENT-QUERY"},
+            is_stream=True,
+        )
+        request._execution_route = route
+        chunks = []
+        approval_count = 0
+        runtime = None
+        try:
+            await adapter.create_instance(mode="code")
+            runtime = adapter._subagent_runtime
+            adapter.select_execution_for_request(request)
+            stream = adapter.process_message_stream_impl(
+                request,
+                {"query": "R1-B4-PARENT-QUERY"},
+            )
+            async for chunk in stream:
+                chunks.append(chunk)
+                payload = chunk.payload or {}
+                if payload.get("event_type") != "chat.ask_user_question":
+                    continue
+                approval_count += 1
+                answer = AgentRequest(
+                    request_id=f"r1-b4-answer-{approval_count}",
+                    channel_id="web",
+                    session_id="r1-a2-session",
+                    params={
+                        "request_id": payload["request_id"],
+                        "source": payload["source"],
+                        "answers": [{"selected_options": ["allow_once"]}],
+                    },
+                )
+                accepted = await adapter.handle_user_answer(answer)
+                assert accepted.payload == {"accepted": True, "resolved": True}
+        finally:
+            await adapter.cleanup()
+
+    rendered_requests = json.dumps(responses.requests, ensure_ascii=False)
+    assert approval_count == 2, (
+        responses.requests,
+        [chunk.payload for chunk in chunks],
+    )
+    assert "R1-B4-CHILD-OK" in rendered_requests
+    assert "R1-B4-PARENT-OK" in json.dumps(
+        [chunk.payload for chunk in chunks],
+        ensure_ascii=False,
+    )
+    assert runtime is not None and runtime.has_control() is False
+    assert not any(
+        bound.binding.host_session_id.startswith("r1-a2-session_sub_")
+        for bound in route.bindings._bindings.values()
+    )
 
 
 @pytest.mark.asyncio

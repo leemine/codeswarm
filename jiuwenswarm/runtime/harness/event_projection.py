@@ -155,6 +155,32 @@ class ExternalEventProjection:
         self._turns.clear()
         self._terminal_errors.clear()
 
+    async def project_product_chunk(self, chunk: Any) -> None:
+        """Reuse the Native subagent parser/history seam for product events."""
+
+        from jiuwenswarm.server.runtime.agent_adapter.subagent_projection import (
+            parse_subagent_stream_chunk,
+        )
+
+        payload = await run_history_io(
+            parse_subagent_stream_chunk,
+            chunk,
+            parent_session_id=self._session_id,
+        )
+        if payload is None:
+            return
+        state = next(reversed(self._turns.values()), None)
+        if state is None:
+            state = self._fallback_state("product-subagent")
+        await send_runtime_push(
+            build_server_push_message(
+                session_id=self._session_id,
+                request_id=state.request_id,
+                payload=payload,
+                fallback_channel_id=state.channel_id,
+            )
+        )
+
     @staticmethod
     def _note_payload(state: _TurnProjection, payload: dict[str, Any]) -> None:
         event_type = payload.get("event_type")

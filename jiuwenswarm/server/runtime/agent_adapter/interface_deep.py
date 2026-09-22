@@ -142,6 +142,14 @@ from jiuwenswarm.server.runtime.agent_adapter.permission_rail_group import (
 from jiuwenswarm.server.runtime.agent_adapter.permission_continuation import (
     discard_permission_continuation, validate_manual_resume,
 )
+from jiuwenswarm.server.runtime.agent_adapter.subagent_projection import (
+    clear_subagent_progress_batches as clear_shared_subagent_progress_batches,
+    parse_subagent_stream_chunk,
+    persist_subagent_activity as persist_shared_subagent_activity,
+    persist_subagent_roster_history as persist_shared_subagent_roster_history,
+    persist_subagent_transcript_message as persist_shared_subagent_transcript_message,
+    project_subagent_updated_for_web as project_shared_subagent_updated_for_web,
+)
 from jiuwenswarm.server.runtime.agent_adapter.permission_dispatch import (
     ROOT_PERMISSION_ANSWER_KEY as _ROOT_PERMISSION_ANSWER_KEY,
     ROOT_PERMISSION_HANDOFF_KEY as _ROOT_PERMISSION_HANDOFF_KEY,
@@ -17851,38 +17859,22 @@ class JiuWenSwarmDeepAdapter:
                     return {"event_type": "todo.updated", "todos": todos}
 
                 if chunk_type == SUBAGENT_UPDATED_EVENT_TYPE:
-                    projection = (
-                        payload.get("subagent_updated") if isinstance(payload, dict) else None
+                    return parse_subagent_stream_chunk(
+                        chunk,
+                        parent_session_id=_parent_session_id,
                     )
-                    if not isinstance(projection, dict):
-                        return None
-                    web_payload = JiuWenSwarmDeepAdapter._project_subagent_updated_for_web(projection)
-                    JiuWenSwarmDeepAdapter._persist_subagent_roster_history(projection, web_payload)
-                    return web_payload
 
                 if chunk_type == SUBAGENT_MESSAGE_EVENT_TYPE:
-                    projection = (
-                        payload.get("subagent_message") if isinstance(payload, dict) else None
+                    return parse_subagent_stream_chunk(
+                        chunk,
+                        parent_session_id=_parent_session_id,
                     )
-                    if not isinstance(projection, dict):
-                        return None
-                    JiuWenSwarmDeepAdapter._persist_subagent_transcript_message(projection)
-                    return None
 
                 if chunk_type == SUBAGENT_ACTIVITY_EVENT_TYPE:
-                    projection = (
-                        payload.get("subagent_activity") if isinstance(payload, dict) else None
+                    return parse_subagent_stream_chunk(
+                        chunk,
+                        parent_session_id=_parent_session_id,
                     )
-                    if not isinstance(projection, dict):
-                        return None
-                    persist_projection = dict(projection)
-                    parent_session_id = str(
-                        persist_projection.get("parent_session_id") or _parent_session_id or ""
-                    ).strip()
-                    if parent_session_id:
-                        persist_projection["parent_session_id"] = parent_session_id
-                    JiuWenSwarmDeepAdapter._persist_subagent_activity(persist_projection)
-                    return {"event_type": "chat.subagent_activity", **projection}
 
                 if chunk_type == "context.usage":
                     usage_payload = normalize_context_usage_payload(payload)
@@ -18084,24 +18076,25 @@ class JiuWenSwarmDeepAdapter:
     @staticmethod
     def project_subagent_updated_for_web(projection: dict) -> dict:
         """Public entry for subagent roster projection."""
-        return JiuWenSwarmDeepAdapter._project_subagent_updated_for_web(projection)
+        return project_shared_subagent_updated_for_web(projection)
 
     @staticmethod
     def persist_subagent_roster_history(projection: dict, web_payload: dict) -> None:
-        JiuWenSwarmDeepAdapter._persist_subagent_roster_history(projection, web_payload)
+        persist_shared_subagent_roster_history(projection, web_payload)
 
     @staticmethod
     def persist_subagent_activity(projection: dict[str, Any]) -> None:
-        JiuWenSwarmDeepAdapter._persist_subagent_activity(projection)
+        persist_shared_subagent_activity(projection)
 
     @staticmethod
     def persist_subagent_transcript_message(projection: dict[str, Any]) -> None:
-        JiuWenSwarmDeepAdapter._persist_subagent_transcript_message(projection)
+        persist_shared_subagent_transcript_message(projection)
 
     @classmethod
     def clear_subagent_progress_batches(cls) -> None:
         with cls._subagent_progress_batches_lock:
             cls._subagent_progress_batches.clear()
+        clear_shared_subagent_progress_batches()
 
     async def _handle_memory_rail_by_config(self, mode: str):
         config = get_config()

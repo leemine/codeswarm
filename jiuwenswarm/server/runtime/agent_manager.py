@@ -1019,9 +1019,15 @@ class AgentManager:
             return None
         for attr in ("_adapter", "adapter", "_active_adapter"):
             inner = getattr(agent, attr, None)
-            if inner is not None and hasattr(inner, "apply_sandbox_runtime_patch"):
+            if inner is not None and (
+                hasattr(inner, "apply_sandbox_runtime_patch")
+                or hasattr(inner, "release_subagent_runtime_for_session")
+            ):
                 return inner
-        if hasattr(agent, "apply_sandbox_runtime_patch"):
+        if (
+            hasattr(agent, "apply_sandbox_runtime_patch")
+            or hasattr(agent, "release_subagent_runtime_for_session")
+        ):
             return agent
         return None
 

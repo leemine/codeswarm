@@ -18,6 +18,7 @@ from jiuwenswarm.runtime.harness.context_bridge import (
 )
 from jiuwenswarm.runtime.harness.event_projection import ExternalEventProjection
 from jiuwenswarm.runtime.harness.execution_session import ExecutionSession
+from jiuwenswarm.runtime.harness.external_subagents import ExternalSubagentRuntime
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
 
 
@@ -33,6 +34,7 @@ class EngineAgentAdapter:
             raise ValueError("EngineAgentAdapter requires an External provider")
         self._route = route
         self._tool_gateway = tool_gateway
+        self._subagent_runtime: ExternalSubagentRuntime | None = None
         self._session: ExecutionSession | None = None
         self._projection = ExternalEventProjection(
             route.bound.binding.host_session_id
@@ -66,6 +68,12 @@ class EngineAgentAdapter:
         if self._session is not None:
             raise RuntimeError("External execution instance already exists")
         binding = self._route.bound.binding
+        if self._tool_gateway is None and self._route.provider_id == "codex":
+            self._subagent_runtime = ExternalSubagentRuntime(
+                self._route,
+                write_output=self._projection.project_product_chunk,
+            )
+            self._tool_gateway = self._subagent_runtime.gateway
         session = prepare_execution_session(
             self._route.source,
             bindings=self._route.bindings,
@@ -242,6 +250,10 @@ class EngineAgentAdapter:
         session = self._session
         if session is None or session.binding.host_session_id != session_id:
             return False
+        await self.release_subagent_runtime_for_session(
+            session_id,
+            reason="parent_ended",
+        )
         await session.stop()
         cleanup_staged_inputs(
             self._route.runtime_paths,
@@ -249,6 +261,22 @@ class EngineAgentAdapter:
         )
         self._session = None
         return True
+
+    async def release_subagent_runtime_for_session(
+        self,
+        session_id: str | None,
+        *,
+        reason: str = "parent_ended",
+    ) -> None:
+        runtime = self._subagent_runtime
+        if runtime is None:
+            return
+        if session_id is not None and (
+            str(session_id) != self._route.bound.binding.host_session_id
+        ):
+            return
+        await runtime.close(reason)
+        self._subagent_runtime = None
 
     def has_session_runtime(self, session_id: str | None = None) -> bool:
         session = self._session
@@ -259,6 +287,10 @@ class EngineAgentAdapter:
     async def cleanup(self) -> None:
         session = self._session
         self._session = None
+        await self.release_subagent_runtime_for_session(
+            self._route.bound.binding.host_session_id,
+            reason="parent_ended",
+        )
         if session is not None:
             await session.stop()
         cleanup_staged_inputs(
