@@ -55,14 +55,22 @@ async def test_cancellation_drains_running_write_before_next_boundary():
 @pytest.mark.asyncio
 async def test_subagent_parser_persistence_runs_off_loop(monkeypatch):
     from types import SimpleNamespace
-    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+    from jiuwenswarm.server.runtime.agent_adapter import (
+        interface_deep,
+        subagent_projection,
+    )
 
     loop_thread = threading.get_ident()
     recorded = []
+
     def append(**kwargs):
         assert threading.get_ident() != loop_thread
         recorded.append(kwargs)
-    monkeypatch.setattr(interface_deep, "append_history_record", append)
+    monkeypatch.setattr(
+        subagent_projection,
+        "append_history_record_durable",
+        append,
+    )
     chunk = SimpleNamespace(type="subagent_message", payload={"subagent_message": {
         "parent_session_id": "parent", "subagent_id": "child", "seq": 1,
         "content": "done", "role": "assistant", "event_type": "chat.final",

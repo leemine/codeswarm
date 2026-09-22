@@ -77,8 +77,18 @@ async def _run_stream(
     recorded: List[dict[str, Any]] = []
     monkeypatch.setattr(facade, "_adapter", _ScriptedAdapter(payloads))
     monkeypatch.setattr(facade, "_sdk_name", "harness")
+
+    def _capture_history(**kwargs: Any) -> None:
+        recorded.append(kwargs)
+
+    async def _capture_assistant_history(**kwargs: Any) -> None:
+        recorded.append({**kwargs, "role": "assistant"})
+
+    monkeypatch.setattr(interface_module, "append_history_record", _capture_history)
     monkeypatch.setattr(
-        interface_module, "append_history_record", lambda **kwargs: recorded.append(kwargs)
+        interface_module,
+        "_append_request_assistant_history",
+        _capture_assistant_history,
     )
     monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
     monkeypatch.setattr(interface_module, "get_memory_mode", lambda _cfg: "off")

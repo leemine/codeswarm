@@ -180,10 +180,18 @@ async def test_heartbeat_stream_persists_both_turns_in_original_session(
     records: list[dict[str, Any]] = []
     monkeypatch.setattr(facade, "_adapter", _Adapter())
     monkeypatch.setattr(facade, "_sdk_name", "harness")
+
+    def _capture_history(**kwargs: Any) -> None:
+        records.append(kwargs)
+
+    async def _capture_assistant_history(**kwargs: Any) -> None:
+        records.append({**kwargs, "role": "assistant"})
+
+    monkeypatch.setattr(interface_module, "append_history_record", _capture_history)
     monkeypatch.setattr(
         interface_module,
-        "append_history_record",
-        lambda **kwargs: records.append(kwargs),
+        "_append_request_assistant_history",
+        _capture_assistant_history,
     )
     monkeypatch.setattr(
         interface_module,
