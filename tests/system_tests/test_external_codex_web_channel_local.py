@@ -155,9 +155,27 @@ class _WebResponsesFixture:
                 elif "R1-A2-WEB-DISCONNECT" in serialized:
                     self._send_delayed_message(index)
                     return
+                elif "R1-04B-WEB-FAIL" in serialized:
+                    self._send_failure()
+                    return
                 else:
                     item = owner._message_item(index, f"R1-A2-WEB-FINAL-{index}")
                 self._send_item(index, item)
+
+            def _send_failure(self) -> None:
+                data = json.dumps(
+                    {
+                        "error": {
+                            "code": "r1_04b_fixture_failure",
+                            "message": "R1-04B-WEB-PROVIDER-FAILED",
+                        }
+                    }
+                ).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
 
             def _send_item(self, index: int, item: dict) -> None:
                 response = owner._response(index)
@@ -487,6 +505,27 @@ async def test_external_codex_web_approval_stop_disconnect_and_history(tmp_path:
 
                 await _send_request(
                     ws,
+                    "failed",
+                    "chat.send",
+                    {
+                        "session_id": session_id,
+                        "mode": "agent.code",
+                        "query": "R1-04B-WEB-FAIL",
+                    },
+                )
+                failed, failed_frames = await _receive_until(
+                    ws,
+                    lambda frame: _event(frame, "chat.error")
+                    and frame.get("payload", {}).get("terminal_status") == "failed",
+                    timeout=40,
+                )
+                assert failed["payload"]["code"]
+                assert "R1-04B-WEB-PROVIDER-FAILED" in json.dumps(
+                    failed_frames, ensure_ascii=False
+                )
+
+                await _send_request(
+                    ws,
                     "disconnect",
                     "chat.send",
                     {
@@ -529,13 +568,49 @@ async def test_external_codex_web_approval_stop_disconnect_and_history(tmp_path:
                     "chat.interrupt",
                     {"session_id": session_id, "mode": "agent.code", "intent": "cancel"},
                 )
-                stopped, _ = await _receive_until(
+                cancelled, cancel_frames = await _receive_until(
                     ws,
-                    lambda frame: _event(frame, "chat.interrupt_result")
-                    and frame.get("payload", {}).get("intent") == "cancel",
+                    lambda frame: _event(frame, "chat.error")
+                    and frame.get("payload", {}).get("terminal_status") == "cancelled",
+                    timeout=40,
+                )
+                assert cancelled["payload"]["code"] == "EXECUTION_CANCELLED"
+                interrupt_results = [
+                    frame
+                    for frame in cancel_frames
+                    if (
+                    _event(frame, "chat.interrupt_result")
+                    and frame.get("payload", {}).get("intent") == "cancel"
+                    )
+                ]
+                if interrupt_results:
+                    assert interrupt_results[-1]["payload"]["success"] is True
+                else:
+                    stopped, trailing_frames = await _receive_until(
+                        ws,
+                        lambda frame: _event(frame, "chat.interrupt_result")
+                        and frame.get("payload", {}).get("intent") == "cancel",
+                        timeout=30,
+                    )
+                    cancel_frames.extend(trailing_frames)
+                    assert stopped["payload"]["success"] is True
+
+                await _send_request(
+                    ws,
+                    "terminal-history",
+                    "history.get",
+                    {"session_id": session_id, "cursor": None, "limit": 50},
+                )
+                _, terminal_history = await _receive_until(
+                    ws,
+                    lambda frame: _event(frame, "history.message")
+                    and frame.get("payload", {}).get("status") == "done",
                     timeout=30,
                 )
-                assert stopped["payload"]["success"] is True
+                serialized_terminals = json.dumps(terminal_history, ensure_ascii=False)
+                assert '"terminal_status": "failed"' in serialized_terminals
+                assert '"terminal_status": "cancelled"' in serialized_terminals
+                assert "EXECUTION_CANCELLED" in serialized_terminals
         finally:
             _stop_process(gateway_process)
             _stop_process(agent_process)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -18,6 +19,7 @@ from openjiuwen.harness_protocol import TurnEventKind
 from openjiuwen.harness_providers.io_adapter import ProjectedOutput
 
 from jiuwenswarm.runtime.host_services import send_runtime_push
+from jiuwenswarm.runtime.terminal_outcome import harness_terminal_payload
 from jiuwenswarm.server.runtime.session.session_history import (
     append_history_record,
     append_history_record_durable,
@@ -32,6 +34,7 @@ from jiuwenswarm.server.runtime.session.session_metadata import (
 logger = logging.getLogger(__name__)
 _HISTORY_PERSISTENCE_UNCONFIRMED = "HISTORY_PERSISTENCE_UNCONFIRMED"
 _DELIVERY_UNCONFIRMED = "DETACHED_DELIVERY_UNCONFIRMED"
+_TERMINAL_TOMBSTONES = 1024
 _DURABLE_EVENT_TYPES = frozenset(
     {
         "chat.ask_user_question",
@@ -70,6 +73,8 @@ class NativeDetachedProjection:
         self._runtime = runtime
         self._request_id_for_turn = request_id_for_turn
         self._turns: dict[str, _DetachedTurn] = {}
+        self._terminated_turns: set[str] = set()
+        self._terminal_order: deque[str] = deque()
 
     async def close(self) -> None:
         """Settle detached Runtime owners if their provider Session stops early."""
@@ -82,10 +87,14 @@ class NativeDetachedProjection:
                         TurnEventKind.ABORTED,
                     )
         self._turns.clear()
+        self._terminated_turns.clear()
+        self._terminal_order.clear()
 
     async def __call__(self, item: ProjectedOutput) -> None:
         turn_id = item.turn_id
         if not turn_id:
+            return
+        if turn_id in self._terminated_turns:
             return
         state = self._turns.setdefault(turn_id, _DetachedTurn())
         delivered = False
@@ -131,17 +140,30 @@ class NativeDetachedProjection:
                     )
             if item.terminal is not None:
                 if item.terminal is TurnEventKind.FINISHED and state.text and not state.final_seen:
-                    payload = {"event_type": "chat.final", "content": state.text}
+                    payload = {
+                        **harness_terminal_payload(TurnEventKind.FINISHED),
+                        "content": state.text,
+                    }
                     await self._publish(
                         turn_id,
                         payload,
                         delivery_id=self._delivery_id(turn_id, item, payload),
                     )
                 elif item.terminal is TurnEventKind.FAILED and not state.error_seen:
-                    payload = {
-                        "event_type": "chat.error",
-                        "error": "Native execution Turn failed",
-                    }
+                    payload = harness_terminal_payload(
+                        TurnEventKind.FAILED,
+                        error="Native execution Turn failed",
+                    )
+                    await self._publish(
+                        turn_id,
+                        payload,
+                        delivery_id=self._delivery_id(turn_id, item, payload),
+                    )
+                elif item.terminal is TurnEventKind.ABORTED and not state.error_seen:
+                    payload = harness_terminal_payload(
+                        TurnEventKind.ABORTED,
+                        cancellation="Native execution Turn was cancelled",
+                    )
                     await self._publish(
                         turn_id,
                         payload,
@@ -161,6 +183,16 @@ class NativeDetachedProjection:
                         self._session_id, state.runtime_execution_id, item.terminal
                     )
                 self._turns.pop(turn_id, None)
+                self._remember_terminal(turn_id)
+
+    def _remember_terminal(self, turn_id: str) -> None:
+        if turn_id in self._terminated_turns:
+            return
+        if len(self._terminal_order) >= _TERMINAL_TOMBSTONES:
+            expired = self._terminal_order.popleft()
+            self._terminated_turns.discard(expired)
+        self._terminal_order.append(turn_id)
+        self._terminated_turns.add(turn_id)
 
     async def _report_delivery_failure(
         self,

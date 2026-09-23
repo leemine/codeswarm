@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,6 +17,7 @@ from openjiuwen.harness_protocol import (
 from openjiuwen.harness_providers.io_adapter import ProjectedOutput
 
 from jiuwenswarm.runtime.host_services import send_runtime_push
+from jiuwenswarm.runtime.terminal_outcome import harness_terminal_payload
 from jiuwenswarm.server.runtime.session.history_io import run_history_io
 from jiuwenswarm.server.runtime.session.session_history import (
     append_history_record,
@@ -32,6 +34,7 @@ from jiuwenswarm.server.utils.stream_utils import parse_stream_chunk
 logger = logging.getLogger(__name__)
 _HISTORY_PERSISTENCE_UNCONFIRMED = "HISTORY_PERSISTENCE_UNCONFIRMED"
 _DELIVERY_UNCONFIRMED = "DETACHED_DELIVERY_UNCONFIRMED"
+_TERMINAL_TOMBSTONES = 1024
 _DURABLE_EVENT_TYPES = frozenset(
     {
         "chat.ask_user_question",
@@ -65,20 +68,28 @@ class ExternalEventProjection:
         self._session_id = session_id
         self._turns: dict[str, _TurnProjection] = {}
         self._terminal_errors: dict[str, str] = {}
+        self._terminal_error_codes: dict[str, str] = {}
+        self._terminal_cancellations: dict[str, str] = {}
+        self._terminated_turns: set[str] = set()
+        self._terminal_order: deque[str] = deque()
 
     async def observe(self, envelope: HarnessEvent) -> None:
         """Retain normalized terminal failures before IO projection drops them."""
 
         turn_id = envelope.turn_id
         event = envelope.event
-        if (
-            turn_id
-            and isinstance(event, TurnLifecycleEvent)
-            and event.kind is TurnEventKind.FAILED
-            and event.result is not None
-            and event.result.error is not None
-        ):
-            self._terminal_errors[turn_id] = event.result.error.message
+        if turn_id and isinstance(event, TurnLifecycleEvent) and event.result is not None:
+            if event.kind is TurnEventKind.FAILED and event.result.error is not None:
+                self._terminal_errors[turn_id] = event.result.error.message
+                if event.result.error.code:
+                    self._terminal_error_codes[turn_id] = event.result.error.code
+            elif (
+                event.kind is TurnEventKind.ABORTED
+                and event.result.termination is not None
+            ):
+                self._terminal_cancellations[turn_id] = (
+                    event.result.termination.message
+                )
 
     def register_turn(
         self,
@@ -111,6 +122,7 @@ class ExternalEventProjection:
             self._note_payload(state, payload)
         if item.terminal is not None:
             self._turns.pop(turn_id, None)
+            self._remember_terminal(turn_id)
         return payload
 
     def payload(
@@ -124,17 +136,14 @@ class ExternalEventProjection:
                 item.chunk,
                 _has_streamed_content=bool(state and state.text),
             )
-        if item.terminal is TurnEventKind.FINISHED:
-            return {"event_type": "chat.final", "content": ""}
-        if item.terminal is TurnEventKind.FAILED:
-            return {
-                "event_type": "chat.error",
-                "error": self._terminal_errors.pop(
-                    item.turn_id or "", "External execution Turn failed"
-                ),
-            }
-        if item.terminal is TurnEventKind.ABORTED:
-            return {"event_type": "chat.final", "content": ""}
+        if item.terminal is not None:
+            turn_id = item.turn_id or ""
+            return harness_terminal_payload(
+                item.terminal,
+                error=self._terminal_errors.pop(turn_id, None),
+                error_code=self._terminal_error_codes.pop(turn_id, None),
+                cancellation=self._terminal_cancellations.pop(turn_id, None),
+            )
         return None
 
     async def __call__(self, item: ProjectedOutput) -> None:
@@ -142,6 +151,8 @@ class ExternalEventProjection:
 
         turn_id = item.turn_id
         if not turn_id:
+            return
+        if turn_id in self._terminated_turns:
             return
         state = self._turns.get(turn_id)
         if state is None:
@@ -180,10 +191,24 @@ class ExternalEventProjection:
             if item.terminal is not None and delivered:
                 self._terminal_errors.pop(turn_id, None)
                 self._turns.pop(turn_id, None)
+                self._remember_terminal(turn_id)
 
     async def close(self) -> None:
         self._turns.clear()
         self._terminal_errors.clear()
+        self._terminal_error_codes.clear()
+        self._terminal_cancellations.clear()
+        self._terminated_turns.clear()
+        self._terminal_order.clear()
+
+    def _remember_terminal(self, turn_id: str) -> None:
+        if turn_id in self._terminated_turns:
+            return
+        if len(self._terminal_order) >= _TERMINAL_TOMBSTONES:
+            expired = self._terminal_order.popleft()
+            self._terminated_turns.discard(expired)
+        self._terminal_order.append(turn_id)
+        self._terminated_turns.add(turn_id)
 
     async def project_product_chunk(self, chunk: Any) -> None:
         """Reuse the Native subagent parser/history seam for product events."""

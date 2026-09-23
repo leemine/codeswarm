@@ -12,6 +12,10 @@ from openjiuwen.harness_protocol import DeliveryMode, SendReceipt
 from openjiuwen.harness_providers.io_adapter import HarnessIOAdapter, ProjectedOutput
 
 
+class TurnOutputIncompleteError(RuntimeError):
+    """A product Turn output owner closed without observing a terminal event."""
+
+
 @dataclass(slots=True)
 class _Mailbox:
     queue: asyncio.Queue[ProjectedOutput]
@@ -219,7 +223,9 @@ class TurnOutputRouter:
     @staticmethod
     async def _next(mailbox: _Mailbox) -> ProjectedOutput:
         if mailbox.closed.is_set():
-            raise RuntimeError("turn output ended before a terminal event")
+            raise TurnOutputIncompleteError(
+                "turn output ended before a terminal event"
+            )
         if mailbox.recovered:
             return mailbox.recovered.popleft()
         if not mailbox.queue.empty():
@@ -234,7 +240,9 @@ class TurnOutputRouter:
                 item = get.result()
                 delivered = True
                 return item
-            raise RuntimeError("turn output ended before a terminal event")
+            raise TurnOutputIncompleteError(
+                "turn output ended before a terminal event"
+            )
         finally:
             for task in (get, closed):
                 if not task.done():
@@ -243,3 +251,6 @@ class TurnOutputRouter:
             if not delivered and get.done() and not get.cancelled():
                 mailbox.recovered.appendleft(get.result())
             mailbox.reader_idle.set()
+
+
+__all__ = ["TurnOutputIncompleteError", "TurnOutputRouter"]

@@ -40,6 +40,7 @@ const HISTORY_RESTORE_TIMEOUT_MS = 30_000;
 
 /** 助手侧仅恢复这些事件；用户消息无 event_type，单独保留 */
 const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
+  'chat.error',
   'chat.final',
   'chat.tool_call',
   'chat.tool_result',
@@ -1086,6 +1087,35 @@ function parseHistoryTimelineEntry(
   }
 
   const payload = buildEventPayloadForRecord(record);
+
+  if (eventType === 'chat.error') {
+    const error =
+      (typeof payload.error === 'string' && payload.error) ||
+      (typeof payload.content === 'string' && payload.content) ||
+      '';
+    if (!error.trim()) return null;
+    const terminalStatus =
+      payload.terminal_status === 'failed' ||
+      payload.terminal_status === 'cancelled' ||
+      payload.terminal_status === 'unknown'
+        ? payload.terminal_status
+        : 'failed';
+    const errorCode = typeof payload.code === 'string' ? payload.code : undefined;
+    return {
+      kind: 'message',
+      message: {
+        id:
+          pickFirstString(record, ['id', 'message_id', 'msg_id']) ??
+          `hist-error-${sessionId}-${at}`,
+        role: 'system',
+        content: error,
+        timestamp: at,
+        terminalStatus,
+        ...(errorCode ? { errorCode } : {}),
+        ...(forkedFromSessionId ? { forkedFromSessionId } : {}),
+      },
+    };
+  }
 
   if (eventType === 'chat.subtask_update') {
     return { kind: 'subagent_update', at, payload };

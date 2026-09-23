@@ -178,6 +178,37 @@ async def test_failed_detached_turn_does_not_write_success_final(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_detached_native_ignores_output_after_terminal(monkeypatch):
+    push = AsyncMock()
+    monkeypatch.setattr(mod, "send_runtime_push", push)
+    monkeypatch.setattr(
+        mod,
+        "append_history_record_durable",
+        MagicMock(return_value=None),
+    )
+    monkeypatch.setattr(history_io, "run_history_io", _direct_history)
+    monkeypatch.setattr(mod, "get_session_delivery_context", lambda _sid: {})
+    monkeypatch.setattr(mod, "get_session_metadata", lambda *_args, **_kwargs: {})
+    projection = mod.NativeDetachedProjection("s", SimpleNamespace())
+    projection._turns["turn"] = mod._DetachedTurn()
+
+    await projection(ProjectedOutput("turn", terminal=TurnEventKind.ABORTED))
+    await projection(
+        ProjectedOutput(
+            "turn",
+            chunk=OutputSchema(
+                type="llm_output",
+                index=99,
+                payload={"content": "late output"},
+            ),
+        )
+    )
+
+    assert push.await_count == 1
+    assert push.await_args.args[0]["payload"]["terminal_status"] == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_detached_goal_completion_uses_existing_card_writer(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
         JiuWenSwarmDeepAdapter,

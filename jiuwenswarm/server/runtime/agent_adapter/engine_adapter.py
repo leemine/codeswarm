@@ -19,7 +19,9 @@ from jiuwenswarm.runtime.harness.context_bridge import (
 from jiuwenswarm.runtime.harness.event_projection import ExternalEventProjection
 from jiuwenswarm.runtime.harness.execution_session import ExecutionSession
 from jiuwenswarm.runtime.harness.external_subagents import ExternalSubagentRuntime
+from jiuwenswarm.runtime.harness.output_router import TurnOutputIncompleteError
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
+from jiuwenswarm.runtime.terminal_outcome import unknown_terminal_payload
 
 
 class EngineAgentAdapter:
@@ -122,19 +124,45 @@ class EngineAgentAdapter:
                         content = [value]
                     else:
                         content.append(value)
-        error = next(
+        terminal_error = next(
             (
-                str(event.get("error") or "External execution failed")
+                event
                 for event in events
                 if event.get("event_type") == "chat.error"
             ),
             None,
         )
+        terminal_event = next(
+            (
+                event
+                for event in reversed(events)
+                if event.get("terminal_status")
+            ),
+            None,
+        )
+        error = (
+            str(terminal_error.get("error") or "External execution failed")
+            if terminal_error is not None
+            else None
+        )
+        terminal_fields = (
+            {
+                key: terminal_event[key]
+                for key in ("code", "terminal_status")
+                if key in terminal_event
+            }
+            if terminal_event is not None
+            else {}
+        )
         return AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,
             ok=error is None,
-            payload={"content": "".join(content), **({"error": error} if error else {})},
+            payload={
+                "content": "".join(content),
+                **({"error": error} if error else {}),
+                **terminal_fields,
+            },
             metadata=request.metadata,
         )
 
@@ -167,18 +195,36 @@ class EngineAgentAdapter:
         )
         terminal_seen = False
         try:
-            async for item in session.outputs(receipt.turn_id):
-                payload = self._projection.owned_payload(item)
-                if payload is not None:
-                    yield AgentResponseChunk(
-                        request_id=request.request_id,
-                        channel_id=request.channel_id,
-                        payload=payload,
-                        is_complete=False,
-                        metadata=dict(request.metadata or {}),
-                    )
-                if item.terminal is not None:
-                    terminal_seen = True
+            try:
+                output = session.outputs(receipt.turn_id)
+                async for item in output:
+                    payload = self._projection.owned_payload(item)
+                    if payload is not None:
+                        status = str(payload.get("terminal_status") or "")
+                        yield AgentResponseChunk(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            payload=payload,
+                            is_complete=item.terminal is not None,
+                            metadata=dict(request.metadata or {}),
+                            runtime_completion=(
+                                status if item.terminal is not None else None
+                            ),
+                        )
+                    if item.terminal is not None:
+                        terminal_seen = True
+            except TurnOutputIncompleteError:
+                pass
+            if not terminal_seen:
+                payload = unknown_terminal_payload()
+                yield AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload=payload,
+                    is_complete=True,
+                    metadata=dict(request.metadata or {}),
+                    runtime_completion="unknown",
+                )
         finally:
             if not terminal_seen:
                 session.abandon_output(receipt.turn_id)

@@ -84,6 +84,19 @@ def test_pending_interaction_history_records_are_restorable():
     ) is True
 
 
+def test_terminal_error_history_records_are_restorable():
+    assert agent_ws_server_module._is_restorable_history_record(
+        {
+            "id": "cancelled-1",
+            "role": "assistant",
+            "event_type": "chat.error",
+            "content": "cancelled by the user",
+            "code": "EXECUTION_CANCELLED",
+            "terminal_status": "cancelled",
+        }
+    ) is True
+
+
 @pytest.fixture(autouse=True)
 def patch_wire_encoder(monkeypatch):
     monkeypatch.setattr(

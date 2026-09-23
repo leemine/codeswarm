@@ -11,10 +11,11 @@ from io import StringIO
 from typing import Any
 
 from jiuwenswarm.channels.process_cli.protocol.model import RuntimeErrorInfo
-from jiuwenswarm.runtime.events import RuntimeEvent
+from jiuwenswarm.runtime.events import RuntimeEvent, TERMINAL_ERROR_EVENT_TYPES
+from jiuwenswarm.runtime.terminal_outcome import payload_terminal_status
 
 
-_RUN_ERROR_EVENTS = frozenset({"chat.error", "runtime.error"})
+_RUN_ERROR_EVENTS = TERMINAL_ERROR_EVENT_TYPES
 _USAGE_COUNTERS = frozenset(
     {
         "input_tokens",
@@ -113,7 +114,14 @@ class RunSummary:
     retained here.
     """
 
-    __slots__ = ("_deltas", "_final", "_usage", "_has_usage_summary", "_error")
+    __slots__ = (
+        "_deltas",
+        "_final",
+        "_usage",
+        "_has_usage_summary",
+        "_error",
+        "_terminal_status",
+    )
 
     def __init__(self) -> None:
         self._deltas = StringIO()
@@ -121,6 +129,7 @@ class RunSummary:
         self._usage: dict[str, Any] = {}
         self._has_usage_summary = False
         self._error: RuntimeErrorInfo | None = None
+        self._terminal_status: str | None = None
 
     @property
     def output(self) -> str | None:
@@ -147,10 +156,19 @@ class RunSummary:
         """Return the first run-level error even if later text looks successful."""
         return self._error
 
+    @property
+    def terminal_status(self) -> str | None:
+        """Return the explicit product terminal outcome, when supplied."""
+
+        return self._terminal_status
+
     def observe(self, event: RuntimeEvent) -> None:
         """Consume one event while preserving Runtime-owned payloads."""
         payload = event.payload if isinstance(event.payload, Mapping) else {}
         event_type = event.event_type
+        explicit_status = payload_terminal_status(payload)
+        if explicit_status is not None:
+            self._terminal_status = explicit_status
         if event_type == "chat.delta":
             self._deltas.write(_text(payload))
         elif event_type == "chat.final":

@@ -13,6 +13,52 @@ import {
 const sessionId = 'web_session';
 const subagentId = 'web_session_sub_general-purpose_1';
 
+test('history restores failed and cancelled terminal records without treating them as finals', () => {
+  const messages = parseHistoryJsonFileToPreviewMessages([
+    {
+      id: 'cancelled',
+      role: 'assistant',
+      event_type: 'chat.error',
+      content: 'cancelled by the user',
+      code: 'EXECUTION_CANCELLED',
+      terminal_status: 'cancelled',
+      timestamp: 1,
+    },
+    {
+      id: 'failed',
+      role: 'assistant',
+      event_type: 'chat.error',
+      content: 'provider failed',
+      code: 'EXECUTION_FAILED',
+      terminal_status: 'failed',
+      timestamp: 2,
+    },
+  ], sessionId);
+
+  assert.deepEqual(messages.map((message) => ({
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    terminalStatus: message.terminalStatus,
+    errorCode: message.errorCode,
+  })), [
+    {
+      id: 'cancelled',
+      role: 'system',
+      content: 'cancelled by the user',
+      terminalStatus: 'cancelled',
+      errorCode: 'EXECUTION_CANCELLED',
+    },
+    {
+      id: 'failed',
+      role: 'system',
+      content: 'provider failed',
+      terminalStatus: 'failed',
+      errorCode: 'EXECUTION_FAILED',
+    },
+  ]);
+});
+
 test('existing full-duplex spoken replies stay expanded after history restore without changing normal chat', () => {
   const messages = parseHistoryJsonFileToPreviewMessages([
     { id: 'ack', channel_id: 'video_duplex', role: 'assistant', event_type: 'chat.final', content: '好的，没问题，我现在就帮你生成这道题的代码。', timestamp: 1 },

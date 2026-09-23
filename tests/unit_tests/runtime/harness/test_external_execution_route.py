@@ -7,6 +7,7 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -23,6 +24,8 @@ from openjiuwen.harness_protocol import (
     TurnLifecycleEvent,
     TurnResult,
     TurnStatus,
+    TurnTermination,
+    TurnTerminationKind,
 )
 from openjiuwen.core.session.stream.base import OutputSchema
 from openjiuwen.harness_providers.io_adapter import ProjectedOutput
@@ -614,6 +617,9 @@ async def test_engine_adapter_streams_projected_output_and_terminal_final(
         "chat.final",
     ]
     assert chunks[0].payload["content"] == "hello"
+    assert chunks[-1].payload["terminal_status"] == "completed"
+    assert chunks[-1].is_complete is True
+    assert chunks[-1].runtime_completion == "completed"
 
 
 @pytest.mark.asyncio
@@ -645,6 +651,148 @@ async def test_external_projection_preserves_normalized_terminal_error() -> None
     assert payload == {
         "event_type": "chat.error",
         "error": "provider rejected the configured source",
+        "code": "EXECUTION_FAILED",
+        "terminal_status": "failed",
+    }
+
+
+@pytest.mark.asyncio
+async def test_external_projection_distinguishes_cancelled_terminal() -> None:
+    projection = ExternalEventProjection("session-1")
+    projection.register_turn(
+        "turn-1",
+        request_id="request-1",
+        channel_id="web",
+        mode="code",
+    )
+    await projection.observe(
+        SimpleNamespace(
+            turn_id="turn-1",
+            event=TurnLifecycleEvent(
+                TurnEventKind.ABORTED,
+                TurnResult(
+                    status=TurnStatus.INTERRUPTED,
+                    termination=TurnTermination(
+                        TurnTerminationKind.USER_ABORT,
+                        "cancelled by the user",
+                    ),
+                ),
+            ),
+        )
+    )
+
+    payload = projection.owned_payload(
+        ProjectedOutput(turn_id="turn-1", terminal=TurnEventKind.ABORTED)
+    )
+
+    assert payload == {
+        "event_type": "chat.error",
+        "error": "cancelled by the user",
+        "code": "EXECUTION_CANCELLED",
+        "terminal_status": "cancelled",
+    }
+
+
+@pytest.mark.asyncio
+async def test_engine_adapter_reports_eof_without_terminal_as_unknown(
+    tmp_path: Path,
+) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import (
+        EngineAgentAdapter,
+    )
+
+    route = _route(tmp_path)
+
+    class Session:
+        binding = route.bound.binding
+        started = True
+        closed = False
+
+        def __init__(self) -> None:
+            self.abandoned: list[str] = []
+
+        async def send(self, _content: Any, *, immediate: bool = False) -> SendReceipt:
+            assert immediate is False
+            return SendReceipt("message-1", "turn-1", DeliveryMode.AUTO)
+
+        async def outputs(self, _turn_id: str):
+            if False:
+                yield None
+
+        def abandon_output(self, turn_id: str) -> None:
+            self.abandoned.append(turn_id)
+
+    adapter = EngineAgentAdapter(route)
+    session = Session()
+    adapter._session = session
+    request = SimpleNamespace(
+        request_id="request-1",
+        channel_id="web",
+        metadata={},
+        params={"mode": "code"},
+    )
+
+    chunks = [
+        chunk
+        async for chunk in adapter.process_message_stream_impl(
+            request,
+            {"query": "hi"},
+        )
+    ]
+
+    assert [chunk.payload for chunk in chunks] == [
+        {
+            "event_type": "chat.error",
+            "error": "External execution stream ended without a terminal result",
+            "code": "EXECUTION_TERMINAL_UNKNOWN",
+            "terminal_status": "unknown",
+        }
+    ]
+    assert chunks[0].is_complete is True
+    assert chunks[0].runtime_completion == "unknown"
+    assert session.abandoned == ["turn-1"]
+
+
+@pytest.mark.asyncio
+async def test_engine_adapter_nonstream_cancel_is_not_ok(tmp_path: Path) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import (
+        EngineAgentAdapter,
+    )
+
+    route = _route(tmp_path)
+
+    class Session:
+        binding = route.bound.binding
+        started = True
+        closed = False
+
+        async def send(self, _content: Any, *, immediate: bool = False) -> SendReceipt:
+            assert immediate is False
+            return SendReceipt("message-1", "turn-1", DeliveryMode.AUTO)
+
+        async def outputs(self, turn_id: str):
+            yield ProjectedOutput(turn_id=turn_id, terminal=TurnEventKind.ABORTED)
+
+        def abandon_output(self, _turn_id: str) -> None:
+            raise AssertionError("cancelled output observed its terminal")
+
+    adapter = EngineAgentAdapter(route)
+    adapter._session = Session()
+    request = SimpleNamespace(
+        request_id="request-1",
+        channel_id="web",
+        metadata={},
+        params={"mode": "code"},
+    )
+
+    response = await adapter.process_message_impl(request, {"query": "hi"})
+
+    assert response.ok is False
+    assert response.payload == {
+        "content": "",
+        "error": "External execution Turn was cancelled",
+        "code": "EXECUTION_CANCELLED",
+        "terminal_status": "cancelled",
     }
 
 
@@ -833,6 +981,41 @@ async def test_detached_external_push_waits_for_durable_history(
     receipt.set_result(None)
     await delivery
     assert len(pushes) == 1
+
+
+@pytest.mark.asyncio
+async def test_external_projection_ignores_output_after_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.runtime.harness import event_projection as module
+
+    push = AsyncMock()
+    monkeypatch.setattr(module, "send_runtime_push", push)
+    projection = ExternalEventProjection("session-1")
+    projection.register_turn(
+        "turn-1",
+        request_id="request-1",
+        channel_id="web",
+        mode="code",
+    )
+
+    terminal = projection.owned_payload(
+        ProjectedOutput("turn-1", terminal=TurnEventKind.FINISHED)
+    )
+    await projection(
+        ProjectedOutput(
+            "turn-1",
+            chunk=OutputSchema(
+                type="llm_output",
+                index=99,
+                payload={"content": "late output"},
+            ),
+        )
+    )
+
+    assert terminal is not None
+    assert terminal["terminal_status"] == "completed"
+    push.assert_not_awaited()
 
 
 @pytest.mark.asyncio

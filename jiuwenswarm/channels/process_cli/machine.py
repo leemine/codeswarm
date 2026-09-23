@@ -29,6 +29,7 @@ from jiuwenswarm.channels.process_cli.protocol import (
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.runtime.events import RuntimeEvent
+from jiuwenswarm.runtime.terminal_outcome import TERMINAL_STATUS_CANCELLED
 
 if TYPE_CHECKING:
     from jiuwenswarm.channels.process_cli.duplex_control import DuplexController
@@ -223,7 +224,14 @@ class _MachineRun:
         self.writer.write_event(event)
         self.summary.observe(event)
         if self.summary.error is not None:
-            self.fail(self.summary.error)
+            if self.summary.terminal_status == TERMINAL_STATUS_CANCELLED:
+                self.fail(
+                    self.summary.error,
+                    status=RunStatus.CANCELLED,
+                    exit_code=130,
+                )
+            else:
+                self.fail(self.summary.error)
 
     async def consume_noninteractive(self) -> bool:
         completed = False

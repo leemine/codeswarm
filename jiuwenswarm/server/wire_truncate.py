@@ -61,6 +61,7 @@ _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES = frozenset(
     {
         "chat.reasoning",
         "chat.ask_user_question",
+        "chat.error",
         "chat.final",
         "chat.tool_call",
         "chat.tool_result",

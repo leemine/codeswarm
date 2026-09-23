@@ -481,6 +481,32 @@ async def test_external_task_cancellation_is_a_terminal_result_after_cleanup(
 
 
 @pytest.mark.asyncio
+async def test_provider_cancelled_terminal_is_not_reported_as_failure() -> None:
+    client = FakeClient(
+        events=[
+            _event(
+                "chat.error",
+                error="External execution Turn was cancelled",
+                code="EXECUTION_CANCELLED",
+                terminal_status="cancelled",
+            )
+        ]
+    )
+
+    result = await _run(client)
+
+    assert result.status == "cancelled"
+    assert result.exit_code == 130
+    assert result.error.code == "EXECUTION_CANCELLED"
+    assert client.calls[-4:] == [
+        "cancel",
+        "stream_close",
+        "cleanup_session",
+        "close",
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "event_type",
     [

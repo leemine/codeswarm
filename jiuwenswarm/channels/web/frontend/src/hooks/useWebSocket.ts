@@ -4170,6 +4170,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const rawErrorMsg =
           typeof payload.error === 'string' ? payload.error : t('network.unknownError');
         const errorMsg = describeChatError(payload, rawErrorMsg, t);
+        const terminalStatus =
+          payload.terminal_status === 'failed' ||
+          payload.terminal_status === 'cancelled' ||
+          payload.terminal_status === 'unknown'
+            ? payload.terminal_status
+            : undefined;
+        const terminalErrorCode =
+          typeof payload.code === 'string' ? payload.code : undefined;
         if (payload.code === 'AGENT_GROUP_NOT_INSTALLED') {
           const chatStore = useChatStore.getState();
           chatStore.setAgentGroupUnavailable(sessionId, true);
@@ -4178,6 +4186,20 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
         // 忽略 "invalid page_idx or session history not found" 错误，因为这是新会话的正常情况
         if (rawErrorMsg.includes('invalid page_idx or session history not found')) {
+          return;
+        }
+        if (terminalStatus === 'cancelled') {
+          const chatStore = useChatStore.getState();
+          chatStore.setProcessing(sessionId, false);
+          localSendPendingRef.current.delete(sessionId);
+          chatStore.addMessage(sessionId, {
+            id: prefixedMessageId('cancelled-'),
+            role: 'system',
+            content: errorMsg,
+            timestamp: new Date().toISOString(),
+            terminalStatus,
+            ...(terminalErrorCode ? { errorCode: terminalErrorCode } : {}),
+          });
           return;
         }
         // 选了免费模型但没登录 / 登录已过期（后端预检 interface_deep._model_config_error，
@@ -4215,6 +4237,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           role: 'system',
           content: t('network.errorPrefix', { message: errorMsg }),
           timestamp: new Date().toISOString(),
+          ...(terminalStatus ? { terminalStatus } : {}),
+          ...(terminalErrorCode ? { errorCode: terminalErrorCode } : {}),
         });
       }),
       webClient.on('chat.message_updated', ({ payload }) => {
