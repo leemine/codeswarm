@@ -34,7 +34,11 @@ from openjiuwen.harness_providers.io_adapter import ProjectedOutput
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
 from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
 from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
-from jiuwenswarm.runtime.harness.execution_session import ExecutionSession
+from jiuwenswarm.runtime.harness.execution_session import (
+    ExecutionExitState,
+    ExecutionExitUnconfirmedError,
+    ExecutionSession,
+)
 from jiuwenswarm.runtime.harness.event_projection import ExternalEventProjection
 from jiuwenswarm.runtime.harness.context_bridge import (
     build_external_input,
@@ -429,6 +433,7 @@ async def test_execution_session_validates_paths_and_owns_one_event_reader(
             self.cursor = Cursor()
             self.start_calls = 0
             self.stop_calls = 0
+            self.stop_failures = 0
 
         async def start(self, _context: HarnessContext) -> None:
             self.start_calls += 1
@@ -436,6 +441,9 @@ async def test_execution_session_validates_paths_and_owns_one_event_reader(
 
         async def stop(self) -> None:
             self.stop_calls += 1
+            if self.stop_failures:
+                self.stop_failures -= 1
+                raise RuntimeError("provider exit unconfirmed")
             self.state = HarnessState.TERMINATED
             self.cursor.closed.set()
 
@@ -484,6 +492,7 @@ async def test_execution_session_validates_paths_and_owns_one_event_reader(
     await session.stop()
     await session.stop()
     assert session.closed is True
+    assert session.exit_state is ExecutionExitState.EXIT_CONFIRMED
     assert harness.stop_calls == 1
 
     wrong_root = (tmp_path / "outside").resolve()
@@ -503,6 +512,213 @@ async def test_execution_session_validates_paths_and_owns_one_event_reader(
     with pytest.raises(ValueError, match="runtime paths"):
         await other.start(wrong_context)
     await other.stop()
+
+
+@pytest.mark.asyncio
+async def test_execution_session_retries_unconfirmed_provider_exit(
+    tmp_path: Path,
+) -> None:
+    route = _route(tmp_path)
+
+    class Cursor:
+        def __init__(self) -> None:
+            self.closed = asyncio.Event()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await self.closed.wait()
+            raise StopAsyncIteration
+
+    class Harness:
+        card = SimpleNamespace(name="fake")
+        state = HarnessState.TERMINATED
+        provider_session_id = None
+
+        def __init__(self, *, fail_first: bool = True) -> None:
+            self.cursor = Cursor()
+            self.stop_calls = 0
+            self.fail_first = fail_first
+
+        async def start(self, _context) -> None:
+            self.state = HarnessState.IDLE
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            if self.fail_first and self.stop_calls == 1:
+                raise RuntimeError("still alive")
+            self.state = HarnessState.TERMINATED
+            self.cursor.closed.set()
+
+        def events(self):
+            return self.cursor
+
+    harness = Harness()
+    session = ExecutionSession(
+        HarnessEngine(route.bound.binding, harness), route.runtime_paths
+    )
+    await session.start(
+        HarnessContext(
+            agent_name="external",
+            agent_id="external-1",
+            host_session_id="session-1",
+            system_prompt="",
+            cwd=str(route.runtime_paths.cwd),
+        )
+    )
+    other_route = _route(tmp_path, session_id="session-2")
+    other_harness = Harness(fail_first=False)
+    other = ExecutionSession(
+        HarnessEngine(other_route.bound.binding, other_harness),
+        other_route.runtime_paths,
+    )
+    await other.start(
+        HarnessContext(
+            agent_name="external",
+            agent_id="external-2",
+            host_session_id="session-2",
+            system_prompt="",
+            cwd=str(other_route.runtime_paths.cwd),
+        )
+    )
+
+    with pytest.raises(ExecutionExitUnconfirmedError) as caught:
+        await session.stop()
+    assert caught.value.code == "EXECUTION_EXIT_UNCONFIRMED"
+    assert session.closed is False
+    assert session.exit_state is ExecutionExitState.EXIT_UNCONFIRMED
+    assert other.exit_state is ExecutionExitState.RUNNING
+    assert other.closed is False
+    with pytest.raises(RuntimeError, match="not running"):
+        session.outputs("turn-1")
+
+    await session.stop()
+    assert session.closed is True
+    assert session.exit_state is ExecutionExitState.EXIT_CONFIRMED
+    assert harness.stop_calls == 2
+    await other.stop()
+    assert other_harness.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_execution_session_stop_timeout_is_unconfirmed_and_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.runtime.harness import execution_session as module
+
+    route = _route(tmp_path)
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    class Cursor:
+        def __init__(self) -> None:
+            self.closed = asyncio.Event()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await self.closed.wait()
+            raise StopAsyncIteration
+
+    class Harness:
+        card = SimpleNamespace(name="fake")
+        state = HarnessState.TERMINATED
+        provider_session_id = None
+
+        def __init__(self) -> None:
+            self.cursor = Cursor()
+            self.stop_calls = 0
+
+        async def start(self, _context) -> None:
+            self.state = HarnessState.IDLE
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            if self.stop_calls == 1:
+                entered.set()
+                await release.wait()
+            self.state = HarnessState.TERMINATED
+            self.cursor.closed.set()
+
+        def events(self):
+            return self.cursor
+
+    monkeypatch.setattr(module, "RESOURCE_STOP_TIMEOUT_S", 0.01)
+    harness = Harness()
+    session = ExecutionSession(
+        HarnessEngine(route.bound.binding, harness), route.runtime_paths
+    )
+    await session.start(
+        HarnessContext(
+            agent_name="external",
+            agent_id="external-1",
+            host_session_id="session-1",
+            system_prompt="",
+            cwd=str(route.runtime_paths.cwd),
+        )
+    )
+
+    stopping = asyncio.create_task(session.stop())
+    await entered.wait()
+    assert session.exit_state is ExecutionExitState.STOP_REQUESTED
+    with pytest.raises(ExecutionExitUnconfirmedError) as caught:
+        await stopping
+    assert isinstance(caught.value.failures[0][1], TimeoutError)
+    assert session.exit_state is ExecutionExitState.EXIT_UNCONFIRMED
+
+    release.set()
+    await session.stop()
+    assert session.exit_state is ExecutionExitState.EXIT_CONFIRMED
+    assert harness.stop_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_half_started_session_is_retained_until_cleanup_retry_succeeds(
+    tmp_path: Path,
+) -> None:
+    route = _route(tmp_path)
+
+    class Harness:
+        card = SimpleNamespace(name="fake")
+        state = HarnessState.TERMINATED
+        provider_session_id = None
+
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        async def start(self, _context) -> None:
+            raise RuntimeError("startup failed after allocation")
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            if self.stop_calls < 3:
+                raise RuntimeError("half-started process still alive")
+
+    harness = Harness()
+    session = ExecutionSession(
+        HarnessEngine(route.bound.binding, harness), route.runtime_paths
+    )
+    context = HarnessContext(
+        agent_name="external",
+        agent_id="external-1",
+        host_session_id="session-1",
+        system_prompt="",
+        cwd=str(route.runtime_paths.cwd),
+    )
+
+    with pytest.raises(ExecutionExitUnconfirmedError):
+        await session.start(context)
+    assert session.exit_state is ExecutionExitState.EXIT_UNCONFIRMED
+    with pytest.raises(RuntimeError, match="cleanup is pending"):
+        await session.start(context)
+
+    await session.stop()
+    assert session.closed is True
+    assert session.exit_state is ExecutionExitState.EXIT_CONFIRMED
+    assert harness.stop_calls == 3
 
 
 @pytest.mark.asyncio

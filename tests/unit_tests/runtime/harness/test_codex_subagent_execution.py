@@ -86,6 +86,7 @@ class _FakeSession:
         self.started_context = None
         self.stopped = False
         self.aborted = False
+        self.stop_failures = 0
         self.outputs_by_turn: dict[str, list[ProjectedOutput]] = {}
 
     async def start(self, context: Any) -> None:
@@ -105,6 +106,9 @@ class _FakeSession:
         self.aborted = True
 
     async def stop(self) -> None:
+        if self.stop_failures:
+            self.stop_failures -= 1
+            raise RuntimeError("child exit unconfirmed")
         self.stopped = True
 
 
@@ -344,6 +348,39 @@ async def test_close_releases_only_exact_child_binding(
 
     assert replacement.binding.provider_id == "native"
     assert route.bound.binding.provider_id == "codex"
+
+
+@pytest.mark.asyncio
+async def test_close_retains_child_binding_until_provider_exit_is_confirmed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _route(tmp_path)
+    calls = _install_session_builder(monkeypatch)
+    factory = CodexSubagentExecutionFactory(route)
+    request = _request()
+    execution = await factory.create(request, _context())
+    session = calls[0][1]
+    session.stop_failures = 1
+
+    with pytest.raises(RuntimeError, match="child exit unconfirmed"):
+        await execution.close("parent_ended")
+
+    assert execution.closed is False
+    assert factory._live[request.subagent_id] is execution
+    with pytest.raises(ValueError, match="does not match its binding"):
+        route.bindings.bind(
+            ExecutionConfigSource(
+                explicit=AgentExecutionSpec("native", "replacement")
+            ),
+            subject_id=execution.binding.subject_id,
+            host_session_id=execution.binding.host_session_id,
+            workspace=execution.binding.workspace,
+        )
+
+    await execution.close("retry")
+    assert execution.closed is True
+    assert request.subagent_id not in factory._live
 
 
 @pytest.mark.asyncio

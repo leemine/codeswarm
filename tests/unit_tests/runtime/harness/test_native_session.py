@@ -10,6 +10,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
 from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
+from jiuwenswarm.runtime.harness.execution_session import (
+    ExecutionExitState,
+    ExecutionExitUnconfirmedError,
+)
 from jiuwenswarm.runtime.harness.native_session import NativeExecutionSession
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -96,6 +100,41 @@ def _setup(tmp_path, rounds, *, goal=None, gate=None):
 
 def _answer():
     return OutputSchema(type="answer", index=9, payload={"output": "done"})
+
+
+@pytest.mark.asyncio
+async def test_half_started_native_session_blocks_restart_until_exit_is_confirmed(
+    tmp_path,
+):
+    execution, _, _, ctx, _, _ = _setup(tmp_path, [])
+
+    class _HalfStartedIO:
+        def __init__(self) -> None:
+            self.stop_fails = True
+            self.start_calls = 0
+
+        async def start(self, _context) -> None:
+            self.start_calls += 1
+            raise RuntimeError("provider startup failed")
+
+        async def stop(self) -> None:
+            if self.stop_fails:
+                raise RuntimeError("provider exit unconfirmed")
+
+    io = _HalfStartedIO()
+    execution.io = io
+
+    with pytest.raises(ExecutionExitUnconfirmedError):
+        await execution.start(ctx)
+    assert execution.exit_state is ExecutionExitState.EXIT_UNCONFIRMED
+
+    with pytest.raises(RuntimeError, match="cleanup is pending"):
+        await execution.start(ctx)
+    assert io.start_calls == 1
+
+    io.stop_fails = False
+    await execution.stop()
+    assert execution.exit_state is ExecutionExitState.EXIT_CONFIRMED
 
 
 @pytest.mark.asyncio

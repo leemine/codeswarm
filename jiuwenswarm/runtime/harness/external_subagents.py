@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
@@ -115,6 +116,7 @@ class ExternalSubagentRuntime:
             invoke_kwargs={"session": self._parent_session},
         )
         self._closed = False
+        self._close_lock = asyncio.Lock()
 
     @property
     def gateway(self) -> ProductToolGateway:
@@ -129,14 +131,29 @@ class ExternalSubagentRuntime:
         return bool(controls)
 
     async def close(self, reason: str = "parent_ended") -> None:
-        if self._closed:
-            return
-        self._closed = True
-        await release_subagent_control(
-            self._parent_host,
-            self._route.bound.binding.host_session_id,
-            reason=reason,
-        )
+        async with self._close_lock:
+            if self._closed:
+                return
+            failures: list[Exception] = []
+            try:
+                await release_subagent_control(
+                    self._parent_host,
+                    self._route.bound.binding.host_session_id,
+                    reason=reason,
+                )
+            except Exception as exc:
+                failures.append(exc)
+            close_pending = getattr(self._factory, "close_pending", None)
+            if callable(close_pending):
+                try:
+                    await close_pending()
+                except Exception as exc:
+                    failures.append(exc)
+            if failures:
+                raise ExceptionGroup(
+                    "External subagent exits could not be confirmed", failures
+                )
+            self._closed = True
 
 
 __all__ = [

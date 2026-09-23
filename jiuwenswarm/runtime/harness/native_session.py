@@ -35,6 +35,11 @@ from openjiuwen.harness_providers.native import (
 )
 
 from jiuwenswarm.runtime.harness.binding_store import BoundExecution
+from jiuwenswarm.runtime.harness.execution_session import (
+    ExecutionExitState,
+    ExecutionExitUnconfirmedError,
+    RESOURCE_STOP_TIMEOUT_S,
+)
 from jiuwenswarm.runtime.harness.output_router import TurnOutputRouter
 
 if TYPE_CHECKING:
@@ -90,6 +95,9 @@ class NativeExecutionSession:
         self._goal_handoffs: set[str] = set()
         self._terminal_turns: deque[str] = deque(maxlen=16)
         self._closing = False
+        self._closed = False
+        self._exit_state = ExecutionExitState.NOT_STARTED
+        self._lifecycle_lock = asyncio.Lock()
         hooks = NativeHostHooks(
             create_session=session_factory,
             before_start=before_start,
@@ -113,31 +121,80 @@ class NativeExecutionSession:
         self._output_router: TurnOutputRouter | None = None
 
     async def start(self, context: HarnessContext) -> None:
-        if self._closing:
-            raise RuntimeError("Native execution session has been closed")
-        binding = self.engine.binding
-        if context.host_session_id != binding.host_session_id or context.cwd is None:
-            raise ValueError(
-                "Native context must match the bound session and workspace"
-            )
-        if str(Path(context.cwd).resolve()) != binding.workspace:
-            raise ValueError("Native context workspace does not match the binding")
-        await self.io.start(context)
+        async with self._lifecycle_lock:
+            if self._closing or self._closed:
+                raise RuntimeError("Native execution session has been closed")
+            if self._exit_state in {
+                ExecutionExitState.STOP_REQUESTED,
+                ExecutionExitState.EXIT_UNCONFIRMED,
+            }:
+                raise RuntimeError("Native execution session cleanup is pending")
+            binding = self.engine.binding
+            if (
+                context.host_session_id != binding.host_session_id
+                or context.cwd is None
+            ):
+                raise ValueError(
+                    "Native context must match the bound session and workspace"
+                )
+            if str(Path(context.cwd).resolve()) != binding.workspace:
+                raise ValueError("Native context workspace does not match the binding")
+            try:
+                await self.io.start(context)
+            except BaseException as start_error:
+                try:
+                    await asyncio.wait_for(
+                        self.io.stop(), timeout=RESOURCE_STOP_TIMEOUT_S
+                    )
+                except Exception as cleanup_error:
+                    self._exit_state = ExecutionExitState.EXIT_UNCONFIRMED
+                    raise ExecutionExitUnconfirmedError(
+                        [("provider", cleanup_error)]
+                    ) from start_error
+                raise
+            self._exit_state = ExecutionExitState.RUNNING
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    @property
+    def exit_state(self) -> ExecutionExitState:
+        return self._exit_state
 
     async def stop(self) -> None:
-        self._closing = True
-        try:
+        async with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closing = True
+            self._exit_state = ExecutionExitState.STOP_REQUESTED
+            failures: list[tuple[str, Exception]] = []
+
+            async def stop_one(
+                name: str, operation: Callable[[], Awaitable[None]]
+            ) -> None:
+                try:
+                    await asyncio.wait_for(
+                        operation(), timeout=RESOURCE_STOP_TIMEOUT_S
+                    )
+                except Exception as exc:
+                    failures.append((name, exc))
+
             if self._output_router is not None:
-                await self._output_router.stop()
-        finally:
-            await self.io.stop()
-        for entry in self._requests.values():
-            if entry.result is not None and not entry.result.done():
-                entry.result.cancel()
-        self._requests.clear()
-        self._turn_requests.clear()
-        self._goal_handoffs.clear()
-        self._terminal_turns.clear()
+                await stop_one("output_router", self._output_router.stop)
+            await stop_one("provider", self.io.stop)
+            if failures:
+                self._exit_state = ExecutionExitState.EXIT_UNCONFIRMED
+                raise ExecutionExitUnconfirmedError(failures)
+            for entry in self._requests.values():
+                if entry.result is not None and not entry.result.done():
+                    entry.result.cancel()
+            self._requests.clear()
+            self._turn_requests.clear()
+            self._goal_handoffs.clear()
+            self._terminal_turns.clear()
+            self._closed = True
+            self._exit_state = ExecutionExitState.EXIT_CONFIRMED
 
     def enable_turn_outputs(
         self,

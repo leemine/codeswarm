@@ -369,18 +369,33 @@ class EngineAgentAdapter:
 
     async def cleanup_session_adapter(self, session_id: str) -> bool:
         session = self._session
-        if session is None or session.binding.host_session_id != session_id:
+        if self._route.bound.binding.host_session_id != session_id:
             return False
-        await self.release_subagent_runtime_for_session(
-            session_id,
-            reason="parent_ended",
-        )
-        await session.stop()
+        if session is None and self._subagent_runtime is None:
+            return False
+        failures: list[Exception] = []
+        try:
+            await self.release_subagent_runtime_for_session(
+                session_id,
+                reason="parent_ended",
+            )
+        except Exception as exc:
+            failures.append(exc)
+        if session is not None:
+            try:
+                await session.stop()
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                self._session = None
+        if failures:
+            raise ExceptionGroup(
+                "External Session exits could not be confirmed", failures
+            )
         cleanup_staged_inputs(
             self._route.runtime_paths,
-            session_id=session.binding.host_session_id,
+            session_id=session_id,
         )
-        self._session = None
         return True
 
     async def release_subagent_runtime_for_session(
@@ -401,19 +416,36 @@ class EngineAgentAdapter:
 
     def has_session_runtime(self, session_id: str | None = None) -> bool:
         session = self._session
-        if session is None or session.closed:
+        owns_session = session is not None and not session.closed
+        owns_subagents = self._subagent_runtime is not None
+        if not owns_session and not owns_subagents:
             return False
-        return session_id is None or session.binding.host_session_id == session_id
+        return (
+            session_id is None
+            or self._route.bound.binding.host_session_id == session_id
+        )
 
     async def cleanup(self) -> None:
         session = self._session
-        self._session = None
-        await self.release_subagent_runtime_for_session(
-            self._route.bound.binding.host_session_id,
-            reason="parent_ended",
-        )
+        failures: list[Exception] = []
+        try:
+            await self.release_subagent_runtime_for_session(
+                self._route.bound.binding.host_session_id,
+                reason="parent_ended",
+            )
+        except Exception as exc:
+            failures.append(exc)
         if session is not None:
-            await session.stop()
+            try:
+                await session.stop()
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                self._session = None
+        if failures:
+            raise ExceptionGroup(
+                "External Session exits could not be confirmed", failures
+            )
         cleanup_staged_inputs(
             self._route.runtime_paths,
             session_id=self._route.bound.binding.host_session_id,

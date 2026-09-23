@@ -10393,6 +10393,7 @@ class JiuWenSwarmDeepAdapter:
                 sid,
                 exc,
             )
+            raise
 
     async def ensure_live_session_instance(self, session_id: str | None) -> Any | None:
         """Start the session-scoped adapter if needed and return its DeepAgent.
@@ -12392,6 +12393,7 @@ class JiuWenSwarmDeepAdapter:
 
     async def cleanup(self) -> None:
         """Release adapter-owned external runtime resources."""
+        stop_errors: list[Exception] = []
         await self._cleanup_evolution_background_tasks()
         eternal_conversation_rail = getattr(self, "_eternal_conversation_rail", None)
         if eternal_conversation_rail is not None:
@@ -12402,34 +12404,54 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] eternal conversation cleanup failed: %s", exc
                 )
         if not self._is_session_scoped_adapter:
-            for adapter in list(self._session_adapters.values()):
+            for session_id, adapter in list(self._session_adapters.items()):
                 try:
                     await adapter.stop_interaction()
+                except Exception:
+                    # ``adapter.cleanup`` retries the retained execution below.
+                    # Its final result determines whether the parent may drop
+                    # this cache entry.
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] initial session stop failed: session_id=%s",
+                        session_id,
+                        exc_info=True,
+                    )
+                try:
                     await adapter.cleanup()
                 except Exception as exc:
                     logger.warning(
-                        "[JiuWenSwarmDeepAdapter] session adapter cleanup failed: %s",
+                        "[JiuWenSwarmDeepAdapter] session adapter cleanup failed: session_id=%s error=%s",
+                        session_id,
                         exc,
                     )
-            self._session_adapters.clear()
-            self._session_adapter_locks.clear()
-            self._session_adapter_last_used.clear()
-            self._session_adapter_versions.clear()
-            self._session_adapter_reload_failures.clear()
-            self._native_session_routes.clear()
+                    stop_errors.append(exc)
+                else:
+                    self._drop_session_adapter_cache_entry(
+                        session_id,
+                        remove_runtime_state=False,
+                    )
+                    self._native_session_routes.pop(session_id, None)
         else:
-            try:
-                if self._parent_session_id:
+            if self._parent_session_id:
+                try:
                     await self.release_subagent_runtime_for_session(
                         self._parent_session_id,
                         reason="adapter_cleanup",
                     )
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] subagent stop failed during cleanup: %s",
+                        exc,
+                    )
+                    stop_errors.append(exc)
+            try:
                 await self.stop_interaction()
             except Exception as exc:
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] stop failed during cleanup: %s",
                     exc,
                 )
+                stop_errors.append(exc)
             try:
                 from jiuwenswarm.agents.harness.common.tools.send_file_to_user import (
                     clear_sent_files_for_session,
@@ -12463,6 +12485,11 @@ class JiuWenSwarmDeepAdapter:
             self._mcp_prewarm_task.cancel()
         self._mcp_prewarm_task = None
         await self._close_a2x_client()
+        if stop_errors:
+            raise ExceptionGroup(
+                "one or more session exits could not be confirmed",
+                stop_errors,
+            )
 
     async def _cleanup_evolution_background_tasks(self) -> None:
         """Drain detached evolution work before adapter-owned state is released."""

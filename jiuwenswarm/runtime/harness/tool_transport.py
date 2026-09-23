@@ -29,6 +29,7 @@ PRODUCT_MCP_SERVER_NAME = "jiuwenswarm_product_tools"
 PRODUCT_MCP_PATH = "/mcp"
 _MAX_REQUEST_BODY_BYTES = 1024 * 1024
 _START_TIMEOUT_S = 10.0
+_STOP_TIMEOUT_S = 10.0
 
 
 def _tool_text(content: Any) -> str:
@@ -66,6 +67,13 @@ class ManagedProductToolTransport:
     def started(self) -> bool:
         task = self._serve_task
         return self._port is not None and task is not None and not task.done()
+
+    @property
+    def exit_confirmed(self) -> bool:
+        """Return true only when the owned server task has actually exited."""
+
+        task = self._serve_task
+        return task is None or task.done()
 
     async def start(self) -> None:
         async with self._lifecycle_lock:
@@ -126,23 +134,38 @@ class ManagedProductToolTransport:
         server = self._uvicorn
         task = self._serve_task
         listener = self._socket
-        self._uvicorn = None
-        self._socket = None
-        self._port = None
         if server is not None:
             server.should_exit = True
         if task is not None:
             try:
-                async with asyncio.timeout(_START_TIMEOUT_S):
-                    await task
+                async with asyncio.timeout(_STOP_TIMEOUT_S):
+                    await asyncio.shield(task)
             except TimeoutError:
                 task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-            finally:
-                if listener is not None:
-                    listener.close()
-        elif listener is not None:
+                try:
+                    async with asyncio.timeout(_STOP_TIMEOUT_S):
+                        await asyncio.shield(task)
+                except TimeoutError as exc:
+                    if listener is not None:
+                        listener.close()
+                        self._socket = None
+                    raise RuntimeError(
+                        "product MCP transport exit could not be confirmed"
+                    ) from exc
+                except asyncio.CancelledError:
+                    pass
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                # The owned server task has exited abnormally, but its exit is
+                # still confirmed.  Startup/readiness already reports failures
+                # that happen before the transport is published.
+                pass
+        if listener is not None:
             listener.close()
+        self._uvicorn = None
+        self._socket = None
+        self._port = None
 
     @staticmethod
     async def _serve(

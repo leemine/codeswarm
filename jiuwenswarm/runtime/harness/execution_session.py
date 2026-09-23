@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from collections.abc import AsyncIterator, Awaitable, Callable
+from enum import Enum
 from pathlib import Path
 
 from openjiuwen.harness.engine import HarnessEngine
@@ -31,6 +32,29 @@ from jiuwenswarm.runtime.harness.tool_transport import (
     ManagedProductToolTransport,
     PRODUCT_MCP_SERVER_NAME,
 )
+
+RESOURCE_STOP_TIMEOUT_S = 10.0
+
+
+class ExecutionExitState(str, Enum):
+    """Host knowledge about one Session's owned runtime exit."""
+
+    NOT_STARTED = "not_started"
+    RUNNING = "running"
+    STOP_REQUESTED = "stop_requested"
+    EXIT_CONFIRMED = "exit_confirmed"
+    EXIT_UNCONFIRMED = "exit_unconfirmed"
+
+
+class ExecutionExitUnconfirmedError(RuntimeError):
+    """One or more Session-owned resources did not confirm exit."""
+
+    code = "EXECUTION_EXIT_UNCONFIRMED"
+
+    def __init__(self, failures: list[tuple[str, Exception]]) -> None:
+        self.failures = tuple(failures)
+        resources = ", ".join(name for name, _ in failures)
+        super().__init__(f"execution exit could not be confirmed: {resources}")
 
 
 class ExecutionSession:
@@ -71,6 +95,7 @@ class ExecutionSession:
         self._lifecycle_lock = asyncio.Lock()
         self._started = False
         self._closed = False
+        self._exit_state = ExecutionExitState.NOT_STARTED
 
     @property
     def binding(self):
@@ -84,11 +109,20 @@ class ExecutionSession:
     def closed(self) -> bool:
         return self._closed
 
+    @property
+    def exit_state(self) -> ExecutionExitState:
+        return self._exit_state
+
     async def start(self, context: HarnessContext) -> None:
         """Start exactly one Provider cycle for the bound host Session."""
         async with self._lifecycle_lock:
             if self._closed:
                 raise RuntimeError("External execution session has been closed")
+            if self._exit_state in {
+                ExecutionExitState.STOP_REQUESTED,
+                ExecutionExitState.EXIT_UNCONFIRMED,
+            }:
+                raise RuntimeError("External execution session cleanup is pending")
             if self._started:
                 raise RuntimeError("External execution session is already started")
             binding = self.binding
@@ -106,9 +140,11 @@ class ExecutionSession:
             try:
                 prepared_context = await self._prepare_tool_context(context)
                 await self.io.start(prepared_context)
-            except BaseException:
-                if self._tool_transport is not None:
-                    await self._tool_transport.stop()
+            except BaseException as start_error:
+                try:
+                    await self._stop_owned_resources(router=None)
+                except ExecutionExitUnconfirmedError as cleanup_error:
+                    raise cleanup_error from start_error
                 raise
             router = TurnOutputRouter(
                 self.io,
@@ -117,15 +153,15 @@ class ExecutionSession:
             )
             try:
                 router.start()
-            except BaseException:
+            except BaseException as router_error:
                 try:
-                    await self.io.stop()
-                finally:
-                    if self._tool_transport is not None:
-                        await self._tool_transport.stop()
+                    await self._stop_owned_resources(router=router)
+                except ExecutionExitUnconfirmedError as cleanup_error:
+                    raise cleanup_error from router_error
                 raise
             self._output_router = router
             self._started = True
+            self._exit_state = ExecutionExitState.RUNNING
 
     async def send(self, content: HarnessInput, *, immediate: bool = False) -> SendReceipt:
         router = self._require_router()
@@ -161,7 +197,11 @@ class ExecutionSession:
         self._require_router().abandon(turn_id)
 
     async def abort(self, *, immediate: bool = False) -> None:
-        if self._started and not self._closed:
+        if (
+            self._started
+            and not self._closed
+            and self._exit_state is ExecutionExitState.RUNNING
+        ):
             await self.io.abort(immediate=immediate)
 
     async def stop(self) -> None:
@@ -169,20 +209,39 @@ class ExecutionSession:
         async with self._lifecycle_lock:
             if self._closed:
                 return
-            self._closed = True
+            self._exit_state = ExecutionExitState.STOP_REQUESTED
             router = self._output_router
+            await self._stop_owned_resources(router=router)
             self._output_router = None
+            self._provider_started_turns.clear()
+            self._started = False
+            self._closed = True
+            self._exit_state = ExecutionExitState.EXIT_CONFIRMED
+
+    async def _stop_owned_resources(
+        self,
+        *,
+        router: TurnOutputRouter | None,
+    ) -> None:
+        failures: list[tuple[str, Exception]] = []
+
+        async def stop_one(name: str, operation: Callable[[], Awaitable[None]]) -> None:
             try:
-                if router is not None:
-                    await router.stop()
-            finally:
-                try:
-                    await self.io.stop()
-                finally:
-                    if self._tool_transport is not None:
-                        await self._tool_transport.stop()
-                    self._provider_started_turns.clear()
-                    self._started = False
+                await asyncio.wait_for(
+                    operation(),
+                    timeout=RESOURCE_STOP_TIMEOUT_S,
+                )
+            except Exception as exc:
+                failures.append((name, exc))
+
+        if router is not None:
+            await stop_one("output_router", router.stop)
+        await stop_one("provider", self.io.stop)
+        if self._tool_transport is not None:
+            await stop_one("product_mcp", self._tool_transport.stop)
+        if failures:
+            self._exit_state = ExecutionExitState.EXIT_UNCONFIRMED
+            raise ExecutionExitUnconfirmedError(failures)
 
     async def _observe_event(self, envelope: HarnessEvent) -> None:
         event = envelope.event
@@ -247,9 +306,19 @@ class ExecutionSession:
 
     def _require_router(self) -> TurnOutputRouter:
         router = self._output_router
-        if not self._started or self._closed or router is None:
+        if (
+            not self._started
+            or self._closed
+            or self._exit_state is not ExecutionExitState.RUNNING
+            or router is None
+        ):
             raise RuntimeError("External execution session is not running")
         return router
 
 
-__all__ = ["ExecutionSession"]
+__all__ = [
+    "ExecutionExitState",
+    "ExecutionExitUnconfirmedError",
+    "ExecutionSession",
+    "RESOURCE_STOP_TIMEOUT_S",
+]
