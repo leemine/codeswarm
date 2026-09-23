@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from openjiuwen.harness.engine import ExecutionBinding
+
 from jiuwenswarm.common.runtime_workspace import (
     RuntimeWorkspacePaths,
     bind_session_runtime_workspace,
@@ -15,6 +17,10 @@ from jiuwenswarm.runtime.harness.binding_store import (
     ExecutionBindingStore,
 )
 from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
+from jiuwenswarm.runtime.harness.recovery_store import (
+    ExecutionRecoveryUnavailableError,
+    SessionExecutionRecovery,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +32,7 @@ class AdmittedExecutionRoute:
     bindings: ExecutionBindingStore
     bound: BoundExecution
     runtime_paths: RuntimeWorkspacePaths
+    recovery: SessionExecutionRecovery | None = None
 
     @property
     def provider_id(self) -> str:
@@ -79,15 +86,26 @@ def bind_admitted_request_execution(
 
     catalog = load_execution_catalog(get_config())
     if catalog is None:
-        raise RuntimeError("session execution profile is no longer configured")
-    source = catalog.source(explicit_profile_id=selected_profile_id)
+        raise ExecutionRecoveryUnavailableError(
+            "execution profile is no longer configured"
+        )
+    try:
+        source = catalog.source(explicit_profile_id=selected_profile_id)
+    except ValueError as exc:
+        raise ExecutionRecoveryUnavailableError(
+            "execution profile is no longer configured"
+        ) from exc
     spec = source.resolve()
     if spec.config_revision != session_metadata.get("execution_config_revision"):
-        raise RuntimeError("session execution configuration changed")
+        raise ExecutionRecoveryUnavailableError(
+            "execution configuration revision changed"
+        )
     from openjiuwen.harness.engine.config import config_fingerprint
 
     if config_fingerprint(spec) != session_metadata.get("execution_config_fingerprint"):
-        raise RuntimeError("session execution configuration changed")
+        raise ExecutionRecoveryUnavailableError(
+            "execution configuration fingerprint changed"
+        )
     runtime_paths = bind_session_runtime_workspace(
         internal_workspace_dir=get_agent_workspace_dir(),
         project_dir=project_dir,
@@ -99,6 +117,18 @@ def bind_admitted_request_execution(
         or session_metadata.get("user_id")
         or f"{channel_id}:{session_id}"
     ).strip()
+    prospective_binding = ExecutionBinding.create(
+        spec,
+        subject_id=subject,
+        host_session_id=session_id,
+        workspace=str(runtime_paths.runtime_workspace_root),
+    )
+    recovery = SessionExecutionRecovery(
+        session_id=session_id,
+        execution_profile_id=selected_profile_id,
+        binding=prospective_binding,
+        runtime_paths=runtime_paths,
+    )
     bindings = agent_manager.execution_bindings
     bound = bindings.bind(
         source,
@@ -112,6 +142,7 @@ def bind_admitted_request_execution(
         bindings=bindings,
         bound=bound,
         runtime_paths=runtime_paths,
+        recovery=recovery,
     )
     setattr(request, "_bound_execution", bound)
     setattr(request, "_execution_source", source)

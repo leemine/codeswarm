@@ -18,6 +18,7 @@ from jiuwenswarm.runtime.harness.codex_subagent import (
     CodexSubagentExecutionFactory,
 )
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
+from jiuwenswarm.runtime.harness.recovery_store import SessionExecutionRecovery
 from jiuwenswarm.runtime.harness.tool_gateway import (
     ProductToolGateway,
     ProductToolScope,
@@ -30,22 +31,22 @@ _SAME_ENGINE_AGENT_DESCRIPTION = (
 
 
 class ExternalSubagentParentSession:
-    """Minimal parent Session port used by the provider-neutral runtime.
-
-    B4 needs live state and event projection only. Durable checkpoint restore is
-    deliberately left to R1-04, so state stays owned by this live parent binding.
-    """
+    """Minimal parent Session port backed by the parent's recovery archive."""
 
     def __init__(
         self,
         session_id: str,
         *,
         write_output: Callable[[OutputSchema], Awaitable[None]],
+        recovery: SessionExecutionRecovery | None = None,
     ) -> None:
         if not session_id:
             raise ValueError("External subagent parent Session id is required")
         self._session_id = session_id
-        self._state: dict[str, Any] = {}
+        self._recovery = recovery
+        self._state: dict[str, Any] = (
+            recovery.load_host_state() if recovery is not None else {}
+        )
         self._write_output = write_output
 
     def get_session_id(self) -> str:
@@ -67,6 +68,8 @@ class ExternalSubagentParentSession:
 
     def update_state(self, data: dict[str, Any]) -> None:
         self._state.update(data)
+        if self._recovery is not None:
+            self._recovery.save_host_state(self._state)
 
     async def write_stream(self, data: dict | OutputSchema) -> None:
         if not isinstance(data, OutputSchema):
@@ -90,6 +93,7 @@ class ExternalSubagentRuntime:
         self._parent_session = ExternalSubagentParentSession(
             binding.host_session_id,
             write_output=write_output,
+            recovery=route.recovery,
         )
         # SubagentControl only needs the parent workspace contract and a stable
         # object on which to cache its per-parent control registry.

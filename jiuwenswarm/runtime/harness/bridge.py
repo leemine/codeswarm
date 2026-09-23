@@ -6,6 +6,7 @@ from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
 from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
 from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
 from jiuwenswarm.runtime.harness.execution_session import ExecutionSession
+from jiuwenswarm.runtime.harness.recovery_store import SessionExecutionRecovery
 
 
 def prepare_execution(source: ExecutionConfigSource, *, bindings: ExecutionBindingStore,
@@ -44,6 +45,7 @@ def prepare_execution_session(
     event_observer=None,
     detached_output=None,
     tool_gateway=None,
+    recovery: SessionExecutionRecovery | None = None,
 ) -> ExecutionSession:
     """Construct an unstarted External session from one admitted path snapshot."""
     engine = prepare_execution(
@@ -61,4 +63,5 @@ def prepare_execution_session(
         event_observer=event_observer,
         detached_output=detached_output,
         tool_gateway=tool_gateway,
+        recovery=recovery,
     )

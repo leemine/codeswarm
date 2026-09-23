@@ -80,6 +80,34 @@ def _context() -> ParentExecutionContext:
     )
 
 
+@pytest.mark.asyncio
+async def test_child_restore_uses_its_own_parent_scoped_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child_recovery = SimpleNamespace(has_checkpoint=lambda: True)
+    child_calls: list[tuple[Any, Any, dict[str, Any]]] = []
+
+    def child(binding: Any, paths: Any, **kwargs: Any):
+        child_calls.append((binding, paths, kwargs))
+        return child_recovery
+
+    route = dataclasses.replace(
+        _route(tmp_path),
+        recovery=SimpleNamespace(child=child),
+    )
+    calls = _install_session_builder(monkeypatch)
+    factory = CodexSubagentExecutionFactory(route)
+
+    assert await factory.can_restore(_request(), _context()) is True
+    execution = await factory.create(_request(), _context())
+
+    assert child_calls[0][2] == {"create_if_missing": False}
+    assert child_calls[1][2] == {}
+    assert calls[0][0]["recovery"] is child_recovery
+    await execution.close("test")
+
+
 class _FakeSession:
     def __init__(self, binding: Any) -> None:
         self.binding = binding
