@@ -116,11 +116,9 @@ class CodexSubagentExecution:
         async with self._close_lock:
             if self._closed:
                 return
+            await self._session.stop()
+            await self._release(self)
             self._closed = True
-            try:
-                await self._session.stop()
-            finally:
-                await self._release(self)
 
 
 class CodexSubagentExecutionFactory:
@@ -151,6 +149,7 @@ class CodexSubagentExecutionFactory:
         self._parent_spec = parent_route.bound.spec
         self._child_source = ExecutionConfigSource(explicit=self._parent_spec)
         self._live: dict[str, CodexSubagentExecution] = {}
+        self._cleanup_pending: dict[str, ExecutionSession] = {}
         self._reserved: set[str] = set()
         self._lock = asyncio.Lock()
 
@@ -235,11 +234,18 @@ class CodexSubagentExecutionFactory:
             async with self._lock:
                 self._live[request.subagent_id] = execution
             return execution
-        except BaseException:
+        except BaseException as create_error:
             if session is not None:
                 try:
                     await session.stop()
-                finally:
+                except Exception as cleanup_error:
+                    async with self._lock:
+                        self._cleanup_pending[request.subagent_id] = session
+                    raise BaseExceptionGroup(
+                        "Codex child startup failed and exit was not confirmed",
+                        [create_error, cleanup_error],
+                    ) from None
+                else:
                     self._parent_route.bindings.release(session.binding)
             raise
         finally:
@@ -279,6 +285,28 @@ class CodexSubagentExecutionFactory:
             if current is execution:
                 del self._live[binding.host_session_id]
         self._parent_route.bindings.release(binding)
+
+    async def close_pending(self) -> None:
+        """Retry half-started child cleanup retained by this factory."""
+
+        failures: list[Exception] = []
+        async with self._lock:
+            pending = tuple(self._cleanup_pending.items())
+        for subagent_id, session in pending:
+            try:
+                await session.stop()
+            except Exception as exc:
+                failures.append(exc)
+                continue
+            self._parent_route.bindings.release(session.binding)
+            async with self._lock:
+                if self._cleanup_pending.get(subagent_id) is session:
+                    self._cleanup_pending.pop(subagent_id, None)
+        if failures:
+            raise ExceptionGroup(
+                "one or more half-started Codex children did not confirm exit",
+                failures,
+            )
 
 
 __all__ = ["CodexSubagentExecution", "CodexSubagentExecutionFactory"]

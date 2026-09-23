@@ -71,6 +71,9 @@ class _Execution:
             self._factory.active -= 1
 
     async def close(self, reason: str) -> None:
+        if self._factory.close_failures:
+            self._factory.close_failures -= 1
+            raise RuntimeError("child exit unconfirmed")
         self.closed = True
         self._factory.closed.append((self.subagent_id, reason))
 
@@ -82,6 +85,7 @@ class _Factory:
         self.peak = 0
         self.created: list[tuple[Any, Any]] = []
         self.closed: list[tuple[str, str]] = []
+        self.close_failures = 0
 
     async def create(self, request, context):
         self.created.append((request, context))
@@ -243,6 +247,41 @@ async def test_cross_parent_control_is_rejected_and_cleanup_cancels_children(
     assert runtime_a.has_control() is False
     assert factory_a.closed == [(child_id, "session_deleted")]
     await runtime_b.close("test_complete")
+
+
+@pytest.mark.asyncio
+async def test_parent_close_retains_failed_child_and_retries_same_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _Factory()
+    factory.close_failures = 1
+    _install_factory(monkeypatch, factory)
+    runtime = ExternalSubagentRuntime(
+        _route(tmp_path, session_id="parent-a"),
+        write_output=lambda _chunk: asyncio.sleep(0),
+    )
+    spawned = await _invoke(
+        runtime,
+        "subagent_spawn",
+        {
+            "subagent_type": "general-purpose",
+            "task_description": "finish then close",
+            "display_name": "Worker A",
+            "role": "Verify cleanup",
+        },
+    )
+    assert spawned.is_error is False
+    await asyncio.sleep(0.02)
+
+    with pytest.raises(ExceptionGroup, match="exits could not be confirmed"):
+        await runtime.close("parent_ended")
+    assert runtime.has_control() is True
+    assert factory.closed == []
+
+    await runtime.close("retry")
+    assert runtime.has_control() is False
+    assert len(factory.closed) == 1
 
 
 @pytest.mark.asyncio

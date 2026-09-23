@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
@@ -72,6 +73,21 @@ class _FailingEvolutionRail:
         raise RuntimeError("background evolution remains active")
 
 
+class _RetryCleanupChildAdapter:
+    def __init__(self) -> None:
+        self.fail_cleanup = True
+        self.stop_calls = 0
+        self.cleanup_calls = 0
+
+    async def stop_interaction(self) -> None:
+        self.stop_calls += 1
+
+    async def cleanup(self) -> None:
+        self.cleanup_calls += 1
+        if self.fail_cleanup:
+            raise RuntimeError("child exit unconfirmed")
+
+
 def test_other_active_sessions_treats_subagent_as_related() -> None:
     adapter = _make_adapter(
         _active_session_ids={
@@ -100,6 +116,39 @@ async def test_adapter_cleanup_propagates_evolution_cleanup_failure() -> None:
 
     with pytest.raises(RuntimeError, match="background evolution remains active"):
         await getattr(adapter, "_cleanup_evolution_background_tasks")()
+
+
+@pytest.mark.asyncio
+async def test_parent_cleanup_retains_child_cache_until_exit_is_confirmed() -> None:
+    child = _RetryCleanupChildAdapter()
+    parent = _make_adapter(
+        _skill_evolution_rail=None,
+        _eternal_conversation_rail=None,
+        _is_session_scoped_adapter=False,
+        _session_adapters={"sess-child": child},
+        _session_adapter_locks={"sess-child": asyncio.Lock()},
+        _session_adapter_last_used={"sess-child": 1.0},
+        _session_adapter_versions={"sess-child": 1},
+        _session_adapter_reload_failures={},
+        _memory_reindex_task=None,
+        _mcp_prewarm_task=None,
+    )
+    parent._finalize_external_memory_session = AsyncMock()  # type: ignore[method-assign]
+    parent._sync_personal_context_rail = AsyncMock()  # type: ignore[method-assign]
+    parent._teardown_agent_owned_tools = MagicMock()  # type: ignore[method-assign]
+    parent._release_sys_operations = MagicMock()  # type: ignore[method-assign]
+    parent._close_a2x_client = AsyncMock()  # type: ignore[method-assign]
+
+    with pytest.raises(ExceptionGroup, match="exits could not be confirmed"):
+        await parent.cleanup()
+    assert parent._session_adapters == {"sess-child": child}
+    assert "sess-child" in parent._session_adapter_locks
+
+    child.fail_cleanup = False
+    await parent.cleanup()
+    assert parent._session_adapters == {}
+    assert parent._session_adapter_locks == {}
+    assert child.cleanup_calls == 2
 
 
 def test_other_active_sessions_counts_unrelated_sessions() -> None:

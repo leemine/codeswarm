@@ -235,6 +235,53 @@ async def test_managed_transport_closes_listener_when_startup_fails(
         await transport.start()
 
     assert transport.started is False
+
+
+@pytest.mark.asyncio
+async def test_managed_transport_retains_task_when_exit_cannot_be_confirmed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.runtime.harness import tool_transport as module
+
+    transport = ManagedProductToolTransport(
+        ProductToolGateway([_Tool()], scope=_scope(tmp_path)),
+        host_session_id="parent-1",
+    )
+    release = asyncio.Event()
+
+    async def stubborn_server() -> None:
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()
+
+    listener = SimpleNamespace(closed=False, close=lambda: None)
+    server = SimpleNamespace(should_exit=False)
+    task = asyncio.create_task(stubborn_server())
+    transport._serve_task = task
+    transport._uvicorn = server
+    transport._socket = listener
+    transport._port = 43111
+    monkeypatch.setattr(module, "_STOP_TIMEOUT_S", 0.01)
+
+    try:
+        with pytest.raises(RuntimeError, match="exit could not be confirmed"):
+            await transport.stop()
+        assert server.should_exit is True
+        assert transport.exit_confirmed is False
+        assert transport._serve_task is task
+
+        release.set()
+        await asyncio.wait_for(task, timeout=1)
+        await transport.stop()
+        assert transport.exit_confirmed is True
+        assert transport._port is None
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
     await transport.stop()
 
 
