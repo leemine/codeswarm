@@ -51,7 +51,10 @@ const question = (extra = {}) => ({
   header: 'Read permission', question: 'Read protected file?', tool_payload: { file_path: '/protected.txt' },
   options: [{ value: 'allow_once', label: 'Allow once' }, { value: 'reject', label: 'Reject' }], ...extra,
 });
-const payload = (questions = [question()]) => ({ session_id: sessionId, request_id: 'sdk-request', source: 'permission_interrupt', questions });
+const payload = (questions = [question()]) => ({
+  session_id: sessionId, request_id: 'sdk-request', source: 'permission_interrupt',
+  session_generation: 7, questions,
+});
 
 async function mounted(run) {
   useChatStore.getState().ensureRuntime(sessionId);
@@ -99,6 +102,7 @@ for (const count of [1, 2]) for (const action of ['allow-once', 'reject']) {
     const request = socket.requests.at(-1);
     assert.equal(request.method, 'chat.send');
     assert.equal(request.params.request_id, 'sdk-request');
+    assert.equal(request.params.session_generation, 7);
     assert.deepEqual(request.params.answers, Array.from({ length: count }, () => ({ selected_options: [action === 'reject' ? 'reject' : 'allow_once'] })));
     assert.ok(prompt(), 'not consumed before acceptance');
     await respond(socket, request);

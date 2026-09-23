@@ -9,6 +9,8 @@ from typing import Any
 
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 
+from openjiuwen.harness_providers.output_buffer import OutputBudgetExceeded, OutputText
+
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.runtime.harness.bridge import prepare_execution_session
 from jiuwenswarm.runtime.harness.context_bridge import (
@@ -112,34 +114,26 @@ class EngineAgentAdapter:
     async def process_message_impl(
         self, request: AgentRequest, inputs: dict[str, Any]
     ) -> AgentResponse:
-        content: list[str] = []
-        events: list[dict[str, Any]] = []
-        async for chunk in self.process_message_stream_impl(request, inputs):
-            payload = chunk.payload if isinstance(chunk.payload, dict) else {}
-            events.append(payload)
-            if payload.get("event_type") in {"chat.delta", "chat.final"}:
-                value = payload.get("content")
-                if isinstance(value, str):
-                    if payload.get("event_type") == "chat.final" and value:
-                        content = [value]
-                    else:
-                        content.append(value)
-        terminal_error = next(
-            (
-                event
-                for event in events
-                if event.get("event_type") == "chat.error"
-            ),
-            None,
-        )
-        terminal_event = next(
-            (
-                event
-                for event in reversed(events)
-                if event.get("terminal_status")
-            ),
-            None,
-        )
+        content = OutputText()
+        terminal_error = None
+        terminal_event = None
+        try:
+            async for chunk in self.process_message_stream_impl(request, inputs):
+                payload = chunk.payload if isinstance(chunk.payload, dict) else {}
+                if payload.get("event_type") == "chat.error" and terminal_error is None:
+                    terminal_error = payload
+                if payload.get("terminal_status"):
+                    terminal_event = payload
+                if payload.get("event_type") in {"chat.delta", "chat.final"}:
+                    value = payload.get("content")
+                    if isinstance(value, str):
+                        if payload.get("event_type") == "chat.final" and value:
+                            content.replace(value)
+                        else:
+                            content.append(value)
+            complete_content = content.read()
+        finally:
+            content.close()
         error = (
             str(terminal_error.get("error") or "External execution failed")
             if terminal_error is not None
@@ -159,7 +153,7 @@ class EngineAgentAdapter:
             channel_id=request.channel_id,
             ok=error is None,
             payload={
-                "content": "".join(content),
+                "content": complete_content,
                 **({"error": error} if error else {}),
                 **terminal_fields,
             },
@@ -187,17 +181,61 @@ class EngineAgentAdapter:
 
         immediate = str(params.get("input_mode") or "").strip().lower() == "steer"
         receipt = await session.send(external_input, immediate=immediate)
-        self._projection.register_turn(
-            receipt.turn_id,
+        try:
+            self._projection.register_turn(
+                receipt.turn_id,
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                mode=str(params.get("mode") or "unknown"),
+            )
+        except OutputBudgetExceeded:
+            session.abandon_output(receipt.turn_id)
+            await asyncio.wait_for(session.abort(), timeout=5)
+            raise
+        receipt_fields = {
+            "provider_message_id": receipt.message_id,
+            "provider_turn_id": receipt.turn_id,
+        }
+        yield AgentResponseChunk(
             request_id=request.request_id,
             channel_id=request.channel_id,
-            mode=str(params.get("mode") or "unknown"),
+            payload={
+                "event_type": "runtime.accepted",
+                "request_id": request.request_id,
+                "submission_status": "harness_accepted",
+                **receipt_fields,
+            },
+            is_complete=False,
+            metadata=dict(request.metadata or {}),
         )
         terminal_seen = False
+        budget_failure = None
+        provider_acceptance_emitted = False
         try:
             try:
                 output = session.outputs(receipt.turn_id)
                 async for item in output:
+                    provider_started = getattr(session, "provider_started", None)
+                    if (
+                        not provider_acceptance_emitted
+                        and (
+                            not callable(provider_started)
+                            or provider_started(receipt.turn_id)
+                        )
+                    ):
+                        provider_acceptance_emitted = True
+                        yield AgentResponseChunk(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            payload={
+                                "event_type": "runtime.accepted",
+                                "request_id": request.request_id,
+                                "submission_status": "provider_accepted",
+                                **receipt_fields,
+                            },
+                            is_complete=False,
+                            metadata=dict(request.metadata or {}),
+                        )
                     payload = self._projection.owned_payload(item)
                     if payload is not None:
                         status = str(payload.get("terminal_status") or "")
@@ -213,10 +251,44 @@ class EngineAgentAdapter:
                         )
                     if item.terminal is not None:
                         terminal_seen = True
+            except OutputBudgetExceeded as exc:
+                budget_failure = exc
+                try:
+                    await asyncio.wait_for(session.abort(), timeout=5)
+                except Exception:
+                    pass  # report delivery failure even when abort is unconfirmed
             except TurnOutputIncompleteError:
                 pass
             if not terminal_seen:
-                payload = unknown_terminal_payload()
+                provider_started = getattr(session, "provider_started", None)
+                if (
+                    not provider_acceptance_emitted
+                    and callable(provider_started)
+                    and provider_started(receipt.turn_id)
+                ):
+                    provider_acceptance_emitted = True
+                    yield AgentResponseChunk(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        payload={
+                            "event_type": "runtime.accepted",
+                            "request_id": request.request_id,
+                            "submission_status": "provider_accepted",
+                            **receipt_fields,
+                        },
+                        is_complete=False,
+                        metadata=dict(request.metadata or {}),
+                    )
+                payload = {
+                    **unknown_terminal_payload(),
+                    **({"code": budget_failure.code, "error": str(budget_failure)} if budget_failure else {}),
+                    "submission_status": (
+                        "provider_accepted"
+                        if provider_acceptance_emitted
+                        else "unknown"
+                    ),
+                    **receipt_fields,
+                }
                 yield AgentResponseChunk(
                     request_id=request.request_id,
                     channel_id=request.channel_id,
@@ -228,6 +300,9 @@ class EngineAgentAdapter:
         finally:
             if not terminal_seen:
                 session.abandon_output(receipt.turn_id)
+            forget_submission = getattr(session, "forget_submission", None)
+            if callable(forget_submission):
+                forget_submission(receipt.turn_id)
 
     async def process_interrupt(self, request: AgentRequest) -> AgentResponse:
         session = self._require_session()

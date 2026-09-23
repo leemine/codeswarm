@@ -10,10 +10,16 @@ import pytest
 from jiuwenswarm.runtime.session import (
     RuntimeSessionCoordinator,
     RuntimeSessionState,
+    SessionControlAlreadyDelivered,
+    SessionControlConflictError,
     SessionExecutionEndedError,
+    SessionGenerationMismatchError,
     SessionPersistencePolicy,
+    SessionRequestDuplicateError,
+    SessionSubmissionState,
     SessionWorkKind,
 )
+from jiuwenswarm.runtime.events import RuntimeEvent
 from jiuwenswarm.runtime.session.execution_registry import SessionExecutionRegistry
 from jiuwenswarm.runtime.session.model import (
     SessionExecutionHandle,
@@ -179,6 +185,14 @@ async def test_session_messages_wait_for_control_and_keep_fifo_order() -> None:
     assert order == []
     assert coordinator.get_execution(first.execution_id).state is SessionExecutionState.QUEUED
     assert coordinator.get_execution(second.execution_id).state is SessionExecutionState.QUEUED
+    assert (
+        coordinator.get_execution(first.execution_id).submission_state
+        is SessionSubmissionState.HOST_ACCEPTED
+    )
+    assert (
+        coordinator.get_execution(second.execution_id).submission_state
+        is SessionSubmissionState.HOST_ACCEPTED
+    )
 
     control_started = asyncio.Event()
     release_control = asyncio.Event()
@@ -1171,4 +1185,254 @@ async def test_interrupted_descendant_cancel_keeps_child_tracked() -> None:
         parent.execution_id,
         child.execution_id,
     }
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_submission_evidence_advances_without_treating_receipt_as_provider_start() -> None:
+    coordinator = RuntimeSessionCoordinator()
+    await _register(coordinator)
+    release_provider = asyncio.Event()
+    release_finish = asyncio.Event()
+
+    async def operation():
+        yield RuntimeEvent.control(
+            request_id="request-1",
+            channel_id="process",
+            session_id="session-a",
+            payload={
+                "event_type": "runtime.accepted",
+                "submission_status": "harness_accepted",
+                "provider_message_id": "message-1",
+                "provider_turn_id": "turn-1",
+            },
+        )
+        await release_provider.wait()
+        yield RuntimeEvent.control(
+            request_id="request-1",
+            channel_id="process",
+            session_id="session-a",
+            payload={
+                "event_type": "runtime.accepted",
+                "submission_status": "provider_accepted",
+                "provider_message_id": "message-1",
+                "provider_turn_id": "turn-1",
+            },
+        )
+        await release_finish.wait()
+
+    stream = coordinator.run_stream(
+        "session-a", "request-1", SessionWorkKind.CHAT_STREAM, operation
+    )
+    await anext(stream)
+    first = coordinator.snapshot_session("session-a").executions[-1]
+    assert first.submission_state is SessionSubmissionState.HARNESS_ACCEPTED
+    assert first.provider_message_id == "message-1"
+    assert first.provider_turn_id == "turn-1"
+
+    release_provider.set()
+    await anext(stream)
+    second = coordinator.snapshot_session("session-a").executions[-1]
+    assert second.submission_state is SessionSubmissionState.PROVIDER_ACCEPTED
+    release_finish.set()
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_stream_request_is_rejected_without_running_again() -> None:
+    coordinator = RuntimeSessionCoordinator()
+    await _register(coordinator)
+    calls = 0
+
+    async def operation():
+        nonlocal calls
+        calls += 1
+        yield "done"
+
+    assert [
+        item
+        async for item in coordinator.run_stream(
+            "session-a", "same-request", SessionWorkKind.CHAT_STREAM, operation
+        )
+    ] == ["done"]
+    with pytest.raises(SessionRequestDuplicateError):
+        async for _item in coordinator.run_stream(
+            "session-a", "same-request", SessionWorkKind.CHAT_STREAM, operation
+        ):
+            pass
+    assert calls == 1
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_completed_control_is_idempotent_and_conflicting_answer_is_rejected() -> None:
+    coordinator = RuntimeSessionCoordinator()
+    await _register(coordinator)
+    await coordinator.run_unary(
+        "session-a",
+        "root",
+        SessionWorkKind.CHAT_UNARY,
+        lambda: asyncio.sleep(0, result="question"),
+        suspension_key=lambda _value: "interaction-1",
+    )
+    calls = 0
+
+    async def answer() -> str:
+        nonlocal calls
+        calls += 1
+        return "accepted"
+
+    assert await coordinator.deliver_control(
+        "session-a", "interaction-1", answer, control_fingerprint="same"
+    ) == "accepted"
+    with pytest.raises(SessionControlAlreadyDelivered):
+        await coordinator.deliver_control(
+            "session-a", "interaction-1", answer, control_fingerprint="same"
+        )
+    with pytest.raises(SessionControlConflictError):
+        await coordinator.deliver_control(
+            "session-a", "interaction-1", answer, control_fingerprint="different"
+        )
+    assert calls == 1
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_answer_stays_idempotent_when_it_produces_a_followup_question() -> None:
+    coordinator = RuntimeSessionCoordinator()
+    await _register(coordinator)
+    await coordinator.run_unary(
+        "session-a",
+        "root",
+        SessionWorkKind.CHAT_UNARY,
+        lambda: asyncio.sleep(0, result="question"),
+        suspension_key=lambda _value: "interaction-1",
+    )
+    calls = 0
+
+    async def answer() -> str:
+        nonlocal calls
+        calls += 1
+        return "followup"
+
+    kwargs = {
+        "suspension_key": lambda _value: "interaction-2",
+        "control_fingerprint": "same",
+    }
+    assert await coordinator.deliver_control(
+        "session-a", "interaction-1", answer, **kwargs
+    ) == "followup"
+    with pytest.raises(SessionControlAlreadyDelivered):
+        await coordinator.deliver_control(
+            "session-a", "interaction-1", answer, **kwargs
+        )
+    assert calls == 1
+    assert coordinator.has_control_target("session-a", "interaction-2")
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_generation_answer_is_rejected_before_delivery() -> None:
+    coordinator = RuntimeSessionCoordinator()
+    first = await coordinator.register_session("session-a", "process")
+    await coordinator.close_session("session-a", generation=first.generation)
+    second = await coordinator.register_session("session-a", "process")
+    assert second.generation == first.generation + 1
+
+    with pytest.raises(SessionGenerationMismatchError, match="stale"):
+        await coordinator.deliver_control(
+            "session-a",
+            "interaction-1",
+            lambda: asyncio.sleep(0, result="not delivered"),
+            generation=first.generation,
+        )
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_submission_rejection_and_post_receipt_cancellation_are_distinct() -> None:
+    coordinator = RuntimeSessionCoordinator()
+    await _register(coordinator)
+
+    async def rejected() -> None:
+        raise ValueError("provider rejected input")
+
+    with pytest.raises(ValueError, match="rejected"):
+        await coordinator.run_unary(
+            "session-a", "rejected", SessionWorkKind.CHAT_UNARY, rejected
+        )
+    rejected_snapshot = coordinator.snapshot_session("session-a").executions[-1]
+    assert rejected_snapshot.submission_state is SessionSubmissionState.REJECTED
+
+    hold = asyncio.Event()
+    calls = 0
+
+    async def uncertain():
+        nonlocal calls
+        calls += 1
+        yield RuntimeEvent.control(
+            request_id="uncertain",
+            channel_id="process",
+            session_id="session-a",
+            payload={
+                "event_type": "runtime.accepted",
+                "submission_status": "harness_accepted",
+            },
+        )
+        await hold.wait()
+
+    stream = coordinator.run_stream(
+        "session-a", "uncertain", SessionWorkKind.CHAT_STREAM, uncertain
+    )
+    await anext(stream)
+    await stream.aclose()
+    uncertain_snapshot = coordinator.snapshot_session("session-a").executions[-1]
+    assert uncertain_snapshot.submission_state is SessionSubmissionState.UNKNOWN
+    with pytest.raises(SessionRequestDuplicateError):
+        async for _item in coordinator.run_stream(
+            "session-a", "uncertain", SessionWorkKind.CHAT_STREAM, uncertain
+        ):
+            pass
+    assert calls == 1
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_answer_and_cancel_compete_on_the_existing_execution_state() -> None:
+    coordinator = RuntimeSessionCoordinator()
+    await _register(coordinator)
+    await coordinator.run_unary(
+        "session-a",
+        "root",
+        SessionWorkKind.CHAT_UNARY,
+        lambda: asyncio.sleep(0, result="question"),
+        suspension_key=lambda _value: "interaction-1",
+    )
+    cancelled = await coordinator.cancel_execution("session-a", request_id="root")
+    assert cancelled.cancelled == 1
+    with pytest.raises(RuntimeError, match="no active execution"):
+        await coordinator.deliver_control(
+            "session-a",
+            "interaction-1",
+            lambda: asyncio.sleep(0, result="late"),
+            control_fingerprint="late",
+        )
+
+    await coordinator.run_unary(
+        "session-a",
+        "root-2",
+        SessionWorkKind.CHAT_UNARY,
+        lambda: asyncio.sleep(0, result="question"),
+        suspension_key=lambda _value: "interaction-2",
+    )
+    assert await coordinator.deliver_control(
+        "session-a",
+        "interaction-2",
+        lambda: asyncio.sleep(0, result="accepted"),
+        control_fingerprint="winner",
+    ) == "accepted"
+    too_late = await coordinator.cancel_execution("session-a", request_id="root-2")
+    assert too_late.matched == 0
     await coordinator.close()

@@ -12,11 +12,12 @@ import logging
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from openjiuwen.harness_protocol import TurnEventKind
 from openjiuwen.harness_providers.io_adapter import ProjectedOutput
+from openjiuwen.harness_providers.output_buffer import OutputBudget, OutputBudgetExceeded, OutputText
 
 from jiuwenswarm.runtime.host_services import send_runtime_push
 from jiuwenswarm.runtime.terminal_outcome import harness_terminal_payload
@@ -49,12 +50,20 @@ _DURABLE_EVENT_TYPES = frozenset(
 
 @dataclass(slots=True)
 class _DetachedTurn:
-    text: str = ""
+    text: OutputText = field(default_factory=OutputText)
     streamed: bool = False
     final_seen: bool = False
     error_seen: bool = False
+    delivery_failed: bool = False
     runtime_execution_id: str | None = None
     request_id: str | None = None
+
+
+    def __post_init__(self) -> None:
+        if isinstance(self.text, str):
+            text = self.text
+            self.text = OutputText()
+            self.text.append(text)
 
 
 class _HistoryPersistenceUnconfirmed(RuntimeError):
@@ -69,6 +78,8 @@ class NativeDetachedProjection:
         request_id_for_turn: Callable[[str], str | None] | None = None,
     ) -> None:
         self._session_id = session_id
+        self._text_budget = OutputBudget()
+        self._max_turns = 128
         self._adapter = adapter
         self._runtime = runtime
         self._request_id_for_turn = request_id_for_turn
@@ -86,6 +97,8 @@ class NativeDetachedProjection:
                         state.runtime_execution_id,
                         TurnEventKind.ABORTED,
                     )
+        for state in self._turns.values():
+            state.text.close()
         self._turns.clear()
         self._terminated_turns.clear()
         self._terminal_order.clear()
@@ -96,7 +109,14 @@ class NativeDetachedProjection:
             return
         if turn_id in self._terminated_turns:
             return
-        state = self._turns.setdefault(turn_id, _DetachedTurn())
+        state = self._turns.get(turn_id)
+        if state is None:
+            if len(self._turns) >= self._max_turns:
+                raise OutputBudgetExceeded("Native projection Turn count budget exhausted")
+            state = _DetachedTurn(text=OutputText(budget=self._text_budget))
+            self._turns[turn_id] = state
+        if state.delivery_failed:
+            return
         delivered = False
         try:
             if state.request_id is None and self._request_id_for_turn is not None:
@@ -120,7 +140,7 @@ class NativeDetachedProjection:
                         else str(payload)
                     )
                     if isinstance(content, str):
-                        state.text += content
+                        state.text.append(content)
                     state.streamed = True
                 parsed = await run_stream_parser(
                     self._adapter._parse_stream_chunk,
@@ -142,7 +162,7 @@ class NativeDetachedProjection:
                 if item.terminal is TurnEventKind.FINISHED and state.text and not state.final_seen:
                     payload = {
                         **harness_terminal_payload(TurnEventKind.FINISHED),
-                        "content": state.text,
+                        "content": state.text.read(),
                     }
                     await self._publish(
                         turn_id,
@@ -170,6 +190,9 @@ class NativeDetachedProjection:
                         delivery_id=self._delivery_id(turn_id, item, payload),
                     )
             delivered = True
+        except OutputBudgetExceeded:
+            state.delivery_failed = True
+            raise
         except Exception as exc:
             logger.exception(
                 "Detached Native output projection failed: session_id=%s turn_id=%s",
@@ -183,7 +206,13 @@ class NativeDetachedProjection:
                         self._session_id, state.runtime_execution_id, item.terminal
                     )
                 self._turns.pop(turn_id, None)
+                state.text.close()
                 self._remember_terminal(turn_id)
+
+    async def output_failed(self, error: OutputBudgetExceeded) -> None:
+        for turn_id, state in tuple(self._turns.items()):
+            state.delivery_failed = True
+            await self._report_delivery_failure(state, turn_id, error)
 
     def _remember_terminal(self, turn_id: str) -> None:
         if turn_id in self._terminated_turns:
@@ -212,6 +241,7 @@ class NativeDetachedProjection:
         request_id = state.request_id or f"native-turn-{turn_id}"
         try:
             code = (
+                error.code if isinstance(error, OutputBudgetExceeded) else
                 _HISTORY_PERSISTENCE_UNCONFIRMED
                 if isinstance(error, _HistoryPersistenceUnconfirmed)
                 else _DELIVERY_UNCONFIRMED

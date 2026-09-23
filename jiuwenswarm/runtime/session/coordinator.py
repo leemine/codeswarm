@@ -16,11 +16,16 @@ from jiuwenswarm.runtime.session.model import (
     RuntimeSessionSnapshot,
     RuntimeSessionState,
     SessionCloseTimeoutError,
+    SessionControlAlreadyDelivered,
+    SessionControlConflictError,
     SessionExecutionEndedError,
     SessionExecutionHandle,
     SessionExecutionSnapshot,
     SessionExecutionState,
+    SessionGenerationMismatchError,
     SessionPersistencePolicy,
+    SessionRequestDuplicateError,
+    SessionSubmissionState,
     SessionWorkKind,
 )
 from jiuwenswarm.runtime.session.work_scheduler import SessionWorkScheduler
@@ -226,6 +231,7 @@ class RuntimeSessionCoordinator:
             try:
                 value = await operation()
             except asyncio.CancelledError as exc:
+                self._mark_submission_interrupted(handle)
                 timed_out = timeout_scope is not None and timeout_scope.expired()
                 self._registry.mark_terminal(
                     handle,
@@ -238,11 +244,13 @@ class RuntimeSessionCoordinator:
                 )
                 raise
             except BaseException as exc:
+                self._mark_submission_failed(handle)
                 self._registry.mark_terminal(
                     handle, SessionExecutionState.FAILED, error=exc
                 )
                 raise
             else:
+                self._observe_submission_value(handle, value)
                 if timeout_scope is not None and timeout_scope.expired():
                     self._registry.mark_terminal(
                         handle,
@@ -339,9 +347,19 @@ class RuntimeSessionCoordinator:
         operation: Callable[[], Awaitable[T]],
         *,
         suspension_key: Callable[[T], str | None] | None = None,
+        generation: int | None = None,
+        control_fingerprint: str | None = None,
     ) -> T:
         """Deliver input to the running Session work without joining its lane."""
         record = self._require_open_session(session_id)
+        self._require_generation(record, generation)
+        delivered = self._completed_control(
+            record, request_id, control_fingerprint=control_fingerprint
+        )
+        if delivered is not None:
+            raise SessionControlAlreadyDelivered(
+                f"interaction answer was already delivered: {request_id}"
+            )
         if self._is_control_claimed(record, request_id):
             raise RuntimeError("control input is already being delivered")
         parent = self._control_parent(record, request_id)
@@ -359,7 +377,9 @@ class RuntimeSessionCoordinator:
                 request_id,
                 SessionWorkKind.CONTROL_INPUT,
                 parent_execution_id=parent.execution_id,
+                allow_duplicate_request=True,
             )
+            handle.control_fingerprint = control_fingerprint
             parent_was_waiting = (
                 parent.state is SessionExecutionState.WAITING_FOR_CONTROL
             )
@@ -370,6 +390,7 @@ class RuntimeSessionCoordinator:
             try:
                 value = await operation()
             except asyncio.CancelledError as exc:
+                self._mark_submission_interrupted(handle)
                 self._registry.mark_terminal(
                     handle, SessionExecutionState.CANCELLED, error=exc
                 )
@@ -378,6 +399,7 @@ class RuntimeSessionCoordinator:
                     self._registry.mark_waiting(parent)
                 raise
             except BaseException as exc:
+                self._mark_submission_failed(handle)
                 self._registry.mark_terminal(
                     handle, SessionExecutionState.FAILED, error=exc
                 )
@@ -385,6 +407,9 @@ class RuntimeSessionCoordinator:
                     self._registry.mark_awaiting_control(parent, request_id)
                     self._registry.mark_waiting(parent)
                 raise
+
+            self._observe_submission_value(handle, value)
+            handle.submission_state = SessionSubmissionState.PROVIDER_ACCEPTED
 
             if (
                 parent.state.terminal
@@ -401,6 +426,8 @@ class RuntimeSessionCoordinator:
                     "control input arrived after its execution ended: "
                     f"session={session_id} request={request_id}"
                 )
+
+            handle.control_delivered = True
 
             control_id = suspension_key(value) if suspension_key is not None else None
             heartbeat_root = self._heartbeat_root(parent)
@@ -459,6 +486,8 @@ class RuntimeSessionCoordinator:
         operation: Callable[[], AsyncIterator[T] | Awaitable[AsyncIterator[T]]],
         *,
         suspension_key: Callable[[T], str | None] | None = None,
+        generation: int | None = None,
+        control_fingerprint: str | None = None,
     ) -> AsyncIterator[T]:
         """Stream a matching control operation without joining the work lane.
 
@@ -467,6 +496,14 @@ class RuntimeSessionCoordinator:
         The output consumer owns this generator and must close it on exit.
         """
         record = self._require_open_session(session_id)
+        self._require_generation(record, generation)
+        delivered = self._completed_control(
+            record, request_id, control_fingerprint=control_fingerprint
+        )
+        if delivered is not None:
+            raise SessionControlAlreadyDelivered(
+                f"interaction answer was already delivered: {request_id}"
+            )
         parent = self._stream_control_parent(record, request_id)
         parent_was_waiting = parent.state is SessionExecutionState.WAITING_FOR_CONTROL
         record.stream_control_claims.add(request_id)
@@ -477,7 +514,9 @@ class RuntimeSessionCoordinator:
             request_id,
             SessionWorkKind.CONTROL_INPUT,
             parent_execution_id=parent.execution_id,
+            allow_duplicate_request=True,
         )
+        handle.control_fingerprint = control_fingerprint
         handle.task = asyncio.current_task()
         self._registry.mark_running(handle)
         try:
@@ -485,6 +524,7 @@ class RuntimeSessionCoordinator:
             stream = await candidate if inspect.isawaitable(candidate) else candidate
             try:
                 async for item in stream:
+                    self._observe_submission_value(handle, item)
                     control_id = suspension_key(item) if suspension_key else None
                     if control_id:
                         self._registry.mark_awaiting_control(handle, control_id)
@@ -495,16 +535,20 @@ class RuntimeSessionCoordinator:
                 if callable(close):
                     await close()
         except (asyncio.CancelledError, GeneratorExit) as exc:
+            self._mark_submission_interrupted(handle)
             self._registry.mark_terminal(handle, SessionExecutionState.CANCELLED, error=exc)
             if parent_was_waiting:
                 self._registry.mark_waiting(parent)
             raise
         except BaseException as exc:
+            self._mark_submission_failed(handle)
             self._registry.mark_terminal(handle, SessionExecutionState.FAILED, error=exc)
             if parent_was_waiting:
                 self._registry.mark_waiting(parent)
             raise
         else:
+            handle.submission_state = SessionSubmissionState.PROVIDER_ACCEPTED
+            handle.control_delivered = True
             if parent_was_waiting and not parent.retain_after_control:
                 self._registry.mark_terminal(parent, SessionExecutionState.SUCCEEDED)
             elif parent.waiting_control_id == request_id:
@@ -615,6 +659,7 @@ class RuntimeSessionCoordinator:
                 candidate = operation()
                 stream = await candidate if inspect.isawaitable(candidate) else candidate
                 async for item in stream:
+                    self._observe_submission_value(handle, item)
                     control_id = (
                         suspension_key(item) if suspension_key is not None else None
                     )
@@ -623,12 +668,14 @@ class RuntimeSessionCoordinator:
                         self._refresh_control_gate(record)
                     await queue.put(_StreamItem(value=item))
             except asyncio.CancelledError as exc:
+                self._mark_submission_interrupted(handle)
                 self._registry.mark_terminal(
                     handle, SessionExecutionState.CANCELLED, error=exc
                 )
                 terminal_item = _StreamItem(error=exc, done=True)
                 raise
             except BaseException as exc:
+                self._mark_submission_failed(handle)
                 self._registry.mark_terminal(
                     handle, SessionExecutionState.FAILED, error=exc
                 )
@@ -847,7 +894,20 @@ class RuntimeSessionCoordinator:
         work_kind: SessionWorkKind,
         *,
         parent_execution_id: str | None = None,
+        allow_duplicate_request: bool = False,
     ) -> SessionExecutionHandle:
+        normalized_request_id = str(request_id or "")
+        if not allow_duplicate_request and normalized_request_id:
+            existing = self._registry.select(
+                session_id=record.session_id,
+                request_id=normalized_request_id,
+                generation=record.generation,
+            )
+            if existing:
+                raise SessionRequestDuplicateError(
+                    "request was already accepted for this Session generation: "
+                    f"{normalized_request_id}"
+                )
         superseded_kinds: set[SessionWorkKind] = set()
         if work_kind in {SessionWorkKind.CHAT_UNARY, SessionWorkKind.CHAT_STREAM}:
             superseded_kinds = {
@@ -877,7 +937,7 @@ class RuntimeSessionCoordinator:
         handle = SessionExecutionHandle(
             execution_id=uuid.uuid4().hex,
             session_id=record.session_id,
-            request_id=str(request_id or ""),
+            request_id=normalized_request_id,
             generation=record.generation,
             work_kind=work_kind,
             parent_execution_id=parent_execution_id,
@@ -885,6 +945,92 @@ class RuntimeSessionCoordinator:
         self._registry.register(handle)
         record.state = RuntimeSessionState.ACTIVE
         return handle
+
+    @staticmethod
+    def _require_generation(
+        record: _SessionRecord, generation: int | None
+    ) -> None:
+        if generation is not None and generation != record.generation:
+            raise SessionGenerationMismatchError(
+                "interaction answer targets a stale Session generation: "
+                f"expected={record.generation} received={generation}"
+            )
+
+    def _completed_control(
+        self,
+        record: _SessionRecord,
+        request_id: str,
+        *,
+        control_fingerprint: str | None,
+    ) -> SessionExecutionHandle | None:
+        completed = [
+            handle
+            for handle in self._registry.select(
+                session_id=record.session_id,
+                request_id=request_id,
+                generation=record.generation,
+            )
+            if handle.work_kind is SessionWorkKind.CONTROL_INPUT
+            and handle.control_delivered
+        ]
+        if not completed:
+            return None
+        handle = completed[-1]
+        if (
+            control_fingerprint is not None
+            and handle.control_fingerprint is not None
+            and control_fingerprint != handle.control_fingerprint
+        ):
+            raise SessionControlConflictError(
+                f"interaction already has a different answer: {request_id}"
+            )
+        return handle
+
+    @staticmethod
+    def _observe_submission_value(
+        handle: SessionExecutionHandle, value: object
+    ) -> None:
+        values = value if isinstance(value, (list, tuple)) else (value,)
+        for item in values:
+            payload = getattr(item, "payload", None)
+            if not isinstance(payload, dict):
+                continue
+            event_type = str(payload.get("event_type") or "")
+            stage = str(payload.get("submission_status") or "")
+            message_id = str(payload.get("provider_message_id") or "").strip()
+            turn_id = str(payload.get("provider_turn_id") or "").strip()
+            if message_id:
+                handle.provider_message_id = message_id
+            if turn_id:
+                handle.provider_turn_id = turn_id
+            if stage == SessionSubmissionState.PROVIDER_ACCEPTED.value:
+                handle.submission_state = SessionSubmissionState.PROVIDER_ACCEPTED
+            elif (
+                stage == SessionSubmissionState.HARNESS_ACCEPTED.value
+                or event_type == "runtime.accepted"
+            ) and handle.submission_state is SessionSubmissionState.HOST_ACCEPTED:
+                handle.submission_state = SessionSubmissionState.HARNESS_ACCEPTED
+            elif stage == SessionSubmissionState.UNKNOWN.value:
+                if handle.submission_state is not SessionSubmissionState.PROVIDER_ACCEPTED:
+                    handle.submission_state = SessionSubmissionState.UNKNOWN
+            elif (
+                event_type.startswith(("chat.", "harness.", "goal."))
+                and event_type not in {"chat.interrupt_result"}
+                and payload.get("terminal_status") != "unknown"
+            ):
+                handle.submission_state = SessionSubmissionState.PROVIDER_ACCEPTED
+
+    @staticmethod
+    def _mark_submission_failed(handle: SessionExecutionHandle) -> None:
+        if handle.submission_state is SessionSubmissionState.HOST_ACCEPTED:
+            handle.submission_state = SessionSubmissionState.REJECTED
+        elif handle.submission_state is SessionSubmissionState.HARNESS_ACCEPTED:
+            handle.submission_state = SessionSubmissionState.UNKNOWN
+
+    @staticmethod
+    def _mark_submission_interrupted(handle: SessionExecutionHandle) -> None:
+        if handle.submission_state is not SessionSubmissionState.PROVIDER_ACCEPTED:
+            handle.submission_state = SessionSubmissionState.UNKNOWN
 
     @staticmethod
     def _requires_direct_cancel(handle: SessionExecutionHandle) -> bool:

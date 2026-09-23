@@ -2491,14 +2491,16 @@ _KV_SENSITIVE_PATTERN = re.compile(
 # 2) 值的起始引号（' 或 "）
 # 3) 值内容（非贪婪）
 # 4) 结束引号（通过 (\2) 强制与起始引号一致）
+# Match only at a key boundary; test the keyword in a lookahead so two
+# variable-length key spans cannot backtrack against each other on large output.
 _NAMED_SENSITIVE_KV_PATTERN = re.compile(
-    r"(?i)([\"']?[A-Za-z0-9_.-]*"
+    r"(?i)(?<![A-Za-z0-9_.-])([\"']?(?=[A-Za-z0-9_.-]*"
     r"(?:token|secret|password|passwd|pwd|api[_-]?key|access[_-]?key|"
     r"secret[_-]?key|authorization|auth[_-]?code|auth[_-]?token|"
     r"credential|private[_-]?key|"
     r"user[_-]?id|userid|project[_-]?id|"
-    r"amap[_-]?key|map[_-]?ak)"
-    r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*)([\"'])(.*?)(\2)"
+    r"amap[_-]?key|map[_-]?ak))"
+    r"[A-Za-z0-9_.-]+[\"']?\s*[:=]\s*)([\"'])(.*?)(\2)"
 )
 # 匹配 Authorization Bearer 令牌，保留 "Bearer " 前缀，仅掩码后面的令牌值。
 # 分组：1) "Bearer " 前缀；2) 令牌值本体（用于算指纹）。
@@ -2524,7 +2526,7 @@ _SENSITIVE_PATTERNS: list[re.Pattern[str]] = [
     # 匹配 GitLab Personal Access Token（glpat- 前缀）。
     re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b"),
     # 匹配邮箱地址（避免日志中泄露个人身份信息）。
-    re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b"),
+    re.compile(r"(?<![a-zA-Z0-9._%+-])[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b"),
     # 匹配中国大陆手机号（可带 +86 或 86 前缀，支持空格/短横线分隔）。
     re.compile(r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)"),
     # 匹配中国身份证号（18 位，最后一位可为 X/x）。

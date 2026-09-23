@@ -160,6 +160,12 @@ class DuplexController:
             project_dir=str(params.get("project_dir") or ""),
             cwd=str(params.get("cwd") or ""),
             trusted_dirs=tuple(params.get("trusted_dirs") or ()),
+            session_generation=(
+                payload.get("session_generation")
+                if isinstance(payload.get("session_generation"), int)
+                and not isinstance(payload.get("session_generation"), bool)
+                else None
+            ),
         )
 
     def _add_stream(

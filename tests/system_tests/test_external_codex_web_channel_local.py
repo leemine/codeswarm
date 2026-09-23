@@ -25,6 +25,7 @@ from jiuwenswarm.common.utils import prepare_workspace
 pytestmark = [pytest.mark.integration, pytest.mark.system]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+LARGE_OUTPUT_SUFFIX = "R1-04C-COMPLETE-" * 20000
 
 
 def _pick_free_port() -> int:
@@ -208,7 +209,7 @@ class _WebResponsesFixture:
                     "status": "in_progress",
                     "content": [],
                 }
-                done = owner._message_item(index, "R1-A2-WEB-DISCONNECT-FINAL")
+                done = owner._message_item(index, "R1-A2-WEB-DISCONNECT-FINAL" + LARGE_OUTPUT_SUFFIX)
                 before = b"".join(
                     (
                         _sse("response.created", {"response": response}),
@@ -235,7 +236,7 @@ class _WebResponsesFixture:
                                 "item_id": pending["id"],
                                 "output_index": 0,
                                 "content_index": 0,
-                                "delta": "FINAL",
+                                "delta": "FINAL" + LARGE_OUTPUT_SUFFIX,
                             },
                         ),
                         _sse(
@@ -244,7 +245,7 @@ class _WebResponsesFixture:
                                 "item_id": pending["id"],
                                 "output_index": 0,
                                 "content_index": 0,
-                                "text": "R1-A2-WEB-DISCONNECT-FINAL",
+                                "text": "R1-A2-WEB-DISCONNECT-FINAL" + LARGE_OUTPUT_SUFFIX,
                             },
                         ),
                         _sse(
@@ -414,7 +415,16 @@ async def _chat_until_question(ws: Any, request_id: str, session_id: str, query:
         timeout=40,
     )
     assert _event(question, "chat.ask_user_question"), frames
-    return question["payload"]
+    statuses = {
+        frame.get("payload", {}).get("submission_status")
+        for frame in frames
+        if _event(frame, "runtime.accepted")
+    }
+    assert {"harness_accepted", "provider_accepted"} <= statuses, frames
+    payload = question["payload"]
+    assert isinstance(payload.get("session_generation"), int), frames
+    assert payload["session_generation"] > 0
+    return payload
 
 
 async def _answer_and_wait_final(
@@ -430,6 +440,7 @@ async def _answer_and_wait_final(
             "query": "",
             "request_id": question["request_id"],
             "source": question["source"],
+            "session_generation": question["session_generation"],
             "answers": [{"selected_options": [option]}],
         },
     )
@@ -498,6 +509,59 @@ async def test_external_codex_web_approval_stop_disconnect_and_history(tmp_path:
                 )
                 await _answer_and_wait_final(ws, "allow-answer", session_id, allow, "allow_once")
                 assert (root / "allow-marker.txt").read_text(encoding="utf-8") == "R1-A2-WEB-ALLOW"
+                provider_calls = len(responses.requests)
+                await _send_request(
+                    ws,
+                    "allow-answer-duplicate",
+                    "chat.send",
+                    {
+                        "session_id": session_id,
+                        "mode": "agent.code",
+                        "query": "",
+                        "request_id": allow["request_id"],
+                        "source": allow["source"],
+                        "session_generation": allow["session_generation"],
+                        "answers": [{"selected_options": ["allow_once"]}],
+                    },
+                )
+                duplicate, duplicate_frames = await _receive_until(
+                    ws,
+                    lambda frame: _event(frame, "runtime.accepted")
+                    and frame.get("payload", {}).get("duplicate") is True,
+                    timeout=20,
+                )
+                assert duplicate["payload"]["submission_status"] == "provider_accepted"
+                assert len(responses.requests) == provider_calls, duplicate_frames
+
+                await _send_request(
+                    ws,
+                    "allow-answer-stale",
+                    "chat.send",
+                    {
+                        "session_id": session_id,
+                        "mode": "agent.code",
+                        "query": "",
+                        "request_id": allow["request_id"],
+                        "source": allow["source"],
+                        "session_generation": allow["session_generation"] + 1,
+                        "answers": [{"selected_options": ["allow_once"]}],
+                    },
+                )
+                stale, stale_frames = await _receive_until(
+                    ws,
+                    lambda frame: (
+                        frame.get("type") == "res"
+                        and frame.get("id") == "allow-answer-stale"
+                        and frame.get("ok") is False
+                    )
+                    or frame.get("event")
+                    in {"chat.error", "execution.error", "runtime.error"},
+                    timeout=20,
+                )
+                assert "stale Session generation" in json.dumps(
+                    [stale, *stale_frames], ensure_ascii=False
+                )
+                assert len(responses.requests) == provider_calls
 
                 deny = await _chat_until_question(ws, "deny", session_id, "R1-A2-WEB-DENY")
                 await _answer_and_wait_final(ws, "deny-answer", session_id, deny, "deny")
@@ -556,8 +620,16 @@ async def test_external_codex_web_approval_stop_disconnect_and_history(tmp_path:
                     and frame.get("payload", {}).get("status") == "done",
                     timeout=30,
                 )
-                serialized_history = json.dumps(history_frames, ensure_ascii=False)
-                assert "R1-A2-WEB-DISCONNECT-FINAL" in serialized_history
+                parts = [
+                    frame.get("payload", {}).get("message", {})
+                    for frame in history_frames if _event(frame, "history.message")
+                ]
+                result_parts = [part for part in parts if part.get("request_id") == "disconnect"
+                                and part.get("event_type") == "chat.final"]
+                result_parts.sort(key=lambda part: part.get("_part", {}).get("part_idx", 0))
+                assert "".join(part.get("content", "") for part in result_parts) == (
+                    "R1-A2-WEB-DISCONNECT-FINAL" + LARGE_OUTPUT_SUFFIX
+                )
                 assert any(_event(frame, "history.message") for frame in history_frames)
 
                 stop = await _chat_until_question(ws, "stop", session_id, "R1-A2-WEB-STOP")

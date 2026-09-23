@@ -360,6 +360,7 @@ def test_regular_evolution_and_ordinary_answers_remain_chat_answer() -> None:
         interaction_id="ordinary-question",
         answers=({"selected_options": ["yes"]},),
         evolution_meta={"approval_transport": "interrupt"},
+        session_generation=3,
     )
 
     regular_request = regular_evolution.to_agent_request()
@@ -374,6 +375,7 @@ def test_regular_evolution_and_ordinary_answers_remain_chat_answer() -> None:
     assert ordinary_request.req_method is ReqMethod.CHAT_ANSWER
     assert ordinary_request.is_stream is False
     assert ordinary_request.params["query"] is None
+    assert ordinary_request.params["session_generation"] == 3
 
 
 def test_evolution_metadata_is_copied_before_mapping_to_agent_request() -> None:

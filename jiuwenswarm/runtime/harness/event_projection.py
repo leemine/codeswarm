@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from openjiuwen.harness_protocol import (
@@ -15,6 +15,7 @@ from openjiuwen.harness_protocol import (
     TurnLifecycleEvent,
 )
 from openjiuwen.harness_providers.io_adapter import ProjectedOutput
+from openjiuwen.harness_providers.output_buffer import OutputBudget, OutputBudgetExceeded, OutputText
 
 from jiuwenswarm.runtime.host_services import send_runtime_push
 from jiuwenswarm.runtime.terminal_outcome import harness_terminal_payload
@@ -52,9 +53,10 @@ class _TurnProjection:
     request_id: str
     channel_id: str
     mode: str
-    text: str = ""
+    text: OutputText = field(default_factory=OutputText)
     final_seen: bool = False
     error_seen: bool = False
+    delivery_failed: bool = False
 
 
 class _HistoryPersistenceUnconfirmed(RuntimeError):
@@ -66,6 +68,8 @@ class ExternalEventProjection:
 
     def __init__(self, session_id: str) -> None:
         self._session_id = session_id
+        self._text_budget = OutputBudget()
+        self._max_turns = 128
         self._turns: dict[str, _TurnProjection] = {}
         self._terminal_errors: dict[str, str] = {}
         self._terminal_error_codes: dict[str, str] = {}
@@ -78,7 +82,14 @@ class ExternalEventProjection:
 
         turn_id = envelope.turn_id
         event = envelope.event
+        if turn_id in self._terminated_turns:
+            return
         if turn_id and isinstance(event, TurnLifecycleEvent) and event.result is not None:
+            if len(self._terminal_errors) + len(self._terminal_cancellations) >= self._max_turns:
+                raise OutputBudgetExceeded("terminal detail count budget exhausted")
+            detail = event.result.error or event.result.termination
+            if detail is not None and len(str(detail).encode("utf-8")) > 64 * 1024:
+                raise OutputBudgetExceeded("terminal detail byte budget exhausted")
             if event.kind is TurnEventKind.FAILED and event.result.error is not None:
                 self._terminal_errors[turn_id] = event.result.error.message
                 if event.result.error.code:
@@ -99,12 +110,19 @@ class ExternalEventProjection:
         channel_id: str,
         mode: str,
     ) -> None:
+        if any(len(value.encode("utf-8")) > 1024 for value in (turn_id, request_id, channel_id, mode)):
+            raise OutputBudgetExceeded("projection correlation identifier byte budget exhausted")
+        if turn_id in self._turns:
+            return
+        if len(self._turns) >= self._max_turns:
+            raise OutputBudgetExceeded("projection Turn count budget exhausted")
         self._turns.setdefault(
             turn_id,
             _TurnProjection(
                 request_id=request_id,
                 channel_id=channel_id or "web",
                 mode=mode or "unknown",
+                text=OutputText(budget=self._text_budget),
             ),
         )
 
@@ -119,9 +137,14 @@ class ExternalEventProjection:
             return None
         payload = self.payload(item, state=state)
         if payload is not None:
-            self._note_payload(state, payload)
+            try:
+                self._note_payload(state, payload)
+            except OutputBudgetExceeded:
+                state.delivery_failed = True
+                raise
         if item.terminal is not None:
             self._turns.pop(turn_id, None)
+            state.text.close()
             self._remember_terminal(turn_id)
         return payload
 
@@ -156,8 +179,16 @@ class ExternalEventProjection:
             return
         state = self._turns.get(turn_id)
         if state is None:
+            if len(self._turns) >= self._max_turns:
+                raise OutputBudgetExceeded("projection Turn count budget exhausted")
             state = self._fallback_state(turn_id)
             self._turns[turn_id] = state
+        if state.delivery_failed:
+            if item.terminal is not None:
+                state.text.close()
+                self._turns.pop(turn_id, None)
+                self._remember_terminal(turn_id)
+            return
         delivered = False
         try:
             payload = self.payload(item, state=state)
@@ -170,13 +201,16 @@ class ExternalEventProjection:
                     and payload.get("event_type") == "chat.final"
                     and not payload.get("content")
                 ):
-                    payload = {**payload, "content": state.text}
+                    payload = {**payload, "content": state.text.read()}
                 await self._publish(
                     state,
                     payload,
                     delivery_id=self._delivery_id(turn_id, item, payload),
                 )
             delivered = True
+        except OutputBudgetExceeded:
+            state.delivery_failed = True
+            raise
         except Exception as exc:
             logger.exception(
                 "Detached External output projection failed: session_id=%s turn_id=%s",
@@ -191,9 +225,17 @@ class ExternalEventProjection:
             if item.terminal is not None and delivered:
                 self._terminal_errors.pop(turn_id, None)
                 self._turns.pop(turn_id, None)
+                state.text.close()
                 self._remember_terminal(turn_id)
 
+    async def output_failed(self, error: OutputBudgetExceeded) -> None:
+        for turn_id, state in tuple(self._turns.items()):
+            state.delivery_failed = True
+            await self._report_delivery_failure(state, turn_id, error)
+
     async def close(self) -> None:
+        for state in self._turns.values():
+            state.text.close()
         self._turns.clear()
         self._terminal_errors.clear()
         self._terminal_error_codes.clear()
@@ -202,6 +244,9 @@ class ExternalEventProjection:
         self._terminal_order.clear()
 
     def _remember_terminal(self, turn_id: str) -> None:
+        self._terminal_errors.pop(turn_id, None)
+        self._terminal_error_codes.pop(turn_id, None)
+        self._terminal_cancellations.pop(turn_id, None)
         if turn_id in self._terminated_turns:
             return
         if len(self._terminal_order) >= _TERMINAL_TOMBSTONES:
@@ -246,6 +291,7 @@ class ExternalEventProjection:
 
         try:
             code = (
+                error.code if isinstance(error, OutputBudgetExceeded) else
                 _HISTORY_PERSISTENCE_UNCONFIRMED
                 if isinstance(error, _HistoryPersistenceUnconfirmed)
                 else _DELIVERY_UNCONFIRMED
@@ -277,11 +323,11 @@ class ExternalEventProjection:
         event_type = payload.get("event_type")
         content = payload.get("content")
         if event_type == "chat.delta" and isinstance(content, str):
-            state.text += content
+            state.text.append(content)
         elif event_type == "chat.final":
             state.final_seen = True
             if isinstance(content, str) and content:
-                state.text = content
+                state.text.replace(content)
         elif event_type == "chat.error":
             state.error_seen = True
 
@@ -296,6 +342,7 @@ class ExternalEventProjection:
                 delivery.get("channel_id") or metadata.get("channel_id") or "web"
             ),
             mode=str(metadata.get("mode") or "unknown"),
+            text=OutputText(budget=self._text_budget),
         )
 
     async def _publish(

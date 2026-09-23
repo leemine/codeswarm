@@ -103,6 +103,16 @@ test('ordinary confirmations retain request-scoped identity', () => {
   );
 });
 
+test('same interaction id in different Session generations stays distinct', () => {
+  const first = {
+    request_id: 'reused', source: 'ask_user_interrupt', sessionGeneration: 1,
+    questions: [{ question: 'Old?', options: [] }],
+  };
+  const second = { ...first, sessionGeneration: 2 };
+  assert.notEqual(pendingQuestionIdentity(first), pendingQuestionIdentity(second));
+  assert.deepEqual(enqueuePendingQuestions(enqueuePendingQuestions([], first), second), [first, second]);
+});
+
 function legacy(count = 1) {
   return {
     request_id: 'legacy-request', source: 'permission_interrupt',

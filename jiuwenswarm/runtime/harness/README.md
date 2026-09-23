@@ -248,3 +248,44 @@ each child execution and its Binding, flushes product state, and stops the
 activity emitter. Durable child checkpoint lookup and cold resume still belong
 to R1-04; B4 intentionally fails `subagent_resume` closed when B3 reports that
 the execution cannot be restored.
+
+## Output capacity (R1-04C)
+
+The router's `queue_size` now bounds the number of RAM entries per mailbox,
+not the entire staging capacity. Unclaimed output, live mailboxes and draining
+mailboxes share an `OutputBudget`: 8192 serialized entries, 4 MiB of RAM,
+256 MiB of anonymous private spool files, and 64 MiB per serialized item.
+There are at most 128 owner/unclaimed Turn slots. Receipt handoff transfers
+the same buffer without copying or increasing its RAM threshold. Reads do not
+remove an item until the live owner wins the close race.
+
+`HarnessIOAdapter` has its own finite budget with the same defaults. Its
+output-prefix cache stores at most 2048 SHA-256 prefix digests and character
+counts, keyed by Turn/output ID, instead of retaining complete strings. Turn
+terminal events release these entries. The adapter's pending-interaction count
+is limited to 128; this does not replace the Provider interaction state machine.
+
+Native/External detached projections and request text accumulators retain full
+UTF-8 text, spilling after 256 KiB, with a 64 MiB text limit. Each detached
+projection allows 128 active Turns and 256 MiB total text. Terminal error details
+are limited to 128 entries of at most 64 KiB; correlation IDs to 1 KiB. Native
+trace text and External unary text no longer accumulate unbounded lists; unary
+responses keep only the first error and last terminal metadata.
+
+Accepted large values are read back losslessly; final content still goes to the
+existing durable history path. Spools are temporary delivery staging, not a new
+history store or cold-recovery mechanism. A disk quota includes consumed extents
+until that file has no unread spilled entries; at that point the file closes
+and releases its full reservation. All router buffers and projection text close
+on Session cleanup. The core adapter preserves the old ability to drain output
+after `stop`; its spool closes when drained, when replaced on `start`, or when
+the adapter is released.
+
+No producer waits for a consumer to free a mailbox slot. Exhaustion or spool I/O
+failure raises `OutputBudgetExceeded` (`OUTPUT_BUDGET_EXCEEDED`), attempts abort
+through the existing control channel and reports delivery failure. It is not a
+Provider FAILED/FINISHED event. Queued accepted output remains ordered; no final
+or question is silently evicted. Subsequent input to a failed IO/router is
+rejected; it is never automatically replayed. Limits account for serialized
+payload bytes; interpreter overhead and producer/consumer-owned in-flight
+objects are outside that byte counter. They are not a whole-process RSS limit.

@@ -58,6 +58,7 @@ def _answer(
     mode: str = "agent.code.normal",
     channel_id: str = "process_cli",
     session_id: str = SESSION_ID,
+    session_generation: int | None = None,
 ) -> InteractionAnswerInput:
     return InteractionAnswerInput(
         request_id=f"answer-{interaction_id}",
@@ -68,6 +69,7 @@ def _answer(
         mode=mode,
         work_mode="code",
         answers=({"question": "Continue?", "selected_options": ["approve"]},),
+        session_generation=session_generation,
     )
 
 
@@ -152,6 +154,7 @@ async def harness(monkeypatch: pytest.MonkeyPatch):
 async def _seed_waiting(harness) -> None:
     events = await _collect(harness.runtime.stream(_request(), trigger_hook=False))
     assert [event.event_type for event in events] == ["chat.ask_user_question"]
+    assert events[0].payload["session_generation"] == 1
 
 
 @pytest.mark.asyncio
@@ -344,7 +347,7 @@ async def test_original_eof_before_old_ack_preserves_next_permission(harness) ->
 
 
 @pytest.mark.asyncio
-async def test_wrong_or_completed_interaction_never_reaches_agent(harness) -> None:
+async def test_wrong_interaction_rejects_and_completed_answer_is_idempotent(harness) -> None:
     await _seed_waiting(harness)
     delivered = Mock(wraps=harness.agent.deliver_control_input)
     harness.agent.deliver_control_input = delivered
@@ -352,9 +355,44 @@ async def test_wrong_or_completed_interaction_never_reaches_agent(harness) -> No
         await _collect(harness.client.stream_interaction_answer(_answer("wrong")))
     delivered.assert_not_called()
     await _collect(harness.client.stream_interaction_answer(_answer()))
-    with pytest.raises(RuntimeError, match="no active execution"):
-        await _collect(harness.client.stream_interaction_answer(_answer()))
+    duplicate = await _collect(harness.client.stream_interaction_answer(_answer()))
+    assert duplicate[0].event_type == "runtime.accepted"
+    assert duplicate[0].payload["duplicate"] is True
     assert delivered.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_nonstream_control_duplicate_returns_ack_without_replaying_events(
+    harness,
+) -> None:
+    await _seed_waiting(harness)
+    delivered = Mock(wraps=harness.agent.deliver_control_input)
+    harness.agent.deliver_control_input = delivered
+    request = _answer().to_agent_request()
+
+    first = await harness.runtime.invoke(request, trigger_hook=False)
+    duplicate = await harness.runtime.invoke(request, trigger_hook=False)
+
+    assert [event.event_type for event in first] == ["runtime.accepted"]
+    assert [event.event_type for event in duplicate] == ["runtime.accepted"]
+    assert duplicate[0].payload["duplicate"] is True
+    assert delivered.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_generation_answer_never_reaches_agent(harness) -> None:
+    await _seed_waiting(harness)
+    delivered = Mock(wraps=harness.agent.deliver_control_input)
+    harness.agent.deliver_control_input = delivered
+
+    with pytest.raises(RuntimeError, match="stale Session generation"):
+        await _collect(
+            harness.client.stream_interaction_answer(
+                _answer(session_generation=2)
+            )
+        )
+
+    delivered.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ from openjiuwen.harness.engine.config import config_fingerprint
 from openjiuwen.harness_protocol import (
     AgentExecutionSpec,
     DeliveryMode,
+    HarnessEvent,
     HarnessContext,
     HarnessState,
     SendReceipt,
@@ -442,9 +443,15 @@ async def test_execution_session_validates_paths_and_owns_one_event_reader(
             return self.cursor
 
     harness = Harness()
+    observed: list[HarnessEvent] = []
+
+    async def observe(event: HarnessEvent) -> None:
+        observed.append(event)
+
     session = ExecutionSession(
         HarnessEngine(route.bound.binding, harness),
         route.runtime_paths,
+        event_observer=observe,
     )
     context = HarnessContext(
         agent_name="external",
@@ -453,6 +460,21 @@ async def test_execution_session_validates_paths_and_owns_one_event_reader(
         system_prompt="",
         cwd=str(route.runtime_paths.cwd),
     )
+
+    started = HarnessEvent(
+        sequence=1,
+        timestamp=1.0,
+        event=TurnLifecycleEvent(TurnEventKind.STARTED),
+        host_session_id="session-1",
+        agent_id="external-1",
+        turn_id="turn-1",
+    )
+    assert session.provider_started("turn-1") is False
+    await session._observe_event(started)
+    assert session.provider_started("turn-1") is True
+    assert observed == [started]
+    session.forget_submission("turn-1")
+    assert session.provider_started("turn-1") is False
 
     await session.start(context)
     assert session.started is True
@@ -613,10 +635,16 @@ async def test_engine_adapter_streams_projected_output_and_terminal_final(
     assert session.started_context.cwd == str(route.runtime_paths.cwd)
     assert session.sent is not None
     assert [chunk.payload["event_type"] for chunk in chunks] == [
+        "runtime.accepted",
+        "runtime.accepted",
         "chat.delta",
         "chat.final",
     ]
-    assert chunks[0].payload["content"] == "hello"
+    assert chunks[0].payload["submission_status"] == "harness_accepted"
+    assert chunks[1].payload["submission_status"] == "provider_accepted"
+    assert chunks[0].payload["provider_message_id"] == "message-1"
+    assert chunks[0].payload["provider_turn_id"] == "turn-1"
+    assert chunks[2].payload["content"] == "hello"
     assert chunks[-1].payload["terminal_status"] == "completed"
     assert chunks[-1].is_complete is True
     assert chunks[-1].runtime_completion == "completed"
@@ -694,8 +722,10 @@ async def test_external_projection_distinguishes_cancelled_terminal() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider_started", [False, True])
 async def test_engine_adapter_reports_eof_without_terminal_as_unknown(
     tmp_path: Path,
+    provider_started: bool,
 ) -> None:
     from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import (
         EngineAgentAdapter,
@@ -719,6 +749,9 @@ async def test_engine_adapter_reports_eof_without_terminal_as_unknown(
             if False:
                 yield None
 
+        def provider_started(self, _turn_id: str) -> bool:
+            return provider_started
+
         def abandon_output(self, turn_id: str) -> None:
             self.abandoned.append(turn_id)
 
@@ -740,16 +773,41 @@ async def test_engine_adapter_reports_eof_without_terminal_as_unknown(
         )
     ]
 
-    assert [chunk.payload for chunk in chunks] == [
+    expected = [
+        {
+            "event_type": "runtime.accepted",
+            "request_id": "request-1",
+            "submission_status": "harness_accepted",
+            "provider_message_id": "message-1",
+            "provider_turn_id": "turn-1",
+        },
+    ]
+    if provider_started:
+        expected.append(
+            {
+                "event_type": "runtime.accepted",
+                "request_id": "request-1",
+                "submission_status": "provider_accepted",
+                "provider_message_id": "message-1",
+                "provider_turn_id": "turn-1",
+            }
+        )
+    expected.append(
         {
             "event_type": "chat.error",
             "error": "External execution stream ended without a terminal result",
             "code": "EXECUTION_TERMINAL_UNKNOWN",
             "terminal_status": "unknown",
+            "submission_status": (
+                "provider_accepted" if provider_started else "unknown"
+            ),
+            "provider_message_id": "message-1",
+            "provider_turn_id": "turn-1",
         }
-    ]
-    assert chunks[0].is_complete is True
-    assert chunks[0].runtime_completion == "unknown"
+    )
+    assert [chunk.payload for chunk in chunks] == expected
+    assert chunks[-1].is_complete is True
+    assert chunks[-1].runtime_completion == "unknown"
     assert session.abandoned == ["turn-1"]
 
 

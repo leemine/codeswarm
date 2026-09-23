@@ -10,7 +10,9 @@ operations; WebSocket framing remains in AgentServer.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import json
 import logging
 import uuid
 from contextlib import aclosing
@@ -55,6 +57,7 @@ from jiuwenswarm.runtime.session_lifecycle import (
     SessionLifecycleTarget,
 )
 from jiuwenswarm.runtime.session.model import (
+    SessionControlAlreadyDelivered,
     SessionExecutionSnapshot,
     SessionExecutionState,
 )
@@ -388,12 +391,24 @@ class AgentRuntime:
         self._admission_controller = controller
 
     async def _mark_pending_interaction(self, event: RuntimeEvent) -> None:
-        if event.event_type != "chat.ask_user_question":
+        key = (
+            "request_id"
+            if event.event_type == "chat.ask_user_question"
+            else "interaction_id"
+            if event.event_type == "harness.activate_interaction"
+            else None
+        )
+        if key is None:
             return
         payload = event.payload if isinstance(event.payload, dict) else {}
+        snapshot = self._session_coordinator.snapshot_session(
+            event.session_id or "default"
+        )
+        if snapshot is not None:
+            payload.setdefault("session_generation", snapshot.generation)
         await self._mark_pending_interaction_id(
             event.session_id or "default",
-            str(payload.get("request_id") or ""),
+            str(payload.get(key) or ""),
         )
 
     async def _mark_pending_interaction_id(
@@ -1634,6 +1649,8 @@ class AgentRuntime:
                 self._control_request_id(request),
                 lambda: self._stream_control_started(request),
                 suspension_key=self._waiting_control_id,
+                generation=self._control_generation(request),
+                control_fingerprint=self._control_fingerprint(request),
             )
         else:
             stream = self.stream(
@@ -1642,9 +1659,12 @@ class AgentRuntime:
                 on_control_event=on_control_event,
                 _agent_execution=self._agent_execution_owner(request),
             )
-        async with aclosing(self._stream_with_runtime_context(stream)) as events:
-            async for event in events:
-                yield event
+        try:
+            async with aclosing(self._stream_with_runtime_context(stream)) as events:
+                async for event in events:
+                    yield event
+        except SessionControlAlreadyDelivered:
+            yield self._duplicate_control_event(request)
 
     async def _stream_with_runtime_context(
         self, stream: AsyncIterator[RuntimeEvent]
@@ -2139,6 +2159,8 @@ class AgentRuntime:
                     request, on_control_event=on_control_event,
                 ),
                 suspension_key=self._waiting_control_id,
+                generation=self._control_generation(request),
+                control_fingerprint=self._control_fingerprint(request),
             )
             if not heartbeat_control:
                 for event in events:
@@ -2148,6 +2170,8 @@ class AgentRuntime:
                     ):
                         await self._mark_pending_interaction(event)
             return events
+        except SessionControlAlreadyDelivered:
+            return [self._duplicate_control_event(request)]
         except BaseException:
             if (
                 not heartbeat_control
@@ -2732,6 +2756,50 @@ class AgentRuntime:
     def _control_request_id(request: AgentRequest) -> str:
         params = request.params if isinstance(request.params, dict) else {}
         return str(params.get("request_id") or request.request_id or "")
+
+    @staticmethod
+    def _control_generation(request: AgentRequest) -> int | None:
+        params = request.params if isinstance(request.params, dict) else {}
+        value = params.get("session_generation")
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, int) and value > 0:
+            return value
+        raise ValueError("session_generation must be a positive integer")
+
+    @classmethod
+    def _control_fingerprint(cls, request: AgentRequest) -> str:
+        params = request.params if isinstance(request.params, dict) else {}
+        material = {
+            "interaction_id": cls._control_request_id(request),
+            "source": str(params.get("source") or ""),
+            "answers": params.get("answers"),
+        }
+        encoded = json.dumps(
+            material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @classmethod
+    def _duplicate_control_event(cls, request: AgentRequest) -> RuntimeEvent:
+        from jiuwenswarm.runtime.events import RuntimeEvent
+
+        return RuntimeEvent.control(
+            request_id=request.request_id,
+            channel_id=request.channel_id or "default",
+            session_id=request.session_id,
+            payload={
+                "event_type": "runtime.accepted",
+                "request_id": request.request_id,
+                "interaction_id": cls._control_request_id(request),
+                "duplicate": True,
+                "submission_status": "provider_accepted",
+            },
+        )
 
     @staticmethod
     def _waiting_control_id(value: object) -> str | None:

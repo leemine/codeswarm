@@ -21,7 +21,10 @@ export function pendingQuestionIdentity(payload: AskUserQuestionPayload): string
   }
   const requestId = boundedIdentity(payload.request_id, 512);
   if (!requestId) return undefined;
-  return `interaction\u0000${payload.source ?? ''}\u0000${requestId}`;
+  const generation = Number.isInteger(payload.sessionGeneration) && (payload.sessionGeneration ?? 0) > 0
+    ? `\u0000${payload.sessionGeneration}`
+    : '';
+  return `interaction\u0000${payload.source ?? ''}\u0000${requestId}${generation}`;
 }
 
 export function permissionQuestionKind(

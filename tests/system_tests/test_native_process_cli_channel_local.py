@@ -26,7 +26,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 class _ChatCompletionsFixture:
     """Small OpenAI-compatible endpoint exercised by the real Native model client."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, suffix: str = "") -> None:
+        self.suffix = suffix
         self.requests: list[dict[str, Any]] = []
         owner = self
 
@@ -51,6 +52,7 @@ class _ChatCompletionsFixture:
                     else "R1-04A-NATIVE-FIRST"
                 )
                 if body.get("stream"):
+                    marker += owner.suffix
                     self._write_stream(marker, str(body.get("model") or "local-native"))
                     return
                 self._write_json(
@@ -281,3 +283,17 @@ def test_native_process_cli_two_turn_history_is_durable(tmp_path: Path) -> None:
     assert all(delivery_ids)
     assert len(delivery_ids) == len(set(delivery_ids))
     assert any(request.get("stream") is True for request in fixture.requests)
+
+
+def test_native_large_result_is_complete_in_cli_and_durable_history(tmp_path: Path) -> None:
+    suffix = "".join(f"R1-04C-{index:05d}-COMPLETE " for index in range(14000))
+    data_dir = tmp_path / "data"
+    with _ChatCompletionsFixture(suffix=suffix) as fixture:
+        root = _configure_workspace(data_dir, fixture.base_url)
+        result = _run_turn(data_dir=data_dir, root=root, prompt="只回复：R1-04A-NATIVE-FIRST")
+        assert result["ok"] is True
+        assert "R1-04A-NATIVE-FIRST" + suffix in _response_text(result)
+    history_path = data_dir / "agent" / "sessions" / result["session_id"] / "history.jsonl"
+    records = [json.loads(line) for line in history_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert any(record.get("event_type") == "chat.final" and record.get("content") == "R1-04A-NATIVE-FIRST" + suffix
+               for record in records)

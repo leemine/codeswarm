@@ -10,6 +10,7 @@ from pathlib import Path
 
 from openjiuwen.harness.engine import HarnessEngine
 from openjiuwen.harness_protocol import (
+    HarnessEvent,
     HarnessCapability,
     HarnessContext,
     HarnessInput,
@@ -17,6 +18,8 @@ from openjiuwen.harness_protocol import (
     SendReceipt,
     ToolGateway,
     UnsupportedHarnessCapabilityError,
+    TurnEventKind,
+    TurnLifecycleEvent,
 )
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.harness_providers.io_adapter import HarnessIOAdapter, ProjectedOutput
@@ -53,10 +56,12 @@ class ExecutionSession:
             raise ValueError("External runtime workspace does not match the binding")
         self.engine = engine
         self.runtime_paths = runtime_paths
+        self._event_observer = event_observer
+        self._provider_started_turns: set[str] = set()
         self.io = HarnessIOAdapter(
             engine.harness,
             auto_approve_tools=False,
-            event_observer=event_observer,
+            event_observer=self._observe_event,
         )
         self._detached_output = detached_output
         self._tool_gateway = tool_gateway
@@ -141,6 +146,14 @@ class ExecutionSession:
             raise RuntimeError("External interaction answer unexpectedly created a Turn")
         return True
 
+    def provider_started(self, turn_id: str) -> bool:
+        """Return exact observation-plane evidence that the Provider began a Turn."""
+
+        return turn_id in self._provider_started_turns
+
+    def forget_submission(self, turn_id: str) -> None:
+        self._provider_started_turns.discard(turn_id)
+
     def outputs(self, turn_id: str) -> AsyncIterator[ProjectedOutput]:
         return self._require_router().outputs(turn_id)
 
@@ -168,7 +181,19 @@ class ExecutionSession:
                 finally:
                     if self._tool_transport is not None:
                         await self._tool_transport.stop()
+                    self._provider_started_turns.clear()
                     self._started = False
+
+    async def _observe_event(self, envelope: HarnessEvent) -> None:
+        event = envelope.event
+        if (
+            envelope.turn_id
+            and isinstance(event, TurnLifecycleEvent)
+            and event.kind is TurnEventKind.STARTED
+        ):
+            self._provider_started_turns.add(envelope.turn_id)
+        if self._event_observer is not None:
+            await self._event_observer(envelope)
 
     async def _prepare_tool_context(self, context: HarnessContext) -> HarnessContext:
         gateway = self._tool_gateway
