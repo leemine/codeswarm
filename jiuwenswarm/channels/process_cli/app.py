@@ -523,6 +523,9 @@ def _answer_request(
         "supports_user_interaction": True,
         "query": "" if resume else None,
     }
+    generation = payload.get("session_generation")
+    if isinstance(generation, int) and not isinstance(generation, bool):
+        params["session_generation"] = generation
     return (
         AgentRequest(
             request_id=_new_request_id("answer"),

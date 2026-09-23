@@ -30,6 +30,22 @@ class SessionCloseTimeoutError(RuntimeError):
         )
 
 
+class SessionRequestDuplicateError(RuntimeError):
+    """A request ID already belongs to this Session generation."""
+
+
+class SessionGenerationMismatchError(RuntimeError):
+    """Control input names an older or otherwise non-current generation."""
+
+
+class SessionControlAlreadyDelivered(RuntimeError):
+    """The same control answer was already delivered successfully."""
+
+
+class SessionControlConflictError(RuntimeError):
+    """A different answer reused an already-consumed interaction ID."""
+
+
 class RuntimeSessionState(str, Enum):
     READY = "ready"
     ACTIVE = "active"
@@ -85,6 +101,16 @@ class SessionExecutionState(str, Enum):
         }
 
 
+class SessionSubmissionState(str, Enum):
+    """How far a host input is known to have crossed the execution boundary."""
+
+    HOST_ACCEPTED = "host_accepted"
+    HARNESS_ACCEPTED = "harness_accepted"
+    PROVIDER_ACCEPTED = "provider_accepted"
+    REJECTED = "rejected"
+    UNKNOWN = "unknown"
+
+
 @dataclass(slots=True)
 class SessionExecutionHandle:
     execution_id: str
@@ -100,6 +126,11 @@ class SessionExecutionHandle:
     finished_at: float | None = None
     error: str | None = None
     cancellation_requested: bool = False
+    submission_state: SessionSubmissionState = SessionSubmissionState.HOST_ACCEPTED
+    provider_message_id: str | None = None
+    provider_turn_id: str | None = None
+    control_fingerprint: str | None = None
+    control_delivered: bool = field(default=False, repr=False)
     task: asyncio.Task[Any] | None = field(default=None, repr=False)
     terminal_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     retain_owner_task: bool = field(default=False, repr=False)
@@ -120,6 +151,9 @@ class SessionExecutionHandle:
             finished_at=self.finished_at,
             error=self.error,
             cancellation_requested=self.cancellation_requested,
+            submission_state=self.submission_state,
+            provider_message_id=self.provider_message_id,
+            provider_turn_id=self.provider_turn_id,
         )
 
 
@@ -138,6 +172,9 @@ class SessionExecutionSnapshot:
     finished_at: float | None
     error: str | None
     cancellation_requested: bool
+    submission_state: SessionSubmissionState
+    provider_message_id: str | None
+    provider_turn_id: str | None
 
 
 @dataclass(frozen=True, slots=True)

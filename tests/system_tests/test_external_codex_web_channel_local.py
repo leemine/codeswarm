@@ -414,7 +414,16 @@ async def _chat_until_question(ws: Any, request_id: str, session_id: str, query:
         timeout=40,
     )
     assert _event(question, "chat.ask_user_question"), frames
-    return question["payload"]
+    statuses = {
+        frame.get("payload", {}).get("submission_status")
+        for frame in frames
+        if _event(frame, "runtime.accepted")
+    }
+    assert {"harness_accepted", "provider_accepted"} <= statuses, frames
+    payload = question["payload"]
+    assert isinstance(payload.get("session_generation"), int), frames
+    assert payload["session_generation"] > 0
+    return payload
 
 
 async def _answer_and_wait_final(
@@ -430,6 +439,7 @@ async def _answer_and_wait_final(
             "query": "",
             "request_id": question["request_id"],
             "source": question["source"],
+            "session_generation": question["session_generation"],
             "answers": [{"selected_options": [option]}],
         },
     )
@@ -498,6 +508,59 @@ async def test_external_codex_web_approval_stop_disconnect_and_history(tmp_path:
                 )
                 await _answer_and_wait_final(ws, "allow-answer", session_id, allow, "allow_once")
                 assert (root / "allow-marker.txt").read_text(encoding="utf-8") == "R1-A2-WEB-ALLOW"
+                provider_calls = len(responses.requests)
+                await _send_request(
+                    ws,
+                    "allow-answer-duplicate",
+                    "chat.send",
+                    {
+                        "session_id": session_id,
+                        "mode": "agent.code",
+                        "query": "",
+                        "request_id": allow["request_id"],
+                        "source": allow["source"],
+                        "session_generation": allow["session_generation"],
+                        "answers": [{"selected_options": ["allow_once"]}],
+                    },
+                )
+                duplicate, duplicate_frames = await _receive_until(
+                    ws,
+                    lambda frame: _event(frame, "runtime.accepted")
+                    and frame.get("payload", {}).get("duplicate") is True,
+                    timeout=20,
+                )
+                assert duplicate["payload"]["submission_status"] == "provider_accepted"
+                assert len(responses.requests) == provider_calls, duplicate_frames
+
+                await _send_request(
+                    ws,
+                    "allow-answer-stale",
+                    "chat.send",
+                    {
+                        "session_id": session_id,
+                        "mode": "agent.code",
+                        "query": "",
+                        "request_id": allow["request_id"],
+                        "source": allow["source"],
+                        "session_generation": allow["session_generation"] + 1,
+                        "answers": [{"selected_options": ["allow_once"]}],
+                    },
+                )
+                stale, stale_frames = await _receive_until(
+                    ws,
+                    lambda frame: (
+                        frame.get("type") == "res"
+                        and frame.get("id") == "allow-answer-stale"
+                        and frame.get("ok") is False
+                    )
+                    or frame.get("event")
+                    in {"chat.error", "execution.error", "runtime.error"},
+                    timeout=20,
+                )
+                assert "stale Session generation" in json.dumps(
+                    [stale, *stale_frames], ensure_ascii=False
+                )
+                assert len(responses.requests) == provider_calls
 
                 deny = await _chat_until_question(ws, "deny", session_id, "R1-A2-WEB-DENY")
                 await _answer_and_wait_final(ws, "deny-answer", session_id, deny, "deny")

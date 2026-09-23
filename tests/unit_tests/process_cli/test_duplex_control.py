@@ -440,6 +440,7 @@ async def test_typed_answer_copies_pending_source_metadata_card_and_owned_worksp
         "source": source,
         "approval_schema": "approval-v1",
         "evolution_meta": {"change": {"id": "approved-change"}},
+        "session_generation": 7,
         "mode": "not-an-owned-mode",
         "cwd": "not-an-owned-cwd",
     }
@@ -472,11 +473,13 @@ async def test_typed_answer_copies_pending_source_metadata_card_and_owned_worksp
     assert answer.project_dir == "owned-project"
     assert answer.cwd == "owned-cwd"
     assert answer.trusted_dirs == ("owned-trusted",)
+    assert answer.session_generation == 7
     assert answer.answers == ({"id": "question-1", "value": "caller-answer"},)
     assert answer.resumes_interrupted_turn
     runtime_request = answer.to_agent_request()
     assert runtime_request.req_method == ReqMethod.CHAT_SEND
     assert runtime_request.params["request_id"] == "real-runtime-card"
+    assert runtime_request.params["session_generation"] == 7
 
 
 @pytest.mark.asyncio

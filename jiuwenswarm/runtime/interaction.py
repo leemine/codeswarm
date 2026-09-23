@@ -107,6 +107,7 @@ class InteractionAnswerInput:
     project_dir: str = ""
     cwd: str = ""
     trusted_dirs: tuple[str, ...] = ()
+    session_generation: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -147,6 +148,19 @@ class InteractionAnswerInput:
         )
         object.__setattr__(self, "cwd", _optional_text("cwd", self.cwd))
         object.__setattr__(self, "trusted_dirs", _trusted_dirs(self.trusted_dirs))
+        if (
+            isinstance(self.session_generation, bool)
+            or (
+                self.session_generation is not None
+                and (
+                    not isinstance(self.session_generation, int)
+                    or self.session_generation <= 0
+                )
+            )
+        ):
+            raise InteractionAnswerError(
+                "session_generation must be a positive integer"
+            )
 
     @property
     def resumes_interrupted_turn(self) -> bool:
@@ -187,6 +201,8 @@ class InteractionAnswerInput:
             params["evolution_meta"] = deepcopy(dict(self.evolution_meta))
         if self.trusted_dirs:
             params["trusted_dirs"] = list(self.trusted_dirs)
+        if self.session_generation is not None:
+            params["session_generation"] = self.session_generation
         return AgentRequest(
             request_id=self.request_id,
             channel_id=self.channel_id,

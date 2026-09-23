@@ -2150,6 +2150,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             : {};
         const approvalSchemaPayload = approvalSchema ? { approval_schema: approvalSchema } : {};
         const sourcePayload = effectiveSource ? { source: effectiveSource } : {};
+        const generationPayload =
+          pendingMatches && Number.isInteger(pendingQuestion?.sessionGeneration)
+            ? { session_generation: pendingQuestion?.sessionGeneration }
+            : {};
 
         // ── SwarmFlow human 回复 → chat.swarmflow_reply ──
         if (effectiveSource === 'swarmflow_human') {
@@ -2261,6 +2265,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               ...agentSelectionPayload,
               ...agentGroupSelectionPayload,
               ...sourcePayload,
+              ...generationPayload,
               ...structuredPlanPayload,
               ...approvalSchemaPayload,
               ...evolutionMetaPayload,
@@ -2306,6 +2311,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             request_id: requestId,
             answers,
             ...sourcePayload,
+            ...generationPayload,
             ...approvalSchemaPayload,
             ...evolutionMetaPayload,
           });
@@ -4534,6 +4540,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           request_id: typeof questionPayload.request_id === 'string' ? questionPayload.request_id : '',
           source: typeof questionPayload.source === 'string' ? questionPayload.source : undefined,
           questions,
+          ...(Number.isInteger(questionPayload.session_generation)
+            && Number(questionPayload.session_generation) > 0
+            ? { sessionGeneration: Number(questionPayload.session_generation) }
+            : {}),
           ...(approvalSchema ? { approvalSchema } : {}),
           ...(evolutionMeta ? { evolutionMeta } : {}),
           ...(planApprovalKind ? { planApprovalKind } : {}),

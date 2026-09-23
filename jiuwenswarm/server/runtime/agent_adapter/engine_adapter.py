@@ -193,11 +193,49 @@ class EngineAgentAdapter:
             channel_id=request.channel_id,
             mode=str(params.get("mode") or "unknown"),
         )
+        receipt_fields = {
+            "provider_message_id": receipt.message_id,
+            "provider_turn_id": receipt.turn_id,
+        }
+        yield AgentResponseChunk(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            payload={
+                "event_type": "runtime.accepted",
+                "request_id": request.request_id,
+                "submission_status": "harness_accepted",
+                **receipt_fields,
+            },
+            is_complete=False,
+            metadata=dict(request.metadata or {}),
+        )
         terminal_seen = False
+        provider_acceptance_emitted = False
         try:
             try:
                 output = session.outputs(receipt.turn_id)
                 async for item in output:
+                    provider_started = getattr(session, "provider_started", None)
+                    if (
+                        not provider_acceptance_emitted
+                        and (
+                            not callable(provider_started)
+                            or provider_started(receipt.turn_id)
+                        )
+                    ):
+                        provider_acceptance_emitted = True
+                        yield AgentResponseChunk(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            payload={
+                                "event_type": "runtime.accepted",
+                                "request_id": request.request_id,
+                                "submission_status": "provider_accepted",
+                                **receipt_fields,
+                            },
+                            is_complete=False,
+                            metadata=dict(request.metadata or {}),
+                        )
                     payload = self._projection.owned_payload(item)
                     if payload is not None:
                         status = str(payload.get("terminal_status") or "")
@@ -216,7 +254,34 @@ class EngineAgentAdapter:
             except TurnOutputIncompleteError:
                 pass
             if not terminal_seen:
-                payload = unknown_terminal_payload()
+                provider_started = getattr(session, "provider_started", None)
+                if (
+                    not provider_acceptance_emitted
+                    and callable(provider_started)
+                    and provider_started(receipt.turn_id)
+                ):
+                    provider_acceptance_emitted = True
+                    yield AgentResponseChunk(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        payload={
+                            "event_type": "runtime.accepted",
+                            "request_id": request.request_id,
+                            "submission_status": "provider_accepted",
+                            **receipt_fields,
+                        },
+                        is_complete=False,
+                        metadata=dict(request.metadata or {}),
+                    )
+                payload = {
+                    **unknown_terminal_payload(),
+                    "submission_status": (
+                        "provider_accepted"
+                        if provider_acceptance_emitted
+                        else "unknown"
+                    ),
+                    **receipt_fields,
+                }
                 yield AgentResponseChunk(
                     request_id=request.request_id,
                     channel_id=request.channel_id,
@@ -228,6 +293,9 @@ class EngineAgentAdapter:
         finally:
             if not terminal_seen:
                 session.abandon_output(receipt.turn_id)
+            forget_submission = getattr(session, "forget_submission", None)
+            if callable(forget_submission):
+                forget_submission(receipt.turn_id)
 
     async def process_interrupt(self, request: AgentRequest) -> AgentResponse:
         session = self._require_session()
