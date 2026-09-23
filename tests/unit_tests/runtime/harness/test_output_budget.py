@@ -138,6 +138,57 @@ async def test_eof_keeps_buffered_real_terminal_for_owner():
 
 
 @pytest.mark.asyncio
+async def test_output_observer_sees_interaction_and_terminal_once_before_delivery():
+    io = IO()
+    observed = []
+
+    async def observe(item):
+        observed.append(item)
+
+    router = TurnOutputRouter(io, output_observer=observe)
+    router.start()
+    interaction = ProjectedOutput(
+        "turn",
+        chunk=OutputSchema(
+            type="__interaction__",
+            index=0,
+            payload={"id": "question-1"},
+        ),
+    )
+    terminal = ProjectedOutput("turn", terminal=TurnEventKind.FINISHED)
+    try:
+        await router.submit(AsyncMock(return_value=receipt()))
+        await io.queue.put(interaction)
+        await io.queue.put(terminal)
+        actual = [item async for item in router.outputs("turn")]
+        assert actual == [interaction, terminal]
+        assert observed == [interaction, terminal]
+    finally:
+        await router.stop()
+
+
+@pytest.mark.asyncio
+async def test_output_observer_failure_aborts_before_product_delivery():
+    io = IO()
+
+    async def reject(_item):
+        raise OSError("recovery archive unavailable")
+
+    router = TurnOutputRouter(io, output_observer=reject)
+    router.start()
+    try:
+        await router.submit(AsyncMock(return_value=receipt()))
+        await io.queue.put(chunk(0))
+        await router._task
+        io.abort.assert_awaited_once()
+        outputs = router.outputs("turn")
+        with pytest.raises(OSError, match="recovery archive unavailable"):
+            await anext(outputs)
+    finally:
+        await router.stop()
+
+
+@pytest.mark.asyncio
 async def test_external_large_owned_prefix_survives_detached_terminal_and_cleanup(
     monkeypatch,
 ):

@@ -87,6 +87,7 @@ class EngineAgentAdapter:
             event_observer=self._projection.observe,
             detached_output=self._projection,
             tool_gateway=self._tool_gateway,
+            recovery=self._route.recovery,
         )
         if session.binding is not binding:
             raise RuntimeError("External construction did not retain its admitted binding")

@@ -7,6 +7,7 @@ import asyncio
 import dataclasses
 from collections.abc import Awaitable, Callable
 
+from openjiuwen.harness.engine import ExecutionBinding
 from openjiuwen.harness.subagent_runtime.ports import (
     ChunkCallback,
     ParentExecutionContext,
@@ -179,12 +180,29 @@ class CodexSubagentExecutionFactory:
         session: ExecutionSession | None = None
         try:
             child_subject_id = f"{_CHILD_SUBJECT_PREFIX}{request.subagent_id}"
+            prospective_binding = ExecutionBinding.create(
+                self._parent_spec,
+                subject_id=child_subject_id,
+                host_session_id=request.subagent_id,
+                workspace=str(
+                    self._parent_route.runtime_paths.runtime_workspace_root
+                ),
+            )
+            child_recovery = (
+                self._parent_route.recovery.child(
+                    prospective_binding,
+                    self._parent_route.runtime_paths,
+                )
+                if self._parent_route.recovery is not None
+                else None
+            )
             session = prepare_execution_session(
                 self._child_source,
                 bindings=self._parent_route.bindings,
                 subject_id=child_subject_id,
                 host_session_id=request.subagent_id,
                 runtime_paths=self._parent_route.runtime_paths,
+                recovery=child_recovery,
             )
             child_binding = session.binding
             if (
@@ -259,9 +277,21 @@ class CodexSubagentExecutionFactory:
     ) -> bool:
         self._validate_parent_context(context)
         self._validate_build_request(request, context)
-        # Durable child checkpoint lookup belongs to R1-04.  Never guess from
-        # a parent checkpoint or rebuild through another Provider.
-        return False
+        parent_recovery = self._parent_route.recovery
+        if parent_recovery is None:
+            return False
+        child_binding = ExecutionBinding.create(
+            self._parent_spec,
+            subject_id=f"{_CHILD_SUBJECT_PREFIX}{request.subagent_id}",
+            host_session_id=request.subagent_id,
+            workspace=str(self._parent_route.runtime_paths.runtime_workspace_root),
+        )
+        child_recovery = parent_recovery.child(
+            child_binding,
+            self._parent_route.runtime_paths,
+            create_if_missing=False,
+        )
+        return child_recovery is not None and child_recovery.has_checkpoint()
 
     def _validate_parent_context(self, context: ParentExecutionContext) -> None:
         if context.parent_session_id != self._parent_binding.host_session_id:

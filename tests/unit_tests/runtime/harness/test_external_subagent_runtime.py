@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import dataclasses
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +18,10 @@ from openjiuwen.harness_protocol import AgentExecutionSpec, ToolInvocation
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
 from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
 from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
-from jiuwenswarm.runtime.harness.external_subagents import ExternalSubagentRuntime
+from jiuwenswarm.runtime.harness.external_subagents import (
+    ExternalSubagentParentSession,
+    ExternalSubagentRuntime,
+)
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
 
 
@@ -79,20 +84,26 @@ class _Execution:
 
 
 class _Factory:
-    def __init__(self, *, gate: asyncio.Event | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        gate: asyncio.Event | None = None,
+        restorable: bool = False,
+    ) -> None:
         self.gate = gate
         self.active = 0
         self.peak = 0
         self.created: list[tuple[Any, Any]] = []
         self.closed: list[tuple[str, str]] = []
         self.close_failures = 0
+        self.restorable = restorable
 
     async def create(self, request, context):
         self.created.append((request, context))
         return _Execution(self, request.subagent_id)
 
     async def can_restore(self, request, context) -> bool:
-        return False
+        return self.restorable
 
 
 def _install_factory(monkeypatch: pytest.MonkeyPatch, factory: _Factory) -> None:
@@ -107,6 +118,81 @@ def _install_factory(monkeypatch: pytest.MonkeyPatch, factory: _Factory) -> None
 
 async def _invoke(runtime: ExternalSubagentRuntime, name: str, arguments: dict):
     return await runtime.gateway.invoke(ToolInvocation(f"call-{name}", name, arguments))
+
+
+def test_parent_subagent_state_is_restored_and_checkpointed() -> None:
+    saved: list[dict[str, Any]] = []
+    recovery = type(
+        "Recovery",
+        (),
+        {
+            "load_host_state": lambda self: {"subagents": {"revision": 3}},
+            "save_host_state": lambda self, state: saved.append(dict(state)),
+        },
+    )()
+
+    async def write_output(_chunk: OutputSchema) -> None:
+        return None
+
+    session = ExternalSubagentParentSession(
+        "parent-a",
+        write_output=write_output,
+        recovery=recovery,
+    )
+    assert session.get_state("subagents") == {"revision": 3}
+    session.update_state({"subagents": {"revision": 4}})
+    assert saved == [{"subagents": {"revision": 4}}]
+
+
+@pytest.mark.asyncio
+async def test_new_product_runtime_restores_closed_child_from_parent_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Recovery:
+        def __init__(self) -> None:
+            self.state: dict[str, Any] = {}
+
+        def load_host_state(self) -> dict[str, Any]:
+            return copy.deepcopy(self.state)
+
+        def save_host_state(self, state: dict[str, Any]) -> None:
+            self.state = copy.deepcopy(state)
+
+    recovery = Recovery()
+    route = dataclasses.replace(_route(tmp_path), recovery=recovery)
+    first_factory = _Factory()
+    _install_factory(monkeypatch, first_factory)
+
+    async def write_output(_chunk: OutputSchema) -> None:
+        return None
+
+    first = ExternalSubagentRuntime(route, write_output=write_output)
+    spawned = await _invoke(
+        first,
+        "subagent_spawn",
+        {
+            "subagent_type": "general-purpose",
+            "task_description": "first task",
+            "display_name": "Worker",
+            "role": "worker",
+        },
+    )
+    control = first._parent_host._subagent_controls["parent-a"]
+    child_id = control.list_live()[0].subagent_id
+    assert spawned.is_error is False
+    await _invoke(first, "subagent_wait", {"subagent_ids": [child_id]})
+    closed = await _invoke(first, "subagent_close", {"subagent_id": child_id})
+    assert closed.is_error is False
+    await first.close("process_exit")
+
+    second_factory = _Factory(restorable=True)
+    _install_factory(monkeypatch, second_factory)
+    second = ExternalSubagentRuntime(route, write_output=write_output)
+    resumed = await _invoke(second, "subagent_resume", {"subagent_id": child_id})
+    assert resumed.is_error is False
+    assert child_id in second._parent_host._subagent_controls["parent-a"]._manager.list_ids()
+    await second.close("test_complete")
 
 
 @pytest.mark.asyncio
@@ -186,8 +272,7 @@ async def test_six_tools_run_parallel_turns_and_keep_parent_scope(
         {"subagent_id": subagent_ids[0]},
     )
     assert closed.is_error is False
-    # B3 explicitly leaves durable child restore to R1-04; the sixth tool must
-    # fail closed instead of rebuilding through another Provider.
+    # This fake factory has no durable checkpoint, so resume must fail closed.
     resumed = await _invoke(
         runtime,
         "subagent_resume",

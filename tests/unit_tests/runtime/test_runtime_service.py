@@ -852,10 +852,32 @@ async def test_execution_binds_after_admission_before_agent_construction(
 ) -> None:
     from openjiuwen.harness.engine.config import config_fingerprint
     from openjiuwen.harness_protocol import AgentExecutionSpec
+    from jiuwenswarm.common.auth import session_store
+    from jiuwenswarm.runtime.harness import recovery_store
     from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
 
     workspace = tmp_path / "approved"
     workspace.mkdir()
+    sessions = tmp_path / "sessions"
+    auth = tmp_path / "auth"
+
+    def resolve_session(session_id: str, create: bool = False):
+        path = sessions / session_id
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
+        return path, None
+
+    def auth_dir() -> Path:
+        auth.mkdir(parents=True, exist_ok=True)
+        return auth
+
+    monkeypatch.setattr(recovery_store, "resolve_session_dir", resolve_session)
+    monkeypatch.setattr(
+        recovery_store,
+        "get_read_history_path",
+        lambda session_id: sessions / session_id / "history.jsonl",
+    )
+    monkeypatch.setattr(session_store, "auth_dir", auth_dir)
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
         lambda *_args, **_kwargs: {

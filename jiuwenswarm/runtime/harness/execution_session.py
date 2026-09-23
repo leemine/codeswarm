@@ -27,6 +27,7 @@ from openjiuwen.harness_providers.io_adapter import HarnessIOAdapter, ProjectedO
 
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
 from jiuwenswarm.runtime.harness.output_router import TurnOutputRouter
+from jiuwenswarm.runtime.harness.recovery_store import SessionExecutionRecovery
 from jiuwenswarm.runtime.harness.tool_gateway import ProductToolGateway
 from jiuwenswarm.runtime.harness.tool_transport import (
     ManagedProductToolTransport,
@@ -74,6 +75,7 @@ class ExecutionSession:
         detached_output: Callable[[ProjectedOutput], Awaitable[None]] | None = None,
         tool_gateway: ToolGateway | None = None,
         queue_size: int = 128,
+        recovery: SessionExecutionRecovery | None = None,
     ) -> None:
         binding = engine.binding
         if str(runtime_paths.runtime_workspace_root.resolve()) != binding.workspace:
@@ -91,6 +93,7 @@ class ExecutionSession:
         self._tool_gateway = tool_gateway
         self._tool_transport: ManagedProductToolTransport | None = None
         self._queue_size = max(1, queue_size)
+        self._recovery = recovery
         self._output_router: TurnOutputRouter | None = None
         self._lifecycle_lock = asyncio.Lock()
         self._started = False
@@ -138,6 +141,7 @@ class ExecutionSession:
             except ValueError as exc:
                 raise ValueError("External context cwd is outside the binding") from exc
             try:
+                context = self._prepare_recovery_context(context)
                 prepared_context = await self._prepare_tool_context(context)
                 await self.io.start(prepared_context)
             except BaseException as start_error:
@@ -150,6 +154,7 @@ class ExecutionSession:
                 self.io,
                 queue_size=self._queue_size,
                 detached_output=self._detached_output,
+                output_observer=self._observe_projected_output,
             )
             try:
                 router.start()
@@ -212,6 +217,8 @@ class ExecutionSession:
             self._exit_state = ExecutionExitState.STOP_REQUESTED
             router = self._output_router
             await self._stop_owned_resources(router=router)
+            if self._recovery is not None:
+                await self._recovery.clear_pending_interactions()
             self._output_router = None
             self._provider_started_turns.clear()
             self._started = False
@@ -254,6 +261,27 @@ class ExecutionSession:
         if self._event_observer is not None:
             await self._event_observer(envelope)
 
+    async def _observe_projected_output(self, item: ProjectedOutput) -> None:
+        recovery = self._recovery
+        if recovery is None:
+            return
+        chunk = item.chunk
+        if chunk is not None and chunk.type == "__interaction__":
+            payload = chunk.payload
+            request_id = (
+                payload.get("id")
+                if isinstance(payload, dict)
+                else getattr(payload, "id", None)
+            )
+            if not isinstance(request_id, str) or not request_id:
+                raise ValueError("External interaction output has no request id")
+            await recovery.mark_pending_interaction(
+                request_id,
+                turn_id=item.turn_id,
+            )
+        if item.terminal is not None:
+            await recovery.clear_pending_interactions()
+
     async def _prepare_tool_context(self, context: HarnessContext) -> HarnessContext:
         gateway = self._tool_gateway
         if gateway is None:
@@ -290,6 +318,21 @@ class ExecutionSession:
             context,
             mcp_servers=(*context.mcp_servers, transport.server_config()),
             host_capabilities=frozenset(capabilities),
+        )
+
+    def _prepare_recovery_context(self, context: HarnessContext) -> HarnessContext:
+        recovery = self._recovery
+        if recovery is None:
+            return context
+        plan = recovery.prepare(self.engine.harness.card, agent_id=context.agent_id)
+        capabilities = set(context.host_capabilities)
+        capabilities.add(HostCapability.CHECKPOINT_SINK)
+        return dataclasses.replace(
+            context,
+            host_capabilities=frozenset(capabilities),
+            resume_policy=plan.resume_policy,
+            checkpoint=plan.checkpoint,
+            checkpoint_sink=plan.checkpoint_sink,
         )
 
     def _validate_gateway_scope(self, gateway: ToolGateway) -> None:

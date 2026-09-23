@@ -48,6 +48,9 @@ from jiuwenswarm.runtime.harness.request_binding import (
     AdmittedExecutionRoute,
     bind_admitted_request_execution,
 )
+from jiuwenswarm.runtime.harness.recovery_store import (
+    ExecutionRecoveryUnavailableError,
+)
 from jiuwenswarm.runtime.plan import PlanModeController, PlanStateResult
 
 
@@ -83,6 +86,8 @@ def _route(
 def test_admission_reuses_runtime_workspace_and_freezes_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from jiuwenswarm.runtime.harness import recovery_store
+
     spec = AgentExecutionSpec("codex", "r1", provider_config={"model": "test"})
     server_config = {
         "execution": {
@@ -101,6 +106,20 @@ def test_admission_reuses_runtime_workspace_and_freezes_route(
     monkeypatch.setattr(
         "jiuwenswarm.common.utils.get_agent_workspace_dir",
         lambda: tmp_path / "internal",
+    )
+    sessions = tmp_path / "sessions"
+    monkeypatch.setattr(
+        recovery_store,
+        "resolve_session_dir",
+        lambda session_id, create=False: (
+            sessions / session_id,
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        recovery_store,
+        "get_read_history_path",
+        lambda session_id: sessions / session_id / "history.jsonl",
     )
     remembered: list[Any] = []
     manager = SimpleNamespace(
@@ -134,8 +153,39 @@ def test_admission_reuses_runtime_workspace_and_freezes_route(
     assert route.runtime_paths.runtime_workspace_root == project
     assert route.runtime_paths.cwd == project
     assert route.bound.binding.workspace == str(project)
+    assert route.recovery is not None
+    assert route.recovery.path == sessions / "session-1" / "execution-recovery.json"
     assert route.cache_identity == ("web", *route.bound.binding.cache_key)
     assert remembered == [("web", "session-1", route.bound.binding)]
+
+    server_config["execution"]["profiles"]["codex"]["provider_config"][
+        "model"
+    ] = "changed"
+    with pytest.raises(
+        ExecutionRecoveryUnavailableError,
+        match="configuration fingerprint changed",
+    ):
+        bind_admitted_request_execution(
+            manager,
+            request,
+            str(project),
+            session_metadata=metadata,
+        )
+    server_config["execution"]["profiles"]["codex"]["provider_config"][
+        "model"
+    ] = "test"
+    with pytest.raises(ExecutionRecoveryUnavailableError, match="Binding changed"):
+        bind_admitted_request_execution(
+            manager,
+            SimpleNamespace(
+                session_id="session-1",
+                channel_id="web",
+                user_id="mallory",
+                params={},
+            ),
+            str(project),
+            session_metadata=metadata,
+        )
 
 
 @pytest.mark.asyncio

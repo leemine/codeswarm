@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
@@ -13,6 +14,8 @@ from openjiuwen.harness_providers.io_adapter import HarnessIOAdapter, ProjectedO
 from openjiuwen.harness_providers.output_buffer import (
     OutputBudget, OutputBudgetExceeded, OutputBuffer, OutputLimits,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class TurnOutputIncompleteError(RuntimeError):
@@ -49,15 +52,17 @@ class TurnOutputRouter:
         *,
         queue_size: int = 128,
         detached_output: Callable[[ProjectedOutput], Awaitable[None]] | None = None,
+        output_observer: Callable[[ProjectedOutput], Awaitable[None]] | None = None,
         output_limits: OutputLimits | None = None,
         max_turns: int = 128,
     ) -> None:
         self._io = io
         self._budget = OutputBudget(output_limits)
         self._max_turns = max(1, max_turns)
-        self._failure: OutputBudgetExceeded | None = None
+        self._failure: BaseException | None = None
         self._queue_size = max(1, queue_size)
         self._detached_output = detached_output
+        self._output_observer = output_observer
         self._mailboxes: dict[str, _Mailbox] = {}
         self._closing_mailboxes: dict[str, _Mailbox] = {}
         self._drain_tasks: set[asyncio.Task[None]] = set()
@@ -77,7 +82,9 @@ class TurnOutputRouter:
         if self._task is None or self._closed:
             raise RuntimeError("turn output router is not running")
         if self._failure is not None:
-            raise OutputBudgetExceeded(str(self._failure))
+            if isinstance(self._failure, OutputBudgetExceeded):
+                raise OutputBudgetExceeded(str(self._failure))
+            raise RuntimeError("turn output observation failed") from self._failure
         if self._task.done():
             self._task.result()
             raise RuntimeError("turn output reader stopped")
@@ -225,6 +232,8 @@ class TurnOutputRouter:
             async for item in self._io.output_envelopes():
                 if item.turn_id is not None and len(item.turn_id.encode("utf-8")) > 1024:
                     raise OutputBudgetExceeded("Turn identifier byte budget exhausted")
+                if self._output_observer is not None:
+                    await self._output_observer(item)
                 async with self._lock:
                     mailbox = self._mailboxes.get(item.turn_id)
                     if (mailbox is None or mailbox.closed.is_set()) and self._submitting:
@@ -254,6 +263,9 @@ class TurnOutputRouter:
                         await self._detached_output(item)
         except OutputBudgetExceeded as exc:
             await self._fail_output(exc)
+        except Exception as exc:
+            logger.exception("turn output observation failed")
+            await self._fail_observation(exc)
         finally:
             if self._failure is None:
                 for mailbox in self._mailboxes.values():
@@ -272,6 +284,19 @@ class TurnOutputRouter:
         report = getattr(self._detached_output, "output_failed", None)
         if callable(report):
             await report(self._failure)
+
+    async def _fail_observation(self, error: BaseException) -> None:
+        if self._failure is not None:
+            return
+        self._failure = error
+        for mailbox in self._mailboxes.values():
+            mailbox.queue.fail(error)
+        try:
+            await asyncio.wait_for(self._io.abort(), timeout=5)
+        except Exception:
+            logger.warning(
+                "turn output observation failure: provider abort could not be confirmed"
+            )
 
     @staticmethod
     async def _put_or_closed(mailbox: _Mailbox, item: ProjectedOutput) -> bool:

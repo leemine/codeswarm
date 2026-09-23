@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import shlex
@@ -26,11 +27,16 @@ from openjiuwen.harness.subagent_runtime import (
 from openjiuwen.harness_providers.codex import native_plugin_content_digest
 
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
+from jiuwenswarm.common.auth import session_store
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
 from jiuwenswarm.runtime.harness.codex_subagent import CodexSubagentExecutionFactory
 from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
+from jiuwenswarm.runtime.harness.recovery_store import (
+    ExecutionRecoveryUnavailableError,
+    SessionExecutionRecovery,
+)
 from jiuwenswarm.runtime.harness.tool_gateway import (
     ProductToolGateway,
     ProductToolScope,
@@ -158,7 +164,12 @@ def _route(root, spec: AgentExecutionSpec) -> AdmittedExecutionRoute:
 
 
 @pytest.mark.asyncio
-async def test_real_codex_cli_runs_through_external_product_adapter(tmp_path):
+async def test_real_codex_cli_runs_through_external_product_adapter(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from jiuwenswarm.runtime.harness import recovery_store
+
     sdk = pytest.importorskip(
         "openai_codex", reason="optional Codex SDK and bundled CLI required"
     )
@@ -188,6 +199,26 @@ async def test_real_codex_cli_runs_through_external_product_adapter(tmp_path):
     (root / "JIUWENSWARM.md").write_text(
         "R1-A2-PROJECT-CONTEXT", encoding="utf-8"
     )
+    sessions = tmp_path / "sessions"
+    auth = tmp_path / "auth"
+
+    def resolve_session(session_id: str, create: bool = False):
+        path = sessions / session_id
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
+        return path, None
+
+    def auth_dir() -> Path:
+        auth.mkdir(parents=True, exist_ok=True)
+        return auth
+
+    monkeypatch.setattr(recovery_store, "resolve_session_dir", resolve_session)
+    monkeypatch.setattr(
+        recovery_store,
+        "get_read_history_path",
+        lambda session_id: sessions / session_id / "history.jsonl",
+    )
+    monkeypatch.setattr(session_store, "auth_dir", auth_dir)
 
     with _ResponsesFixture() as responses:
         spec = AgentExecutionSpec(
@@ -201,7 +232,8 @@ async def test_real_codex_cli_runs_through_external_product_adapter(tmp_path):
                     "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 },
                 "startup_source_roots": [str(root), str(codex_home / "skills")],
-                "mcp_required": False,
+                "mcp_required": True,
+                "mcp_default_tools_approval_mode": "prompt",
                 "model": {
                     "model": "gpt-5.6-sol",
                     "provider": "r1_a2_fixture",
@@ -211,6 +243,13 @@ async def test_real_codex_cli_runs_through_external_product_adapter(tmp_path):
             },
         )
         route = _route(root, spec)
+        recovery = SessionExecutionRecovery(
+            session_id="r1-a2-session",
+            execution_profile_id="codex-local",
+            binding=route.bound.binding,
+            runtime_paths=route.runtime_paths,
+        )
+        route = dataclasses.replace(route, recovery=recovery)
         adapter = EngineAgentAdapter(route)
         request = AgentRequest(
             request_id="r1-a2-request",
@@ -233,6 +272,50 @@ async def test_real_codex_cli_runs_through_external_product_adapter(tmp_path):
         finally:
             await adapter.cleanup()
 
+        cold_route = _route(root, spec)
+        cold_recovery = SessionExecutionRecovery(
+            session_id="r1-a2-session",
+            execution_profile_id="codex-local",
+            binding=cold_route.bound.binding,
+            runtime_paths=cold_route.runtime_paths,
+        )
+        cold_route = dataclasses.replace(cold_route, recovery=cold_recovery)
+        cold_adapter = EngineAgentAdapter(cold_route)
+        cold_request = AgentRequest(
+            request_id="r1-a2-cold-request",
+            channel_id="web",
+            session_id="r1-a2-session",
+            params={"mode": "code", "query": "R1-A2-COLD-RESUME"},
+            is_stream=True,
+        )
+        cold_request._execution_route = cold_route
+        try:
+            await cold_adapter.create_instance(mode="code")
+            cold_adapter.select_execution_for_request(cold_request)
+            cold_chunks = [
+                chunk
+                async for chunk in cold_adapter.process_message_stream_impl(
+                    cold_request,
+                    {"query": "R1-A2-COLD-RESUME"},
+                )
+            ]
+            cold_session = cold_adapter.execution_session
+            assert cold_session is not None
+            cold_card = cold_session.engine.harness.card
+        finally:
+            await cold_adapter.cleanup()
+
+        final_recovery = SessionExecutionRecovery(
+            session_id="r1-a2-session",
+            execution_profile_id="codex-local",
+            binding=cold_route.bound.binding,
+            runtime_paths=cold_route.runtime_paths,
+        )
+        final_plan = final_recovery.prepare(
+            cold_card,
+            agent_id="external:codex:r1-a2-session",
+        )
+
     payloads = [chunk.payload for chunk in chunks if chunk.payload]
     assert any(
         payload.get("event_type") == "chat.delta"
@@ -244,10 +327,21 @@ async def test_real_codex_cli_runs_through_external_product_adapter(tmp_path):
     sent = json.dumps(responses.requests[0], ensure_ascii=False)
     assert "R1-A2-USER-QUERY" in sent
     assert "R1-A2-PROJECT-CONTEXT" in sent
+    cold_payloads = [chunk.payload for chunk in cold_chunks if chunk.payload]
+    assert cold_payloads[-1]["event_type"] == "chat.final"
+    assert len(responses.requests) == 2
+    assert "R1-A2-COLD-RESUME" in json.dumps(responses.requests[1], ensure_ascii=False)
+    assert final_plan.checkpoint is not None
+    assert final_plan.checkpoint.data["resumed"] is True
 
 
 @pytest.mark.asyncio
-async def test_real_codex_cli_runs_independently_bound_child(tmp_path):
+async def test_real_codex_cli_runs_independently_bound_child(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from jiuwenswarm.runtime.harness import recovery_store
+
     sdk = pytest.importorskip(
         "openai_codex", reason="optional Codex SDK and bundled CLI required"
     )
@@ -274,6 +368,37 @@ async def test_real_codex_cli_runs_independently_bound_child(tmp_path):
         + "\n[permissions.r1-b3-read.network]\nenabled=false\n"
     )
     (codex_home / "config.toml").write_text(permission_config, encoding="utf-8")
+    sessions = tmp_path / "sessions"
+    auth = tmp_path / "auth"
+
+    def resolve_session(session_id: str, create: bool = False):
+        path = sessions / session_id
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
+        return path, None
+
+    def resolve_subagent(parent_id: str, subagent_id: str, create: bool = False):
+        path = sessions / parent_id / "subagents" / subagent_id / "history.jsonl"
+        if create:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        return path, None
+
+    def auth_dir() -> Path:
+        auth.mkdir(parents=True, exist_ok=True)
+        return auth
+
+    monkeypatch.setattr(recovery_store, "resolve_session_dir", resolve_session)
+    monkeypatch.setattr(
+        recovery_store,
+        "get_read_history_path",
+        lambda session_id: sessions / session_id / "history.jsonl",
+    )
+    monkeypatch.setattr(
+        recovery_store,
+        "resolve_subagent_history_path",
+        resolve_subagent,
+    )
+    monkeypatch.setattr(session_store, "auth_dir", auth_dir)
 
     with _ResponsesFixture() as responses:
         responses.items.append(
@@ -286,6 +411,21 @@ async def test_real_codex_cli_runs_independently_bound_child(tmp_path):
                     {
                         "type": "output_text",
                         "text": "R1-B3-CODEX-CHILD-OK",
+                        "annotations": [],
+                    }
+                ],
+            }
+        )
+        responses.items.append(
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "msg_r1_b3_child_resumed",
+                "status": "completed",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "R1-B3-CODEX-CHILD-RESUMED",
                         "annotations": [],
                     }
                 ],
@@ -328,19 +468,27 @@ async def test_real_codex_cli_runs_independently_bound_child(tmp_path):
                 project_root=root,
             ),
         )
-        factory = CodexSubagentExecutionFactory(route)
-        execution = await factory.create(
-            SubagentBuildRequest(
-                subagent_id="r1-a2-session_sub_explore_b3",
-                subagent_type="explore_agent",
-                display_name="B3 Explorer",
-                role="Return the delegated result",
-            ),
-            ParentExecutionContext(
-                parent_session_id="r1-a2-session",
-                parent_subject_id="local-test",
+        route = dataclasses.replace(
+            route,
+            recovery=SessionExecutionRecovery(
+                session_id="r1-a2-session",
+                execution_profile_id="codex-local",
+                binding=route.bound.binding,
+                runtime_paths=route.runtime_paths,
             ),
         )
+        factory = CodexSubagentExecutionFactory(route)
+        build_request = SubagentBuildRequest(
+            subagent_id="r1-a2-session_sub_explore_b3",
+            subagent_type="explore_agent",
+            display_name="B3 Explorer",
+            role="Return the delegated result",
+        )
+        parent_context = ParentExecutionContext(
+            parent_session_id="r1-a2-session",
+            parent_subject_id="local-test",
+        )
+        execution = await factory.create(build_request, parent_context)
         results = []
 
         async def settle(result):
@@ -357,6 +505,36 @@ async def test_real_codex_cli_runs_independently_bound_child(tmp_path):
         finally:
             await execution.close("test_complete")
 
+        cold_route = _route(root, spec)
+        cold_route = dataclasses.replace(
+            cold_route,
+            runtime_paths=route.runtime_paths,
+            recovery=SessionExecutionRecovery(
+                session_id="r1-a2-session",
+                execution_profile_id="codex-local",
+                binding=cold_route.bound.binding,
+                runtime_paths=route.runtime_paths,
+            ),
+        )
+        cold_factory = CodexSubagentExecutionFactory(cold_route)
+        assert await cold_factory.can_restore(build_request, parent_context) is True
+        cold_execution = await cold_factory.create(build_request, parent_context)
+        cold_results = []
+
+        async def settle_cold(result):
+            cold_results.append(result)
+
+        try:
+            await cold_execution.run_turn(
+                SubagentTurnRequest(
+                    task_id="r1-b3-task-resumed",
+                    query="R1-B3-CHILD-COLD-RESUME",
+                ),
+                on_result=settle_cold,
+            )
+        finally:
+            await cold_execution.close("test_complete")
+
     assert execution.binding is not route.bound.binding
     assert execution.binding.subject_id == "subagent:r1-a2-session_sub_explore_b3"
     assert execution.binding.workspace == route.bound.binding.workspace
@@ -364,14 +542,31 @@ async def test_real_codex_cli_runs_independently_bound_child(tmp_path):
     assert len(results) == 1
     assert results[0].output == "R1-B3-CODEX-CHILD-OK"
     assert results[0].is_error is False
-    assert responses.requests
+    assert len(cold_results) == 1
+    assert cold_results[0].output == "R1-B3-CODEX-CHILD-RESUMED"
+    assert cold_results[0].is_error is False
+    assert len(responses.requests) == 2
     rendered = json.dumps(responses.requests[0], ensure_ascii=False)
     assert "R1-B3-CHILD-QUERY" in rendered
     assert str(task_cwd) in rendered
+    assert "R1-B3-CHILD-COLD-RESUME" in json.dumps(
+        responses.requests[1], ensure_ascii=False
+    )
+    provider_sessions = [
+        str((request.get("client_metadata") or {}).get("session_id") or "")
+        for request in responses.requests
+    ]
+    assert provider_sessions[0]
+    assert provider_sessions[1] == provider_sessions[0]
 
 
 @pytest.mark.asyncio
-async def test_real_codex_cli_calls_session_owned_product_gateway(tmp_path):
+async def test_real_codex_cli_calls_session_owned_product_gateway(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from jiuwenswarm.runtime.harness import recovery_store
+
     sdk = pytest.importorskip(
         "openai_codex", reason="optional Codex SDK and bundled CLI required"
     )
@@ -397,6 +592,26 @@ async def test_real_codex_cli_calls_session_owned_product_gateway(tmp_path):
         + "\n[permissions.r1-b1-read.network]\nenabled=false\n"
     )
     (codex_home / "config.toml").write_text(permission_config, encoding="utf-8")
+    sessions = tmp_path / "sessions"
+    auth = tmp_path / "auth"
+
+    def resolve_session(session_id: str, create: bool = False):
+        path = sessions / session_id
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
+        return path, None
+
+    def auth_dir() -> Path:
+        auth.mkdir(parents=True, exist_ok=True)
+        return auth
+
+    monkeypatch.setattr(recovery_store, "resolve_session_dir", resolve_session)
+    monkeypatch.setattr(
+        recovery_store,
+        "get_read_history_path",
+        lambda session_id: sessions / session_id / "history.jsonl",
+    )
+    monkeypatch.setattr(session_store, "auth_dir", auth_dir)
 
     class EchoTool:
         card = SimpleNamespace(
@@ -460,6 +675,15 @@ async def test_real_codex_cli_calls_session_owned_product_gateway(tmp_path):
             },
         )
         route = _route(root, spec)
+        route = dataclasses.replace(
+            route,
+            recovery=SessionExecutionRecovery(
+                session_id="r1-a2-session",
+                execution_profile_id="codex-local",
+                binding=route.bound.binding,
+                runtime_paths=route.runtime_paths,
+            ),
+        )
         adapter = EngineAgentAdapter(route, tool_gateway=gateway)
         request = AgentRequest(
             request_id="r1-b1-product-tool-request",
@@ -471,6 +695,7 @@ async def test_real_codex_cli_calls_session_owned_product_gateway(tmp_path):
         request._execution_route = route
         chunks = []
         approval_count = 0
+        cold_blocked = False
         transport = None
         try:
             await adapter.create_instance(mode="code")
@@ -488,6 +713,23 @@ async def test_real_codex_cli_calls_session_owned_product_gateway(tmp_path):
                 if payload.get("event_type") != "chat.ask_user_question":
                     continue
                 approval_count += 1
+                live_session = adapter.execution_session
+                assert live_session is not None
+                cold = SessionExecutionRecovery(
+                    session_id="r1-a2-session",
+                    execution_profile_id="codex-local",
+                    binding=route.bound.binding,
+                    runtime_paths=route.runtime_paths,
+                )
+                with pytest.raises(
+                    ExecutionRecoveryUnavailableError,
+                    match="interaction Turn did not reach",
+                ):
+                    cold.prepare(
+                        live_session.engine.harness.card,
+                        agent_id="external:codex:r1-a2-session",
+                    )
+                cold_blocked = True
                 answer = AgentRequest(
                     request_id=f"r1-b1-answer-{approval_count}",
                     channel_id="web",
@@ -500,12 +742,25 @@ async def test_real_codex_cli_calls_session_owned_product_gateway(tmp_path):
                 )
                 accepted = await adapter.handle_user_answer(answer)
                 assert accepted.payload == {"accepted": True, "resolved": True}
+            live_session = adapter.execution_session
+            assert live_session is not None
+            resumed = SessionExecutionRecovery(
+                session_id="r1-a2-session",
+                execution_profile_id="codex-local",
+                binding=route.bound.binding,
+                runtime_paths=route.runtime_paths,
+            ).prepare(
+                live_session.engine.harness.card,
+                agent_id="external:codex:r1-a2-session",
+            )
+            assert resumed.resume_policy.value == "require_resume"
             transport = adapter.execution_session._tool_transport
             assert transport is not None and transport.started
         finally:
             await adapter.cleanup()
 
     assert approval_count == 1
+    assert cold_blocked is True
     assert tool.calls == [{"value": "from-codex"}]
     assert "R1-B1-PRODUCT-MCP-OK" in json.dumps(responses.requests)
     assert any((chunk.payload or {}).get("event_type") == "chat.final" for chunk in chunks)
