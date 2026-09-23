@@ -3457,10 +3457,12 @@ class JiuWenSwarm:
         stream_done = asyncio.Event()
         producer_cancellation: asyncio.CancelledError | None = None
         final_answer_content = ""
-        final_answer_chunks: list[str] = []
-        durable_pending_final_chunks: list[str] = []
+        from openjiuwen.harness_providers.output_buffer import OutputText
+
+        final_answer_chunks = OutputText()
+        durable_pending_final_chunks = OutputText()
         durable_pending_final_started_at: float | None = None
-        durable_pending_reasoning_chunks: list[str] = []
+        durable_pending_reasoning_chunks = OutputText()
         # reasoning 首/末帧时刻（epoch ms）：随 reasoning_content 一起落盘，供刷新后
         # 恢复耗时终点；即使 final/closeReasoning 丢失，末帧也是真实事件时刻。
         durable_pending_reasoning_started_at: float | None = None
@@ -3486,7 +3488,7 @@ class JiuWenSwarm:
             reasoning_text = "".join(durable_pending_reasoning_chunks)
             started_at = durable_pending_reasoning_started_at
             updated_at = durable_pending_reasoning_updated_at
-            durable_pending_reasoning_chunks = []
+            durable_pending_reasoning_chunks.clear()
             durable_pending_reasoning_started_at = None
             durable_pending_reasoning_updated_at = None
             return reasoning_text, started_at, updated_at
@@ -3535,7 +3537,7 @@ class JiuWenSwarm:
 
         def _reset_durable_pending_final() -> None:
             nonlocal durable_pending_final_chunks, durable_pending_final_started_at
-            durable_pending_final_chunks = []
+            durable_pending_final_chunks.clear()
             durable_pending_final_started_at = None
 
         def _note_durable_pending_final_delta(content: str) -> None:
@@ -4341,7 +4343,7 @@ class JiuWenSwarm:
                 mode=request.params.get("mode", "unknown"),
             )
             final_answer_content = finalized_assistant_message
-            final_answer_chunks = []
+            final_answer_chunks.clear()
             final_chunk = _make_a2ui_final_chunk(
                 request_id=rid,
                 channel_id=cid,
@@ -4378,6 +4380,9 @@ class JiuWenSwarm:
         if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
             _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=True)
 
+        final_answer_chunks.close()
+        durable_pending_final_chunks.close()
+        durable_pending_reasoning_chunks.close()
         yield AgentResponseChunk(
             request_id=rid,
             channel_id=cid,

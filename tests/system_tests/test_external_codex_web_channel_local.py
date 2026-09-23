@@ -25,6 +25,7 @@ from jiuwenswarm.common.utils import prepare_workspace
 pytestmark = [pytest.mark.integration, pytest.mark.system]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+LARGE_OUTPUT_SUFFIX = "R1-04C-COMPLETE-" * 20000
 
 
 def _pick_free_port() -> int:
@@ -208,7 +209,7 @@ class _WebResponsesFixture:
                     "status": "in_progress",
                     "content": [],
                 }
-                done = owner._message_item(index, "R1-A2-WEB-DISCONNECT-FINAL")
+                done = owner._message_item(index, "R1-A2-WEB-DISCONNECT-FINAL" + LARGE_OUTPUT_SUFFIX)
                 before = b"".join(
                     (
                         _sse("response.created", {"response": response}),
@@ -235,7 +236,7 @@ class _WebResponsesFixture:
                                 "item_id": pending["id"],
                                 "output_index": 0,
                                 "content_index": 0,
-                                "delta": "FINAL",
+                                "delta": "FINAL" + LARGE_OUTPUT_SUFFIX,
                             },
                         ),
                         _sse(
@@ -244,7 +245,7 @@ class _WebResponsesFixture:
                                 "item_id": pending["id"],
                                 "output_index": 0,
                                 "content_index": 0,
-                                "text": "R1-A2-WEB-DISCONNECT-FINAL",
+                                "text": "R1-A2-WEB-DISCONNECT-FINAL" + LARGE_OUTPUT_SUFFIX,
                             },
                         ),
                         _sse(
@@ -619,8 +620,16 @@ async def test_external_codex_web_approval_stop_disconnect_and_history(tmp_path:
                     and frame.get("payload", {}).get("status") == "done",
                     timeout=30,
                 )
-                serialized_history = json.dumps(history_frames, ensure_ascii=False)
-                assert "R1-A2-WEB-DISCONNECT-FINAL" in serialized_history
+                parts = [
+                    frame.get("payload", {}).get("message", {})
+                    for frame in history_frames if _event(frame, "history.message")
+                ]
+                result_parts = [part for part in parts if part.get("request_id") == "disconnect"
+                                and part.get("event_type") == "chat.final"]
+                result_parts.sort(key=lambda part: part.get("_part", {}).get("part_idx", 0))
+                assert "".join(part.get("content", "") for part in result_parts) == (
+                    "R1-A2-WEB-DISCONNECT-FINAL" + LARGE_OUTPUT_SUFFIX
+                )
                 assert any(_event(frame, "history.message") for frame in history_frames)
 
                 stop = await _chat_until_question(ws, "stop", session_id, "R1-A2-WEB-STOP")

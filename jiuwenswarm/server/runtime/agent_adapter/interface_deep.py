@@ -16192,7 +16192,9 @@ class JiuWenSwarmDeepAdapter:
         emitted_ask_user_events: set[tuple[Any, ...]] = set()
         # The run's final answer for the OTel trace output, kept as the streamed
         # deltas plus the terminal chat.final — see ``_assemble_run_answer``.
-        run_answer_deltas: list[str] = []
+        from openjiuwen.harness_providers.output_buffer import OutputBudgetExceeded, OutputText
+
+        run_answer_deltas = OutputText()
         run_answer_final = ""
 
         def should_skip_duplicate_ask_user(parsed: dict | None) -> bool:
@@ -16229,6 +16231,8 @@ class JiuWenSwarmDeepAdapter:
                     if event_type == "chat.delta":
                         run_answer_deltas.append(text)
                     else:
+                        if len(text.encode("utf-8")) > run_answer_deltas.max_bytes:
+                            raise OutputBudgetExceeded("Native final text byte budget exhausted")
                         run_answer_final = text
             # Persist goal-completed cards at the stream yield choke point so
             # every goal.updated path (typed chunk / dict chunk) is covered once
@@ -17162,6 +17166,8 @@ class JiuWenSwarmDeepAdapter:
             raise
         except Exception as exc:
             _run_exception = exc
+            if isinstance(exc, OutputBudgetExceeded):
+                interaction_stream_abort = True
             logger.exception("[JiuWenSwarmDeepAdapter] 流式任务异常: %s", exc)
             if _debug_logger is not None:
                 _debug_logger.end_run(status="error", error=exc)
@@ -17173,6 +17179,7 @@ class JiuWenSwarmDeepAdapter:
                     "request_id": rid,
                     "error": str(exc),
                     "error_type": type(exc).__name__,
+                    **({"code": exc.code, "terminal_status": "unknown"} if isinstance(exc, OutputBudgetExceeded) else {}),
                 },
                 is_complete=False,
             )
@@ -17203,14 +17210,17 @@ class JiuWenSwarmDeepAdapter:
                     )
                 except Exception:
                     logger.debug("[Goal] interaction stream close failed", exc_info=True)
-            close_agent_run_span(
-                _run_span,
-                session_id=session_id,
-                output=_assemble_run_answer(run_answer_deltas, run_answer_final),
-                exception=_run_exception,
-                error_type=run_failure[0] if run_failure is not None else "",
-                error_message=run_failure[1] if run_failure is not None else "",
-            )
+            try:
+                close_agent_run_span(
+                    _run_span,
+                    session_id=session_id,
+                    output=_assemble_run_answer(run_answer_deltas, run_answer_final),
+                    exception=_run_exception,
+                    error_type=run_failure[0] if run_failure is not None else "",
+                    error_message=run_failure[1] if run_failure is not None else "",
+                )
+            finally:
+                run_answer_deltas.close()
             self._permission_dispatch.finalize(inputs)
             self._unregister_session_agent_task(session_id)
             cleanup_permission_context(token_perm)
