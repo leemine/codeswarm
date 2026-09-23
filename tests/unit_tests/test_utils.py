@@ -866,3 +866,15 @@ class TestCleanupStaleOpenjiuwenDescs:
         ]
         if openjiuwen_imports:
             assert cleanup_call < min(openjiuwen_imports)
+
+
+def test_large_unbroken_log_output_keeps_text_and_masks_adjacent_nested_secrets():
+    body = "R1-04C-COMPLETE-" * 20000
+    raw = body + ' {"outer": {"CAT_CAFE_CALLBACK_TOKEN": "fixture-sensitive-value"}}'
+    sanitized = utils._sanitize_log_text(raw)
+    assert sanitized.startswith(body)
+    assert "fixture-sensitive-value" not in sanitized
+    assert "******" in sanitized
+    # Repeated sensitive substrings with no key/value delimiter must stay linear too.
+    repeated = "token-secret-password-" * 15000
+    assert utils._sanitize_log_text(repeated) == repeated
