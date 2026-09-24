@@ -174,6 +174,10 @@ def test_admission_reuses_runtime_workspace_and_freezes_route(
     server_config["execution"]["profiles"]["codex"]["provider_config"][
         "model"
     ] = "test"
+    server_config["execution"]["profiles"]["codex"]["authorization"] = {"full_access": False}
+    with pytest.raises(ExecutionRecoveryUnavailableError, match="configuration fingerprint changed"):
+        bind_admitted_request_execution(manager, request, str(project), session_metadata=metadata)
+    del server_config["execution"]["profiles"]["codex"]["authorization"]
     with pytest.raises(ExecutionRecoveryUnavailableError, match="Binding changed"):
         bind_admitted_request_execution(
             manager,
@@ -428,17 +432,25 @@ async def test_shared_engine_adapter_constructs_without_native_deep_adapter(
 
 
 @pytest.mark.asyncio
-async def test_actual_facade_constructs_codex_through_shared_engine_adapter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("provider_id", "harness_type"),
+    [
+        pytest.param("codex", "CodexHarness", id="codex"),
+        pytest.param("opencode", "OpenCodeHarness", id="opencode"),
+    ],
+)
+async def test_actual_facade_constructs_external_provider_through_shared_engine_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_id: str,
+    harness_type: str,
 ) -> None:
-    from openjiuwen.harness_providers.codex import CodexHarness
-
     from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import EngineAgentAdapter
     from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
 
     monkeypatch.setattr(JiuWenSwarm, "_prepare_skill_library", staticmethod(lambda: None))
     facade = JiuWenSwarm()
-    route = _route(tmp_path)
+    route = _route(tmp_path, provider_id=provider_id)
     try:
         await facade.create_instance(
             {"channel_id": "web"},
@@ -448,7 +460,7 @@ async def test_actual_facade_constructs_codex_through_shared_engine_adapter(
         assert isinstance(facade._adapter, EngineAgentAdapter)
         session = facade._adapter.execution_session
         assert session is not None
-        assert isinstance(session.engine.harness, CodexHarness)
+        assert type(session.engine.harness).__name__ == harness_type
         assert session.binding is route.bound.binding
         assert facade.owns_external_execution("session-1") is True
     finally:

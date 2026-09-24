@@ -24,6 +24,35 @@ execution:
       config_revision: r1
 ```
 
+An OpenCode Single profile uses the same public selection and authorization
+fields. Provider-specific process and model details remain in the server-owned
+snapshot and are compiled only inside the core OpenCode Provider:
+
+```yaml
+execution:
+  default_profile_id: opencode-local
+  profiles:
+    opencode-local:
+      provider_id: opencode
+      config_revision: opencode-1.18.18-r1
+      authorization:
+        full_access: false
+      provider_config:
+        cli_path: /absolute/path/to/opencode
+        runtime_root: /absolute/private/path/to/opencode-runtime
+        model:
+          model: configured-model
+          api_base: https://model-endpoint.example/v1
+          api_key: server-owned-secret
+```
+
+The `runtime_root` is a private host storage root, not the project directory;
+the admitted project/cwd still comes from the immutable Session binding. New
+OpenCode profiles must declare the public `authorization` object if global
+product permission settings should control them. Omitting it preserves the
+Provider's legacy configuration byte-for-byte rather than silently changing an
+old Binding or cold archive.
+
 When the section is absent the loader returns `None`; a present but malformed
 section (including `execution: null`) fails validation. A configured default
 selects new sessions; existing sessions without a selection retain the legacy
@@ -115,11 +144,22 @@ session cleanup removes only the matching External root and Binding.
 
 All non-Native Providers use one `EngineAgentAdapter`. Its
 `ExecutionSession` combines the core `HarnessEngine`, one `HarnessIOAdapter`
-event consumer and one `TurnOutputRouter`, with tool auto-approval disabled.
+event consumer and one `TurnOutputRouter`. Tool approval is derived from the
+same effective public execution authorization compiled by the selected
+Provider: normal mode surfaces the existing product approval card, while
+`full_access` suppresses that conflicting host prompt.
 It validates the bound runtime root and cwd before start and stops only its own
 resources. It lazily starts the Provider on the first Turn, using only the
 admitted runtime paths and immutable binding; construction and execution never
 fall back to DeepAgent.
+
+OpenCode uses this shared route without a dedicated Swarm state machine. Its
+fixed CLI/service lifecycle, native approval/question exchange and checkpoint
+resume remain Provider-owned; project context, authorized attachments,
+interaction answers, history/UI projection, artifacts and cleanup remain on
+the existing product paths. Product MCP and same-engine child-agent tools are
+separate follow-up capabilities and are not implied by selecting an OpenCode
+Single profile.
 
 `context_bridge` builds a per-Turn input snapshot. It reads bounded project
 rules only when their resolved paths remain under the admitted runtime root.
@@ -289,3 +329,20 @@ or question is silently evicted. Subsequent input to a failed IO/router is
 rejected; it is never automatically replayed. Limits account for serialized
 payload bytes; interpreter overhead and producer/consumer-owned in-flight
 objects are outside that byte counter. They are not a whole-process RSS limit.
+
+## 公共授权与旧配置兼容
+
+新 profile 可显式声明 `authorization: {full_access: false}`。如果服务端
+`permissions.enabled` 是布尔值，catalog 将其转换为该新 profile 的最终公共授权：
+`true` 表示普通审批，`false` 表示 full-access。模型/chat 请求不能设置该值。
+`bridge` 通过 core 公共解析器决定产品工具审批，私有参数转换由 core Provider 完成。
+Codex 和 OpenCode 支持显式授权；其他尚未适配的 Provider 会在构造前明确拒绝。
+
+旧 profile 缺失或设置 `authorization: null` 时保持旧语义：普通配置不补字段；
+旧 full-access 仅对 Codex 使用 core 中的兼容投影，JSON 和指纹与迁移前一致。
+已绑定实例不跟随默认值变化。给旧 profile 补显式授权（包括 false）会改变指纹，
+metadata/冷归档严格拒绝恢复；应使用新 profile 与新 Session。归档无需迁移，
+身份/Workspace/Provider/版本/指纹检查均继续执行。
+
+本地源码集成需要包含公共授权接口的 core；正式发布必须先合入 core，再更新声明和锁，
+经干净安装验证。本次联合开发不把 editable 测试当作锁定版本验收。

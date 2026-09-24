@@ -221,3 +221,52 @@ def test_bridge_constructs_native_and_external_without_shared_instances():
         assert one.binding is two.binding
         assert one.harness is not two.harness
         assert one.harness.provider_session_id is None
+
+
+@pytest.mark.parametrize("value", [{}, {"full_access": "false"}, {"full_access": 1},
+                                    {"full_access": True, "extra": False}, True])
+def test_public_authorization_rejects_malformed_config(value):
+    with pytest.raises((TypeError, ValueError)):
+        parse_execution_config({"provider_id": "codex", "config_revision": "r1", "authorization": value})
+
+
+@pytest.mark.parametrize("provider_id", ["codex", "opencode"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_host_authorization_overrides_new_profiles_without_vendor_json(
+    provider_id, enabled
+):
+    from openjiuwen.harness_protocol import ExecutionAuthorization
+    profile = {"provider_id": provider_id, "config_revision": "r1",
+               "authorization": {"full_access": enabled}, "provider_config": {}}
+    config = {"permissions": {"enabled": enabled},
+              "execution": {"default_profile_id": "new", "profiles": {"new": profile}}}
+    spec = load_execution_catalog(config).source().resolve()
+    assert spec.authorization == ExecutionAuthorization(not enabled)
+    assert spec.provider_config == {}
+    assert profile["authorization"]["full_access"] is enabled
+
+
+@pytest.mark.parametrize("provider_id", ["codex", "opencode"])
+@pytest.mark.parametrize("full_access", [False, True])
+def test_public_authorization_controls_product_approval_and_binding(
+    tmp_path, provider_id, full_access
+):
+    from dataclasses import replace
+    from openjiuwen.harness_protocol import ExecutionAuthorization
+    spec = AgentExecutionSpec(
+        provider_id, "r1", authorization=ExecutionAuthorization(full_access)
+    )
+    store = ExecutionBindingStore()
+    session = prepare_execution_session(
+        ExecutionConfigSource(explicit=spec), bindings=store, subject_id="alice", host_session_id="s1",
+        runtime_paths=RuntimeWorkspacePaths(internal_workspace_dir=tmp_path, runtime_workspace_root=tmp_path,
+                                            cwd=tmp_path, project_root=tmp_path),
+    )
+    context = session.io.prepare_context(HarnessContext(agent_name="external", agent_id="external-1",
+                                                         host_session_id="s1", system_prompt="", cwd=str(tmp_path)))
+    assert (HostCapability.TOOL_APPROVAL in context.host_capabilities) is not full_access
+    assert HostCapability.USER_INPUT in context.host_capabilities
+    changed = replace(spec, authorization=ExecutionAuthorization(not full_access))
+    with pytest.raises(ValueError, match="does not match"):
+        store.bind(ExecutionConfigSource(explicit=changed), subject_id="alice", host_session_id="s1",
+                   workspace=str(tmp_path))

@@ -1,6 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Opt-in construction entry point; existing chat routing is unchanged."""
 from openjiuwen.harness.engine import HarnessEngine, create_harness_engine
+from openjiuwen.harness_providers.construction import execution_authorization
 
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
 from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
@@ -57,10 +58,7 @@ def prepare_execution_session(
     engine = create_harness_engine(bound.spec, binding=bound.binding)
     if engine.binding.provider_id == "native":
         raise ValueError("Native execution must use prepare_native_session")
-    auto_approve_tools = (
-        bound.spec.provider_id == "codex"
-        and bound.spec.provider_config.get("bypass_approvals_and_sandbox") is True
-    )
+    auto_approve_tools = execution_authorization(bound.spec).full_access
     return ExecutionSession(
         engine,
         runtime_paths,

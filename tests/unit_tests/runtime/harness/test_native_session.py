@@ -1254,3 +1254,18 @@ async def test_answer_then_abort_does_not_dispatch_continuation(tmp_path):
         assert lifecycle == [TurnEventKind.STARTED, TurnEventKind.ABORTED]
     finally:
         await execution.stop()
+
+
+@pytest.mark.parametrize("full_access", [False, True])
+def test_native_host_cannot_silently_ignore_explicit_authorization(tmp_path, full_access):
+    from openjiuwen.harness_protocol import ExecutionAuthorization, UnsupportedHarnessCapabilityError
+
+    bound = ExecutionBindingStore().bind(
+        ExecutionConfigSource(explicit=AgentExecutionSpec(
+            "native", "r1", authorization=ExecutionAuthorization(full_access),
+        )), subject_id="alice", host_session_id="s", workspace=str(tmp_path),
+    )
+    factory = AsyncMock()
+    with pytest.raises(UnsupportedHarnessCapabilityError, match="explicit execution authorization"):
+        NativeExecutionSession(bound, agent_factory=factory, session_factory=AsyncMock())
+    factory.assert_not_called()

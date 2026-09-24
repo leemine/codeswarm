@@ -26,6 +26,7 @@ from openjiuwen.harness_protocol import (
     SendReceipt,
     TurnEventKind,
     TurnLifecycleEvent,
+    UnsupportedHarnessCapabilityError,
 )
 from openjiuwen.harness_providers.io_adapter import HarnessIOAdapter, ProjectedOutput
 from openjiuwen.harness_providers.native import (
@@ -86,6 +87,10 @@ class NativeExecutionSession:
         if bound.spec.provider_config or bound.spec.requested_mode is not None:
             raise ValueError(
                 "Native host assembly uses its existing config; provider overrides are not supported"
+            )
+        if bound.spec.authorization is not None:
+            raise UnsupportedHarnessCapabilityError(
+                "Native host assembly does not support explicit execution authorization"
             )
         self._dispatch_guard = dispatch_guard
         self._goal_dispatcher = goal_dispatcher

@@ -535,3 +535,47 @@ async def test_scope_version_checkpoint_and_replay_mismatch_are_history_only(
     same.path.write_text(json.dumps(archive), encoding="utf-8")
     with pytest.raises(ExecutionRecoveryUnavailableError, match="history was truncated"):
         same.prepare(_card(), agent_id="external:codex:session-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("full_access,old_digest", [
+    (False, "72282159ebaa0f09e27125b00b4a9c87136226711684164b1ce652fdec2ce0e1"),
+    (True, "6b829962018a9c9becd2a36ccb34d104549f21bc93620a099e38b238573f4688"),
+])
+async def test_legacy_archive_accepts_unchanged_profile_but_rejects_authorization_migration(
+    tmp_path, recovery_env, full_access, old_digest,
+):
+    from dataclasses import replace
+    from openjiuwen.harness_protocol import ExecutionAuthorization
+    from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
+
+    paths = _paths(tmp_path)
+    old = ExecutionBinding("alice", "session-1", str(paths.runtime_workspace_root), "codex", "old-r1", old_digest)
+    recovery = SessionExecutionRecovery(session_id="session-1", execution_profile_id="legacy", binding=old,
+                                        runtime_paths=paths)
+    recovery.prepare(_card(), agent_id="external:codex:session-1")
+    await recovery.save(HarnessCheckpoint(
+        provider="codex", schema_version="1", agent_id="external:codex:session-1", host_session_id="session-1",
+        checkpoint_id="old-checkpoint", sequence=1, data={"thread_id": "legacy-thread"},
+    ), reason=CheckpointReason.TURN_COMPLETED)
+    catalog = load_execution_catalog({
+        "permissions": {"enabled": not full_access},
+        "execution": {"default_profile_id": "legacy", "profiles": {
+            "legacy": {"provider_id": "codex", "config_revision": "old-r1",
+                       "provider_config": {"model": {"model": "fixture"}}},
+        }},
+    })
+    spec = catalog.source().resolve()
+    binding = ExecutionBinding.create(spec, subject_id="alice", host_session_id="session-1",
+                                       workspace=str(paths.runtime_workspace_root))
+    assert binding == old
+    restored = SessionExecutionRecovery(session_id="session-1", execution_profile_id="legacy", binding=binding,
+                                         runtime_paths=paths).prepare(_card(), agent_id="external:codex:session-1")
+    assert restored.resume_policy is ResumePolicy.REQUIRE_RESUME
+    assert restored.checkpoint.data["thread_id"] == "legacy-thread"
+    changed = ExecutionBinding.create(replace(spec, authorization=ExecutionAuthorization(full_access)),
+                                      subject_id="alice", host_session_id="session-1",
+                                      workspace=str(paths.runtime_workspace_root))
+    with pytest.raises(ExecutionRecoveryUnavailableError):
+        SessionExecutionRecovery(session_id="session-1", execution_profile_id="legacy", binding=changed,
+                                 runtime_paths=paths).prepare(_card(), agent_id="external:codex:session-1")

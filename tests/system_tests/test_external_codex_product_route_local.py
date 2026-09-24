@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from openjiuwen.harness_protocol import AgentExecutionSpec
+from openjiuwen.harness_protocol import AgentExecutionSpec, ExecutionAuthorization
 from openjiuwen.core.foundation.tool.schema import ToolOutput
 from openjiuwen.harness.subagent_runtime import (
     ParentExecutionContext,
@@ -561,8 +561,10 @@ async def test_real_codex_cli_runs_independently_bound_child(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("authorization", [None, ExecutionAuthorization(False), ExecutionAuthorization(True)])
 async def test_real_codex_cli_calls_session_owned_product_gateway(
     tmp_path,
+    authorization,
     monkeypatch: pytest.MonkeyPatch,
 ):
     from jiuwenswarm.runtime.harness import recovery_store
@@ -656,6 +658,7 @@ async def test_real_codex_cli_calls_session_owned_product_gateway(
         spec = AgentExecutionSpec(
             "codex",
             "r1-b1-product-tools-local",
+            authorization=authorization,
             provider_config={
                 "inherit_process_env": False,
                 "env": {
@@ -663,7 +666,8 @@ async def test_real_codex_cli_calls_session_owned_product_gateway(
                     "CODEX_HOME": str(codex_home),
                     "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 },
-                "startup_source_roots": [str(root), str(codex_home / "skills")],
+                "startup_source_roots": (None if authorization and authorization.full_access
+                                         else [str(root), str(codex_home / "skills")]),
                 "mcp_required": True,
                 "mcp_default_tools_approval_mode": "prompt",
                 "model": {
@@ -759,8 +763,9 @@ async def test_real_codex_cli_calls_session_owned_product_gateway(
         finally:
             await adapter.cleanup()
 
-    assert approval_count == 1
-    assert cold_blocked is True
+    needs_approval = authorization is None or not authorization.full_access
+    assert approval_count == int(needs_approval)
+    assert cold_blocked is needs_approval
     assert tool.calls == [{"value": "from-codex"}]
     assert "R1-B1-PRODUCT-MCP-OK" in json.dumps(responses.requests)
     assert any((chunk.payload or {}).get("event_type") == "chat.final" for chunk in chunks)
@@ -949,9 +954,13 @@ async def test_real_codex_cli_runs_six_tool_same_engine_child_chain(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("allow", [False, True])
+@pytest.mark.parametrize("allow,authorization", [
+    (False, None), (True, None),
+    (False, ExecutionAuthorization(False)), (True, ExecutionAuthorization(False)),
+    (True, ExecutionAuthorization(True)),
+])
 async def test_real_codex_tool_approval_roundtrips_through_product_adapter(
-    tmp_path, allow, monkeypatch
+    tmp_path, allow, authorization, monkeypatch
 ):
     pytest.importorskip(
         "openai_codex", reason="optional Codex SDK and bundled CLI required"
@@ -999,6 +1008,7 @@ async def test_real_codex_tool_approval_roundtrips_through_product_adapter(
         spec = AgentExecutionSpec(
             "codex",
             "r1-a2-approval-local",
+            authorization=authorization,
             provider_config={
                 "inherit_process_env": False,
                 "env": {
@@ -1041,31 +1051,36 @@ async def test_real_codex_tool_approval_roundtrips_through_product_adapter(
             stream = adapter.process_message_stream_impl(
                 request, {"query": "Run the prescribed tool once."}
             )
-            while True:
-                chunk = await anext(stream)
-                chunks.append(chunk)
-                payload = chunk.payload or {}
-                if payload.get("event_type") == "chat.ask_user_question":
-                    break
-            answer = AgentRequest(
-                request_id="r1-a2-answer",
-                channel_id="web",
-                session_id="r1-a2-session",
-                params={
-                    "request_id": payload["request_id"],
-                    "source": payload["source"],
-                    "answers": [
-                        {
-                            "selected_options": [
-                                "allow_once" if allow else "deny"
-                            ]
-                        }
-                    ],
-                },
-            )
-            answer_response = await adapter.handle_user_answer(answer)
-            assert answer_response.payload == {"accepted": True, "resolved": True}
-            chunks.extend([chunk async for chunk in stream])
+            if authorization is not None and authorization.full_access:
+                chunks.extend([chunk async for chunk in stream])
+                assert not any((chunk.payload or {}).get("event_type") == "chat.ask_user_question"
+                               for chunk in chunks)
+            else:
+                while True:
+                    chunk = await anext(stream)
+                    chunks.append(chunk)
+                    payload = chunk.payload or {}
+                    if payload.get("event_type") == "chat.ask_user_question":
+                        break
+                answer = AgentRequest(
+                    request_id="r1-a2-answer",
+                    channel_id="web",
+                    session_id="r1-a2-session",
+                    params={
+                        "request_id": payload["request_id"],
+                        "source": payload["source"],
+                        "answers": [
+                            {
+                                "selected_options": [
+                                    "allow_once" if allow else "deny"
+                                ]
+                            }
+                        ],
+                    },
+                )
+                answer_response = await adapter.handle_user_answer(answer)
+                assert answer_response.payload == {"accepted": True, "resolved": True}
+                chunks.extend([chunk async for chunk in stream])
         finally:
             await adapter.cleanup()
 
