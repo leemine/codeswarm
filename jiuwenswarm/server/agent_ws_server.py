@@ -3837,6 +3837,7 @@ class AgentWebSocketServer:
             self._session_stream_tasks.setdefault(session_id, {})[current_task] = stream_stop_event
 
         chunk_count = 0
+        saw_terminal_chunk = False
         outcome_tracker = _TurnOutcomeTracker()
         keepalive = _StreamKeepalive(
             ws,
@@ -3880,6 +3881,7 @@ class AgentWebSocketServer:
                         resume_state=resume_state,
                     )
                 chunk_count += 1
+                saw_terminal_chunk = saw_terminal_chunk or event.is_complete
                 # 通知 keepalive 有真实 chunk 发送，重置空闲计时。
                 keepalive.notify_activity(terminal=event.is_complete)
                 try:
@@ -3904,6 +3906,28 @@ class AgentWebSocketServer:
                         request.request_id,
                     )
                     return
+            if not saw_terminal_chunk:
+                # A control-only dispatch (notably permission/ask-user resume)
+                # can inject input into the already-owned Turn and therefore
+                # produce no independent Runtime events.  The E2A streaming
+                # contract still requires a terminal frame so the Gateway can
+                # release this request's queue and running-state tracking.
+                terminal = RuntimeEvent(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    session_id=request.session_id,
+                    payload={"is_complete": True},
+                    is_complete=True,
+                )
+                keepalive.notify_activity(terminal=True)
+                await self._send_runtime_event(
+                    ws,
+                    terminal,
+                    send_lock,
+                    streaming=True,
+                    sequence=chunk_count,
+                )
+                chunk_count += 1
             if resume_state is not None and resume_state.waiting_user:
                 outcome_tracker.waiting_user = True
             resume_outcome = outcome_tracker.outcome()

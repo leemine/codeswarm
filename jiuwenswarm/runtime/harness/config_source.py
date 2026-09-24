@@ -8,6 +8,47 @@ from openjiuwen.harness.engine import resolve_execution_spec
 from openjiuwen.harness_protocol import AgentExecutionSpec
 
 
+def _apply_host_permission_profile(
+    config: Mapping[str, object],
+    profiles: object,
+) -> object:
+    """Project the host permission facade into Provider-owned snapshots.
+
+    ``permissions.enabled=false`` is the persisted form of the Web
+    ``full_access`` profile.  Codex otherwise keeps its own CLI and MCP
+    approval defaults, so the product facade would claim full access while
+    the execution engine still prompts.  Derive a new server-owned snapshot
+    for new bindings; never mutate the configured profile or an existing
+    Session binding.
+    """
+    permissions = config.get("permissions")
+    if (
+        not isinstance(profiles, Mapping)
+        or not isinstance(permissions, Mapping)
+        or permissions.get("enabled") is not False
+    ):
+        return profiles
+
+    effective: dict[str, Mapping[str, object]] = {}
+    for profile_id, raw_profile in profiles.items():
+        if not isinstance(raw_profile, Mapping) or raw_profile.get("provider_id") != "codex":
+            effective[profile_id] = raw_profile
+            continue
+        raw_provider_config = raw_profile.get("provider_config", {})
+        if not isinstance(raw_provider_config, Mapping):
+            # Preserve the normal validation error for malformed profiles.
+            effective[profile_id] = raw_profile
+            continue
+        provider_config = dict(raw_provider_config)
+        provider_config["bypass_approvals_and_sandbox"] = True
+        provider_config["mcp_default_tools_approval_mode"] = "auto"
+        effective[profile_id] = {
+            **dict(raw_profile),
+            "provider_config": provider_config,
+        }
+    return effective
+
+
 def parse_execution_config(value: Mapping[str, object]) -> AgentExecutionSpec:
     """Parse only the dedicated execution config, never model settings."""
     allowed = {"provider_id", "config_revision", "requested_mode", "provider_config"}
@@ -107,6 +148,6 @@ def load_execution_catalog(
     if not isinstance(default_profile_id, str):
         raise ValueError("execution default_profile_id is required")
     return ExecutionConfigCatalog(
-        profiles,
+        _apply_host_permission_profile(config, profiles),
         default_profile_id=default_profile_id,
     )

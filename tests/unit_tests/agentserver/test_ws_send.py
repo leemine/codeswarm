@@ -146,6 +146,49 @@ async def test_single_agent_goal_stream_skips_transport_task_registry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_empty_runtime_stream_sends_terminal_sentinel() -> None:
+    manager = object()
+    runtime = AgentRuntime(
+        agent_manager=manager,
+        initializer=AsyncMock(),
+        plan_controller=AsyncMock(),
+    )
+
+    async def stream(_request, **_kwargs):
+        if False:
+            yield
+
+    runtime.stream = stream  # type: ignore[method-assign]
+    server = agent_ws_server.AgentWebSocketServer.__new__(
+        agent_ws_server.AgentWebSocketServer
+    )
+    server._agent_manager = manager
+    server._runtime = runtime
+    server._session_stream_tasks = {}
+    request = AgentRequest(
+        request_id="permission-resume",
+        channel_id="web",
+        session_id="session-1",
+        req_method=ReqMethod.CHAT_SEND,
+        params={
+            "source": "permission_interrupt",
+            "request_id": "approval-1",
+            "answers": [{"selected_options": ["allow_once"]}],
+        },
+        is_stream=True,
+    )
+    ws = FakeWebSocket()
+
+    await server._handle_stream_impl(ws, request, asyncio.Lock())
+
+    assert len(ws.sent) == 1
+    chunk = parse_agent_server_wire_chunk(json.loads(ws.sent[0]))
+    assert chunk.request_id == "permission-resume"
+    assert chunk.is_complete is True
+    assert chunk.payload == {"is_complete": True}
+
+
+@pytest.mark.asyncio
 async def test_send_wire_payload_sends_small_wire_unchanged(monkeypatch):
     monkeypatch.setattr(ws_send, "AGENT_WS_SEND_BUDGET_BYTES", 1024)
     ws = FakeWebSocket()
@@ -785,5 +828,9 @@ async def test_stream_control_event_does_not_consume_chunk_sequence() -> None:
     assert runtime_call["trigger_hook"] is False
     assert callable(runtime_call["control_handler"])
     server.send_push.assert_awaited_once()
-    assert len(ws.sent) == 1
+    assert len(ws.sent) == 2
     assert json.loads(ws.sent[0])["sequence"] == 0
+    terminal = parse_agent_server_wire_chunk(json.loads(ws.sent[1]))
+    assert json.loads(ws.sent[1])["sequence"] == 1
+    assert terminal.is_complete is True
+    assert terminal.payload == {"is_complete": True}

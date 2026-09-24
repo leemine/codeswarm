@@ -76,6 +76,7 @@ class ExecutionSession:
         tool_gateway: ToolGateway | None = None,
         queue_size: int = 128,
         recovery: SessionExecutionRecovery | None = None,
+        auto_approve_tools: bool = False,
     ) -> None:
         binding = engine.binding
         if str(runtime_paths.runtime_workspace_root.resolve()) != binding.workspace:
@@ -86,7 +87,7 @@ class ExecutionSession:
         self._provider_started_turns: set[str] = set()
         self.io = HarnessIOAdapter(
             engine.harness,
-            auto_approve_tools=False,
+            auto_approve_tools=auto_approve_tools,
             event_observer=self._observe_event,
         )
         self._detached_output = detached_output

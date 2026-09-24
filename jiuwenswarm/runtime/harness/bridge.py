@@ -48,15 +48,19 @@ def prepare_execution_session(
     recovery: SessionExecutionRecovery | None = None,
 ) -> ExecutionSession:
     """Construct an unstarted External session from one admitted path snapshot."""
-    engine = prepare_execution(
+    bound = bindings.bind(
         source,
-        bindings=bindings,
         subject_id=subject_id,
         host_session_id=host_session_id,
         workspace=str(runtime_paths.runtime_workspace_root),
     )
+    engine = create_harness_engine(bound.spec, binding=bound.binding)
     if engine.binding.provider_id == "native":
         raise ValueError("Native execution must use prepare_native_session")
+    auto_approve_tools = (
+        bound.spec.provider_id == "codex"
+        and bound.spec.provider_config.get("bypass_approvals_and_sandbox") is True
+    )
     return ExecutionSession(
         engine,
         runtime_paths,
@@ -64,4 +68,5 @@ def prepare_execution_session(
         detached_output=detached_output,
         tool_gateway=tool_gateway,
         recovery=recovery,
+        auto_approve_tools=auto_approve_tools,
     )

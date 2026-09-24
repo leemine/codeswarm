@@ -5,8 +5,10 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from openjiuwen.harness_protocol import AgentExecutionSpec
+from openjiuwen.harness_protocol import HarnessContext, HostCapability
+from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
 from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
-from jiuwenswarm.runtime.harness.bridge import prepare_execution
+from jiuwenswarm.runtime.harness.bridge import prepare_execution, prepare_execution_session
 from jiuwenswarm.runtime.harness.config_source import (
     ExecutionConfigCatalog,
     ExecutionConfigSource,
@@ -74,6 +76,104 @@ def test_optional_server_config_catalog_does_not_silently_fall_back():
         load_execution_catalog({"execution": "native"})
     with pytest.raises(TypeError, match="execution configuration"):
         load_execution_catalog({"execution": None})
+
+
+def test_full_access_projects_into_new_codex_execution_snapshot_only():
+    codex_profile = {
+        "provider_id": "codex",
+        "config_revision": "codex-r1",
+        "provider_config": {
+            "codex_bin": "/opt/codex",
+            "bypass_approvals_and_sandbox": False,
+            "mcp_default_tools_approval_mode": "prompt",
+        },
+    }
+    native_profile = {
+        "provider_id": "native",
+        "config_revision": "native-r1",
+        "provider_config": {"marker": "unchanged"},
+    }
+    config = {
+        "permissions": {"enabled": False, "mode": "manual"},
+        "execution": {
+            "default_profile_id": "codex",
+            "profiles": {"codex": codex_profile, "native": native_profile},
+        },
+    }
+
+    catalog = load_execution_catalog(config)
+    effective = catalog.source().resolve().provider_config
+
+    assert effective == {
+        "codex_bin": "/opt/codex",
+        "bypass_approvals_and_sandbox": True,
+        "mcp_default_tools_approval_mode": "auto",
+    }
+    assert catalog.source(explicit_profile_id="native").resolve().provider_config == {
+        "marker": "unchanged"
+    }
+    assert codex_profile["provider_config"] == {
+        "codex_bin": "/opt/codex",
+        "bypass_approvals_and_sandbox": False,
+        "mcp_default_tools_approval_mode": "prompt",
+    }
+
+
+def test_enabled_permissions_preserve_codex_approval_configuration():
+    catalog = load_execution_catalog({
+        "permissions": {"enabled": True, "mode": "manual"},
+        "execution": {
+            "default_profile_id": "codex",
+            "profiles": {
+                "codex": {
+                    "provider_id": "codex",
+                    "config_revision": "codex-r1",
+                    "provider_config": {
+                        "bypass_approvals_and_sandbox": False,
+                        "mcp_default_tools_approval_mode": "prompt",
+                    },
+                },
+            },
+        },
+    })
+
+    assert catalog.source().resolve().provider_config == {
+        "bypass_approvals_and_sandbox": False,
+        "mcp_default_tools_approval_mode": "prompt",
+    }
+
+
+def test_codex_bypass_does_not_advertise_conflicting_host_approval(tmp_path):
+    root = tmp_path.resolve()
+    source = ExecutionConfigSource(
+        explicit=AgentExecutionSpec(
+            "codex",
+            "codex-r1",
+            provider_config={"bypass_approvals_and_sandbox": True},
+        )
+    )
+    session = prepare_execution_session(
+        source,
+        bindings=ExecutionBindingStore(),
+        subject_id="alice",
+        host_session_id="session-1",
+        runtime_paths=RuntimeWorkspacePaths(
+            internal_workspace_dir=root,
+            runtime_workspace_root=root,
+            cwd=root,
+            project_root=root,
+        ),
+    )
+    prepared = session.io.prepare_context(HarnessContext(
+        agent_name="external",
+        agent_id="external-1",
+        host_session_id="session-1",
+        system_prompt="",
+        cwd=str(root),
+    ))
+
+    assert HostCapability.USER_INPUT in prepared.host_capabilities
+    assert HostCapability.TOOL_APPROVAL not in prepared.host_capabilities
 
 
 def test_defaults_change_only_new_sessions_and_explicit_change_is_rejected():
