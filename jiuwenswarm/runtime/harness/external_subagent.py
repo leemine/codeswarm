@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Codex child executions bound to one admitted External parent."""
+"""Same-engine child executions bound to one admitted External parent."""
 
 from __future__ import annotations
 
@@ -28,17 +28,18 @@ from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
 
 
 _CHILD_SUBJECT_PREFIX = "subagent:"
+SUPPORTED_SUBAGENT_PROVIDERS = frozenset({"codex", "opencode"})
 
 
-class CodexSubagentExecution:
-    """Drive one independently bound Codex child through the shared session path."""
+class ExternalSubagentExecution:
+    """Drive one independently bound External child through the shared session path."""
 
     def __init__(
         self,
         session: ExecutionSession,
         *,
         parent_session_id: str,
-        release: Callable[["CodexSubagentExecution"], Awaitable[None]],
+        release: Callable[["ExternalSubagentExecution"], Awaitable[None]],
     ) -> None:
         self._session = session
         self._parent_session_id = parent_session_id
@@ -63,7 +64,7 @@ class CodexSubagentExecution:
         on_result: ResultCallback,
     ) -> None:
         if self._closed:
-            raise RuntimeError("Codex subagent execution is closed")
+            raise RuntimeError("External subagent execution is closed")
         receipt = await self._session.send(
             HarnessInput(
                 content=request.query,
@@ -93,7 +94,7 @@ class CodexSubagentExecution:
             raise
 
         if terminal is None:
-            raise RuntimeError("Codex subagent turn ended without a terminal event")
+            raise RuntimeError("External subagent turn ended without a terminal event")
         failed = terminal is not TurnEventKind.FINISHED or aggregator.is_error()
         error_code = None
         if terminal is TurnEventKind.FAILED:
@@ -104,7 +105,7 @@ class CodexSubagentExecution:
             SubagentTurnResult(
                 output=(
                     aggregator.output()
-                    or ("Codex subagent turn failed" if failed else "")
+                    or ("External subagent turn failed" if failed else "")
                 ),
                 reasoning=aggregator.reasoning_text(),
                 is_error=failed,
@@ -122,8 +123,8 @@ class CodexSubagentExecution:
             self._closed = True
 
 
-class CodexSubagentExecutionFactory:
-    """Create Codex children from an exact parent route snapshot.
+class ExternalSubagentExecutionFactory:
+    """Create same-engine children from an exact parent route snapshot.
 
     The child gets a distinct subject, Binding and Provider session.  It uses
     the parent's already admitted Provider configuration and task paths; there
@@ -132,24 +133,31 @@ class CodexSubagentExecutionFactory:
 
     def __init__(self, parent_route: AdmittedExecutionRoute) -> None:
         binding = parent_route.bound.binding
-        if binding.provider_id != "codex" or parent_route.provider_id != "codex":
-            raise ValueError("Codex subagent factory requires a Codex parent")
+        if (
+            binding.provider_id not in SUPPORTED_SUBAGENT_PROVIDERS
+            or parent_route.provider_id != binding.provider_id
+        ):
+            raise ValueError(
+                "External subagent factory requires a supported, consistent parent"
+            )
         if binding.workspace != str(
             parent_route.runtime_paths.runtime_workspace_root.resolve()
         ):
-            raise ValueError("Codex parent workspace does not match runtime paths")
+            raise ValueError("External parent workspace does not match runtime paths")
         try:
             parent_route.runtime_paths.cwd.resolve().relative_to(
                 parent_route.runtime_paths.runtime_workspace_root.resolve()
             )
         except ValueError as exc:
-            raise ValueError("Codex parent cwd is outside the admitted workspace") from exc
+            raise ValueError(
+                "External parent cwd is outside the admitted workspace"
+            ) from exc
         binding.validate_spec(parent_route.bound.spec)
         self._parent_route = parent_route
         self._parent_binding = binding
         self._parent_spec = parent_route.bound.spec
         self._child_source = ExecutionConfigSource(explicit=self._parent_spec)
-        self._live: dict[str, CodexSubagentExecution] = {}
+        self._live: dict[str, ExternalSubagentExecution] = {}
         self._cleanup_pending: dict[str, ExecutionSession] = {}
         self._reserved: set[str] = set()
         self._lock = asyncio.Lock()
@@ -173,7 +181,7 @@ class CodexSubagentExecutionFactory:
                 and not existing.closed
             ):
                 raise RuntimeError(
-                    f"Codex subagent execution already exists: {request.subagent_id}"
+                    f"External subagent execution already exists: {request.subagent_id}"
                 )
             self._reserved.add(request.subagent_id)
 
@@ -184,9 +192,7 @@ class CodexSubagentExecutionFactory:
                 self._parent_spec,
                 subject_id=child_subject_id,
                 host_session_id=request.subagent_id,
-                workspace=str(
-                    self._parent_route.runtime_paths.runtime_workspace_root
-                ),
+                workspace=str(self._parent_route.runtime_paths.runtime_workspace_root),
             )
             child_recovery = (
                 self._parent_route.recovery.child(
@@ -214,13 +220,15 @@ class CodexSubagentExecutionFactory:
                 or child_binding.config_revision != self._parent_binding.config_revision
                 or child_binding.fingerprint != self._parent_binding.fingerprint
             ):
-                raise RuntimeError("Codex child binding did not inherit the parent scope")
+                raise RuntimeError(
+                    "External child binding did not inherit the parent scope"
+                )
 
             context_value = build_external_context(
                 paths=self._parent_route.runtime_paths,
                 host_session_id=request.subagent_id,
                 channel_id=self._parent_route.channel_id,
-                provider_id="codex",
+                provider_id=self._parent_binding.provider_id,
             )
             child_prompt = (
                 f"{context_value.system_prompt}\n"
@@ -244,7 +252,7 @@ class CodexSubagentExecutionFactory:
                 },
             )
             await session.start(context_value)
-            execution = CodexSubagentExecution(
+            execution = ExternalSubagentExecution(
                 session,
                 parent_session_id=context.parent_session_id,
                 release=self._release,
@@ -260,7 +268,7 @@ class CodexSubagentExecutionFactory:
                     async with self._lock:
                         self._cleanup_pending[request.subagent_id] = session
                     raise BaseExceptionGroup(
-                        "Codex child startup failed and exit was not confirmed",
+                        "External child startup failed and exit was not confirmed",
                         [create_error, cleanup_error],
                     ) from None
                 else:
@@ -295,9 +303,9 @@ class CodexSubagentExecutionFactory:
 
     def _validate_parent_context(self, context: ParentExecutionContext) -> None:
         if context.parent_session_id != self._parent_binding.host_session_id:
-            raise ValueError("Codex child parent Session does not match the binding")
+            raise ValueError("External child parent Session does not match the binding")
         if context.parent_subject_id != self._parent_binding.subject_id:
-            raise ValueError("Codex child parent subject does not match the binding")
+            raise ValueError("External child parent subject does not match the binding")
 
     @staticmethod
     def _validate_build_request(
@@ -306,9 +314,11 @@ class CodexSubagentExecutionFactory:
     ) -> None:
         expected_prefix = f"{context.parent_session_id}_sub_"
         if not request.subagent_id.startswith(expected_prefix):
-            raise ValueError("Codex child identity does not belong to the parent Session")
+            raise ValueError(
+                "External child identity does not belong to the parent Session"
+            )
 
-    async def _release(self, execution: CodexSubagentExecution) -> None:
+    async def _release(self, execution: ExternalSubagentExecution) -> None:
         binding = execution.binding
         async with self._lock:
             current = self._live.get(binding.host_session_id)
@@ -334,9 +344,13 @@ class CodexSubagentExecutionFactory:
                     self._cleanup_pending.pop(subagent_id, None)
         if failures:
             raise ExceptionGroup(
-                "one or more half-started Codex children did not confirm exit",
+                "one or more half-started External children did not confirm exit",
                 failures,
             )
 
 
-__all__ = ["CodexSubagentExecution", "CodexSubagentExecutionFactory"]
+__all__ = [
+    "ExternalSubagentExecution",
+    "ExternalSubagentExecutionFactory",
+    "SUPPORTED_SUBAGENT_PROVIDERS",
+]

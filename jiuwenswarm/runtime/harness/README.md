@@ -233,9 +233,10 @@ model arguments. Non-parallel-safe tools share a per-gateway serialization
 lock, while an optional host admission callback can reject an invocation.
 
 An External provider with native ToolGateway support receives the gateway
-directly. A provider such as Codex receives one Session-owned Streamable HTTP
+directly. Codex and OpenCode receive one Session-owned Streamable HTTP
 MCP endpoint bound to 127.0.0.1 with a random Bearer credential. The endpoint
-is required and uses prompt approval in the Codex profile. Readiness completes
+is required and uses the Provider's native prompt approval. OpenCode accepts only
+this authenticated loopback HTTP shape and disables OAuth. Readiness completes
 before provider startup; startup failure, normal stop and router failure close
 only that Session's endpoint. The reserved product server namespace cannot be
 overridden by request MCP configuration.
@@ -245,13 +246,14 @@ provider-neutral child port, B3 the Codex child composition, and B4 the six-tool
 product/channel acceptance. This module is not a general MCP registry and does
 not import Team runtime or reuse Team operator permissions.
 
-## Codex child execution (R1-03B3)
+## Same-engine External child execution (R1-03B3 / R1-05 OC4)
 
-`CodexSubagentExecutionFactory` is the Swarm composition for the core B2
-`SubagentExecutionFactory` port. It accepts one admitted Codex parent route and
+`ExternalSubagentExecutionFactory` is the Swarm composition for the core B2
+`SubagentExecutionFactory` port. It accepts one admitted, product-verified Codex
+or OpenCode parent route and
 captures that route's exact `AgentExecutionSpec`, Binding, subject, Session and
 `RuntimeWorkspacePaths`. Each child receives its own `subagent:<id>` subject,
-host Session ID, Binding, Codex harness and SDK/CLI session while retaining the
+host Session ID, Binding, same-engine harness and Provider session while retaining the
 parent configuration fingerprint, workspace root and task cwd. There is no
 child Provider, profile, model, workspace or cwd override input.
 
@@ -270,7 +272,7 @@ of a caller-supplied identity.
 
 ## External product sub-Agents (R1-03B4)
 
-`ExternalSubagentRuntime` is the Codex parent composition root for the existing
+`ExternalSubagentRuntime` is the Codex/OpenCode parent composition root for the existing
 six product tools. It builds those original tools with the B3 execution factory,
 binds their gateway to the admitted parent subject/Session/workspace, and uses a
 minimal live parent Session port for product state and `OutputSchema` events. It

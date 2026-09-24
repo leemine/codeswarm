@@ -18,7 +18,9 @@ from jiuwenswarm.common.config import is_subagent_runtime_enabled
 from jiuwenswarm.server.runtime.agent_adapter import (
     subagent_projection as subagent_projection_module,
 )
-from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+    JiuWenSwarmDeepAdapter,
+)
 
 
 class TestSubagentRuntimeConfig:
@@ -216,10 +218,13 @@ class TestSubagentStreamMapping:
 
     @staticmethod
     def test_invalid_subagent_updated_payload_is_skipped() -> None:
-        assert _map_subagent_updated_chunk(
-            SUBAGENT_UPDATED_EVENT_TYPE,
-            {"subagent_updated": "bad"},
-        ) is None
+        assert (
+            _map_subagent_updated_chunk(
+                SUBAGENT_UPDATED_EVENT_TYPE,
+                {"subagent_updated": "bad"},
+            )
+            is None
+        )
 
     @staticmethod
     def test_subagent_activity_is_persisted_for_subagent_history() -> None:
@@ -235,7 +240,9 @@ class TestSubagentStreamMapping:
             "tool_call_id": "call-4",
         }
 
-        with patch.object(subagent_projection_module, "append_history_record") as append_history:
+        with patch.object(
+            subagent_projection_module, "append_history_record"
+        ) as append_history:
             parsed = JiuWenSwarmDeepAdapter.parse_stream_chunk(
                 SimpleNamespace(
                     type=SUBAGENT_ACTIVITY_EVENT_TYPE,
@@ -272,8 +279,12 @@ class TestSubagentStreamMapping:
             "status": "idle",
         }
 
-        with patch.object(subagent_projection_module, "append_history_record") as append_history:
-            JiuWenSwarmDeepAdapter.persist_subagent_roster_history(projection, web_payload)
+        with patch.object(
+            subagent_projection_module, "append_history_record"
+        ) as append_history:
+            JiuWenSwarmDeepAdapter.persist_subagent_roster_history(
+                projection, web_payload
+            )
 
         assert append_history.call_args.kwargs["session_id"] == "parent-sess-roster"
         assert append_history.call_args.kwargs["subagent_id"] == "sub-a"
@@ -289,11 +300,15 @@ class TestSubagentStreamMapping:
             "at_ms": 1787019579060,
         }
 
-        with patch.object(subagent_projection_module, "append_history_record") as append_history:
-            JiuWenSwarmDeepAdapter.persist_subagent_activity({
-                **projection_without_seq,
-                "parent_session_id": "parent-sess-activity",
-            })
+        with patch.object(
+            subagent_projection_module, "append_history_record"
+        ) as append_history:
+            JiuWenSwarmDeepAdapter.persist_subagent_activity(
+                {
+                    **projection_without_seq,
+                    "parent_session_id": "parent-sess-activity",
+                }
+            )
 
         request_id = append_history.call_args.kwargs["request_id"]
         assert request_id.startswith("sub-a:activity:turn-1:")
@@ -310,11 +325,21 @@ class TestSubagentStreamMapping:
             "at_ms": 1787019579059,
         }
 
-        with patch.object(subagent_projection_module, "append_history_record") as append_history:
+        with patch.object(
+            subagent_projection_module,
+            "append_history_record_durable",
+        ) as append_history:
             JiuWenSwarmDeepAdapter.persist_subagent_transcript_message(projection)
 
         append_history.assert_called_once()
+        assert (
+            append_history.call_args.kwargs["delivery_id"]
+            == "subagent:sub-a:transcript:7"
+        )
         assert append_history.call_args.kwargs["session_id"] == "parent-sess-final"
         assert append_history.call_args.kwargs["subagent_id"] == "sub-a"
         assert append_history.call_args.kwargs["event_type"] == "chat.final"
-        assert append_history.call_args.kwargs["extra"]["parent_session_id"] == "parent-sess-final"
+        assert (
+            append_history.call_args.kwargs["extra"]["parent_session_id"]
+            == "parent-sess-final"
+        )

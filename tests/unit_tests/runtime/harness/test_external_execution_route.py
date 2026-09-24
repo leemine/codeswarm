@@ -64,9 +64,7 @@ def _route(
 ) -> AdmittedExecutionRoute:
     root = (tmp_path / session_id).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    source = ExecutionConfigSource(
-        explicit=AgentExecutionSpec(provider_id, revision)
-    )
+    source = ExecutionConfigSource(explicit=AgentExecutionSpec(provider_id, revision))
     bindings = ExecutionBindingStore()
     bound = bindings.bind(
         source,
@@ -158,9 +156,9 @@ def test_admission_reuses_runtime_workspace_and_freezes_route(
     assert route.cache_identity == ("web", *route.bound.binding.cache_key)
     assert remembered == [("web", "session-1", route.bound.binding)]
 
-    server_config["execution"]["profiles"]["codex"]["provider_config"][
-        "model"
-    ] = "changed"
+    server_config["execution"]["profiles"]["codex"]["provider_config"]["model"] = (
+        "changed"
+    )
     with pytest.raises(
         ExecutionRecoveryUnavailableError,
         match="configuration fingerprint changed",
@@ -171,12 +169,16 @@ def test_admission_reuses_runtime_workspace_and_freezes_route(
             str(project),
             session_metadata=metadata,
         )
-    server_config["execution"]["profiles"]["codex"]["provider_config"][
-        "model"
-    ] = "test"
-    server_config["execution"]["profiles"]["codex"]["authorization"] = {"full_access": False}
-    with pytest.raises(ExecutionRecoveryUnavailableError, match="configuration fingerprint changed"):
-        bind_admitted_request_execution(manager, request, str(project), session_metadata=metadata)
+    server_config["execution"]["profiles"]["codex"]["provider_config"]["model"] = "test"
+    server_config["execution"]["profiles"]["codex"]["authorization"] = {
+        "full_access": False
+    }
+    with pytest.raises(
+        ExecutionRecoveryUnavailableError, match="configuration fingerprint changed"
+    ):
+        bind_admitted_request_execution(
+            manager, request, str(project), session_metadata=metadata
+        )
     del server_config["execution"]["profiles"]["codex"]["authorization"]
     with pytest.raises(ExecutionRecoveryUnavailableError, match="Binding changed"):
         bind_admitted_request_execution(
@@ -216,7 +218,9 @@ async def test_manager_cache_isolates_external_binding_scope(
         def set_permissions_changed_notifier(self, _notifier: object) -> None:
             return None
 
-        def set_permissions_external_input_context_builder(self, _builder: object) -> None:
+        def set_permissions_external_input_context_builder(
+            self, _builder: object
+        ) -> None:
             return None
 
         async def create_instance(self, _config: object, **kwargs: Any) -> None:
@@ -225,8 +229,7 @@ async def test_manager_cache_isolates_external_binding_scope(
         async def cleanup_session_runtime(self, session_id: str) -> bool:
             route = self.create_kwargs.get("execution_route")
             return bool(
-                route is not None
-                and route.bound.binding.host_session_id == session_id
+                route is not None and route.bound.binding.host_session_id == session_id
             )
 
         def has_session_runtime(self, _session_id: str | None = None) -> bool:
@@ -272,9 +275,10 @@ async def test_manager_cache_isolates_external_binding_scope(
         assert manager.agents["web"][keys[0]] is first
         assert manager.agents["web"][keys[1]] is second
 
-        assert await manager.cleanup_session_runtime(
-            channel_id="web", session_id="one"
-        ) is True
+        assert (
+            await manager.cleanup_session_runtime(channel_id="web", session_id="one")
+            is True
+        )
         assert first.cleaned is True
         assert tuple(manager.agents["web"].values()) == (second,)
     finally:
@@ -300,7 +304,9 @@ async def test_admission_callback_routes_before_facade_construction(
         def set_permissions_changed_notifier(self, _notifier: object) -> None:
             return None
 
-        def set_permissions_external_input_context_builder(self, _builder: object) -> None:
+        def set_permissions_external_input_context_builder(
+            self, _builder: object
+        ) -> None:
             return None
 
         async def create_instance(self, _config: object, **kwargs: Any) -> None:
@@ -352,7 +358,9 @@ async def test_native_route_keeps_existing_cache_and_external_definition_fails_c
         def set_permissions_changed_notifier(self, _notifier: object) -> None:
             return None
 
-        def set_permissions_external_input_context_builder(self, _builder: object) -> None:
+        def set_permissions_external_input_context_builder(
+            self, _builder: object
+        ) -> None:
             return None
 
         async def create_instance(self, _config: object, **kwargs: Any) -> None:
@@ -391,7 +399,9 @@ async def test_shared_engine_adapter_constructs_without_native_deep_adapter(
 ) -> None:
     from jiuwenswarm.server.runtime.agent_adapter import engine_adapter as module
     from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import create_adapter
-    from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import EngineAgentAdapter
+    from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import (
+        EngineAgentAdapter,
+    )
 
     route = _route(tmp_path)
     stopped: list[bool] = []
@@ -408,7 +418,9 @@ async def test_shared_engine_adapter_constructs_without_native_deep_adapter(
             del immediate
 
     session = Session()
-    monkeypatch.setattr(module, "prepare_execution_session", lambda *args, **kwargs: session)
+    monkeypatch.setattr(
+        module, "prepare_execution_session", lambda *args, **kwargs: session
+    )
 
     adapter = create_adapter("harness", mode="code", execution_route=route)
     assert isinstance(adapter, EngineAgentAdapter)
@@ -445,10 +457,14 @@ async def test_actual_facade_constructs_external_provider_through_shared_engine_
     provider_id: str,
     harness_type: str,
 ) -> None:
-    from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import EngineAgentAdapter
+    from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import (
+        EngineAgentAdapter,
+    )
     from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
 
-    monkeypatch.setattr(JiuWenSwarm, "_prepare_skill_library", staticmethod(lambda: None))
+    monkeypatch.setattr(
+        JiuWenSwarm, "_prepare_skill_library", staticmethod(lambda: None)
+    )
     facade = JiuWenSwarm()
     route = _route(tmp_path, provider_id=provider_id)
     try:
@@ -462,6 +478,7 @@ async def test_actual_facade_constructs_external_provider_through_shared_engine_
         assert session is not None
         assert type(session.engine.harness).__name__ == harness_type
         assert session.binding is route.bound.binding
+        assert session._tool_gateway is not None
         assert facade.owns_external_execution("session-1") is True
     finally:
         await facade.cleanup()
@@ -805,9 +822,7 @@ async def test_external_context_stages_only_session_authorized_attachments(
         session_id="session-1",
         params={
             "files": {
-                "uploaded_documents": [
-                    {"filename": "notes.txt", "path": str(upload)}
-                ]
+                "uploaded_documents": [{"filename": "notes.txt", "path": str(upload)}]
             }
         },
         paths=route.runtime_paths,
@@ -1257,9 +1272,7 @@ async def test_detached_external_output_reuses_history_and_push_paths(
             ),
         )
     )
-    await projection(
-        ProjectedOutput(turn_id="turn-1", terminal=TurnEventKind.FINISHED)
-    )
+    await projection(ProjectedOutput(turn_id="turn-1", terminal=TurnEventKind.FINISHED))
 
     assert [item["event_type"] for item in history] == [
         "chat.delta",
@@ -1309,9 +1322,7 @@ async def test_detached_external_push_waits_for_durable_history(
     delivery = asyncio.create_task(projection(item))
     await asyncio.sleep(0)
     assert len(history) == 1
-    assert history[0]["delivery_id"] == (
-        "harness:turn-1:terminal:finished:chat.final"
-    )
+    assert history[0]["delivery_id"] == ("harness:turn-1:terminal:finished:chat.final")
     assert pushes == []
 
     receipt.set_result(None)
@@ -1497,9 +1508,7 @@ async def test_request_owned_critical_history_waits_for_durable_receipt(
     await asyncio.sleep(0)
 
     assert persistence.done() is False
-    assert calls[0]["delivery_id"].startswith(
-        "request:request-1:chat.final:"
-    )
+    assert calls[0]["delivery_id"].startswith("request:request-1:chat.final:")
     receipt.set_result(None)
     await persistence
 

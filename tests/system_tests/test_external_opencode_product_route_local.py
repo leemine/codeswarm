@@ -4,6 +4,7 @@
 RUN_OPENCODE_OC3=1 pytest tests/system_tests/test_external_opencode_product_route_local.py
 requires non-root Linux, cgroup v2, and an active systemd user manager.  The
 model endpoint is a task-owned loopback fixture; no remote model is contacted.
+OC4 continues to reuse the historical OC3 opt-in environment variable.
 """
 
 from __future__ import annotations
@@ -17,7 +18,10 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 
-from openjiuwen.harness_protocol import AgentExecutionSpec, ExecutionAuthorization
+from openjiuwen.harness_protocol import (
+    AgentExecutionSpec,
+    ExecutionAuthorization,
+)
 
 from jiuwenswarm.common.auth import session_store
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
@@ -42,15 +46,20 @@ class _ModelFixture:
     def __init__(self) -> None:
         self.actions: list[dict] = []
         self.requests: list[dict] = []
+        self.child_text: str | None = None
 
     async def respond(self, request: web.Request) -> web.Response:
         body = await request.json()
         self.requests.append(body)
-        action = (
-            self.actions.pop(0)
-            if body.get("tools") and self.actions
-            else {"text": "OC3-PRODUCT-ROUTE-OK"}
-        )
+        rendered = json.dumps(body, ensure_ascii=False)
+        if self.child_text is not None and "You are a product subagent" in rendered:
+            action = {"text": self.child_text}
+        else:
+            action = (
+                self.actions.pop(0)
+                if body.get("tools") and self.actions
+                else {"text": "OC3-PRODUCT-ROUTE-OK"}
+            )
         if "tool" in action:
             delta = {
                 "tool_calls": [
@@ -96,9 +105,10 @@ class _ModelFixture:
                 },
             },
         ]
-        data = "".join(
-            "data: " + json.dumps(chunk) + "\n\n" for chunk in chunks
-        ) + "data: [DONE]\n\n"
+        data = (
+            "".join("data: " + json.dumps(chunk) + "\n\n" for chunk in chunks)
+            + "data: [DONE]\n\n"
+        )
         return web.Response(text=data, content_type="text/event-stream")
 
 
@@ -179,6 +189,10 @@ async def test_real_opencode_cli_runs_product_context_interaction_and_cold_resum
                 "description": "OC3 product approval fixture",
             },
         },
+        {
+            "tool": "jiuwenswarm_product_tools_subagent_list",
+            "args": {},
+        },
         {"text": "OC3-PRODUCT-ROUTE-OK"},
     ]
     spec = AgentExecutionSpec(
@@ -212,9 +226,7 @@ async def test_real_opencode_cli_runs_product_context_interaction_and_cold_resum
         params = {"mode": "code", "query": query}
         if attachment:
             params["files"] = {
-                "uploaded_documents": [
-                    {"filename": "notes.txt", "path": str(upload)}
-                ]
+                "uploaded_documents": [{"filename": "notes.txt", "path": str(upload)}]
             }
         request = AgentRequest(
             request_id=request_id,
@@ -270,7 +282,7 @@ async def test_real_opencode_cli_runs_product_context_interaction_and_cold_resum
                 directory.chmod(0o700)
 
     payloads = [chunk.payload for chunk in chunks if chunk.payload]
-    assert approvals == 1
+    assert approvals == 2
     assert any(payload.get("event_type") == "chat.tool_result" for payload in payloads)
     assert payloads[-1]["event_type"] == "chat.final"
     assert cold_approvals == 0
@@ -289,3 +301,117 @@ async def test_real_opencode_cli_runs_product_context_interaction_and_cold_resum
         / "session-inputs"
         / "oc3-session"
     ).exists()
+
+
+@pytest.mark.asyncio
+async def test_real_opencode_child_inherits_parent_engine_and_closes_cleanly(
+    tmp_path: Path,
+) -> None:
+    model = _ModelFixture()
+    model.child_text = "OC4-CHILD-RESULT"
+    model.actions = [
+        {
+            "tool": "jiuwenswarm_product_tools_subagent_spawn",
+            "args": {
+                "subagent_type": "verification_agent",
+                "task_description": "Return OC4-CHILD-RESULT",
+                "display_name": "OC4 child",
+                "role": "Return the requested marker",
+            },
+        },
+        {
+            "tool": "jiuwenswarm_product_tools_subagent_wait",
+            "args": {
+                "subagent_ids": ["oc3-session_sub_verification_agent"],
+                "timeout_ms": 25_000,
+            },
+        },
+        {"text": "OC4-PARENT-RESULT"},
+    ]
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", model.respond)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    await web.SockSite(runner, sock).start()
+
+    root = (tmp_path / "project").resolve()
+    runtime_root = (tmp_path / "runtime").resolve()
+    root.mkdir()
+    runtime_root.mkdir(mode=0o700)
+    spec = AgentExecutionSpec(
+        "opencode",
+        "oc4-child-local-r1",
+        authorization=ExecutionAuthorization(True),
+        provider_config={
+            "cli_path": os.environ.get(
+                "OPENCODE_OC1_CLI",
+                os.path.expanduser("~/.opencode/bin/opencode"),
+            ),
+            "runtime_root": str(runtime_root),
+            "model": {
+                "model": "fixture",
+                "api_base": f"http://127.0.0.1:{port}/v1",
+                "api_key": "fixture-only",
+            },
+            "turn_timeout_s": 25,
+        },
+    )
+    route = _route(root, spec)
+    adapter = EngineAgentAdapter(route)
+    request = AgentRequest(
+        request_id="oc4-parent-request",
+        channel_id="web",
+        session_id="oc3-session",
+        params={"mode": "code", "query": "Run the OC4 child"},
+        is_stream=True,
+    )
+    request._execution_route = route
+    chunks = []
+    runtime = None
+    try:
+        await adapter.create_instance(mode="code")
+        runtime = adapter._subagent_runtime
+        adapter.select_execution_for_request(request)
+        async for chunk in adapter.process_message_stream_impl(
+            request,
+            {"query": "Run the OC4 child"},
+        ):
+            chunks.append(chunk)
+    finally:
+        await adapter.cleanup()
+        await runner.cleanup()
+        for directory in runtime_root.rglob("*"):
+            if directory.is_dir() and not directory.is_symlink():
+                directory.chmod(0o700)
+
+    parent_requests = [
+        body
+        for body in model.requests
+        if "You are a product subagent" not in json.dumps(body, ensure_ascii=False)
+    ]
+    tool_names = {
+        tool["function"]["name"]
+        for tool in parent_requests[0].get("tools", ())
+        if tool.get("type") == "function"
+    }
+    assert {
+        "jiuwenswarm_product_tools_subagent_spawn",
+        "jiuwenswarm_product_tools_subagent_wait",
+        "jiuwenswarm_product_tools_subagent_list",
+        "jiuwenswarm_product_tools_subagent_send_input",
+        "jiuwenswarm_product_tools_subagent_close",
+        "jiuwenswarm_product_tools_subagent_resume",
+    } <= tool_names
+    assert "OC4-CHILD-RESULT" in json.dumps(parent_requests, ensure_ascii=False)
+    assert "OC4-PARENT-RESULT" in json.dumps(
+        [chunk.payload for chunk in chunks],
+        ensure_ascii=False,
+    )
+    assert runtime is not None and runtime.has_control() is False
+    assert not any(
+        bound.binding.host_session_id.startswith("oc3-session_sub_")
+        for bound in route.bindings._bindings.values()
+    )

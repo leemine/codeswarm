@@ -11,7 +11,11 @@ from openjiuwen.core.session.interaction.interactive_input import InteractiveInp
 
 from openjiuwen.harness_providers.output_buffer import OutputBudgetExceeded, OutputText
 
-from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.schema.agent import (
+    AgentRequest,
+    AgentResponse,
+    AgentResponseChunk,
+)
 from jiuwenswarm.runtime.harness.bridge import prepare_execution_session
 from jiuwenswarm.runtime.harness.context_bridge import (
     build_external_context,
@@ -40,9 +44,7 @@ class EngineAgentAdapter:
         self._tool_gateway = tool_gateway
         self._subagent_runtime: ExternalSubagentRuntime | None = None
         self._session: ExecutionSession | None = None
-        self._projection = ExternalEventProjection(
-            route.bound.binding.host_session_id
-        )
+        self._projection = ExternalEventProjection(route.bound.binding.host_session_id)
         self._start_lock = asyncio.Lock()
         self._personal_context_runtime_enabled = False
 
@@ -72,7 +74,10 @@ class EngineAgentAdapter:
         if self._session is not None:
             raise RuntimeError("External execution instance already exists")
         binding = self._route.bound.binding
-        if self._tool_gateway is None and self._route.provider_id == "codex":
+        if self._tool_gateway is None and self._route.provider_id in {
+            "codex",
+            "opencode",
+        }:
             self._subagent_runtime = ExternalSubagentRuntime(
                 self._route,
                 write_output=self._projection.project_product_chunk,
@@ -90,7 +95,9 @@ class EngineAgentAdapter:
             recovery=self._route.recovery,
         )
         if session.binding is not binding:
-            raise RuntimeError("External construction did not retain its admitted binding")
+            raise RuntimeError(
+                "External construction did not retain its admitted binding"
+            )
         self._session = session
 
     def select_execution_for_request(self, request: AgentRequest) -> None:
@@ -217,12 +224,9 @@ class EngineAgentAdapter:
                 output = session.outputs(receipt.turn_id)
                 async for item in output:
                     provider_started = getattr(session, "provider_started", None)
-                    if (
-                        not provider_acceptance_emitted
-                        and (
-                            not callable(provider_started)
-                            or provider_started(receipt.turn_id)
-                        )
+                    if not provider_acceptance_emitted and (
+                        not callable(provider_started)
+                        or provider_started(receipt.turn_id)
                     ):
                         provider_acceptance_emitted = True
                         yield AgentResponseChunk(
@@ -282,7 +286,11 @@ class EngineAgentAdapter:
                     )
                 payload = {
                     **unknown_terminal_payload(),
-                    **({"code": budget_failure.code, "error": str(budget_failure)} if budget_failure else {}),
+                    **(
+                        {"code": budget_failure.code, "error": str(budget_failure)}
+                        if budget_failure
+                        else {}
+                    ),
                     "submission_status": (
                         "provider_accepted"
                         if provider_acceptance_emitted
@@ -343,7 +351,9 @@ class EngineAgentAdapter:
     async def handle_user_answer(self, request: AgentRequest) -> AgentResponse:
         params = request.params if isinstance(request.params, dict) else {}
         interaction = self._interaction_answer(params)
-        resolved = bool(interaction and await self._require_session().answer(interaction))
+        resolved = bool(
+            interaction and await self._require_session().answer(interaction)
+        )
         return AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,
@@ -499,8 +509,18 @@ class EngineAgentAdapter:
                 custom = str(raw.get("custom_input") or "").strip()
                 value: Any = custom
                 if isinstance(selected, list):
-                    cleaned = [str(item).strip() for item in selected if str(item).strip() and str(item).strip() != "Other"]
-                    value = [*cleaned, custom] if cleaned and custom else cleaned[0] if len(cleaned) == 1 else cleaned or custom
+                    cleaned = [
+                        str(item).strip()
+                        for item in selected
+                        if str(item).strip() and str(item).strip() != "Other"
+                    ]
+                    value = (
+                        [*cleaned, custom]
+                        if cleaned and custom
+                        else cleaned[0]
+                        if len(cleaned) == 1
+                        else cleaned or custom
+                    )
                 if question and value:
                     values[question] = value
             interactive.update(request_id, {"answers": values})
@@ -508,17 +528,34 @@ class EngineAgentAdapter:
 
         answer = answers[0] if answers and isinstance(answers[0], dict) else {}
         selected = answer.get("selected_options") if isinstance(answer, dict) else []
-        value = str(selected[0] if isinstance(selected, list) and selected else "").strip().lower()
-        custom = str(answer.get("custom_input") or "").strip() if isinstance(answer, dict) else ""
+        value = (
+            str(selected[0] if isinstance(selected, list) and selected else "")
+            .strip()
+            .lower()
+        )
+        custom = (
+            str(answer.get("custom_input") or "").strip()
+            if isinstance(answer, dict)
+            else ""
+        )
         allowed = value in {
-            "allow_once", "allow", "approve", "approved", "本次允许", "allow once",
-            "session_allow", "always_allow", "总是允许", "always allow",
+            "allow_once",
+            "allow",
+            "approve",
+            "approved",
+            "本次允许",
+            "allow once",
+            "session_allow",
+            "always_allow",
+            "总是允许",
+            "always allow",
         }
         interactive.update(
             request_id,
             {
                 "approved": allowed,
-                "auto_confirm": value in {"session_allow", "always_allow", "总是允许", "always allow"},
+                "auto_confirm": value
+                in {"session_allow", "always_allow", "总是允许", "always allow"},
                 "feedback": custom or ("" if allowed else "用户拒绝"),
             },
         )

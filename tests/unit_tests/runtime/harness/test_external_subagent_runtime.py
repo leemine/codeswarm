@@ -25,12 +25,15 @@ from jiuwenswarm.runtime.harness.external_subagents import (
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
 
 
-def _route(tmp_path: Path, *, session_id: str = "parent-a") -> AdmittedExecutionRoute:
+def _route(
+    tmp_path: Path,
+    *,
+    session_id: str = "parent-a",
+    provider_id: str = "codex",
+) -> AdmittedExecutionRoute:
     root = (tmp_path / session_id).resolve()
     root.mkdir()
-    source = ExecutionConfigSource(
-        explicit=AgentExecutionSpec("codex", "r1-b4")
-    )
+    source = ExecutionConfigSource(explicit=AgentExecutionSpec(provider_id, "r1-b4"))
     bindings = ExecutionBindingStore()
     bound = bindings.bind(
         source,
@@ -111,7 +114,7 @@ def _install_factory(monkeypatch: pytest.MonkeyPatch, factory: _Factory) -> None
 
     monkeypatch.setattr(
         module,
-        "CodexSubagentExecutionFactory",
+        "ExternalSubagentExecutionFactory",
         lambda _route: factory,
     )
 
@@ -145,7 +148,7 @@ def test_parent_subagent_state_is_restored_and_checkpointed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_new_product_runtime_restores_closed_child_from_parent_archive(
+async def test_public_factory_restores_pre_migration_codex_child_archive(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -185,20 +188,28 @@ async def test_new_product_runtime_restores_closed_child_from_parent_archive(
     closed = await _invoke(first, "subagent_close", {"subagent_id": child_id})
     assert closed.is_error is False
     await first.close("process_exit")
+    serialized = repr(recovery.state)
+    assert "CodexSubagentExecution" not in serialized
+    assert "codex_subagent" not in serialized
 
     second_factory = _Factory(restorable=True)
     _install_factory(monkeypatch, second_factory)
     second = ExternalSubagentRuntime(route, write_output=write_output)
     resumed = await _invoke(second, "subagent_resume", {"subagent_id": child_id})
     assert resumed.is_error is False
-    assert child_id in second._parent_host._subagent_controls["parent-a"]._manager.list_ids()
+    assert (
+        child_id
+        in second._parent_host._subagent_controls["parent-a"]._manager.list_ids()
+    )
     await second.close("test_complete")
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider_id", ["codex", "opencode"])
 async def test_six_tools_run_parallel_turns_and_keep_parent_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    provider_id: str,
 ) -> None:
     factory = _Factory()
     _install_factory(monkeypatch, factory)
@@ -207,7 +218,10 @@ async def test_six_tools_run_parallel_turns_and_keep_parent_scope(
     async def write_output(chunk: OutputSchema) -> None:
         events.append(chunk)
 
-    runtime = ExternalSubagentRuntime(_route(tmp_path), write_output=write_output)
+    runtime = ExternalSubagentRuntime(
+        _route(tmp_path, provider_id=provider_id),
+        write_output=write_output,
+    )
     definitions = await runtime.gateway.definitions()
     assert {item.name for item in definitions} == {
         "subagent_spawn",

@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""R1-03B3 Codex-to-Codex child execution tests."""
+"""Same-engine External child execution tests."""
 
 from __future__ import annotations
 
@@ -27,19 +27,23 @@ from openjiuwen.harness_providers.io_adapter import ProjectedOutput
 
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
 from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
-from jiuwenswarm.runtime.harness.codex_subagent import (
-    CodexSubagentExecutionFactory,
+from jiuwenswarm.runtime.harness.external_subagent import (
+    ExternalSubagentExecutionFactory,
 )
 from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
 
 
-def _route(tmp_path: Path) -> AdmittedExecutionRoute:
+def _route(
+    tmp_path: Path,
+    *,
+    provider_id: str = "codex",
+) -> AdmittedExecutionRoute:
     root = (tmp_path / "project").resolve()
     cwd = root / "task"
     cwd.mkdir(parents=True)
     spec = AgentExecutionSpec(
-        "codex",
+        provider_id,
         "parent-r1",
         provider_config={
             "cwd": str(cwd),
@@ -64,7 +68,9 @@ def _route(tmp_path: Path) -> AdmittedExecutionRoute:
     return AdmittedExecutionRoute("web", source, bindings, bound, paths)
 
 
-def _request(subagent_id: str = "parent-session_sub_explore_deadbeef") -> SubagentBuildRequest:
+def _request(
+    subagent_id: str = "parent-session_sub_explore_deadbeef",
+) -> SubagentBuildRequest:
     return SubagentBuildRequest(
         subagent_id=subagent_id,
         subagent_type="explore_agent",
@@ -97,7 +103,7 @@ async def test_child_restore_uses_its_own_parent_scoped_checkpoint(
         recovery=SimpleNamespace(child=child),
     )
     calls = _install_session_builder(monkeypatch)
-    factory = CodexSubagentExecutionFactory(route)
+    factory = ExternalSubagentExecutionFactory(route)
 
     assert await factory.can_restore(_request(), _context()) is True
     execution = await factory.create(_request(), _context())
@@ -143,7 +149,7 @@ class _FakeSession:
 def _install_session_builder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[tuple[dict[str, Any], _FakeSession]]:
-    from jiuwenswarm.runtime.harness import codex_subagent as module
+    from jiuwenswarm.runtime.harness import external_subagent as module
 
     calls: list[tuple[dict[str, Any], _FakeSession]] = []
 
@@ -163,13 +169,15 @@ def _install_session_builder(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider_id", ["codex", "opencode"])
 async def test_child_inherits_exact_parent_provider_paths_and_gets_new_binding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    provider_id: str,
 ) -> None:
-    route = _route(tmp_path)
+    route = _route(tmp_path, provider_id=provider_id)
     calls = _install_session_builder(monkeypatch)
-    factory = CodexSubagentExecutionFactory(route)
+    factory = ExternalSubagentExecutionFactory(route)
 
     execution = await factory.create(_request(), _context())
 
@@ -191,7 +199,10 @@ async def test_child_inherits_exact_parent_provider_paths_and_gets_new_binding(
     assert session.started_context.agent_id == child.subject_id
     assert session.started_context.host_session_id == child.host_session_id
     assert session.started_context.metadata["parent_subject_id"] == "alice"
-    assert "Role: Inspect only the delegated scope." in session.started_context.system_prompt
+    assert (
+        "Role: Inspect only the delegated scope."
+        in session.started_context.system_prompt
+    )
 
     await execution.close("test")
     assert session.stopped is True
@@ -218,7 +229,7 @@ async def test_parent_scope_mismatch_is_rejected_before_child_construction(
     message: str,
 ) -> None:
     calls = _install_session_builder(monkeypatch)
-    factory = CodexSubagentExecutionFactory(_route(tmp_path))
+    factory = ExternalSubagentExecutionFactory(_route(tmp_path))
 
     with pytest.raises(ValueError, match=message):
         await factory.create(_request(), context)
@@ -234,15 +245,13 @@ async def test_existing_cross_provider_child_binding_fails_closed(
     route = _route(tmp_path)
     request = _request()
     route.bindings.bind(
-        ExecutionConfigSource(
-            explicit=AgentExecutionSpec("native", "malicious-child")
-        ),
+        ExecutionConfigSource(explicit=AgentExecutionSpec("native", "malicious-child")),
         subject_id=f"subagent:{request.subagent_id}",
         host_session_id=request.subagent_id,
         workspace=route.bound.binding.workspace,
     )
     calls = _install_session_builder(monkeypatch)
-    factory = CodexSubagentExecutionFactory(route)
+    factory = ExternalSubagentExecutionFactory(route)
 
     with pytest.raises(ValueError, match="does not match its binding"):
         await factory.create(request, _context())
@@ -256,7 +265,7 @@ async def test_child_identity_from_another_parent_is_rejected_before_constructio
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _install_session_builder(monkeypatch)
-    factory = CodexSubagentExecutionFactory(_route(tmp_path))
+    factory = ExternalSubagentExecutionFactory(_route(tmp_path))
 
     with pytest.raises(ValueError, match="does not belong"):
         await factory.create(
@@ -273,7 +282,7 @@ async def test_turn_projects_chunks_and_settles_from_provider_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _install_session_builder(monkeypatch)
-    execution = await CodexSubagentExecutionFactory(_route(tmp_path)).create(
+    execution = await ExternalSubagentExecutionFactory(_route(tmp_path)).create(
         _request(),
         _context(),
     )
@@ -328,7 +337,7 @@ async def test_failed_terminal_is_a_structured_subagent_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _install_session_builder(monkeypatch)
-    execution = await CodexSubagentExecutionFactory(_route(tmp_path)).create(
+    execution = await ExternalSubagentExecutionFactory(_route(tmp_path)).create(
         _request(),
         _context(),
     )
@@ -348,7 +357,7 @@ async def test_failed_terminal_is_a_structured_subagent_result(
     assert len(results) == 1
     assert results[0].is_error is True
     assert results[0].error_code == "PROVIDER_TURN_FAILED"
-    assert results[0].output == "Codex subagent turn failed"
+    assert results[0].output == "External subagent turn failed"
 
 
 @pytest.mark.asyncio
@@ -358,7 +367,7 @@ async def test_close_releases_only_exact_child_binding(
 ) -> None:
     route = _route(tmp_path)
     _install_session_builder(monkeypatch)
-    factory = CodexSubagentExecutionFactory(route)
+    factory = ExternalSubagentExecutionFactory(route)
     request = _request()
     execution = await factory.create(request, _context())
     child_binding = execution.binding
@@ -366,9 +375,7 @@ async def test_close_releases_only_exact_child_binding(
     await execution.close("done")
     await execution.close("again")
     replacement = route.bindings.bind(
-        ExecutionConfigSource(
-            explicit=AgentExecutionSpec("native", "replacement")
-        ),
+        ExecutionConfigSource(explicit=AgentExecutionSpec("native", "replacement")),
         subject_id=child_binding.subject_id,
         host_session_id=child_binding.host_session_id,
         workspace=child_binding.workspace,
@@ -385,7 +392,7 @@ async def test_close_retains_child_binding_until_provider_exit_is_confirmed(
 ) -> None:
     route = _route(tmp_path)
     calls = _install_session_builder(monkeypatch)
-    factory = CodexSubagentExecutionFactory(route)
+    factory = ExternalSubagentExecutionFactory(route)
     request = _request()
     execution = await factory.create(request, _context())
     session = calls[0][1]
@@ -398,9 +405,7 @@ async def test_close_retains_child_binding_until_provider_exit_is_confirmed(
     assert factory._live[request.subagent_id] is execution
     with pytest.raises(ValueError, match="does not match its binding"):
         route.bindings.bind(
-            ExecutionConfigSource(
-                explicit=AgentExecutionSpec("native", "replacement")
-            ),
+            ExecutionConfigSource(explicit=AgentExecutionSpec("native", "replacement")),
             subject_id=execution.binding.subject_id,
             host_session_id=execution.binding.host_session_id,
             workspace=execution.binding.workspace,
@@ -416,7 +421,7 @@ async def test_core_runtime_preserves_parent_and_child_execution_identities(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from jiuwenswarm.runtime.harness import codex_subagent as module
+    from jiuwenswarm.runtime.harness import external_subagent as module
 
     route = _route(tmp_path)
     sessions: list[_FakeSession] = []
@@ -444,7 +449,7 @@ async def test_core_runtime_preserves_parent_and_child_execution_identities(
         return session
 
     monkeypatch.setattr(module, "prepare_execution_session", build)
-    factory = CodexSubagentExecutionFactory(route)
+    factory = ExternalSubagentExecutionFactory(route)
     parent_agent = SimpleNamespace(
         deep_config=SimpleNamespace(workspace=str(route.runtime_paths.cwd))
     )
@@ -481,7 +486,7 @@ async def test_cancelled_turn_aborts_only_the_child_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _install_session_builder(monkeypatch)
-    execution = await CodexSubagentExecutionFactory(_route(tmp_path)).create(
+    execution = await ExternalSubagentExecutionFactory(_route(tmp_path)).create(
         _request(),
         _context(),
     )
@@ -506,7 +511,7 @@ async def test_cancelled_turn_aborts_only_the_child_provider(
     assert session.aborted is True
 
 
-def test_non_codex_parent_is_rejected(tmp_path: Path) -> None:
+def test_unsupported_parent_is_rejected(tmp_path: Path) -> None:
     route = _route(tmp_path)
     native = AgentExecutionSpec("native", "r1")
     source = ExecutionConfigSource(explicit=native)
@@ -524,5 +529,5 @@ def test_non_codex_parent_is_rejected(tmp_path: Path) -> None:
         bound=bound,
     )
 
-    with pytest.raises(ValueError, match="Codex parent"):
-        CodexSubagentExecutionFactory(native_route)
+    with pytest.raises(ValueError, match="supported, consistent parent"):
+        ExternalSubagentExecutionFactory(native_route)

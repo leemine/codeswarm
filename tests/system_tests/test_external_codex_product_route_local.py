@@ -30,7 +30,9 @@ from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
 from jiuwenswarm.common.auth import session_store
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
-from jiuwenswarm.runtime.harness.codex_subagent import CodexSubagentExecutionFactory
+from jiuwenswarm.runtime.harness.external_subagent import (
+    ExternalSubagentExecutionFactory,
+)
 from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
 from jiuwenswarm.runtime.harness.recovery_store import (
@@ -60,27 +62,27 @@ class _ResponsesFixture:
                 return None
 
             def do_POST(self):
-                body = json.loads(
-                    self.rfile.read(int(self.headers["Content-Length"]))
-                )
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 owner.requests.append(body)
                 index = len(owner.requests)
                 item = (
                     owner.responder(body, index)
                     if owner.responder is not None
-                    else owner.items.pop(0) if owner.items else {
-                    "type": "message",
-                    "role": "assistant",
-                    "id": f"msg_{index}",
-                    "status": "completed",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": "R1-A2-PRODUCT-ROUTE-OK",
-                            "annotations": [],
-                        }
-                    ],
-                }
+                    else owner.items.pop(0)
+                    if owner.items
+                    else {
+                        "type": "message",
+                        "role": "assistant",
+                        "id": f"msg_{index}",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "R1-A2-PRODUCT-ROUTE-OK",
+                                "annotations": [],
+                            }
+                        ],
+                    }
                 )
                 response = {
                     "id": f"resp_{index}",
@@ -196,9 +198,7 @@ async def test_real_codex_cli_runs_through_external_product_adapter(
         + "\n[permissions.r1-a2-read.network]\nenabled=false\n"
     )
     (codex_home / "config.toml").write_text(permission_config, encoding="utf-8")
-    (root / "JIUWENSWARM.md").write_text(
-        "R1-A2-PROJECT-CONTEXT", encoding="utf-8"
-    )
+    (root / "JIUWENSWARM.md").write_text("R1-A2-PROJECT-CONTEXT", encoding="utf-8")
     sessions = tmp_path / "sessions"
     auth = tmp_path / "auth"
 
@@ -477,7 +477,7 @@ async def test_real_codex_cli_runs_independently_bound_child(
                 runtime_paths=route.runtime_paths,
             ),
         )
-        factory = CodexSubagentExecutionFactory(route)
+        factory = ExternalSubagentExecutionFactory(route)
         build_request = SubagentBuildRequest(
             subagent_id="r1-a2-session_sub_explore_b3",
             subagent_type="explore_agent",
@@ -516,7 +516,7 @@ async def test_real_codex_cli_runs_independently_bound_child(
                 runtime_paths=route.runtime_paths,
             ),
         )
-        cold_factory = CodexSubagentExecutionFactory(cold_route)
+        cold_factory = ExternalSubagentExecutionFactory(cold_route)
         assert await cold_factory.can_restore(build_request, parent_context) is True
         cold_execution = await cold_factory.create(build_request, parent_context)
         cold_results = []
@@ -561,7 +561,9 @@ async def test_real_codex_cli_runs_independently_bound_child(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("authorization", [None, ExecutionAuthorization(False), ExecutionAuthorization(True)])
+@pytest.mark.parametrize(
+    "authorization", [None, ExecutionAuthorization(False), ExecutionAuthorization(True)]
+)
 async def test_real_codex_cli_calls_session_owned_product_gateway(
     tmp_path,
     authorization,
@@ -666,8 +668,11 @@ async def test_real_codex_cli_calls_session_owned_product_gateway(
                     "CODEX_HOME": str(codex_home),
                     "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 },
-                "startup_source_roots": (None if authorization and authorization.full_access
-                                         else [str(root), str(codex_home / "skills")]),
+                "startup_source_roots": (
+                    None
+                    if authorization and authorization.full_access
+                    else [str(root), str(codex_home / "skills")]
+                ),
                 "mcp_required": True,
                 "mcp_default_tools_approval_mode": "prompt",
                 "model": {
@@ -768,7 +773,9 @@ async def test_real_codex_cli_calls_session_owned_product_gateway(
     assert cold_blocked is needs_approval
     assert tool.calls == [{"value": "from-codex"}]
     assert "R1-B1-PRODUCT-MCP-OK" in json.dumps(responses.requests)
-    assert any((chunk.payload or {}).get("event_type") == "chat.final" for chunk in chunks)
+    assert any(
+        (chunk.payload or {}).get("event_type") == "chat.final" for chunk in chunks
+    )
     assert transport is not None and not transport.started
 
 
@@ -851,9 +858,7 @@ async def test_real_codex_cli_runs_six_tool_same_engine_child_chain(tmp_path):
                     "call_id": "call_r1_b4_wait",
                     "arguments": json.dumps(
                         {
-                            "subagent_ids": [
-                                "r1-a2-session_sub_verification_agent"
-                            ],
+                            "subagent_ids": ["r1-a2-session_sub_verification_agent"],
                             "timeout_ms": 120_000,
                         }
                     ),
@@ -954,11 +959,16 @@ async def test_real_codex_cli_runs_six_tool_same_engine_child_chain(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("allow,authorization", [
-    (False, None), (True, None),
-    (False, ExecutionAuthorization(False)), (True, ExecutionAuthorization(False)),
-    (True, ExecutionAuthorization(True)),
-])
+@pytest.mark.parametrize(
+    "allow,authorization",
+    [
+        (False, None),
+        (True, None),
+        (False, ExecutionAuthorization(False)),
+        (True, ExecutionAuthorization(False)),
+        (True, ExecutionAuthorization(True)),
+    ],
+)
 async def test_real_codex_tool_approval_roundtrips_through_product_adapter(
     tmp_path, allow, authorization, monkeypatch
 ):
@@ -997,8 +1007,7 @@ async def test_real_codex_tool_approval_roundtrips_through_product_adapter(
                 "arguments": json.dumps(
                     {
                         "cmd": (
-                            f"cat {shlex.quote(str(staged))} "
-                            "> approval-marker.txt"
+                            f"cat {shlex.quote(str(staged))} > approval-marker.txt"
                         ),
                         "workdir": str(root),
                     }
@@ -1053,8 +1062,10 @@ async def test_real_codex_tool_approval_roundtrips_through_product_adapter(
             )
             if authorization is not None and authorization.full_access:
                 chunks.extend([chunk async for chunk in stream])
-                assert not any((chunk.payload or {}).get("event_type") == "chat.ask_user_question"
-                               for chunk in chunks)
+                assert not any(
+                    (chunk.payload or {}).get("event_type") == "chat.ask_user_question"
+                    for chunk in chunks
+                )
             else:
                 while True:
                     chunk = await anext(stream)
@@ -1070,11 +1081,7 @@ async def test_real_codex_tool_approval_roundtrips_through_product_adapter(
                         "request_id": payload["request_id"],
                         "source": payload["source"],
                         "answers": [
-                            {
-                                "selected_options": [
-                                    "allow_once" if allow else "deny"
-                                ]
-                            }
+                            {"selected_options": ["allow_once" if allow else "deny"]}
                         ],
                     },
                 )
@@ -1089,8 +1096,7 @@ async def test_real_codex_tool_approval_roundtrips_through_product_adapter(
         assert marker.read_text(encoding="utf-8") == "R1-A2-ATTACHMENT"
     assert not staged.exists()
     assert any(
-        (chunk.payload or {}).get("event_type") == "chat.final"
-        for chunk in chunks
+        (chunk.payload or {}).get("event_type") == "chat.final" for chunk in chunks
     )
 
 
@@ -1122,7 +1128,10 @@ async def test_real_codex_native_plugin_runs_through_product_adapter(tmp_path):
                     {
                         "name": "c1-probe",
                         "source": {"source": "local", "path": "./plugins/c1-probe"},
-                        "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+                        "policy": {
+                            "installation": "AVAILABLE",
+                            "authentication": "ON_INSTALL",
+                        },
                     }
                 ],
             }
@@ -1157,7 +1166,11 @@ async def test_real_codex_native_plugin_runs_through_product_adapter(tmp_path):
     )
     (plugin / ".mcp.json").write_text(
         json.dumps(
-            {"mcpServers": {"c1_probe": {"command": sys.executable, "args": ["-c", server_code]}}}
+            {
+                "mcpServers": {
+                    "c1_probe": {"command": sys.executable, "args": ["-c", server_code]}
+                }
+            }
         ),
         encoding="utf-8",
     )
@@ -1167,7 +1180,10 @@ async def test_real_codex_native_plugin_runs_through_product_adapter(tmp_path):
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
     }
     binary = str(sdk.client._resolve_codex_bin(sdk.CodexConfig()))
-    for args in (("plugin", "marketplace", "add", str(market)), ("plugin", "add", "c1-probe@c1-local")):
+    for args in (
+        ("plugin", "marketplace", "add", str(market)),
+        ("plugin", "add", "c1-probe@c1-local"),
+    ):
         process = await asyncio.create_subprocess_exec(
             binary,
             *args,
@@ -1186,9 +1202,12 @@ async def test_real_codex_native_plugin_runs_through_product_adapter(tmp_path):
         str(Path(binary).parent): "read",
         str(Path(sys.executable).parent): "read",
     }
-    permission_config = 'default_permissions = "c1-product"\n[permissions.c1-product.filesystem]\n'
+    permission_config = (
+        'default_permissions = "c1-product"\n[permissions.c1-product.filesystem]\n'
+    )
     permission_config += "\n".join(
-        f"{json.dumps(path)} = {json.dumps(access)}" for path, access in readable.items()
+        f"{json.dumps(path)} = {json.dumps(access)}"
+        for path, access in readable.items()
     )
     permission_config += "\n[permissions.c1-product.network]\nenabled=false\n"
     config_path.write_text(permission_config + installed_config, encoding="utf-8")
@@ -1203,7 +1222,9 @@ async def test_real_codex_native_plugin_runs_through_product_adapter(tmp_path):
                     "name": "exec_command",
                     "id": "fc_c1_skill",
                     "call_id": "call_c1_skill",
-                    "arguments": json.dumps({"cmd": f"cat {shlex.quote(str(skill))}", "login": False}),
+                    "arguments": json.dumps(
+                        {"cmd": f"cat {shlex.quote(str(skill))}", "login": False}
+                    ),
                 },
                 {
                     "type": "function_call",
@@ -1233,7 +1254,9 @@ async def test_real_codex_native_plugin_runs_through_product_adapter(tmp_path):
                         "source_type": "local",
                         "source_locator": str(plugin),
                         "version": "1.0.0",
-                        "content_sha256": native_plugin_content_digest(installed_plugin),
+                        "content_sha256": native_plugin_content_digest(
+                            installed_plugin
+                        ),
                         "enabled": True,
                         "required_components": ["skills", "mcp"],
                         "mcp_server_names": ["c1_probe"],
@@ -1295,7 +1318,9 @@ async def test_real_codex_native_plugin_runs_through_product_adapter(tmp_path):
     rendered_requests = json.dumps(responses.requests)
     assert "C1-PRODUCT-SKILL" in rendered_requests
     assert "C1-PRODUCT-MCP-OK" in rendered_requests
-    assert any((chunk.payload or {}).get("event_type") == "chat.final" for chunk in chunks)
+    assert any(
+        (chunk.payload or {}).get("event_type") == "chat.final" for chunk in chunks
+    )
     pid = int(pidfile.read_text(encoding="utf-8"))
     deadline = time.monotonic() + 5
     while Path(f"/proc/{pid}").exists() and time.monotonic() < deadline:

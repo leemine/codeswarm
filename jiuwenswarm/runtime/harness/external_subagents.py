@@ -14,8 +14,9 @@ from openjiuwen.harness.tools.subagent import (
     release_subagent_control,
 )
 
-from jiuwenswarm.runtime.harness.codex_subagent import (
-    CodexSubagentExecutionFactory,
+from jiuwenswarm.runtime.harness.external_subagent import (
+    ExternalSubagentExecutionFactory,
+    SUPPORTED_SUBAGENT_PROVIDERS,
 )
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
 from jiuwenswarm.runtime.harness.recovery_store import SessionExecutionRecovery
@@ -61,8 +62,7 @@ class ExternalSubagentParentSession:
             return {name: self._state.get(name) for name in key}
         if isinstance(key, dict):
             return {
-                name: self._state.get(name, default)
-                for name, default in key.items()
+                name: self._state.get(name, default) for name, default in key.items()
             }
         return None
 
@@ -86,8 +86,10 @@ class ExternalSubagentRuntime:
         *,
         write_output: Callable[[OutputSchema], Awaitable[None]],
     ) -> None:
-        if route.provider_id != "codex":
-            raise ValueError("External subagent runtime currently requires Codex")
+        if route.provider_id not in SUPPORTED_SUBAGENT_PROVIDERS:
+            raise ValueError(
+                "External subagent runtime requires a supported External provider"
+            )
         binding = route.bound.binding
         self._route = route
         self._parent_session = ExternalSubagentParentSession(
@@ -103,7 +105,7 @@ class ExternalSubagentRuntime:
                 subagents=(),
             )
         )
-        self._factory = CodexSubagentExecutionFactory(route)
+        self._factory = ExternalSubagentExecutionFactory(route)
         tools = build_subagent_tools(
             self._parent_host,
             language="cn",
