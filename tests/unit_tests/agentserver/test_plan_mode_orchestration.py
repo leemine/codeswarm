@@ -409,6 +409,7 @@ async def test_ensure_code_mode_state_syncs_plan_to_normal() -> None:
     session_id = "sess_sync"
 
     plan_agent = MagicMock()
+    plan_agent._runtime_execution_route = None
     plan_instance = MagicMock()
     plan_agent.get_instance.return_value = plan_instance
     # Non-chat callers now await ensure_instance(), which builds the root
@@ -449,6 +450,7 @@ async def test_ensure_code_mode_state_skips_if_mode_already_matches() -> None:
     session_id = "sess_skip"
 
     plan_agent = MagicMock()
+    plan_agent._runtime_execution_route = None
     plan_instance = MagicMock()
     plan_agent.get_instance.return_value = plan_instance
     # Non-chat callers now await ensure_instance(), which builds the root
@@ -484,6 +486,7 @@ async def test_ensure_code_mode_state_allows_explicit_plan_reentry_after_exit() 
     session_id = "sess_explicit_reentry"
 
     plan_agent = MagicMock()
+    plan_agent._runtime_execution_route = None
     plan_instance = MagicMock()
     plan_agent.get_instance.return_value = plan_instance
     # Non-chat callers now await ensure_instance(), which builds the root
@@ -538,6 +541,7 @@ async def test_disconnect_cleanup_then_stale_plan_reentry_blocked_by_slug() -> N
     session_id = "sess_stale_after_disconnect"
 
     plan_agent = MagicMock()
+    plan_agent._runtime_execution_route = None
     plan_instance = MagicMock()
     plan_agent.get_instance.return_value = plan_instance
     # Non-chat callers now await ensure_instance(), which builds the root
@@ -609,6 +613,7 @@ async def test_work_turn_with_previous_plan_mode_still_syncs() -> None:
     session_id = "sess_work_restart"
 
     plan_agent = MagicMock()
+    plan_agent._runtime_execution_route = None
     plan_instance = MagicMock()
     plan_agent.get_live_session_instance.return_value = None
     plan_agent.ensure_instance = AsyncMock(return_value=plan_instance)

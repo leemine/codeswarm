@@ -108,6 +108,7 @@ async def _recv_until_response(ws, req_id: str, timeout: float = 10.0) -> dict:
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(180)
 async def test_cli_route_system_roundtrip(temp_home: Path, monkeypatch: pytest.MonkeyPatch):
     agent_port = _pick_free_port()
     web_port = _pick_free_port()

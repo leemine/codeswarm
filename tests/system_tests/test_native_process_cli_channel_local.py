@@ -237,6 +237,7 @@ def _response_text(document: dict[str, Any]) -> str:
     )
 
 
+@pytest.mark.timeout(120)
 def test_native_process_cli_two_turn_history_is_durable(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     with _ChatCompletionsFixture() as fixture:

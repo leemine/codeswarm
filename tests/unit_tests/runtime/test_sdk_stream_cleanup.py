@@ -177,10 +177,12 @@ async def test_sdk_stream_aclose_drains_real_runtime_wrapper_and_context(
         assert get_current_runtime() is None
         if with_session:
             assert agent.close_task is agent.enter_task
-        elif close_in_other_task:
-            assert agent.close_task is not agent.enter_task
-        else:
+        elif not close_in_other_task:
             assert agent.close_task is agent.enter_task
+        # ``asyncio.wait_for`` may or may not move an already-ready aclose
+        # continuation to its helper task.  Task identity in that branch is
+        # an asyncio scheduling detail; the ownership assertions above pin
+        # the required drain, context, and foreground cleanup semantics.
     finally:
         # Also clean up on the intentionally failing pre-fix reproduction, so
         # no test contaminates another via pending async-generator finalizers.

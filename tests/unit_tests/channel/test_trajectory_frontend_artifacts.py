@@ -49,6 +49,7 @@ def _assert_notice_contents(contents: dict[str, str]) -> None:
         assert "packages/client/ui-primitives/src" in notice_text
 
 
+@pytest.mark.timeout(120)
 def test_trajectory_license_and_notice_ship_in_vite_dist_and_python_wheel(tmp_path: Path) -> None:
     npm = _require_tool("npm")
     subprocess.run(

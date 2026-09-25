@@ -68,7 +68,9 @@ async def test_reject_protocol_or_process_disagreement(mode):
     [
         (b"\xff\n", UnicodeDecodeError),
         (b"{\n", json.JSONDecodeError),
-        (b"[" * 2000 + b"\n", RecursionError),
+        # The C JSON decoder may hit either its recursion guard or the
+        # incomplete-record parser path depending on the CPython build.
+        (b"[" * 2000 + b"\n", (RecursionError, json.JSONDecodeError)),
     ],
 )
 def test_invalid_json_retains_protocol_error_and_cause(line, cause):

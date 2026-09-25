@@ -3,6 +3,7 @@ from __future__ import annotations
 # TEST ONLY: model endpoint literals use RFC-reserved domains and are consumed by
 # patched clients; no external request is performed.
 
+import asyncio
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -157,6 +158,14 @@ class _FakeAbilityManager:
     def remove(self, name: str) -> None:
         self.cards = [card for card in self.cards if getattr(card, "name", "") != name]
 
+    def teardown_tools(self) -> None:
+        self.cards.clear()
+
+
+async def _inline_to_thread(function, /, *args, **kwargs):
+    """Keep this fake-runtime test from creating a process-global executor."""
+    return function(*args, **kwargs)
+
 
 async def _create_adapter_and_run_chat(config_base: dict) -> SimpleNamespace:
     """Create adapter, run one chat turn via interaction attach/send_input path.
@@ -182,6 +191,7 @@ async def _create_adapter_and_run_chat(config_base: dict) -> SimpleNamespace:
         unregister_rail=AsyncMock(),
         attach_output=AsyncMock(return_value=_FakeInteractionStream()),
         send_input=AsyncMock(),
+        stop=AsyncMock(),
         goal_manager=None,
         # A real DeepAgent always carries one, and the adapter registers its
         # session-stable tools through it while preparing the turn.
@@ -196,12 +206,27 @@ async def _create_adapter_and_run_chat(config_base: dict) -> SimpleNamespace:
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_get_tool_cards", AsyncMock(return_value=[])),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_build_agent_rails", return_value=[]),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_create_sys_operation", return_value=MagicMock()),
+        patch.object(
+            interface_module.JiuWenSwarmDeepAdapter,
+            "_ensure_cron_tools_registered",
+            return_value=None,
+        ),
+        patch.object(
+            interface_module.JiuWenSwarmDeepAdapter,
+            "_release_sys_operations",
+            return_value=None,
+        ),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_build_configured_subagents", return_value=(None, False)),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_update_runtime_config", AsyncMock()),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "load_user_rails", AsyncMock()),
         patch.object(interface_module, "get_config", return_value=config_base),
         patch.object(interface_module, "init_permission_engine", return_value=None),
         patch.object(interface_module, "create_deep_agent", return_value=created_agent),
+        patch(
+            "jiuwenswarm.agents.harness.agent_observability.sync_agent_observability",
+            return_value=None,
+        ),
+        patch.object(asyncio, "to_thread", _inline_to_thread),
         patch.dict("os.environ", {"API_KEY": "system-test-key"}),
     ):
         adapter = JiuWenSwarmDeepAdapter()
@@ -214,6 +239,12 @@ async def _create_adapter_and_run_chat(config_base: dict) -> SimpleNamespace:
     assert response.ok is True
     assert response.payload.get("content") == "PONG"
     created_agent.send_input.assert_awaited()
+    pending = [
+        task
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task() and not task.done()
+    ]
+    assert not pending, [repr(task.get_coro()) for task in pending]
     return created_agent
 
 

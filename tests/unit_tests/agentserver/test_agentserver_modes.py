@@ -374,54 +374,11 @@ def test_resolve_request_project_dir_falls_back_to_cwd_for_legacy_clients():
 async def test_build_inputs_keeps_stable_project_dir_and_dynamic_cwd(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
-    class FakeSkillManager:
-        def __init__(self, workspace_dir=None):
-            self.workspace_dir = workspace_dir
-            self.hook = None
-
-        def set_skillnet_install_complete_hook(self, hook):
-            self.hook = hook
-
-    class FakeSessionManager:
-        @staticmethod
-        def get_session_id(session_id):
-            return session_id or "default"
-
-        async def submit_and_wait(self, _session_id, task_func):
-            return await task_func()
-
-    class FakeAdapter:
-        def __init__(self):
-            self.seen_inputs = None
-            self.skill_manager = None
-
-        def set_skill_manager(self, skill_manager):
-            self.skill_manager = skill_manager
-
-        async def handle_heartbeat(self, _request):
-            return None
-
-        async def process_message_impl(self, request, inputs):
-            self.seen_inputs = inputs
-            return AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                payload={"content": "ok"},
-            )
-
-    fake_adapter = FakeAdapter()
-
     monkeypatch.setattr(
         interface_module,
         "get_config",
         lambda: {"preferred_language": "zh"},
     )
-    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
-    monkeypatch.setattr(interface_module, "SkillManager", FakeSkillManager)
-    monkeypatch.setattr(interface_module, "SessionManager", FakeSessionManager)
-    monkeypatch.setattr(interface_module, "append_history_record", lambda **_kwargs: None)
-    monkeypatch.setattr(interface_module, "resolve_sdk_choice", lambda: "harness")
-    monkeypatch.setattr(interface_module, "create_adapter", lambda _sdk, mode="agent": fake_adapter)
     request = AgentRequest(
         request_id="req-chat",
         channel_id="tui",
@@ -434,9 +391,7 @@ async def test_build_inputs_keeps_stable_project_dir_and_dynamic_cwd(monkeypatch
         },
     )
 
-    await interface_module.JiuWenSwarm().process_message(request)
-
-    inputs = fake_adapter.seen_inputs
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
     assert inputs["project_dir"] == "/tmp/project"
     assert inputs["cwd"] == "/tmp/project-worktree"
     assert inputs["trusted_dirs"] == ["/tmp/project"]
@@ -856,7 +811,11 @@ async def test_chat_answer_routes_team_plan_confirm_interrupt_to_adapter(monkeyp
     monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
     monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
     fake_adapter = FakeAdapter()
-    monkeypatch.setattr(interface_module, "create_adapter", lambda _sdk, mode="agent": fake_adapter)
+    monkeypatch.setattr(
+        interface_module,
+        "create_adapter",
+        lambda _sdk, mode="agent", execution_route=None: fake_adapter,
+    )
 
     request = AgentRequest(
         request_id="req-answer",
@@ -1492,7 +1451,11 @@ async def test_team_plan_answer_routing(monkeypatch, params):
         "jiuwenswarm.agents.harness.team.get_team_manager",
         lambda _channel_id: FakeTeamManager(),
     )
-    monkeypatch.setattr(interface_module, "create_adapter", lambda _sdk, mode="agent": FakeAdapter())
+    monkeypatch.setattr(
+        interface_module,
+        "create_adapter",
+        lambda _sdk, mode="agent", execution_route=None: FakeAdapter(),
+    )
 
     request = AgentRequest(
         request_id="req-answer",
@@ -2140,50 +2103,7 @@ async def test_build_inputs_threads_workspace_dir_into_cwd(monkeypatch, tmp_path
     """
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
-    class FakeSkillManager:
-        def __init__(self, workspace_dir=None):
-            self.workspace_dir = workspace_dir
-            self.hook = None
-
-        def set_skillnet_install_complete_hook(self, hook):
-            self.hook = hook
-
-    class FakeSessionManager:
-        @staticmethod
-        def get_session_id(session_id):
-            return session_id or "default"
-
-        async def submit_and_wait(self, _session_id, task_func):
-            return await task_func()
-
-    class FakeAdapter:
-        def __init__(self):
-            self.seen_inputs = None
-            self.skill_manager = None
-
-        def set_skill_manager(self, skill_manager):
-            self.skill_manager = skill_manager
-
-        async def handle_heartbeat(self, _request):
-            return None
-
-        async def process_message_impl(self, request, inputs):
-            self.seen_inputs = inputs
-            return AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                payload={"content": "ok"},
-            )
-
-    fake_adapter = FakeAdapter()
-
     monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
-    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
-    monkeypatch.setattr(interface_module, "SkillManager", FakeSkillManager)
-    monkeypatch.setattr(interface_module, "SessionManager", FakeSessionManager)
-    monkeypatch.setattr(interface_module, "append_history_record", lambda **_kwargs: None)
-    monkeypatch.setattr(interface_module, "resolve_sdk_choice", lambda: "harness")
-    monkeypatch.setattr(interface_module, "create_adapter", lambda _sdk, mode="agent": fake_adapter)
 
     scratch = tmp_path / "scoped-run-001"  # does NOT exist yet
     assert not scratch.exists()
@@ -2195,9 +2115,7 @@ async def test_build_inputs_threads_workspace_dir_into_cwd(monkeypatch, tmp_path
         params={"query": "hello", "workspace_dir": str(scratch)},
     )
 
-    await interface_module.JiuWenSwarm().process_message(request)
-
-    inputs = fake_adapter.seen_inputs
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
     # Path is resolved (symlinks followed, absolute form) before threading.
     resolved = str(scratch.resolve())
     assert inputs["cwd"] == resolved, "workspace_dir must thread into inputs.cwd"
@@ -2216,50 +2134,7 @@ async def test_build_inputs_omits_cwd_when_workspace_dir_unset(monkeypatch):
     """
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
-    class FakeSkillManager:
-        def __init__(self, workspace_dir=None):
-            self.workspace_dir = workspace_dir
-            self.hook = None
-
-        def set_skillnet_install_complete_hook(self, hook):
-            self.hook = hook
-
-    class FakeSessionManager:
-        @staticmethod
-        def get_session_id(session_id):
-            return session_id or "default"
-
-        async def submit_and_wait(self, _session_id, task_func):
-            return await task_func()
-
-    class FakeAdapter:
-        def __init__(self):
-            self.seen_inputs = None
-            self.skill_manager = None
-
-        def set_skill_manager(self, skill_manager):
-            self.skill_manager = skill_manager
-
-        async def handle_heartbeat(self, _request):
-            return None
-
-        async def process_message_impl(self, request, inputs):
-            self.seen_inputs = inputs
-            return AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                payload={"content": "ok"},
-            )
-
-    fake_adapter = FakeAdapter()
-
     monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
-    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
-    monkeypatch.setattr(interface_module, "SkillManager", FakeSkillManager)
-    monkeypatch.setattr(interface_module, "SessionManager", FakeSessionManager)
-    monkeypatch.setattr(interface_module, "append_history_record", lambda **_kwargs: None)
-    monkeypatch.setattr(interface_module, "resolve_sdk_choice", lambda: "harness")
-    monkeypatch.setattr(interface_module, "create_adapter", lambda _sdk, mode="agent": fake_adapter)
 
     request = AgentRequest(
         request_id="req-nows",
@@ -2268,9 +2143,7 @@ async def test_build_inputs_omits_cwd_when_workspace_dir_unset(monkeypatch):
         params={"query": "hello", "cwd": "/tmp/explicit-cwd"},  # no workspace_dir
     )
 
-    await interface_module.JiuWenSwarm().process_message(request)
-
-    inputs = fake_adapter.seen_inputs
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
     # params.cwd is preserved untouched
     assert inputs["cwd"] == "/tmp/explicit-cwd"
 
@@ -2457,7 +2330,7 @@ async def test_agent_manager_creates_code_adapter_for_code_team(monkeypatch):
                 }
             )
 
-    def fake_create_adapter(sdk=None, *, mode="agent"):
+    def fake_create_adapter(sdk=None, *, mode="agent", execution_route=None):
         calls.append({"adapter_mode": mode})
         return FakeAdapter()
 
@@ -2509,7 +2382,7 @@ async def test_agent_manager_creates_deep_adapter_for_team_plan_alias(monkeypatc
                 }
             )
 
-    def fake_create_adapter(sdk=None, *, mode="agent"):
+    def fake_create_adapter(sdk=None, *, mode="agent", execution_route=None):
         calls.append({"adapter_mode": mode})
         return FakeAdapter()
 
@@ -2566,7 +2439,7 @@ async def test_agent_manager_uses_project_dir_in_cache_identity(monkeypatch, tmp
             self.sub_mode = sub_mode
             created.append(self)
 
-    def fake_create_adapter(sdk=None, *, mode="agent"):
+    def fake_create_adapter(sdk=None, *, mode="agent", execution_route=None):
         return FakeAdapter()
 
     monkeypatch.setattr(interface_module, "SkillManager", FakeSkillManager)

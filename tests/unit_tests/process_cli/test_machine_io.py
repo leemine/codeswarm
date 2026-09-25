@@ -261,7 +261,13 @@ def test_nonfinite_json_constants_are_rejected(constant: str) -> None:
 def test_deeply_nested_json_is_reported_as_invalid_input() -> None:
     document = "[" * 2000 + "0" + "]" * 2000
 
-    with pytest.raises(MachineInputError, match="valid JSON document"):
+    # CPython may reject this at the JSON decoder recursion boundary or decode
+    # it as a non-object before the schema guard rejects it.  Both are safe
+    # INVALID_INPUT outcomes and neither exposes the input.
+    with pytest.raises(
+        MachineInputError,
+        match=r"valid JSON document|JSON object",
+    ):
         read_run_input("-", stdin=io.StringIO(document))
 
 
