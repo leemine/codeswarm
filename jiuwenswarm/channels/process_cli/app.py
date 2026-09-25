@@ -222,8 +222,9 @@ async def _create_session(
     renderer: EventRenderer,
     *,
     request_id: str,
+    chat_bootstrap: bool = False,
 ) -> str:
-    arguments = str(args.prompt or "").strip().lower()
+    arguments = "" if chat_bootstrap else str(args.prompt or "").strip().lower()
     if arguments not in {"", "--persist", "--persist-session"}:
         raise SessionProvisionError(
             "usage: /new [--persist|--persist-session]",
@@ -254,6 +255,10 @@ async def _create_session(
                 project_dir="",
                 cwd=cwd,
                 work_mode=args.work_mode,
+                execution_profile_id=(
+                    str(getattr(args, "execution_profile", "") or "").strip()
+                    or None
+                ),
             )
         )
         result = prepared.result
@@ -722,10 +727,22 @@ async def run(
             return 0
         if operation != CHAT_OPERATION:
             raise ValueError(f"unsupported process CLI operation: {operation}")
-        session_id = await client.create_or_resume_session(
-            channel_id=CHANNEL_ID,
-            session_id=args.session,
-        )
+        requested_profile = str(
+            getattr(args, "execution_profile", "") or ""
+        ).strip()
+        if requested_profile and not session_id:
+            session_id = await _create_session(
+                client,
+                args,
+                renderer,
+                request_id=f"{request_id}-session",
+                chat_bootstrap=True,
+            )
+        else:
+            session_id = await client.create_or_resume_session(
+                channel_id=CHANNEL_ID,
+                session_id=args.session,
+            )
         _write_worker_result(
             args,
             operation=CHAT_OPERATION,

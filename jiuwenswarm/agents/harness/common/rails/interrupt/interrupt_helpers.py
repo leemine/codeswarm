@@ -899,6 +899,7 @@ def convert_interactions_to_ask_user_question(
     interactions = list(_iter_interactions(state_outputs))
     if not interactions:
         return None
+
     locator_rows = [
         (
             interaction,
@@ -932,6 +933,27 @@ def convert_interactions_to_ask_user_question(
     # A live host-owned locator takes priority and cannot be reclassified by a
     # query-shaped payload or a parallel ask_user shell.
     if not live_interactions:
+        # Protocol harness providers expose host questions as a small,
+        # provider-neutral envelope.  It is authoritative interaction state,
+        # not a permission request.  Locator validation above intentionally
+        # runs first so this shape cannot reclassify a host-owned permission.
+        for interaction in interactions:
+            request_id, value_obj = _extract_interaction_parts(interaction)
+            if (
+                not isinstance(value_obj, Mapping)
+                or value_obj.get("kind") != "user_input"
+            ):
+                continue
+            generic_questions = _generic_user_input_questions(value_obj)
+            if request_id and generic_questions:
+                return {
+                    "event_type": "chat.ask_user_question",
+                    "request_id": request_id,
+                    "questions": generic_questions,
+                    "source": "ask_user_interrupt",
+                }
+            return None
+
         for interaction in interactions:
             request_id, value_obj = _extract_interaction_parts(interaction)
             if not request_id:
@@ -1086,6 +1108,42 @@ def _extract_interaction_parts(interaction: Any) -> tuple[str, Any]:
         return "", None
 
     return str(request_id or "").strip(), value_obj
+
+
+def _generic_user_input_questions(value_obj: Any) -> list[dict[str, Any]] | None:
+    """Project the provider-neutral ``kind=user_input`` protocol envelope."""
+
+    if not isinstance(value_obj, Mapping) or value_obj.get("kind") != "user_input":
+        return None
+
+    provider_data = value_obj.get("provider_data")
+    if isinstance(provider_data, Mapping):
+        opencode = provider_data.get("opencode")
+        if isinstance(opencode, Mapping):
+            raw_questions = opencode.get("questions")
+            if isinstance(raw_questions, list) and raw_questions and all(
+                isinstance(question, Mapping) for question in raw_questions
+            ):
+                return _build_multi_questions(raw_questions)
+
+    prompt = str(value_obj.get("prompt") or "").strip()
+    if not prompt:
+        return None
+    raw_choices = value_obj.get("choices")
+    choices = raw_choices if isinstance(raw_choices, (list, tuple)) else ()
+    return _build_multi_questions(
+        [
+            {
+                "question": prompt,
+                "header": "Question",
+                "options": [
+                    {"label": str(choice), "description": ""}
+                    for choice in choices
+                    if str(choice).strip()
+                ],
+            }
+        ]
+    )
 
 
 def _extract_questions_from_value(value_obj: Any) -> list | None:

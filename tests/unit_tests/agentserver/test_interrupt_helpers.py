@@ -1064,6 +1064,90 @@ def test_convert_interactions_derives_prompt_from_the_calls_query():
     assert question["question"] == "Please provide the details for your follow-up:"
     assert question["inputs"] == [{"type": "date", "name": "d"}]
 
+
+def test_protocol_user_input_projects_as_question_not_permission():
+    payload = convert_interactions_to_ask_user_question(
+        [
+            {
+                "id": "opencode-question:question-1",
+                "value": {
+                    "kind": "user_input",
+                    "prompt": "OC6: Continue OC6?\n  - Yes",
+                    "choices": ["Yes"],
+                    "provider_data": {
+                        "opencode": {
+                            "questions": [
+                                {
+                                    "question": "Continue OC6?",
+                                    "header": "OC6",
+                                    "options": [
+                                        {"label": "Yes", "description": "continue"}
+                                    ],
+                                }
+                            ]
+                        }
+                    },
+                },
+            }
+        ]
+    )
+
+    assert payload is not None
+    assert payload["source"] == "ask_user_interrupt"
+    assert payload["request_id"] == "opencode-question:question-1"
+    assert payload["questions"][0]["question"] == "Continue OC6?"
+    assert payload["questions"][0]["header"] == "OC6"
+    assert payload["questions"][0]["options"][0] == {
+        "label": "Yes",
+        "description": "continue",
+    }
+
+
+def test_protocol_user_input_falls_back_to_prompt_and_choices():
+    payload = convert_interactions_to_ask_user_question(
+        [
+            {
+                "id": "generic-question",
+                "value": {
+                    "kind": "user_input",
+                    "prompt": "Continue?",
+                    "choices": ["Yes", "No"],
+                    "provider_data": {},
+                },
+            }
+        ]
+    )
+
+    assert payload is not None
+    assert payload["source"] == "ask_user_interrupt"
+    assert payload["questions"][0]["question"] == "Continue?"
+    assert [option["label"] for option in payload["questions"][0]["options"]] == [
+        "Yes",
+        "No",
+        "Other",
+    ]
+
+
+def test_protocol_user_input_cannot_reclassify_live_permission_locator():
+    interaction = SimpleNamespace(
+        id="permission-call",
+        value={
+            "kind": "user_input",
+            "prompt": "Looks like a question",
+            "choices": ["Yes"],
+            "tool_name": "bash",
+        },
+    )
+    queue = _bind_single_permission_interaction(interaction)
+
+    payload = convert_interactions_to_ask_user_question(
+        [interaction], root_permission_queue=queue
+    )
+
+    assert payload is not None
+    assert payload["source"] == "permission_interrupt"
+    assert payload["questions"][0]["card_id"] == "invocation:permission-call"
+
 def test_permission_interrupt_uses_ask_title_from_metadata():
     from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
         extract_question_from_interaction,

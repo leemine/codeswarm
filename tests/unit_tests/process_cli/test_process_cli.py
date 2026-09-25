@@ -370,6 +370,7 @@ def _args(tmp_path: Path, **overrides) -> argparse.Namespace:
         "cwd": str(tmp_path),
         "project_dir": str(tmp_path),
         "trusted_dir": [],
+        "execution_profile": None,
         "mode": "code.normal",
         "work_mode": "code",
         "output": "jsonl",
@@ -616,6 +617,37 @@ async def test_one_command_owns_one_runtime_lifecycle(
     output = capsys.readouterr().out
     assert '"event_type": "chat.delta"' in output
     assert '"event_type": "chat.final"' in output
+
+
+@pytest.mark.asyncio
+async def test_explicit_execution_profile_provisions_before_first_chat(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class ProfileClient(SessionOperationClient):
+        async def prepare_session_create(self, provision_input):
+            assert provision_input.execution_profile_id == "opencode-oc6"
+            return await super().prepare_session_create(provision_input)
+
+    client = ProfileClient()
+    monkeypatch.setattr(app, "InProcessRuntimeClient", lambda: client)
+
+    result = await app.run(
+        _args(tmp_path, execution_profile="opencode-oc6"),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert result == 0
+    assert "session:process_cli:" not in client.calls
+    assert client.calls == [
+        "start",
+        "prepare:create::False:code.normal",
+        "commit:create:after_result_delivery",
+        "stream:process_cli_created",
+        "cleanup:process_cli:process_cli_created",
+        "close",
+    ]
 
 
 @pytest.mark.asyncio

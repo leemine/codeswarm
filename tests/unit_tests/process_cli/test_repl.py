@@ -30,6 +30,7 @@ def _args(**overrides) -> argparse.Namespace:
         "cwd": None,
         "project_dir": None,
         "trusted_dir": [],
+        "execution_profile": None,
         "mode": "code.normal",
         "work_mode": "code",
         "output": "human",
@@ -86,6 +87,14 @@ def test_process_cli_help_uses_chinese_labels() -> None:
     assert "显示帮助信息并退出" in help_text
 
 
+def test_parser_accepts_execution_profile_for_new_session() -> None:
+    args = build_parser().parse_args(
+        ["--execution-profile", "opencode-oc6", "task"]
+    )
+
+    assert args.execution_profile == "opencode-oc6"
+
+
 @pytest.mark.parametrize(
     ("mode", "work_mode", "expected"),
     [
@@ -130,7 +139,11 @@ async def test_interactive_prompt_keeps_existing_text(monkeypatch) -> None:
 
 def test_worker_command_uses_a_fresh_process_entry_and_runtime_session() -> None:
     command = repl._worker_command(
-        _args(timeout=30.0, trusted_dir=["D:/trusted"]),
+        _args(
+            timeout=30.0,
+            trusted_dir=["D:/trusted"],
+            execution_profile="opencode-oc6",
+        ),
         prompt_file="D:/temp/prompt.txt",
         session_id="process_cli_session_1",
         session_result_file="D:/temp/session.txt",
@@ -145,6 +158,7 @@ def test_worker_command_uses_a_fresh_process_entry_and_runtime_session() -> None
     assert command[command.index("--session") + 1] == "process_cli_session_1"
     assert command[command.index("--mode") + 1] == "code.normal"
     assert command[command.index("--work-mode") + 1] == "code"
+    assert command[command.index("--execution-profile") + 1] == "opencode-oc6"
     assert command[command.index("--_prompt-file") + 1] == "D:/temp/prompt.txt"
     assert "inspect this project" not in command
     assert "--_operation" not in command

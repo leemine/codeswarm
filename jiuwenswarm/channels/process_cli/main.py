@@ -157,6 +157,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="可信目录；可重复指定多个目录。",
     )
+    parser.add_argument(
+        "--execution-profile",
+        help="为新会话选择服务端 execution profile；已有会话沿用创建时锁定值。",
+    )
     parser.add_argument("--mode", default="code.normal", help="Runtime 运行模式。")
     parser.add_argument(
         "--work-mode",

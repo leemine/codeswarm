@@ -111,6 +111,11 @@ def _worker_command(
         command.extend(("--project-dir", args.project_dir))
     for trusted_dir in args.trusted_dir:
         command.extend(("--trusted-dir", trusted_dir))
+    execution_profile = str(
+        getattr(args, "execution_profile", "") or ""
+    ).strip()
+    if execution_profile:
+        command.extend(("--execution-profile", execution_profile))
     if args.timeout is not None:
         command.extend(("--timeout", str(args.timeout)))
     if args.show_reasoning:
