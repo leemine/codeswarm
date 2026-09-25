@@ -487,7 +487,8 @@ async def test_stream_keepalive_shutdown_does_not_depend_on_task_cancellation(
 
     assert completed_without_cancellation is True
     assert swallowed_cancellation.is_set() is False
-    assert not ws.sent
+    assert [json.loads(payload)["sequence"] for payload in ws.sent] == [0]
+    assert parse_agent_server_wire_chunk(json.loads(ws.sent[0])).is_complete
     assert not server._session_stream_tasks
 
 
@@ -843,5 +844,6 @@ async def test_stream_keepalive_rechecks_stop_after_waiting_for_send_lock(
 
     await server._handle_stream_impl(ws, request, DelayedLock())
 
-    assert not ws.sent
+    assert [json.loads(payload)["sequence"] for payload in ws.sent] == [0]
+    assert parse_agent_server_wire_chunk(json.loads(ws.sent[0])).is_complete
     assert not server._session_stream_tasks

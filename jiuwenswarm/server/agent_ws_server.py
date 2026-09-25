@@ -482,7 +482,7 @@ async def _stop_stream_keepalive(
     keepalive_stop_event: asyncio.Event,
     stream_activity_event: asyncio.Event,
     request_id: str,
-) -> None:
+) -> bool:
     """Stop an owned stream keepalive without blocking its owner indefinitely."""
     keepalive_stop_event.set()
     stream_activity_event.set()
@@ -528,8 +528,9 @@ async def _stop_stream_keepalive(
                 request_id,
             )
         )
-        return
+        return False
     _consume_keepalive_task_result(keepalive_task, request_id)
+    return True
 
 
 @dataclass(slots=True)
@@ -605,6 +606,7 @@ class _StreamKeepalive:
         self._stop_event = asyncio.Event()
         self._activity_event = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        self._stop_attempted = False
 
     def start(self) -> None:
         """Start sending keepalives while the stream is idle."""
@@ -624,12 +626,15 @@ class _StreamKeepalive:
         self._stop_event.set()
         self._activity_event.set()
 
-    async def stop(self) -> None:
+    async def stop(self) -> bool:
         """Join the owned task within the configured total time budget."""
         self.signal_stop()
         if self._task is None:
-            return
-        await _stop_stream_keepalive(
+            return True
+        if self._stop_attempted:
+            return self._task.done()
+        self._stop_attempted = True
+        return await _stop_stream_keepalive(
             self._task,
             self._stop_event,
             self._activity_event,
@@ -3883,7 +3888,19 @@ class AgentWebSocketServer:
                 chunk_count += 1
                 saw_terminal_chunk = saw_terminal_chunk or event.is_complete
                 # 通知 keepalive 有真实 chunk 发送，重置空闲计时。
-                keepalive.notify_activity(terminal=event.is_complete)
+                if event.is_complete:
+                    # A terminal frame must never queue behind a keepalive send
+                    # that may be stuck in the transport. Stop the auxiliary
+                    # owner before the terminal claims the shared send lock.
+                    if not await keepalive.stop():
+                        logger.error(
+                            "[AgentWebSocketServer] terminal chunk skipped because "
+                            "keepalive transport ownership was not released: request_id=%s",
+                            request.request_id,
+                        )
+                        return
+                else:
+                    keepalive.notify_activity()
                 try:
                     sent_original = await self._send_runtime_event(
                         ws,
@@ -3919,14 +3936,28 @@ class AgentWebSocketServer:
                     payload={"is_complete": True},
                     is_complete=True,
                 )
-                keepalive.notify_activity(terminal=True)
-                await self._send_runtime_event(
-                    ws,
-                    terminal,
-                    send_lock,
-                    streaming=True,
-                    sequence=chunk_count,
-                )
+                if not await keepalive.stop():
+                    logger.error(
+                        "[AgentWebSocketServer] synthetic terminal skipped because "
+                        "keepalive transport ownership was not released: request_id=%s",
+                        request.request_id,
+                    )
+                    return
+                try:
+                    await self._send_runtime_event(
+                        ws,
+                        terminal,
+                        send_lock,
+                        streaming=True,
+                        sequence=chunk_count,
+                    )
+                except WebSocketConnectionClosed:
+                    logger.info(
+                        "[AgentWebSocketServer] synthetic terminal skipped after "
+                        "WebSocket closed: request_id=%s",
+                        request.request_id,
+                    )
+                    return
                 chunk_count += 1
             if resume_state is not None and resume_state.waiting_user:
                 outcome_tracker.waiting_user = True
