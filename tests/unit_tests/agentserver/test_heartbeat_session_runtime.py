@@ -1881,3 +1881,376 @@ async def test_delete_waiting_heartbeat_rejects_late_answer_and_releases_owner(m
         assert chain.agent.control_requests == []
     finally:
         await _finish(chain)
+
+
+async def _external_provider_chain(make_chain, tmp_path, monkeypatch, *, fail_close=0):
+    """Use the real Facade, ExecutionSession, IO and serialized Provider boundary."""
+    from openjiuwen.harness.engine import HarnessEngine
+    from openjiuwen.harness_protocol import (
+        HarnessCapability, HarnessCard, TurnError, TurnEventKind, TurnResult, TurnStatus,
+    )
+    from openjiuwen.harness_providers.base import SerializedTurnHarness
+    from jiuwenswarm.runtime.harness import bridge
+    from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import EngineAgentAdapter
+    from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+    from tests.unit_tests.runtime.harness.test_external_execution_route import _route
+
+    class Provider(SerializedTurnHarness):
+        card = HarnessCard(
+            name="controlled", implementation_version="1",
+            capabilities=frozenset({HarnessCapability.NATIVE_TOOLS}),
+        )
+
+        def __init__(self, first):
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.close_entered = asyncio.Event()
+            self.allow_close = asyncio.Event()
+            self.release = asyncio.Event()
+            self.exited = asyncio.Event()
+            self.close_failed = asyncio.Event()
+            self.close_calls = 0
+            self.fail_close = fail_close if first else 0
+            self.sent = []
+            self.hold_receipt = False
+            self.receipt_accepted = asyncio.Event()
+            self.return_receipt = asyncio.Event()
+            self.terminal_kind = TurnEventKind.FINISHED
+            if not first:
+                self.allow_close.set()
+                self.release.set()
+
+        async def _open_session(self, context):
+            return "same-provider-session"
+
+        async def send(self, content, **kwargs):
+            receipt = await super().send(content, **kwargs)
+            self.sent.append(receipt)
+            self.receipt_accepted.set()
+            if self.hold_receipt:
+                await self.return_receipt.wait()
+            return receipt
+
+        async def _execute_turn(self, turn):
+            self.entered.set()
+            await self.release.wait()
+            if self.terminal_kind is TurnEventKind.FAILED:
+                return self.terminal_kind, TurnResult(
+                    status=TurnStatus.FAILED, error=TurnError(message="provider failed"),
+                )
+            if self.terminal_kind is TurnEventKind.ABORTED:
+                return self.terminal_kind, TurnResult(status=TurnStatus.INTERRUPTED)
+            return self.terminal_kind, TurnResult(status=TurnStatus.COMPLETED)
+
+        async def _close_session(self):
+            self.close_calls += 1
+            self.close_entered.set()
+            await self.allow_close.wait()
+            if self.fail_close:
+                self.fail_close -= 1
+                self.close_failed.set()
+                raise RuntimeError("owned Provider exit not confirmed")
+            self.release.set()
+            self.exited.set()
+
+    providers = []
+
+    def build(spec, *, binding):
+        provider = Provider(not providers)
+        providers.append(provider)
+        return HarnessEngine(binding, provider)
+
+    monkeypatch.setattr(bridge, "create_harness_engine", build)
+    monkeypatch.setattr(JiuWenSwarm, "_prepare_skill_library", staticmethod(lambda: None))
+    chain = await make_chain()
+    route = _route(tmp_path / "provider", session_id=SESSION)
+    adapter = EngineAgentAdapter(route)
+    adapter.set_heartbeat_service(chain.heartbeat)
+    await adapter.create_instance()
+    facade = JiuWenSwarm()
+    facade._adapter = adapter
+    facade.reconcile_session_mcp = AsyncMock()
+    chain.foreground_prepared = asyncio.Event()
+
+    async def prepare(request, channel_id, **kwargs):
+        request.params["mode"] = chain.mode
+        if not chain.runtime.owns_heartbeat_execution(SESSION, request.request_id):
+            chain.foreground_prepared.set()
+        return "agent", "normal", facade
+
+    chain.runtime._prepare_chat_turn = prepare
+    chain.facade = facade
+    chain.adapter = adapter
+    chain.providers = providers
+    return chain
+
+
+@pytest.mark.parametrize("action", ["chat", "set", "resume", "pause", "clear"])
+async def test_external_heartbeat_preemption_waits_for_provider_exit(
+    make_chain, tmp_path, monkeypatch, action,
+):
+    chain = await _external_provider_chain(make_chain, tmp_path, monkeypatch)
+    old = chain.providers[0]
+    original_session = chain.adapter.execution_session
+    original_gateway = chain.adapter._tool_gateway
+    user = None
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        await asyncio.wait_for(old.entered.wait(), 2)
+        request = _user_request(chain)
+        if action != "chat":
+            request.req_method = ReqMethod.COMMAND_GOAL
+            request.params["action"] = action
+
+        async def foreground():
+            return [event async for event in chain.runtime.stream(request, trigger_hook=False)]
+
+        user = asyncio.create_task(foreground())
+        await asyncio.wait_for(old.close_entered.wait(), 2)
+        assert not user.done()
+        assert not chain.foreground_prepared.is_set()
+        assert SESSION in chain.heartbeat.execution.active_session_ids()
+        assert not next(e for e in _executions(chain) if e.work_kind is SessionWorkKind.HEARTBEAT).state.terminal
+        assert len(chain.providers) == 1
+        old.allow_close.set()
+        await asyncio.wait_for(user, 3)
+        assert old.exited.is_set()
+        assert original_session.closed
+        assert chain.foreground_prepared.is_set()
+        assert (await _settle(chain)).run_state.last_run_status == "cancelled"
+        if action in {"chat", "set", "resume"}:
+            assert len(chain.providers) == 2
+            assert chain.adapter.execution_session.binding is original_session.binding
+            assert chain.adapter._tool_gateway is not original_gateway
+            names = {tool.name for tool in await chain.adapter._tool_gateway.definitions()}
+            assert len(names) == 15
+    finally:
+        old.allow_close.set()
+        if user is not None and not user.done():
+            user.cancel()
+            await asyncio.gather(user, return_exceptions=True)
+        await _finish(chain)
+        await chain.facade.cleanup()
+
+
+async def test_external_heartbeat_failed_exit_retains_owner_until_explicit_retry(
+    make_chain, tmp_path, monkeypatch,
+):
+    chain = await _external_provider_chain(make_chain, tmp_path, monkeypatch, fail_close=1)
+    old = chain.providers[0]
+    old.allow_close.set()
+    chain.heartbeat.execution._cancel_timeout_seconds = 0.05
+    original_session = chain.adapter.execution_session
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        await asyncio.wait_for(old.entered.wait(), 2)
+        run_id = (await chain.heartbeat.store.get_job(chain.job.id)).run_state.current_run_id
+        assert not await chain.heartbeat.execution.cancel(run_id, reason="user_request")
+        await asyncio.wait_for(old.close_failed.wait(), 2)
+        assert chain.adapter.execution_session is original_session
+        assert SESSION in chain.heartbeat.execution.active_session_ids()
+        assert not old.exited.is_set()
+        assert len(chain.providers) == 1
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert old.close_calls == 1  # no autonomous retry after failure
+        assert (await chain.heartbeat.store.get_job(chain.job.id)).run_state.current_run_id == run_id
+        assert await chain.heartbeat.execution.cancel(run_id, reason="user_request")
+        assert old.close_calls == 2
+        assert old.exited.is_set()
+        assert (await _settle(chain)).run_state.last_run_status == "cancelled"
+        await _user_turn(chain)
+        assert len(chain.providers) == 2
+        assert chain.adapter.execution_session.binding is original_session.binding
+    finally:
+        old.allow_close.set()
+        old.fail_close = 0
+        await _finish(chain)
+        await chain.facade.cleanup()
+
+
+async def test_external_browser_disconnect_keeps_provider_detached(
+    make_chain, tmp_path, monkeypatch,
+):
+    chain = await _external_provider_chain(make_chain, tmp_path, monkeypatch)
+    provider = chain.providers[0]
+    reader = asyncio.create_task(_user_turn(chain))
+    try:
+        await asyncio.wait_for(provider.entered.wait(), 2)
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+        assert not provider.close_entered.is_set()
+        assert not chain.adapter.execution_session.closed
+        provider.release.set()
+    finally:
+        provider.allow_close.set()
+        provider.release.set()
+        await _finish(chain)
+        await chain.facade.cleanup()
+
+
+@pytest.mark.parametrize("ending", ["failed", "aborted", "unknown"])
+async def test_external_heartbeat_unconfirmed_end_keeps_owner_until_stop(
+    make_chain, tmp_path, monkeypatch, ending,
+):
+    from openjiuwen.harness_protocol import TurnEventKind
+
+    chain = await _external_provider_chain(make_chain, tmp_path, monkeypatch)
+    provider = chain.providers[0]
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        await asyncio.wait_for(provider.entered.wait(), 2)
+        if ending == "unknown":
+            # End the sole observation channel while the fake Provider task is
+            # still alive. EOF must not become successful execution ownership.
+            await provider._event_buffer.close()
+        else:
+            provider.terminal_kind = (
+                TurnEventKind.FAILED if ending == "failed" else TurnEventKind.ABORTED
+            )
+            provider.release.set()
+        await asyncio.wait_for(provider.close_entered.wait(), 2)
+        assert SESSION in chain.heartbeat.execution.active_session_ids()
+        assert not provider.exited.is_set()
+        assert not next(e for e in _executions(chain) if e.work_kind is SessionWorkKind.HEARTBEAT).state.terminal
+        provider.allow_close.set()
+        assert (await _settle(chain)).run_state.last_run_status == "failed"
+        assert provider.exited.is_set()
+    finally:
+        provider.allow_close.set()
+        provider.release.set()
+        await _finish(chain)
+        await chain.facade.cleanup()
+
+
+async def test_external_heartbeat_cancel_covers_accepted_send_without_receipt(
+    make_chain, tmp_path, monkeypatch,
+):
+    chain = await _external_provider_chain(make_chain, tmp_path, monkeypatch)
+    provider = chain.providers[0]
+    provider.hold_receipt = True
+    cancellation = None
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        await asyncio.wait_for(provider.receipt_accepted.wait(), 2)
+        await asyncio.wait_for(provider.entered.wait(), 2)
+        run_id = (await chain.heartbeat.store.get_job(chain.job.id)).run_state.current_run_id
+        cancellation = asyncio.create_task(chain.heartbeat.execution.cancel(run_id))
+        await asyncio.wait_for(provider.close_entered.wait(), 2)
+        assert not provider.return_receipt.is_set()
+        assert SESSION in chain.heartbeat.execution.active_session_ids()
+        provider.allow_close.set()
+        assert await asyncio.wait_for(cancellation, 2)
+        assert provider.exited.is_set()
+        assert (await _settle(chain)).run_state.last_run_status == "cancelled"
+    finally:
+        provider.allow_close.set()
+        provider.return_receipt.set()
+        if cancellation is not None:
+            await cancellation
+        await _finish(chain)
+        await chain.facade.cleanup()
+
+
+async def test_external_heartbeat_parent_exit_precedes_child_cleanup_and_retry(
+    make_chain, tmp_path, monkeypatch,
+):
+    chain = await _external_provider_chain(make_chain, tmp_path, monkeypatch)
+    provider = chain.providers[0]
+    subagents = chain.adapter._subagent_runtime
+    gateway = chain.adapter._tool_gateway
+    factory_close = subagents._factory.close_pending
+    child_cleanup_calls = 0
+
+    async def close_child():
+        nonlocal child_cleanup_calls
+        child_cleanup_calls += 1
+        assert provider.exited.is_set()
+        assert chain.adapter.execution_session.closed
+        if child_cleanup_calls == 1:
+            raise RuntimeError("child exit unconfirmed")
+        await factory_close()
+
+    monkeypatch.setattr(subagents._factory, "close_pending", close_child)
+    chain.heartbeat.execution._cancel_timeout_seconds = 0.05
+    cancellation = None
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        await asyncio.wait_for(provider.entered.wait(), 2)
+        run_id = (await chain.heartbeat.store.get_job(chain.job.id)).run_state.current_run_id
+        cancellation = asyncio.create_task(chain.heartbeat.execution.cancel(run_id))
+        await asyncio.wait_for(provider.close_entered.wait(), 2)
+        assert child_cleanup_calls == 0
+        assert chain.adapter._subagent_runtime is subagents
+        provider.allow_close.set()
+        assert not await cancellation
+        assert child_cleanup_calls == 1
+        assert chain.adapter._subagent_runtime is subagents
+        assert chain.adapter._tool_gateway is gateway
+        assert len(chain.providers) == 1
+        assert SESSION in chain.heartbeat.execution.active_session_ids()
+        assert await chain.heartbeat.execution.cancel(run_id)
+        assert child_cleanup_calls == 2
+        assert subagents._closed
+        await _user_turn(chain)
+        assert len(chain.providers) == 2
+        assert chain.adapter._subagent_runtime is not subagents
+        assert chain.adapter._tool_gateway is not gateway
+        from openjiuwen.harness_protocol import ToolInvocation
+        result = await chain.adapter._tool_gateway.invoke(
+            ToolInvocation("after-restart", "subagent_list", {}),
+        )
+        assert not result.is_error
+    finally:
+        provider.allow_close.set()
+        monkeypatch.setattr(subagents._factory, "close_pending", factory_close)
+        if cancellation is not None:
+            await cancellation
+        await _finish(chain)
+        await chain.facade.cleanup()
+
+
+async def test_external_heartbeat_rebuild_failure_retains_new_parent_cache_for_retry(
+    make_chain, tmp_path, monkeypatch,
+):
+    from jiuwenswarm.server.runtime.agent_adapter import engine_adapter
+
+    chain = await _external_provider_chain(make_chain, tmp_path, monkeypatch)
+    provider = chain.providers[0]
+    original_session = chain.adapter.execution_session
+    build = engine_adapter.prepare_execution_session
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("replacement construction unavailable")
+        return build(*args, **kwargs)
+
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        await asyncio.wait_for(provider.entered.wait(), 2)
+        provider.allow_close.set()
+        run_id = (await chain.heartbeat.store.get_job(chain.job.id)).run_state.current_run_id
+        assert await chain.heartbeat.execution.cancel(run_id)
+        monkeypatch.setattr(engine_adapter, "prepare_execution_session", fail_once)
+        events = await _user_turn(chain)
+        assert any(event.event_type == "chat.error" for event in events)
+        assert chain.adapter.execution_session is original_session
+        parent = chain.adapter._subagent_runtime.parent_session
+        gateway = chain.adapter._tool_gateway
+        assert len(chain.providers) == 1
+        retry = _user_request(chain)
+        retry.request_id = "retry-user-request"
+        _ = [event async for event in chain.runtime.stream(retry, trigger_hook=False)]
+        assert calls == 2
+        assert chain.adapter._subagent_runtime.parent_session is parent
+        assert chain.adapter._tool_gateway is gateway
+        assert chain.adapter.execution_session.binding is original_session.binding
+        assert len(chain.providers) == 2
+    finally:
+        provider.allow_close.set()
+        monkeypatch.setattr(engine_adapter, "prepare_execution_session", build)
+        await _finish(chain)
+        await chain.facade.cleanup()

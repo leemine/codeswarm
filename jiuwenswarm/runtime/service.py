@@ -409,6 +409,17 @@ class AgentRuntime:
             for execution in snapshot.executions
         )
 
+    def owns_heartbeat_execution(self, session_id: str, request_id: str) -> bool:
+        """Identify an exact live Heartbeat from the existing execution registry."""
+        snapshot = self._session_coordinator.snapshot_session(session_id)
+        return snapshot is not None and any(
+            execution.request_id == request_id
+            and execution.generation == snapshot.generation
+            and execution.work_kind is SessionWorkKind.HEARTBEAT
+            and not execution.state.terminal
+            for execution in snapshot.executions
+        )
+
     async def _mark_pending_interaction(self, event: RuntimeEvent) -> None:
         key = (
             "request_id"

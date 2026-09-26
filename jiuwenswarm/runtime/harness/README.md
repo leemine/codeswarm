@@ -265,6 +265,16 @@ Goal records. After a cold restart, a persisted Heartbeat run without its exact
 live execution owner is marked failed and its schedule disabled, including any
 queued run. Unknown side effects require explicit resume through the existing
 controls. Successfully completed runs with a remaining schedule recover normally.
+
+Cancelling an External Heartbeat retains its Runtime owner until the original
+`ExecutionSession.stop()` confirms exit, then closes the existing child runtime.
+Abort requests, synthetic ABORTED events, failed output and EOF are not exit
+confirmation. An unconfirmed stop retains the exact instance and admission;
+a later explicit cancellation retries cleanup. Only after parent, product
+transport and children have stopped can the original binding/checkpoint recovery
+construct a replacement execution and fresh product gateway. Ordinary browser
+disconnection continues to detach output without stopping the Provider.
+
 External Goal product wiring and combined durable Goal recovery
 remain R1-09B, and External Team entry remains subject to its existing routing
 scope.
