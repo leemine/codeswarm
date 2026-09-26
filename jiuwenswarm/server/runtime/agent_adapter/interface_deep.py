@@ -133,6 +133,7 @@ from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
 from openjiuwen.harness.schema.config import SubAgentConfig
 
 from jiuwenswarm.server.runtime.agent_adapter import goal_control as _goal_control
+from jiuwenswarm.server.runtime.agent_adapter import goal_history as _goal_history
 
 from jiuwenswarm.server.runtime.session.history_io import (
     run_history_io, run_stream_parser, stream_chunk_writes_history,
@@ -433,7 +434,7 @@ from jiuwenswarm.server.runtime import extension_package_manager as equipment
 
 # Goal 用户历史：忙碌插队时先挂起，等上一轮→goal 边界（或流结束）再落盘，
 # 时间戳与 live「答完再入列」对齐。按 session 暂存，跨同 session 的并发 stream 共享。
-_pending_goal_objective_history: dict[str, dict[str, Any]] = {}
+_pending_goal_objective_history = _goal_history.pending_goal_objective_history
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     EVOLUTION_ACCEPT_LABELS,
@@ -14713,31 +14714,12 @@ class JiuWenSwarmDeepAdapter:
         defer: bool | None = None,
     ) -> None:
         """成功 set 后写入 objective 用户历史；忙碌时推迟到上一轮收尾后再写。"""
-        if str(action or "").strip().lower() != "set":
+        record_kwargs = _goal_history.objective_record(
+            request, action=action, result_type=result_type, goal_payload=goal_payload,
+        )
+        if record_kwargs is None:
             return
-        if result_type in {"goal_error", "goal_confirm_required", None}:
-            return
-        if not isinstance(goal_payload, dict):
-            return
-        objective = str(goal_payload.get("objective") or "").strip()
-        if not objective:
-            return
-        params = request.params if isinstance(request.params, dict) else {}
-        goal_id = str(goal_payload.get("goal_id") or "").strip() or None
         sid = request.session_id or "default"
-        record_kwargs: dict[str, Any] = {
-            "session_id": sid,
-            "request_id": request.request_id,
-            "channel_id": request.channel_id,
-            "role": "user",
-            "content": objective,
-            "channel_metadata": request.metadata,
-            "mode": params.get("mode", "unknown"),
-            "extra": {
-                "goal_id": goal_id,
-                "is_goal_objective_message": True,
-            },
-        }
         should_defer = (
             defer if defer is not None else self._should_defer_goal_objective_history(sid)
         )
@@ -14779,43 +14761,18 @@ class JiuWenSwarmDeepAdapter:
         goal_payload: dict[str, Any] | None,
     ) -> None:
         """Persist a goal-completed card once when status first becomes completed."""
-        if not isinstance(goal_payload, dict):
-            return
-        status = goal_payload.get("status")
-        status_value = getattr(status, "value", status)
-        if str(status_value or "").strip().lower() != "completed":
-            return
-        goal_id = str(goal_payload.get("goal_id") or "").strip()
-        if not goal_id:
-            return
-        sid = (session_id or "default").strip() or "default"
-        if await run_history_io(JiuWenSwarmDeepAdapter._goal_completed_history_exists, sid, goal_id):
-            return
-
-        evidence = ""
-        last_assessment = goal_payload.get("last_assessment")
-        if isinstance(last_assessment, dict):
-            evidence = str(last_assessment.get("evidence") or "").strip()
-        # Keep the existing frontend GoalCompletedCard wire format so history
-        # restore / localStorage merge keep working without a content-parser fork.
-        content = "goal.completed:" + json.dumps({"evidence": evidence}, ensure_ascii=False)
-        message_id = f"goal-completed-{goal_id}"
-        await run_history_io(append_history_record,
-            session_id=sid,
-            request_id=message_id,
-            channel_id=channel_id,
-            role="assistant",
-            content=content,
-            timestamp=time.time(),
-            channel_metadata=channel_metadata,
-            mode=mode,
-            extra={
-                "id": message_id,
-                "goal_id": goal_id,
-                "is_goal_completed_message": True,
-                "evidence": evidence,
-            },
+        record = _goal_history.completion_record(
+            session_id=session_id, channel_id=channel_id,
+            channel_metadata=channel_metadata, mode=mode, goal_payload=goal_payload,
         )
+        if record is None:
+            return
+        if await run_history_io(
+            JiuWenSwarmDeepAdapter._goal_completed_history_exists,
+            record["session_id"], record["extra"]["goal_id"],
+        ):
+            return
+        await run_history_io(append_history_record, timestamp=time.time(), **record)
 
     @staticmethod
     def _interaction_goal_updated_payload(payload: Any) -> dict[str, Any]:

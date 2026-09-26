@@ -51,6 +51,26 @@ def parse_goal_slash_intent(query: str) -> dict[str, Any] | None:
     return {"action": "set", "objective": args}
 
 
+def tui_goal_operation(request: AgentRequest) -> dict[str, Any] | None:
+    """Interpret only original TUI user text, never rendered or relayed input."""
+    from jiuwenswarm.common.session_message import SESSION_MESSAGE_INTERNAL_KEY
+
+    raw_params = getattr(request, "params", None)
+    raw_metadata = getattr(request, "metadata", None)
+    params = raw_params if isinstance(raw_params, dict) else {}
+    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+    if (
+        getattr(request, "req_method", None) != ReqMethod.CHAT_SEND
+        or str(getattr(request, "channel_id", None) or "").strip().lower() != "tui"
+        or wants_attach_goal(params)
+        or any(isinstance(container.get(SESSION_MESSAGE_INTERNAL_KEY), dict)
+               for container in (params, metadata))
+        or not isinstance(params.get("query"), str)
+    ):
+        return None
+    return parse_goal_slash_intent(params["query"])
+
+
 def structured_goal_operation(
     request: AgentRequest,
 ) -> dict[str, Any] | None:

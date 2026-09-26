@@ -275,9 +275,8 @@ transport and children have stopped can the original binding/checkpoint recovery
 construct a replacement execution and fresh product gateway. Ordinary browser
 disconnection continues to detach output without stopping the Provider.
 
-External Goal product wiring and combined durable Goal recovery
-remain R1-09B, and External Team entry remains subject to its existing routing
-scope.
+External Goal product wiring is described below. External Team entry remains
+subject to its existing routing scope.
 
 The local Codex regression drives a real CLI and product MCP endpoint against
 loopback model responses, creates a job, advances the scheduler clock, and
@@ -288,6 +287,63 @@ The persistent AgentServer owns scheduling for Web and Gateway CLI sessions.
 Process CLI uses a worker per request and closes that Runtime when the request
 ends; it currently has no idle Heartbeat host. A passing Provider CLI test or
 Gateway CLI test does not establish automatic follow-up in Process CLI.
+
+## External Goal (R1-09B)
+
+The existing Runtime stream producer drives `GoalAttemptDriver`; its original
+Session coordinator grants one External execution at a time. Ordinary user work
+gets priority at attempt boundaries. Controls and interaction answers use the
+existing control path without acquiring another execution permit. Native keeps
+its original supervisor and scheduling. No observer starts work, settles a Goal,
+or consumes a second Provider event stream.
+
+The parent has one `ExternalSubagentParentSession`, shared by Goal and the
+existing child registry. `GoalManager` remains the sole GoalRecord writer.
+`get_current_goal` and `submit_goal_report` join the original product gateway;
+reports require the exact root subject, Session, goal/revision/attempt and an
+ephemeral attempt token. An old report cannot be rebound to the current attempt.
+TUI slash controls use the original user text before prompt rendering, excluding
+cross-session messages. Web slash text remains ordinary chat. Unary set followed
+by explicit attach is supported without a second producer.
+
+Each admitted owner retains its configured assessor model snapshot. Assessment
+uses the shared GoalEvaluator and a separate no-tool `Model.invoke` call; it
+cannot trust a terminal self-report as completion evidence. Request model names
+select only server catalog entries. Login/request-credential model factories
+are explicitly unavailable in this initial External slice; no default model is
+silently substituted. Provider configuration and assessor configuration remain
+separate.
+
+Provider cumulative/delta/final usage is deduplicated by attempt, generation,
+turn and event sequence. The assessor's separate usage is accounted once, even
+when a late result must be rejected after cancellation. Missing input/output
+counts are not zero and are not reconstructed from total-only usage: External
+Goal stops with an explicit usage-unavailable result. Attempt and token budgets
+are checked at settlement, not a promise of an exact provider-side token cutoff.
+Unknown costs, including cancellation without usage, persist an accounting
+marker that rejects further set/resume in that Session. A confirmed process
+exit alone does not make an incomplete budget safe to resume.
+
+Attempt finals remain one root output stream until Goal assessment settles it.
+The original history writer stores the objective and stable completion card;
+refresh does not create another copy. Provider completion does not release the
+next execution until the original
+Facade history consumer finishes; detached completion waits for its durable
+terminal projection. A history write failure retains the permit.
+Goal stream loss conservatively confirms
+Provider exit and pauses. Explicit resume may start a new attempt only after a
+safe boundary; an attach never resends an unknown accepted input. Cold records
+with an unmatched attempt marker, unassessed attempt without a matching safe
+boundary, or failed persistence remain read-only and explain the recovery
+restriction. Delete that Session and create a new one when prior execution
+cannot be verified. This does not claim transparent cold resumption of an
+unknown pending tool or question. Ordinary chat keeps its existing detached
+output behavior.
+
+The local Goal CLI test exercises real Codex/MCP and a separate model client on
+loopback fixtures, including report identity, usage and unique history. Remote
+Native/Codex WebSocket/Gateway CLI and browser acceptance are separate opt-in
+gates; local unit or CLI success does not substitute for them.
 
 ## Same-engine External child execution (R1-03B3 / R1-05 OC4)
 

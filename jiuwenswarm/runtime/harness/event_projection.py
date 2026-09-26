@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -57,6 +58,10 @@ class _TurnProjection:
     final_seen: bool = False
     error_seen: bool = False
     delivery_failed: bool = False
+    goal_attempt: bool = False
+    goal_id: str | None = None
+    detached: bool = False
+    pending_terminal: dict[str, Any] | None = None
 
 
 class _HistoryPersistenceUnconfirmed(RuntimeError):
@@ -66,8 +71,12 @@ class _HistoryPersistenceUnconfirmed(RuntimeError):
 class ExternalEventProjection:
     """Track owned output and persist/push only after request ownership ends."""
 
-    def __init__(self, session_id: str) -> None:
+    def __init__(
+        self, session_id: str, *,
+        on_detached_terminal: Callable[[str], Awaitable[None]] | None = None,
+    ) -> None:
         self._session_id = session_id
+        self._on_detached_terminal = on_detached_terminal
         self._text_budget = OutputBudget()
         self._max_turns = 128
         self._turns: dict[str, _TurnProjection] = {}
@@ -109,6 +118,8 @@ class ExternalEventProjection:
         request_id: str,
         channel_id: str,
         mode: str,
+        goal_attempt: bool = False,
+        goal_id: str | None = None,
     ) -> None:
         if any(len(value.encode("utf-8")) > 1024 for value in (turn_id, request_id, channel_id, mode)):
             raise OutputBudgetExceeded("projection correlation identifier byte budget exhausted")
@@ -123,6 +134,8 @@ class ExternalEventProjection:
                 channel_id=channel_id or "web",
                 mode=mode or "unknown",
                 text=OutputText(budget=self._text_budget),
+                goal_attempt=goal_attempt,
+                goal_id=goal_id,
             ),
         )
 
@@ -142,7 +155,7 @@ class ExternalEventProjection:
             except OutputBudgetExceeded:
                 state.delivery_failed = True
                 raise
-        if item.terminal is not None:
+        if item.terminal is not None and not state.goal_attempt:
             self._turns.pop(turn_id, None)
             state.text.close()
             self._remember_terminal(turn_id)
@@ -155,18 +168,35 @@ class ExternalEventProjection:
         state: _TurnProjection | None = None,
     ) -> dict[str, Any] | None:
         if item.chunk is not None:
-            return parse_stream_chunk(
+            payload = parse_stream_chunk(
                 item.chunk,
                 _has_streamed_content=bool(state and state.text),
             )
+            if state is not None and state.goal_attempt and payload is not None:
+                if payload.get("event_type") == "chat.error":
+                    state.pending_terminal = payload
+                    return None
+                if payload.get("event_type") == "chat.final":
+                    # A Provider final belongs to an attempt. The existing
+                    # Goal owner must assess it before ending the root stream.
+                    content = str(payload.get("content") or "")
+                    prefix = state.text.read()
+                    if prefix:
+                        content = content[len(prefix):] if content.startswith(prefix) else ""
+                    return {"event_type": "chat.delta", "content": content} if content else None
+            return payload
         if item.terminal is not None:
             turn_id = item.turn_id or ""
-            return harness_terminal_payload(
+            payload = harness_terminal_payload(
                 item.terminal,
                 error=self._terminal_errors.pop(turn_id, None),
                 error_code=self._terminal_error_codes.pop(turn_id, None),
                 cancellation=self._terminal_cancellations.pop(turn_id, None),
             )
+            if state is not None and state.goal_attempt:
+                state.pending_terminal = payload
+                return None
+            return payload
         return None
 
     async def __call__(self, item: ProjectedOutput) -> None:
@@ -183,6 +213,7 @@ class ExternalEventProjection:
                 raise OutputBudgetExceeded("projection Turn count budget exhausted")
             state = self._fallback_state(turn_id)
             self._turns[turn_id] = state
+        state.detached = True
         if state.delivery_failed:
             if item.terminal is not None:
                 state.text.close()
@@ -207,6 +238,12 @@ class ExternalEventProjection:
                     payload,
                     delivery_id=self._delivery_id(turn_id, item, payload),
                 )
+            if (
+                item.terminal is not None
+                and not state.goal_attempt
+                and self._on_detached_terminal is not None
+            ):
+                await self._on_detached_terminal(turn_id)
             delivered = True
         except OutputBudgetExceeded:
             state.delivery_failed = True
@@ -222,11 +259,41 @@ class ExternalEventProjection:
             # Keep terminal projection state after an uncertain delivery.  A
             # reconnect/replay can reuse its stable delivery id, skip the
             # already-durable row, and retry only the product push.
-            if item.terminal is not None and delivered:
+            if item.terminal is not None and delivered and not state.goal_attempt:
                 self._terminal_errors.pop(turn_id, None)
                 self._turns.pop(turn_id, None)
                 state.text.close()
                 self._remember_terminal(turn_id)
+
+    async def finish_goal_turn(
+        self,
+        turn_id: str,
+        *,
+        terminal_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Release an assessed attempt; only its owner can finish the root.
+
+        ``None`` is an intermediate attempt, with no product terminal. This
+        same seam handles detached delivery without a second history writer.
+        Failed persistence retains the state so a retry uses the same key.
+        """
+        state = self._turns.get(turn_id)
+        if state is None or not state.goal_attempt:
+            return None
+        payload = dict(terminal_payload) if terminal_payload is not None else None
+        if payload is not None and state.goal_id:
+            payload.setdefault("goal_id", state.goal_id)
+        if payload is not None and state.detached:
+            if payload.get("event_type") == "chat.final" and not payload.get("content"):
+                payload["content"] = state.text.read()
+            await self._publish(
+                state, payload,
+                delivery_id=f"harness:{turn_id}:goal-root-terminal",
+            )
+        self._turns.pop(turn_id, None)
+        state.text.close()
+        self._remember_terminal(turn_id)
+        return None if state.detached else payload
 
     async def output_failed(self, error: OutputBudgetExceeded) -> None:
         for turn_id, state in tuple(self._turns.items()):
