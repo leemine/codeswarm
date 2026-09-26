@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import shlex
 import time
 from pathlib import Path
@@ -132,8 +131,69 @@ def _history(data, sid):
     )
 
 
+def _goal_tool_evidence(frames, sid, goal_id):
+    calls = {}
+    results = []
+    for frame in frames:
+        payload = frame.get("payload") or {}
+        if payload.get("session_id") != sid:
+            continue
+        if frame.get("event") == "chat.tool_call":
+            call = payload.get("tool_call") or {}
+            if call.get("tool_call_id"):
+                calls[(payload.get("request_id"), call["tool_call_id"])] = call
+        elif frame.get("event") == "chat.tool_result":
+            results.append(payload)
+
+    reads = [
+        payload for payload in results
+        if str(payload.get("tool_name", "")).endswith("get_current_goal")
+        and goal_id in json.dumps(payload)
+        and (payload.get("request_id"), payload.get("tool_call_id")) in calls
+    ]
+    assert reads, "Goal read tool did not return the current goal identity"
+    read_requests = {payload.get("request_id") for payload in reads}
+    reports = []
+    for payload in results:
+        key = (payload.get("request_id"), payload.get("tool_call_id"))
+        if (key not in calls or key[0] not in read_requests
+                or not str(payload.get("tool_name", "")).endswith("submit_goal_report")):
+            continue
+        call = calls[key]
+        assert str(call.get("name", "")).endswith("submit_goal_report")
+        arguments = call.get("arguments") or {}
+        if isinstance(arguments, str):
+            arguments = json.loads(arguments)
+        if arguments.get("status") != "complete":
+            continue
+        if "goal_id" in arguments:
+            assert arguments["goal_id"] == goal_id
+        raw = payload.get("raw_output")
+        if isinstance(raw, dict):
+            accepted = raw.get("result") == "report_accepted" and raw.get("status") == "complete"
+        else:
+            # External MCP exposes the tool's own rendered result, not agent
+            # prose or Native's raw dict. Correlate the actual call/result ID.
+            result = payload.get("result")
+            assert payload.get("is_error") is not True and payload.get("success") is not False
+            if isinstance(result, dict):
+                assert result.get("isError") is not True
+                texts = [item.get("text", "") for item in result.get("content", [])]
+            else:
+                texts = [result] if isinstance(result, str) else []
+            accepted = any(text.rstrip(".") == "Goal report accepted (status: complete)" for text in texts)
+        if accepted:
+            reports.append(key)
+    assert reports, "Goal report tool did not return an accepted correlated report"
+    return {
+        "goal_read_tool_call_ids": [payload["tool_call_id"] for payload in reads],
+        "goal_report_tool_call_ids": [call_id for _, call_id in reports],
+        "goal_report_request_ids": sorted({request_id for request_id, _ in reports if request_id}),
+    }
+
+
 async def _verify_completed(
-    channel, scope, data, sid, goal, objective, artifact, marker
+    channel, scope, data, sid, goal, objective, artifact, marker, *, defer_clear=False
 ):
     assert goal["status"] == "completed", goal
     assert goal["last_assessment"]["status"] == "complete", goal
@@ -167,32 +227,47 @@ async def _verify_completed(
     assert cards[0]["id"] == f"goal-completed-{goal_id}"
     # A real tool report must have reached the core sink; agent prose alone is
     # insufficient, even if the evaluator could infer completion from output.
-    log = (scope / "agentserver.log").read_text(errors="replace")
-    assert re.search(
-        r"\[GoalReportSink\] Report submitted:.*goal_id=" + re.escape(goal_id), log
-    )
-    tool_frames = [
-        frame
-        for frame in channel.frames
-        if str(frame.get("event", "")).startswith("chat.tool_")
-    ]
-    assert "get_current_goal" in json.dumps(tool_frames), (
-        "Goal read tool was not observed on the product stream"
-    )
-    start = len(channel.frames)
-    await channel.send("history.get", {"session_id": sid, "cursor": None, "limit": 100})
-    await channel.until(
-        lambda frame: (
-            frame.get("event") == "history.message"
-            and frame.get("payload", {}).get("status") == "done"
+    tool_evidence = _goal_tool_evidence(channel.frames, sid, goal_id)
+    cursor = None
+    readback = []
+    history_requests = []
+    seen_cursors = set()
+    while True:
+        start = len(channel.frames)
+        request_id = await channel.send(
+            "history.get", {"session_id": sid, "cursor": cursor, "limit": 50}
         )
-    )
-    readback = json.dumps(channel.frames[start:], ensure_ascii=False)
-    assert (
-        goal_id in readback
-        and "is_goal_completed_message" in readback
-        and "is_goal_objective_message" in readback
-    )
+        history_requests.append(request_id)
+
+        def belongs(frame):
+            payload = frame.get("payload") or {}
+            # Current history codec omits request_id on both channels. There is
+            # only one outstanding history request on this single consumer;
+            # session + cursor bind its response. Enforce ID when transmitted.
+            return (
+                frame.get("event") == "history.message"
+                and payload.get("session_id") == sid
+                and payload.get("cursor") == cursor
+                and payload.get("request_id", request_id) == request_id
+            )
+
+        history_result = await channel.until(
+            lambda frame: belongs(frame)
+            and frame["payload"].get("status") in {"done", "error"}
+        )
+        done = history_result["payload"]
+        assert done["status"] == "done", history_result
+        readback.extend(
+            frame["payload"]["message"] for frame in channel.frames[start:]
+            if belongs(frame) and isinstance(frame["payload"].get("message"), dict)
+        )
+        if not done.get("has_more"):
+            break
+        cursor = done.get("next_cursor")
+        assert cursor and cursor not in seen_cursors, done
+        seen_cursors.add(cursor)
+    for flag in ("is_goal_objective_message", "is_goal_completed_message"):
+        assert sum(bool(row.get(flag)) and row.get("goal_id") == goal_id for row in readback) == 1
     # Read-only refresh must not append another objective or completion card.
     refreshed = await channel.goal(sid, "get")
     assert refreshed["goal"]["goal_id"] == goal_id
@@ -204,9 +279,8 @@ async def _verify_completed(
         )
         == 1
     )
-    cleared = await channel.goal(sid, "clear")
-    assert cleared.get("goal") is None and cleared["cleared_goal"]["goal_id"] == goal_id
-    assert (await channel.goal(sid, "get")).get("goal") is None
+    if not defer_clear:
+        await _clear_goal(channel, sid, goal_id)
     return {
         "goal_id": goal_id,
         "attempt_count": goal["attempt_count"],
@@ -216,9 +290,18 @@ async def _verify_completed(
         "objective_history_count": len(objectives),
         "completion_card_count": len(cards),
         "history_channel_readback": True,
-        "cleared": True,
+        "history_request_ids": history_requests,
+        "history_pages": len(history_requests),
+        "cleared": not defer_clear,
         "real_goal_report": True,
+        **tool_evidence,
     }
+
+
+async def _clear_goal(channel, sid, goal_id):
+    cleared = await channel.goal(sid, "clear")
+    assert cleared.get("goal") is None and cleared["cleared_goal"]["goal_id"] == goal_id
+    assert (await channel.goal(sid, "get")).get("goal") is None
 
 
 def _save(scope, channel, result):
@@ -302,7 +385,14 @@ async def test_remote_codex_goal_pause_resume(tmp_path: Path):
             assert not artifact.exists(), (
                 "pause arrived after the real shell had already finished"
             )
-            await channel.goal(sid, "resume")
+            resume_id = await channel.goal(sid, "resume")
+            resumed = await channel.until(
+                lambda frame: frame.get("event") in {"goal.snapshot", "goal.error", "execution.error", "chat.error"}
+                and frame.get("payload", {}).get("session_id") == sid
+                and frame.get("payload", {}).get("request_id") == resume_id
+            )
+            assert resumed["event"] == "goal.snapshot", resumed
+            assert resumed["payload"]["goal"]["status"] == "active", resumed
             goal = await channel.wait_goal(sid, {"completed", "blocked", "paused"})
             assert goal["goal_id"] == paused["goal"]["goal_id"]
             result = await _verify_completed(
@@ -340,7 +430,7 @@ async def test_remote_codex_goal_attempt_budget(tmp_path: Path):
             assert goal["status"] == "blocked", goal
             assert goal["attempt_count"] == 1
             assert "max_attempts_exhausted" in goal["last_assessment"]["evidence"], goal
-            await channel.goal(sid, "clear")
+            await _clear_goal(channel, sid, goal["goal_id"])
             _save(
                 tmp_path,
                 channel,
@@ -386,10 +476,16 @@ async def test_remote_codex_goal_defers_due_heartbeat(tmp_path: Path):
                 )
             )["job"]
             assert during["run_count"] == 0, during
+            assert during["run_state"].get("current_run_id") is None, during
+            assert not [
+                frame for frame in channel.frames
+                if (frame.get("payload", {}).get("metadata") or {}).get("automation", {}).get("kind") == "heartbeat"
+                and (frame.get("payload", {}).get("metadata") or {}).get("automation", {}).get("job_id") == job["id"]
+            ], "Heartbeat emitted execution events while Goal still owned the session"
             assert (await channel.goal(sid, "get"))["goal"]["status"] == "active"
             goal = await channel.wait_goal(sid, {"completed", "blocked", "paused"})
             result = await _verify_completed(
-                channel, tmp_path, data, sid, goal, objective, artifact, marker
+                channel, tmp_path, data, sid, goal, objective, artifact, marker, defer_clear=True
             )
             deadline = asyncio.get_running_loop().time() + 180
             while True:
@@ -403,9 +499,15 @@ async def test_remote_codex_goal_defers_due_heartbeat(tmp_path: Path):
                 assert asyncio.get_running_loop().time() < deadline, final_job
                 await asyncio.sleep(1)
             assert final_job["run_state"]["last_run_status"] == "succeeded", final_job
+            retained_goal = (await channel.goal(sid, "get"))["goal"]
+            assert retained_goal == goal, "Heartbeat changed the completed Goal record"
             await channel.rpc(
                 "heartbeat.job.delete", {"session_id": sid, "id": job["id"]}
             )
+            jobs = (await channel.rpc("heartbeat.job.list", {"session_id": sid}))["jobs"]
+            assert all(row["id"] != job["id"] for row in jobs)
+            await _clear_goal(channel, sid, goal["goal_id"])
+            result["cleared"] = True
             _save(
                 tmp_path,
                 channel,
