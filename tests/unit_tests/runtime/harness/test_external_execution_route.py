@@ -466,6 +466,8 @@ async def test_actual_facade_constructs_external_provider_through_shared_engine_
         JiuWenSwarm, "_prepare_skill_library", staticmethod(lambda: None)
     )
     facade = JiuWenSwarm()
+    heartbeat_service = AsyncMock()
+    facade.set_heartbeat_service(heartbeat_service)
     route = _route(tmp_path, provider_id=provider_id)
     try:
         await facade.create_instance(
@@ -479,6 +481,10 @@ async def test_actual_facade_constructs_external_provider_through_shared_engine_
         assert type(session.engine.harness).__name__ == harness_type
         assert session.binding is route.bound.binding
         assert session._tool_gateway is not None
+        tool_names = {tool.name for tool in await session._tool_gateway.definitions()}
+        assert "heartbeat_create_job" in tool_names
+        assert "subagent_spawn" in tool_names
+        assert len(tool_names) == 15
         assert facade.owns_external_execution("session-1") is True
     finally:
         await facade.cleanup()

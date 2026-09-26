@@ -29,6 +29,7 @@ from jiuwenswarm.runtime.session import (
     SessionPersistencePolicy,
     SessionWorkKind,
 )
+from jiuwenswarm.runtime.session.model import SessionExecutionState
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
 SESSION = "existing-session"
@@ -1261,7 +1262,8 @@ async def test_busy_foreground_defers_heartbeat_without_creating_execution(make_
         await _finish(chain)
 
 
-async def test_heartbeat_does_not_serialize_active_goal_execution(make_chain):
+@pytest.mark.parametrize("work_kind", [SessionWorkKind.GOAL_STREAM, SessionWorkKind.GOAL_ATTACH])
+async def test_active_goal_owner_blocks_heartbeat(make_chain, work_kind):
     chain = await make_chain()
     await chain.coordinator.register_session(
         SESSION, "web", SessionPersistencePolicy.PERSISTENT
@@ -1277,20 +1279,28 @@ async def test_heartbeat_does_not_serialize_active_goal_execution(make_chain):
         chain.coordinator.run_unary(
             SESSION,
             "goal-1",
-            SessionWorkKind.GOAL_STREAM,
+            work_kind,
             goal,
         )
     )
     try:
         await asyncio.wait_for(goal_entered.wait(), 2)
         await chain.heartbeat.scheduler._tick_once()
-        assert (await _settle(chain)).run_state.last_run_status == "succeeded"
+        result = await _settle(chain)
+        assert result.run_state.current_run_id is None
+        assert result.run_count == 0
+        assert result.next_run_at == 1000.0
         assert not task.done()
-        states = {item.work_kind: item.state.value for item in _executions(chain)}
-        assert states == {
-            SessionWorkKind.GOAL_STREAM: "running",
-            SessionWorkKind.HEARTBEAT: "succeeded",
+        assert chain.agent.requests == []
+        assert {item.work_kind: item.state.value for item in _executions(chain)} == {
+            work_kind: "running",
         }
+        # Admission checks the live owner again even if a prior tick saw idle.
+        assert not await chain.heartbeat.admission.try_begin_heartbeat(SESSION, "racing-run")
+        goal_release.set()
+        await asyncio.wait_for(task, 2)
+        assert (await chain.heartbeat.scheduler.trigger_run_now(chain.job.id))["accepted"]
+        assert (await _settle(chain)).run_state.last_run_status == "succeeded"
     finally:
         goal_release.set()
         await asyncio.wait_for(task, 2)
@@ -1605,4 +1615,269 @@ async def test_stop_fences_queue_handoff_already_in_finalization(make_chain):
         if stop_task is not None:
             await stop_task
         chain.heartbeat.store.finish_run = finish_run
+        await _finish(chain)
+
+
+async def test_detached_goal_wait_preserves_owner_until_terminal(make_chain):
+    chain = await make_chain()
+    await chain.coordinator.register_session(SESSION, "web")
+    owner = chain.coordinator.begin_detached_turn(SESSION, "goal-detached")
+    chain.coordinator.observe_detached_turn(SESSION, owner.execution_id, "goal-question")
+    try:
+        assert (await chain.heartbeat.scheduler.trigger_run_now(chain.job.id))["reason"] == "session_busy"
+        assert chain.agent.requests == []
+        waiting = chain.coordinator.get_execution(owner.execution_id)
+        assert waiting.waiting_control_id == "goal-question"
+        assert waiting.generation == owner.generation
+        assert chain.coordinator.finish_detached_turn(
+            SESSION, owner.execution_id, SessionExecutionState.SUCCEEDED,
+        )
+        assert not chain.coordinator.finish_detached_turn(
+            SESSION, owner.execution_id, SessionExecutionState.SUCCEEDED,
+        )
+        assert (await chain.heartbeat.scheduler.trigger_run_now(chain.job.id))["accepted"]
+        assert (await _settle(chain)).run_state.last_run_status == "succeeded"
+    finally:
+        await _finish(chain)
+
+
+@pytest.mark.parametrize("action", ["set", "resume", "pause", "clear", "get"])
+@pytest.mark.parametrize("streaming", [True, False])
+async def test_goal_control_preempts_heartbeat_except_readonly_get(make_chain, action, streaming):
+    chain = await make_chain(behavior="block")
+    seen = []
+
+    async def execute(request):
+        seen.append(chain.agent.closed.is_set())
+        return chain.agent._chunk(request, {"event_type": "goal.status"})
+
+    async def stream(request):
+        yield await execute(request)
+
+    chain.agent.execute_message = execute
+    chain.agent.process_message = execute
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        await asyncio.wait_for(chain.agent.entered.wait(), 2)
+        # Swap only the foreground entry; the active heartbeat retains its iterator.
+        chain.agent.process_message_stream = stream
+        request = AgentRequest(
+            request_id="goal-control", channel_id="web", session_id=SESSION,
+            req_method=ReqMethod.COMMAND_GOAL,
+            params={"mode": chain.mode, "action": action}, is_stream=streaming,
+        )
+        if streaming:
+            events = [event async for event in chain.runtime.stream(request, trigger_hook=False)]
+        else:
+            events = await chain.runtime.invoke(request, trigger_hook=False)
+        assert events
+        assert seen == [action != "get"]
+        if action != "get":
+            assert (await _settle(chain)).run_state.last_run_status == "cancelled"
+        else:
+            assert not chain.agent.closed.is_set()
+    finally:
+        chain.agent.release.set()
+        await _finish(chain)
+
+
+async def test_queued_goal_blocks_heartbeat_before_executor_starts(make_chain):
+    chain = await make_chain()
+    await chain.coordinator.register_session(SESSION, "web")
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def goal():
+        entered.set()
+        await release.wait()
+
+    owner = chain.coordinator.submit_unary(SESSION, "queued-goal", SessionWorkKind.GOAL_STREAM, goal)
+    try:
+        assert owner.state is SessionExecutionState.QUEUED
+        assert not entered.is_set()
+        assert not await chain.heartbeat.admission.try_begin_heartbeat(SESSION, "racing-tick")
+        assert chain.agent.requests == []
+    finally:
+        release.set()
+        await _finish(chain)
+
+
+@pytest.fixture
+def persistent_goal(tmp_path, monkeypatch):
+    """Use the original Session checkpoint and sole GoalRecord writer."""
+    from openjiuwen.core.session.agent import Session
+    from openjiuwen.core.session.checkpointer import CheckpointerFactory
+    from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
+    from openjiuwen.core.single_agent import AgentCard
+    from openjiuwen.harness.goal.manager import GoalManager
+    from openjiuwen.harness.goal.store import SessionGoalStore
+    from openjiuwen.harness.task_loop.event_manager import EventManager
+
+    async def open_session():
+        checkpoint = await CheckpointerFactory.create(CheckpointerConfig(
+            type="persistence", conf={"db_type": "shelve", "db_path": str(tmp_path / "native-checkpoint")},
+        ))
+        monkeypatch.setattr(CheckpointerFactory, "_default_checkpointer", checkpoint)
+        session = Session(session_id=SESSION, card=AgentCard(id="native-goal", name="Native Goal"))
+        await session.pre_run()
+        events = EventManager()
+        store = SessionGoalStore(session)
+        manager = GoalManager(
+            store=store, event_manager=events, control_lock=asyncio.Lock(),
+            has_output_stream=lambda: False, cancel_active_round=AsyncMock(),
+            emit_event=Mock(), notify_work=Mock(),
+        )
+        return SimpleNamespace(session=session, events=events, store=store, manager=manager)
+
+    return open_session
+
+
+async def _stop_original_goal(goal, reason):
+    from openjiuwen.harness.goal.evaluation import GoalEvaluator
+    from openjiuwen.harness.goal.schema import GoalAssessment, GoalAssessmentStatus
+
+    record = await goal.manager.set(
+        "original root objective",
+        token_budget=7 if reason == "budget" else None,
+        max_attempts=1 if reason == "attempts" else None,
+    )
+    await goal.manager.begin_attempt(goal_id=record.goal_id, revision=record.revision)
+    await goal.manager.accumulate_usage(
+        goal_id=record.goal_id, revision=record.revision, input_tokens=5, output_tokens=2,
+    )
+    if reason == "paused":
+        await goal.manager.pause()
+    else:
+        assessment = GoalAssessment(
+            status={"completed": GoalAssessmentStatus.COMPLETE, "blocked": GoalAssessmentStatus.BLOCKED}.get(reason, GoalAssessmentStatus.CONTINUE),
+            evidence="deterministic completion/blocking evidence", remaining_work="followup",
+        )
+        if reason in {"budget", "attempts"}:
+            assessment = GoalEvaluator().assess(await goal.manager.get(), agent_report=assessment)
+            assert assessment.status is GoalAssessmentStatus.BLOCKED
+            expected = "token_budget_exhausted" if reason == "budget" else "max_attempts_exhausted"
+            assert expected in assessment.evidence
+        await goal.manager.apply_assessment(
+            goal_id=record.goal_id, revision=record.revision, assessment=assessment,
+        )
+    return (await goal.manager.get()).to_dict()
+
+
+@pytest.mark.parametrize("reason", ["paused", "completed", "blocked", "budget", "attempts"])
+async def test_heartbeat_preserves_stopped_original_goal_record(make_chain, persistent_goal, reason):
+    goal = await persistent_goal()
+    before = await _stop_original_goal(goal, reason)
+    chain = await make_chain()
+    chain.agent.goal_manager = goal.manager
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        assert (await _settle(chain)).run_state.last_run_status == "succeeded"
+        assert len(chain.agent.requests) == 1
+        assert (await goal.manager.get()).to_dict() == before
+        assert goal.events.next_work() is None
+        # Reconstruct the real native Session from its durable checkpoint.
+        cold = await persistent_goal()
+        assert (await cold.manager.get()).to_dict() == before
+        assert cold.events.next_work() is None
+    finally:
+        await _finish(chain)
+
+
+@pytest.mark.parametrize("queued", [False, True])
+@pytest.mark.parametrize("goal_status", ["paused", "active"])
+async def test_cold_orphan_with_goal_record_requires_explicit_resume(make_chain, persistent_goal, queued, goal_status):
+    goal = await persistent_goal()
+    before = await _stop_original_goal(goal, goal_status)
+    warm = await make_chain(concurrency_policy="queue")
+    await warm.heartbeat.store.claim_run(
+        warm.job.id, "unknown-run", 1000.0, trigger="scheduler", reschedule=True,
+        next_run_at_after_claim=1120.0,
+    )
+    if queued:
+        await warm.heartbeat.store.claim_run(
+            warm.job.id, "unknown-followup", 1001.0, trigger="manual", reschedule=False,
+        )
+    await _finish(warm)
+    cold = await make_chain()
+    await cold.heartbeat.store.delete_job(cold.job.id)
+    cold.job = await cold.heartbeat.store.get_job(warm.job.id)
+    restored_goal = await persistent_goal()
+    cold.agent.goal_manager = restored_goal.manager
+    try:
+        await cold.heartbeat.scheduler.reload()
+        await cold.heartbeat.scheduler._tick_once()
+        recovered = await cold.heartbeat.store.get_job(cold.job.id)
+        assert recovered.status == "disabled"
+        assert recovered.enabled is False
+        assert recovered.run_state.current_run_id is None
+        assert recovered.run_state.queued_run_id is None
+        assert recovered.run_state.last_run_status == "failed"
+        assert "explicit resume required" in recovered.run_state.last_error
+        assert cold.agent.requests == []
+        assert cold.coordinator.snapshot_session(SESSION) is None
+        assert (await restored_goal.manager.get()).to_dict() == before
+        snapshot = recovered.to_dict()
+        assert not await cold.heartbeat.scheduler.on_run_finished(cold.job.id, "unknown-run", outcome="succeeded")
+        assert (await cold.heartbeat.store.get_job(cold.job.id)).to_dict() == snapshot
+        assert restored_goal.events.next_work() is None
+        # An unknown active Goal stays readable without attaching new output.
+        # Its continuation is the Goal driver's responsibility, never recovery.
+        if goal_status == "active":
+            return
+        # Existing explicit enable/run APIs recover; an old completion cannot
+        # resurrect the queued intent or mutate the root Goal.
+        await cold.heartbeat.controller.toggle_job(cold.job.id, True, access_session_id=SESSION)
+        assert (await cold.heartbeat.scheduler.trigger_run_now(cold.job.id))["accepted"]
+        assert (await _settle(cold)).run_state.last_run_status == "succeeded"
+        assert len(cold.agent.requests) == 1
+        assert (await restored_goal.manager.get()).to_dict() == before
+    finally:
+        await _finish(cold)
+
+
+async def test_completed_heartbeat_checkpoint_is_not_disabled_on_restart(make_chain, persistent_goal):
+    goal = await persistent_goal()
+    before = await _stop_original_goal(goal, "completed")
+    warm = await make_chain()
+    await warm.heartbeat.scheduler._tick_once()
+    saved = await _settle(warm)
+    await _finish(warm)
+    cold = await make_chain()
+    await cold.heartbeat.store.delete_job(cold.job.id)
+    cold.job = await cold.heartbeat.store.get_job(warm.job.id)
+    try:
+        await cold.heartbeat.scheduler.reload()
+        assert (await cold.heartbeat.store.get_job(cold.job.id)).to_dict() == saved.to_dict()
+        cold.heartbeat.scheduler._now_fn = lambda: saved.next_run_at
+        await cold.heartbeat.scheduler._tick_once()
+        assert (await _settle(cold)).run_count == saved.run_count + 1
+        assert len(cold.agent.requests) == 1
+        assert (await (await persistent_goal()).manager.get()).to_dict() == before
+    finally:
+        await _finish(cold)
+
+
+async def test_delete_waiting_heartbeat_rejects_late_answer_and_releases_owner(make_chain):
+    chain = await make_chain(behavior="ask_live")
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        await asyncio.wait_for(chain.agent.question_seen.wait(), 2)
+        (owner,) = _executions(chain)
+        await chain.heartbeat.begin_session_delete(SESSION)
+        await chain.runtime.cleanup_session(channel_id="web", session_id=SESSION, reset_plan_state=False)
+        await chain.heartbeat.commit_session_delete(SESSION)
+        saved = await chain.heartbeat.store.get_job(chain.job.id)
+        assert saved.enabled is False
+        assert not chain.heartbeat.admission.has_pending_interaction(SESSION)
+        assert not chain.heartbeat.execution.active_session_ids()
+        assert chain.heartbeat._pinned_agents == {}
+        assert chain.coordinator.get_execution(owner.execution_id).state is SessionExecutionState.CANCELLED
+        assert not chain.coordinator.has_control_target(SESSION, "question-1")
+        # Old generation projection and durable completion both remain rejected.
+        assert not chain.coordinator.observe_detached_turn(SESSION, owner.execution_id, "late-question")
+        assert not await chain.heartbeat.scheduler.on_run_finished(chain.job.id, owner.request_id, outcome="succeeded")
+        assert (await chain.heartbeat.store.get_job(chain.job.id)).to_dict() == saved.to_dict()
+        assert len(chain.agent.requests) == 1
+        assert chain.agent.control_requests == []
+    finally:
         await _finish(chain)

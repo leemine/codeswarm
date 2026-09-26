@@ -60,11 +60,21 @@ class SessionRunAdmission:
     ) -> None:
         self._condition = asyncio.Condition()
         self._states: dict[str, _SessionAdmissionState] = {}
+        self._runtime_busy: Callable[[str], bool] | None = None
         self._heartbeat_preemptor: Callable[[str], Awaitable[bool]] | None = None
         self._user_preemption_timeout_seconds = max(
             0.001,
             float(user_preemption_timeout_seconds),
         )
+
+    def set_runtime_busy_checker(
+        self, checker: Callable[[str], bool] | None
+    ) -> None:
+        """Read existing Session owners without mirroring their lifecycle state."""
+        self._runtime_busy = checker
+
+    def is_runtime_busy(self, session_id: str) -> bool:
+        return bool(self._runtime_busy and self._runtime_busy(session_id))
 
     def set_heartbeat_preemptor(
         self,
@@ -339,7 +349,10 @@ class SessionRunAdmission:
                 or state.session_message_run_id is not None
                 or state.session_message_waiters > 0
             )
-            if state.heartbeat_blocked or session_has_work:
+            if (
+                state.heartbeat_blocked or session_has_work
+                or self.is_runtime_busy(session_id)
+            ):
                 return False
             state.heartbeat_run_id = run_id
             return True
@@ -473,7 +486,9 @@ class HeartbeatExecutionService:
         ) or self._admission.is_heartbeat_active(
             session_id,
             exclude_run_id=exclude_run_id,
-        ) or self._admission.has_pending_interaction(session_id)
+        ) or self._admission.has_pending_interaction(session_id) or (
+            self._admission.is_runtime_busy(session_id)
+        )
 
     def has_active_run(self, run_id: str) -> bool:
         task = self._tasks.get(run_id)

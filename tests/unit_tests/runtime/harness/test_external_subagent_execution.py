@@ -195,6 +195,8 @@ async def test_child_inherits_exact_parent_provider_paths_and_gets_new_binding(
         parent.fingerprint,
     )
     assert kwargs["runtime_paths"] is route.runtime_paths
+    # Parent Heartbeat tools never propagate to a delegated execution.
+    assert kwargs.get("tool_gateway") is None
     assert session.started_context.cwd == str(route.runtime_paths.cwd)
     assert session.started_context.agent_id == child.subject_id
     assert session.started_context.host_session_id == child.host_session_id

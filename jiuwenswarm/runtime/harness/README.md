@@ -246,6 +246,34 @@ provider-neutral child port, B3 the Codex child composition, and B4 the six-tool
 product/channel acceptance. This module is not a general MCP registry and does
 not import Team runtime or reuse Team operator permissions.
 
+## External Heartbeat tools (R1-08)
+
+The shared External adapter receives the existing AgentServer Heartbeat service
+through the facade and adds its nine original `HeartbeatRuntimeBridge` tools to
+the same parent `ProductToolGateway` as the six subagent tools. The admitted
+channel, parent Session and subject remain fixed in the tool context; the
+original Heartbeat service validates the authoritative Session owner. Child
+executions do not inherit this parent gateway. Store, Controller, Scheduler and
+Execution remain AgentServer-owned; there is no Provider-specific scheduler.
+
+Heartbeat admission reads active owners from the existing Session coordinator,
+including queued Goal work and detached Goal output/interaction owners in the
+current generation. Both scheduler busy checks and dispatch admission consult
+that state. Goal `set/resume/pause/clear` enter the existing user-priority
+preemption path; `get` remains read-only. Heartbeat does not write or advance
+Goal records. After a cold restart, a persisted Heartbeat run without its exact
+live execution owner is marked failed and its schedule disabled, including any
+queued run. Unknown side effects require explicit resume through the existing
+controls. Successfully completed runs with a remaining schedule recover normally.
+External Goal product wiring and combined durable Goal recovery
+remain R1-09B, and External Team entry remains subject to its existing routing
+scope.
+
+The local Codex regression drives a real CLI and product MCP endpoint against
+loopback model responses, creates a job, advances the scheduler clock, and
+checks that the same External Session handles the automatic follow-up and
+releases its pin/transport. It is not remote-model or browser-channel acceptance.
+
 ## Same-engine External child execution (R1-03B3 / R1-05 OC4)
 
 `ExternalSubagentExecutionFactory` is the Swarm composition for the core B2

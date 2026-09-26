@@ -218,7 +218,9 @@ class HeartbeatSchedulerService:
                 job.id,
                 rid,
                 outcome="failed",
-                error="orphan run recovered after scheduler restart",
+                error="orphan run recovered after scheduler restart; explicit resume required",
+                pause_schedule=True,
+                consume_queue=False,
             )
         self._sync_store_mtime()
         self._reload_event.set()

@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 
 from openjiuwen.harness_providers.output_buffer import OutputBudgetExceeded, OutputText
 
+from jiuwenswarm.agents.harness.code.rails.heartbeat.tools import HeartbeatRuntimeBridge
 from jiuwenswarm.common.schema.agent import (
     AgentRequest,
     AgentResponse,
@@ -42,6 +44,7 @@ class EngineAgentAdapter:
             raise ValueError("EngineAgentAdapter requires an External provider")
         self._route = route
         self._tool_gateway = tool_gateway
+        self._heartbeat_bridge = HeartbeatRuntimeBridge()
         self._subagent_runtime: ExternalSubagentRuntime | None = None
         self._session: ExecutionSession | None = None
         self._projection = ExternalEventProjection(route.bound.binding.host_session_id)
@@ -81,6 +84,18 @@ class EngineAgentAdapter:
             self._subagent_runtime = ExternalSubagentRuntime(
                 self._route,
                 write_output=self._projection.project_product_chunk,
+                additional_tools=self._heartbeat_bridge.build_tools(
+                    context=SimpleNamespace(
+                        channel_id=self._route.channel_id,
+                        session_id=binding.host_session_id,
+                        user_id=(
+                            "" if binding.subject_id == (
+                                f"{self._route.channel_id}:{binding.host_session_id}"
+                            ) else binding.subject_id
+                        ),
+                        metadata={},
+                    )
+                ),
             )
             self._tool_gateway = self._subagent_runtime.gateway
         session = prepare_execution_session(
@@ -461,6 +476,10 @@ class EngineAgentAdapter:
             self._route.runtime_paths,
             session_id=self._route.bound.binding.host_session_id,
         )
+
+    def set_heartbeat_service(self, service: Any | None) -> None:
+        """Reuse the AgentServer service; tools retain the admitted parent scope."""
+        self._heartbeat_bridge.set_service(service)
 
     def set_personal_context_runtime_enabled(self, enabled: bool) -> None:
         self._personal_context_runtime_enabled = bool(enabled)

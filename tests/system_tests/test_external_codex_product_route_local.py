@@ -1326,3 +1326,131 @@ async def test_real_codex_native_plugin_runs_through_product_adapter(tmp_path):
     while Path(f"/proc/{pid}").exists() and time.monotonic() < deadline:
         await asyncio.sleep(0.05)
     assert not Path(f"/proc/{pid}").exists()
+
+
+@pytest.mark.asyncio
+async def test_real_codex_heartbeat_tool_creates_job_and_scheduler_reuses_session(tmp_path, monkeypatch):
+    """Real CLI/MCP plus original Scheduler/Runtime; model responses stay local."""
+    from unittest.mock import AsyncMock, Mock
+
+    from jiuwenswarm.agents.harness.code.rails.heartbeat import runtime as heartbeat_module
+    from jiuwenswarm.agents.harness.code.rails.heartbeat.runtime import HeartbeatRailRuntime
+    from jiuwenswarm.agents.harness.code.rails.heartbeat.session_resolver import SessionSummary
+    from jiuwenswarm.common.schema.message import ReqMethod
+    from jiuwenswarm.runtime import AgentRuntime
+    from jiuwenswarm.runtime.plan import PlanStateResult
+    from jiuwenswarm.runtime.session import SessionWorkKind
+    from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+    from jiuwenswarm.server.runtime.session import session_metadata
+
+    pytest.importorskip("openai_codex", reason="optional Codex SDK and bundled CLI required")
+    root, home, codex_home = (tmp_path / name for name in ("project", "home", "codex-home"))
+    for path in (root, home, codex_home, codex_home / "skills"):
+        path.mkdir()
+    monkeypatch.setattr(heartbeat_module, "get_heartbeat_jobs_path", lambda: tmp_path / "heartbeat.json")
+    monkeypatch.setattr(session_metadata, "get_session_metadata", lambda *args, **kwargs: {"user_id": "local-test"})
+    finished = asyncio.Event()
+    calls = []
+    adapter = None
+
+    class Facade:
+        async def process_message_stream(self, request):
+            calls.append(request)
+            request._execution_route = route
+            adapter.select_execution_for_request(request)
+            async for chunk in adapter.process_message_stream_impl(request, {"query": (request.params or {}).get("content", "continue")}):
+                yield chunk
+
+    facade = Facade()
+    manager = SimpleNamespace(
+        begin_foreground_chat=AsyncMock(), end_foreground_chat=AsyncMock(),
+        cleanup=AsyncMock(), cancel_all_inflight_work=AsyncMock(),
+        cleanup_session_runtime=AsyncMock(return_value=True),
+        pin_agent=Mock(), unpin_agent=Mock(),
+        get_agent_for_session_nowait=Mock(return_value=facade),
+    )
+    runtime = AgentRuntime(
+        agent_manager=manager, initializer=AsyncMock(),
+        plan_controller=SimpleNamespace(
+            ensure_state=AsyncMock(return_value=PlanStateResult()),
+            check_post_process_exit=AsyncMock(return_value=[]), reset_session=Mock(),
+        ),
+    )
+
+    async def prepare(request, channel_id, **kwargs):
+        request.params["mode"] = "agent.code.normal"
+        return "code", "normal", facade
+
+    runtime._prepare_chat_turn = prepare
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._runtime, server._agent_manager = runtime, manager
+    server.send_push = AsyncMock(return_value=True)
+    heartbeat = HeartbeatRailRuntime(server)
+    server._heartbeat_runtime = heartbeat
+    runtime.set_admission_controller(heartbeat.admission)
+    runtime.set_session_delete_lifecycle(heartbeat)
+    heartbeat.scheduler._session_resolver = SimpleNamespace(
+        resolve=lambda channel_id, session_id: SessionSummary(session_id=session_id, channel_id=channel_id)
+    )
+    # Drive the clock explicitly; no scheduler sleep or remote model is involved.
+    heartbeat._available = True
+
+    async def completed(session_id):
+        await heartbeat._release_if_no_active_jobs(session_id)
+        finished.set()
+
+    heartbeat.execution.set_completion_hook(completed)
+    with _ResponsesFixture() as responses:
+        responses.items = [
+            {"type": "function_call", "namespace": "mcp__jiuwenswarm_product_tools", "name": "heartbeat_create_job", "id": "fc_hb", "call_id": "call_hb", "arguments": json.dumps({"name": "followup", "prompt": "Return R1-08-AUTO-OK", "schedule": {"type": "interval", "interval_seconds": 60}, "max_runs": 1})},
+        ]
+        spec = AgentExecutionSpec(
+            "codex", "r1-08-local", authorization=ExecutionAuthorization(full_access=True),
+            provider_config={
+                "inherit_process_env": False,
+                "env": {"HOME": str(home), "CODEX_HOME": str(codex_home), "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+                "mcp_required": True,
+                "model": {"model": "gpt-5.6-sol", "provider": "r1_08_fixture", "api_base": responses.base_url, "api_key": "local-only"},
+            },
+        )
+        route = _route(root, spec)
+        adapter = EngineAgentAdapter(route)
+        adapter.set_heartbeat_service(heartbeat)
+        transport = None
+        try:
+            await adapter.create_instance()
+            request = AgentRequest(request_id="r1-08-create", channel_id="web", session_id="r1-a2-session", req_method=ReqMethod.CHAT_SEND, params={"mode": "agent.code.normal", "content": "Create the prescribed follow-up."}, is_stream=True, user_id="local-test")
+            async with asyncio.timeout(45):
+                initial = [event async for event in runtime.stream(request, trigger_hook=False)]
+                assert any(event.event_type == "chat.final" for event in initial)
+                jobs = await heartbeat.store.list_jobs()
+                assert len(jobs) == 1
+                job = jobs[0]
+                assert job.session_id == request.session_id
+                assert job.metadata["user_id"] == "local-test"
+                original_session = adapter.execution_session
+                transport = original_session._tool_transport
+                heartbeat.scheduler._now_fn = lambda: job.next_run_at
+                await heartbeat.scheduler._tick_once()
+                await finished.wait()
+            saved = await heartbeat.store.get_job(job.id)
+            assert saved.run_count == 1
+            assert saved.run_state.last_run_status == "succeeded"
+            assert adapter.execution_session is original_session
+            assert len(calls) == 2
+            assert calls[1].metadata["automation"]["kind"] == "heartbeat"
+            assert calls[1].session_id == request.session_id
+            snapshot = runtime._session_coordinator.snapshot_session(request.session_id)
+            assert sum(item.work_kind is SessionWorkKind.HEARTBEAT and item.state.value == "succeeded" for item in snapshot.executions) == 1
+            pushes = [call.args[0] for call in server.send_push.await_args_list]
+            assert any(item["payload"].get("event_type") == "chat.final" for item in pushes)
+            assert pushes[-1]["payload"]["is_processing"] is False
+            assert heartbeat._pinned_agents == {}
+            assert not heartbeat.execution.active_session_ids()
+            assert len(responses.requests) >= 3
+        finally:
+            await heartbeat.stop()
+            await runtime.close()
+            await adapter.cleanup()
+    assert transport is not None and not transport.started
+    assert not adapter.has_session_runtime()
