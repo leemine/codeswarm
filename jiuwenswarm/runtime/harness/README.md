@@ -274,6 +274,11 @@ loopback model responses, creates a job, advances the scheduler clock, and
 checks that the same External Session handles the automatic follow-up and
 releases its pin/transport. It is not remote-model or browser-channel acceptance.
 
+The persistent AgentServer owns scheduling for Web and Gateway CLI sessions.
+Process CLI uses a worker per request and closes that Runtime when the request
+ends; it currently has no idle Heartbeat host. A passing Provider CLI test or
+Gateway CLI test does not establish automatic follow-up in Process CLI.
+
 ## Same-engine External child execution (R1-03B3 / R1-05 OC4)
 
 `ExternalSubagentExecutionFactory` is the Swarm composition for the core B2
