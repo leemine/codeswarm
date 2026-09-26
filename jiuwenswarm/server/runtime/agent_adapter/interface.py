@@ -398,6 +398,24 @@ def _request_history_delivery_id(
 
 
 async def _append_request_assistant_history(
+    **kwargs: Any,
+) -> None:
+    """Drain an accepted history write before propagating request cancellation."""
+    write = asyncio.create_task(_append_request_assistant_history_impl(**kwargs))
+    cancelled = None
+    while True:
+        try:
+            await asyncio.shield(write)
+            break
+        except asyncio.CancelledError as exc:
+            if write.cancelled():
+                raise
+            cancelled = exc
+    if cancelled is not None:
+        raise cancelled
+
+
+async def _append_request_assistant_history_impl(
     *,
     session_id: str,
     request_id: str,
@@ -2943,6 +2961,28 @@ class JiuWenSwarm:
         return await self._process_message(request, schedule_session=False)
 
     async def _process_message(
+        self,
+        request: AgentRequest,
+        *,
+        schedule_session: bool,
+    ) -> AgentResponse:
+        route = getattr(request, "_execution_route", None)
+        external = isinstance(route, AdmittedExecutionRoute) and route.provider_id != "native"
+        if external:
+            request._defer_execution_until_history = True
+        history_failed = False
+        try:
+            return await self._process_message_impl(request, schedule_session=schedule_session)
+        except Exception:
+            history_failed = True
+            raise
+        finally:
+            if external and not history_failed:
+                complete = getattr(self._adapter, "complete_request_history", None)
+                if callable(complete):
+                    await complete(request)
+
+    async def _process_message_impl(
         self,
         request: AgentRequest,
         *,

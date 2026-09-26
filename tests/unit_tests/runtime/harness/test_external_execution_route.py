@@ -1496,9 +1496,11 @@ async def test_request_owned_critical_history_waits_for_durable_receipt(
 
     receipt: Future[None] = Future()
     calls: list[dict[str, Any]] = []
+    accepted = asyncio.Event()
 
     async def direct_history(fn, **kwargs):
         calls.append(kwargs)
+        accepted.set()
         return receipt
 
     monkeypatch.setattr(module, "_run_history_io", direct_history)
@@ -1514,7 +1516,7 @@ async def test_request_owned_critical_history_waits_for_durable_receipt(
             mode="code",
         )
     )
-    await asyncio.sleep(0)
+    await asyncio.wait_for(accepted.wait(), 1)
 
     assert persistence.done() is False
     assert calls[0]["delivery_id"].startswith("request:request-1:chat.final:")

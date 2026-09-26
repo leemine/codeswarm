@@ -1,6 +1,7 @@
 """Real Facade history consumption gates the original External Runtime owner."""
 
 import asyncio
+import threading
 
 import pytest
 from openjiuwen.harness_protocol import OutputEvent, OutputKind
@@ -27,9 +28,10 @@ async def eventually(predicate):
             await asyncio.sleep(0.001)
 
 
-@pytest.mark.parametrize("outcome", ["complete", "clear", "history_failure"])
+@pytest.mark.parametrize("outcome", ["complete", "clear", "history_failure", "cancel_durable"])
+@pytest.mark.parametrize("old_delivery", ["stream", "unary"])
 async def test_facade_persists_prior_final_before_goal_boundary(
-    chain, monkeypatch, tmp_path, outcome,
+    chain, monkeypatch, tmp_path, outcome, old_delivery,
 ):
     # Reuse the real Engine/Manager/SerializedTurnHarness/Runtime fixture, but
     # restore its intentionally stubbed history functions for this integration.
@@ -51,10 +53,12 @@ async def test_facade_persists_prior_final_before_goal_boundary(
     facade._adapter = chain.adapter
     facade._sdk_name = "harness"
     history_entered, history_release = asyncio.Event(), asyncio.Event()
+    writer_release = threading.Event()
     original_append = facade_module._append_request_assistant_history
 
     async def delayed_real_append(**kwargs):
-        if kwargs["request_id"] == "old-chat" and kwargs["event_type"] == "chat.final":
+        if (outcome != "cancel_durable" and kwargs["request_id"] == "old-chat"
+                and kwargs["event_type"] == "chat.final"):
             history_entered.set()
             await history_release.wait()
             if outcome == "history_failure":
@@ -62,12 +66,29 @@ async def test_facade_persists_prior_final_before_goal_boundary(
         await original_append(**kwargs)
 
     monkeypatch.setattr(facade_module, "_append_request_assistant_history", delayed_real_append)
+    if outcome == "cancel_durable":
+        loop = asyncio.get_running_loop()
+        original_write = session_history._write_item
+
+        def delayed_real_write(session_id, item, **kwargs):
+            if item.get("request_id") == "old-chat" and item.get("event_type") == "chat.final":
+                loop.call_soon_threadsafe(history_entered.set)
+                if not writer_release.wait(4):
+                    raise TimeoutError("test did not release its durable writer")
+            return original_write(session_id, item, **kwargs)
+
+        monkeypatch.setattr(session_history, "_write_item", delayed_real_write)
 
     async def run(req, kind):
         req._execution_route = chain.adapter._route
         req._bound_execution = chain.adapter._route.bound
         token = set_runtime_context(chain.runtime, None)
         try:
+            if not req.is_stream:
+                return await chain.runtime.coordinator.run_unary(
+                    req.session_id, req.request_id, kind,
+                    lambda: facade.execute_message(req),
+                )
             return [chunk async for chunk in chain.runtime.coordinator.run_stream(
                 req.session_id, req.request_id, kind,
                 lambda: facade.process_message_stream(req),
@@ -77,6 +98,7 @@ async def test_facade_persists_prior_final_before_goal_boundary(
 
     old = request("old-chat")
     old.req_method = ReqMethod.CHAT_SEND
+    old.is_stream = old_delivery == "stream"
     old.params = {"query": "ordinary request", "mode": "agent"}
     provider = chain.providers[0]
     execute_turn = provider._execute_turn
@@ -90,7 +112,9 @@ async def test_facade_persists_prior_final_before_goal_boundary(
 
     monkeypatch.setattr(provider, "_execute_turn", execute_with_visible_answer)
     provider.release.clear()
-    old_task = asyncio.create_task(run(old, SessionWorkKind.CHAT_STREAM))
+    old_task = asyncio.create_task(run(
+        old, SessionWorkKind.CHAT_STREAM if old.is_stream else SessionWorkKind.CHAT_UNARY,
+    ))
     goal_task = None
     try:
         await asyncio.wait_for(provider.entered.wait(), 5)
@@ -100,11 +124,23 @@ async def test_facade_persists_prior_final_before_goal_boundary(
         await eventually(lambda: "session-1" in goal_history.pending_goal_objective_history)
         provider.release.set()
         await asyncio.wait_for(history_entered.wait(), 5)
+        if outcome == "cancel_durable":
+            old_handle = chain.runtime.coordinator._registry.select(
+                session_id="session-1", request_id="old-chat",
+            )[0]
+            old_producer = old_handle.task
+            assert old_producer is not None
+            old_task.cancel()
+            await asyncio.sleep(0)
+            # The caller may detach; the original registry producer must drain.
+            old_producer.cancel()
         # Let the real producer prefetch through its terminal while the Facade
         # consumer remains blocked at the durable history boundary.
         for _ in range(20):
             await asyncio.sleep(0)
         goal = chain.adapter._goal_runtime.manager.peek()
+        if outcome == "cancel_durable":
+            assert not old_producer.done()
         assert goal.attempt_count == 0
         assert len(provider.sent) == 1
         owner_id = chain.runtime.coordinator._sessions["session-1"].external_owner
@@ -122,6 +158,7 @@ async def test_facade_persists_prior_final_before_goal_boundary(
             assert len(provider.sent) == 1
 
         history_release.set()
+        writer_release.set()
         if outcome == "history_failure":
             with pytest.raises(OSError, match="durable history unavailable"):
                 await asyncio.wait_for(old_task, 5)
@@ -132,7 +169,11 @@ async def test_facade_persists_prior_final_before_goal_boundary(
             rows = session_history.load_history_records("session-1")
             assert not any(row.get("is_goal_objective_message") for row in rows)
             return
-        await asyncio.wait_for(old_task, 5)
+        if outcome == "cancel_durable":
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(old_task, 5)
+        else:
+            await asyncio.wait_for(old_task, 5)
         await asyncio.wait_for(goal_task, 5)
         rows = session_history.load_history_records("session-1")
         finals = [i for i, row in enumerate(rows) if row.get("request_id") == "old-chat" and row.get("event_type") == "chat.final"]
@@ -148,6 +189,7 @@ async def test_facade_persists_prior_final_before_goal_boundary(
             assert chain.adapter._goal_runtime.manager.peek().status.value == "completed"
     finally:
         history_release.set()
+        writer_release.set()
         provider.release.set()
         for task in (old_task, goal_task):
             if task is not None and not task.done():
