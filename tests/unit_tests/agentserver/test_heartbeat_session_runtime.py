@@ -29,6 +29,7 @@ from jiuwenswarm.runtime.session import (
     SessionPersistencePolicy,
     SessionWorkKind,
 )
+from jiuwenswarm.runtime.session.model import SessionExecutionState
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
 SESSION = "existing-session"
@@ -1261,7 +1262,8 @@ async def test_busy_foreground_defers_heartbeat_without_creating_execution(make_
         await _finish(chain)
 
 
-async def test_heartbeat_does_not_serialize_active_goal_execution(make_chain):
+@pytest.mark.parametrize("work_kind", [SessionWorkKind.GOAL_STREAM, SessionWorkKind.GOAL_ATTACH])
+async def test_active_goal_owner_blocks_heartbeat(make_chain, work_kind):
     chain = await make_chain()
     await chain.coordinator.register_session(
         SESSION, "web", SessionPersistencePolicy.PERSISTENT
@@ -1277,20 +1279,28 @@ async def test_heartbeat_does_not_serialize_active_goal_execution(make_chain):
         chain.coordinator.run_unary(
             SESSION,
             "goal-1",
-            SessionWorkKind.GOAL_STREAM,
+            work_kind,
             goal,
         )
     )
     try:
         await asyncio.wait_for(goal_entered.wait(), 2)
         await chain.heartbeat.scheduler._tick_once()
-        assert (await _settle(chain)).run_state.last_run_status == "succeeded"
+        result = await _settle(chain)
+        assert result.run_state.current_run_id is None
+        assert result.run_count == 0
+        assert result.next_run_at == 1000.0
         assert not task.done()
-        states = {item.work_kind: item.state.value for item in _executions(chain)}
-        assert states == {
-            SessionWorkKind.GOAL_STREAM: "running",
-            SessionWorkKind.HEARTBEAT: "succeeded",
+        assert chain.agent.requests == []
+        assert {item.work_kind: item.state.value for item in _executions(chain)} == {
+            work_kind: "running",
         }
+        # Admission checks the live owner again even if a prior tick saw idle.
+        assert not await chain.heartbeat.admission.try_begin_heartbeat(SESSION, "racing-run")
+        goal_release.set()
+        await asyncio.wait_for(task, 2)
+        assert (await chain.heartbeat.scheduler.trigger_run_now(chain.job.id))["accepted"]
+        assert (await _settle(chain)).run_state.last_run_status == "succeeded"
     finally:
         goal_release.set()
         await asyncio.wait_for(task, 2)
@@ -1606,3 +1616,641 @@ async def test_stop_fences_queue_handoff_already_in_finalization(make_chain):
             await stop_task
         chain.heartbeat.store.finish_run = finish_run
         await _finish(chain)
+
+
+async def test_detached_goal_wait_preserves_owner_until_terminal(make_chain):
+    chain = await make_chain()
+    await chain.coordinator.register_session(SESSION, "web")
+    owner = chain.coordinator.begin_detached_turn(SESSION, "goal-detached")
+    chain.coordinator.observe_detached_turn(SESSION, owner.execution_id, "goal-question")
+    try:
+        assert (await chain.heartbeat.scheduler.trigger_run_now(chain.job.id))["reason"] == "session_busy"
+        assert chain.agent.requests == []
+        waiting = chain.coordinator.get_execution(owner.execution_id)
+        assert waiting.waiting_control_id == "goal-question"
+        assert waiting.generation == owner.generation
+        assert chain.coordinator.finish_detached_turn(
+            SESSION, owner.execution_id, SessionExecutionState.SUCCEEDED,
+        )
+        assert not chain.coordinator.finish_detached_turn(
+            SESSION, owner.execution_id, SessionExecutionState.SUCCEEDED,
+        )
+        assert (await chain.heartbeat.scheduler.trigger_run_now(chain.job.id))["accepted"]
+        assert (await _settle(chain)).run_state.last_run_status == "succeeded"
+    finally:
+        await _finish(chain)
+
+
+@pytest.mark.parametrize("action", ["set", "resume", "pause", "clear", "get"])
+@pytest.mark.parametrize("streaming", [True, False])
+async def test_goal_control_preempts_heartbeat_except_readonly_get(make_chain, action, streaming):
+    chain = await make_chain(behavior="block")
+    seen = []
+
+    async def execute(request):
+        seen.append(chain.agent.closed.is_set())
+        return chain.agent._chunk(request, {"event_type": "goal.status"})
+
+    async def stream(request):
+        yield await execute(request)
+
+    chain.agent.execute_message = execute
+    chain.agent.process_message = execute
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        await asyncio.wait_for(chain.agent.entered.wait(), 2)
+        # Swap only the foreground entry; the active heartbeat retains its iterator.
+        chain.agent.process_message_stream = stream
+        request = AgentRequest(
+            request_id="goal-control", channel_id="web", session_id=SESSION,
+            req_method=ReqMethod.COMMAND_GOAL,
+            params={"mode": chain.mode, "action": action}, is_stream=streaming,
+        )
+        if streaming:
+            events = [event async for event in chain.runtime.stream(request, trigger_hook=False)]
+        else:
+            events = await chain.runtime.invoke(request, trigger_hook=False)
+        assert events
+        assert seen == [action != "get"]
+        if action != "get":
+            assert (await _settle(chain)).run_state.last_run_status == "cancelled"
+        else:
+            assert not chain.agent.closed.is_set()
+    finally:
+        chain.agent.release.set()
+        await _finish(chain)
+
+
+async def test_queued_goal_blocks_heartbeat_before_executor_starts(make_chain):
+    chain = await make_chain()
+    await chain.coordinator.register_session(SESSION, "web")
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def goal():
+        entered.set()
+        await release.wait()
+
+    owner = chain.coordinator.submit_unary(SESSION, "queued-goal", SessionWorkKind.GOAL_STREAM, goal)
+    try:
+        assert owner.state is SessionExecutionState.QUEUED
+        assert not entered.is_set()
+        assert not await chain.heartbeat.admission.try_begin_heartbeat(SESSION, "racing-tick")
+        assert chain.agent.requests == []
+    finally:
+        release.set()
+        await _finish(chain)
+
+
+@pytest.fixture
+def persistent_goal(tmp_path, monkeypatch):
+    """Use the original Session checkpoint and sole GoalRecord writer."""
+    from openjiuwen.core.session.agent import Session
+    from openjiuwen.core.session.checkpointer import CheckpointerFactory
+    from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
+    from openjiuwen.core.single_agent import AgentCard
+    from openjiuwen.harness.goal.manager import GoalManager
+    from openjiuwen.harness.goal.store import SessionGoalStore
+    from openjiuwen.harness.task_loop.event_manager import EventManager
+
+    async def open_session():
+        checkpoint = await CheckpointerFactory.create(CheckpointerConfig(
+            type="persistence", conf={"db_type": "shelve", "db_path": str(tmp_path / "native-checkpoint")},
+        ))
+        monkeypatch.setattr(CheckpointerFactory, "_default_checkpointer", checkpoint)
+        session = Session(session_id=SESSION, card=AgentCard(id="native-goal", name="Native Goal"))
+        await session.pre_run()
+        events = EventManager()
+        store = SessionGoalStore(session)
+        manager = GoalManager(
+            store=store, event_manager=events, control_lock=asyncio.Lock(),
+            has_output_stream=lambda: False, cancel_active_round=AsyncMock(),
+            emit_event=Mock(), notify_work=Mock(),
+        )
+        return SimpleNamespace(session=session, events=events, store=store, manager=manager)
+
+    return open_session
+
+
+async def _stop_original_goal(goal, reason):
+    from openjiuwen.harness.goal.evaluation import GoalEvaluator
+    from openjiuwen.harness.goal.schema import GoalAssessment, GoalAssessmentStatus
+
+    record = await goal.manager.set(
+        "original root objective",
+        token_budget=7 if reason == "budget" else None,
+        max_attempts=1 if reason == "attempts" else None,
+    )
+    await goal.manager.begin_attempt(goal_id=record.goal_id, revision=record.revision)
+    await goal.manager.accumulate_usage(
+        goal_id=record.goal_id, revision=record.revision, input_tokens=5, output_tokens=2,
+    )
+    if reason == "paused":
+        await goal.manager.pause()
+    else:
+        assessment = GoalAssessment(
+            status={"completed": GoalAssessmentStatus.COMPLETE, "blocked": GoalAssessmentStatus.BLOCKED}.get(reason, GoalAssessmentStatus.CONTINUE),
+            evidence="deterministic completion/blocking evidence", remaining_work="followup",
+        )
+        if reason in {"budget", "attempts"}:
+            assessment = GoalEvaluator().assess(await goal.manager.get(), agent_report=assessment)
+            assert assessment.status is GoalAssessmentStatus.BLOCKED
+            expected = "token_budget_exhausted" if reason == "budget" else "max_attempts_exhausted"
+            assert expected in assessment.evidence
+        await goal.manager.apply_assessment(
+            goal_id=record.goal_id, revision=record.revision, assessment=assessment,
+        )
+    return (await goal.manager.get()).to_dict()
+
+
+@pytest.mark.parametrize("reason", ["paused", "completed", "blocked", "budget", "attempts"])
+async def test_heartbeat_preserves_stopped_original_goal_record(make_chain, persistent_goal, reason):
+    goal = await persistent_goal()
+    before = await _stop_original_goal(goal, reason)
+    chain = await make_chain()
+    chain.agent.goal_manager = goal.manager
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        assert (await _settle(chain)).run_state.last_run_status == "succeeded"
+        assert len(chain.agent.requests) == 1
+        assert (await goal.manager.get()).to_dict() == before
+        assert goal.events.next_work() is None
+        # Reconstruct the real native Session from its durable checkpoint.
+        cold = await persistent_goal()
+        assert (await cold.manager.get()).to_dict() == before
+        assert cold.events.next_work() is None
+    finally:
+        await _finish(chain)
+
+
+@pytest.mark.parametrize("queued", [False, True])
+@pytest.mark.parametrize("goal_status", ["paused", "active"])
+async def test_cold_orphan_with_goal_record_requires_explicit_resume(make_chain, persistent_goal, queued, goal_status):
+    goal = await persistent_goal()
+    before = await _stop_original_goal(goal, goal_status)
+    warm = await make_chain(concurrency_policy="queue")
+    await warm.heartbeat.store.claim_run(
+        warm.job.id, "unknown-run", 1000.0, trigger="scheduler", reschedule=True,
+        next_run_at_after_claim=1120.0,
+    )
+    if queued:
+        await warm.heartbeat.store.claim_run(
+            warm.job.id, "unknown-followup", 1001.0, trigger="manual", reschedule=False,
+        )
+    await _finish(warm)
+    cold = await make_chain()
+    await cold.heartbeat.store.delete_job(cold.job.id)
+    cold.job = await cold.heartbeat.store.get_job(warm.job.id)
+    restored_goal = await persistent_goal()
+    cold.agent.goal_manager = restored_goal.manager
+    try:
+        await cold.heartbeat.scheduler.reload()
+        await cold.heartbeat.scheduler._tick_once()
+        recovered = await cold.heartbeat.store.get_job(cold.job.id)
+        assert recovered.status == "disabled"
+        assert recovered.enabled is False
+        assert recovered.run_state.current_run_id is None
+        assert recovered.run_state.queued_run_id is None
+        assert recovered.run_state.last_run_status == "failed"
+        assert "explicit resume required" in recovered.run_state.last_error
+        assert cold.agent.requests == []
+        assert cold.coordinator.snapshot_session(SESSION) is None
+        assert (await restored_goal.manager.get()).to_dict() == before
+        snapshot = recovered.to_dict()
+        assert not await cold.heartbeat.scheduler.on_run_finished(cold.job.id, "unknown-run", outcome="succeeded")
+        assert (await cold.heartbeat.store.get_job(cold.job.id)).to_dict() == snapshot
+        assert restored_goal.events.next_work() is None
+        # An unknown active Goal stays readable without attaching new output.
+        # Its continuation is the Goal driver's responsibility, never recovery.
+        if goal_status == "active":
+            return
+        # Existing explicit enable/run APIs recover; an old completion cannot
+        # resurrect the queued intent or mutate the root Goal.
+        await cold.heartbeat.controller.toggle_job(cold.job.id, True, access_session_id=SESSION)
+        assert (await cold.heartbeat.scheduler.trigger_run_now(cold.job.id))["accepted"]
+        assert (await _settle(cold)).run_state.last_run_status == "succeeded"
+        assert len(cold.agent.requests) == 1
+        assert (await restored_goal.manager.get()).to_dict() == before
+    finally:
+        await _finish(cold)
+
+
+async def test_completed_heartbeat_checkpoint_is_not_disabled_on_restart(make_chain, persistent_goal):
+    goal = await persistent_goal()
+    before = await _stop_original_goal(goal, "completed")
+    warm = await make_chain()
+    await warm.heartbeat.scheduler._tick_once()
+    saved = await _settle(warm)
+    await _finish(warm)
+    cold = await make_chain()
+    await cold.heartbeat.store.delete_job(cold.job.id)
+    cold.job = await cold.heartbeat.store.get_job(warm.job.id)
+    try:
+        await cold.heartbeat.scheduler.reload()
+        assert (await cold.heartbeat.store.get_job(cold.job.id)).to_dict() == saved.to_dict()
+        cold.heartbeat.scheduler._now_fn = lambda: saved.next_run_at
+        await cold.heartbeat.scheduler._tick_once()
+        assert (await _settle(cold)).run_count == saved.run_count + 1
+        assert len(cold.agent.requests) == 1
+        assert (await (await persistent_goal()).manager.get()).to_dict() == before
+    finally:
+        await _finish(cold)
+
+
+async def test_delete_waiting_heartbeat_rejects_late_answer_and_releases_owner(make_chain):
+    chain = await make_chain(behavior="ask_live")
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        await asyncio.wait_for(chain.agent.question_seen.wait(), 2)
+        (owner,) = _executions(chain)
+        await chain.heartbeat.begin_session_delete(SESSION)
+        await chain.runtime.cleanup_session(channel_id="web", session_id=SESSION, reset_plan_state=False)
+        await chain.heartbeat.commit_session_delete(SESSION)
+        saved = await chain.heartbeat.store.get_job(chain.job.id)
+        assert saved.enabled is False
+        assert not chain.heartbeat.admission.has_pending_interaction(SESSION)
+        assert not chain.heartbeat.execution.active_session_ids()
+        assert chain.heartbeat._pinned_agents == {}
+        assert chain.coordinator.get_execution(owner.execution_id).state is SessionExecutionState.CANCELLED
+        assert not chain.coordinator.has_control_target(SESSION, "question-1")
+        # Old generation projection and durable completion both remain rejected.
+        assert not chain.coordinator.observe_detached_turn(SESSION, owner.execution_id, "late-question")
+        assert not await chain.heartbeat.scheduler.on_run_finished(chain.job.id, owner.request_id, outcome="succeeded")
+        assert (await chain.heartbeat.store.get_job(chain.job.id)).to_dict() == saved.to_dict()
+        assert len(chain.agent.requests) == 1
+        assert chain.agent.control_requests == []
+    finally:
+        await _finish(chain)
+
+
+async def _external_provider_chain(make_chain, tmp_path, monkeypatch, *, fail_close=0):
+    """Use the real Facade, ExecutionSession, IO and serialized Provider boundary."""
+    from openjiuwen.harness.engine import HarnessEngine
+    from openjiuwen.harness_protocol import (
+        HarnessCapability, HarnessCard, TurnError, TurnEventKind, TurnResult, TurnStatus,
+    )
+    from openjiuwen.harness_providers.base import SerializedTurnHarness
+    from jiuwenswarm.runtime.harness import bridge
+    from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import EngineAgentAdapter
+    from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+    from tests.unit_tests.runtime.harness.test_external_execution_route import _route
+
+    class Provider(SerializedTurnHarness):
+        card = HarnessCard(
+            name="controlled", implementation_version="1",
+            capabilities=frozenset({HarnessCapability.NATIVE_TOOLS}),
+        )
+
+        def __init__(self, first):
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.close_entered = asyncio.Event()
+            self.allow_close = asyncio.Event()
+            self.release = asyncio.Event()
+            self.exited = asyncio.Event()
+            self.close_failed = asyncio.Event()
+            self.close_calls = 0
+            self.fail_close = fail_close if first else 0
+            self.sent = []
+            self.hold_receipt = False
+            self.receipt_accepted = asyncio.Event()
+            self.return_receipt = asyncio.Event()
+            self.terminal_kind = TurnEventKind.FINISHED
+            if not first:
+                self.allow_close.set()
+                self.release.set()
+
+        async def _open_session(self, context):
+            return "same-provider-session"
+
+        async def send(self, content, **kwargs):
+            receipt = await super().send(content, **kwargs)
+            self.sent.append(receipt)
+            self.receipt_accepted.set()
+            if self.hold_receipt:
+                await self.return_receipt.wait()
+            return receipt
+
+        async def _execute_turn(self, turn):
+            self.entered.set()
+            await self.release.wait()
+            if self.terminal_kind is TurnEventKind.FAILED:
+                return self.terminal_kind, TurnResult(
+                    status=TurnStatus.FAILED, error=TurnError(message="provider failed"),
+                )
+            if self.terminal_kind is TurnEventKind.ABORTED:
+                return self.terminal_kind, TurnResult(status=TurnStatus.INTERRUPTED)
+            return self.terminal_kind, TurnResult(status=TurnStatus.COMPLETED)
+
+        async def _close_session(self):
+            self.close_calls += 1
+            self.close_entered.set()
+            await self.allow_close.wait()
+            if self.fail_close:
+                self.fail_close -= 1
+                self.close_failed.set()
+                raise RuntimeError("owned Provider exit not confirmed")
+            self.release.set()
+            self.exited.set()
+
+    providers = []
+
+    def build(spec, *, binding):
+        provider = Provider(not providers)
+        providers.append(provider)
+        return HarnessEngine(binding, provider)
+
+    monkeypatch.setattr(bridge, "create_harness_engine", build)
+    monkeypatch.setattr(JiuWenSwarm, "_prepare_skill_library", staticmethod(lambda: None))
+    chain = await make_chain()
+    route = _route(tmp_path / "provider", session_id=SESSION)
+    adapter = EngineAgentAdapter(route)
+    adapter.set_heartbeat_service(chain.heartbeat)
+    await adapter.create_instance()
+    facade = JiuWenSwarm()
+    facade._adapter = adapter
+    facade.reconcile_session_mcp = AsyncMock()
+    chain.foreground_prepared = asyncio.Event()
+
+    async def prepare(request, channel_id, **kwargs):
+        request.params["mode"] = chain.mode
+        if not chain.runtime.owns_heartbeat_execution(SESSION, request.request_id):
+            chain.foreground_prepared.set()
+        return "agent", "normal", facade
+
+    chain.runtime._prepare_chat_turn = prepare
+    chain.facade = facade
+    chain.adapter = adapter
+    chain.providers = providers
+    return chain
+
+
+@pytest.mark.parametrize("action", ["chat", "set", "resume", "pause", "clear"])
+async def test_external_heartbeat_preemption_waits_for_provider_exit(
+    make_chain, tmp_path, monkeypatch, action,
+):
+    chain = await _external_provider_chain(make_chain, tmp_path, monkeypatch)
+    old = chain.providers[0]
+    original_session = chain.adapter.execution_session
+    original_gateway = chain.adapter._tool_gateway
+    user = None
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        await asyncio.wait_for(old.entered.wait(), 2)
+        request = _user_request(chain)
+        if action != "chat":
+            request.req_method = ReqMethod.COMMAND_GOAL
+            request.params["action"] = action
+
+        async def foreground():
+            return [event async for event in chain.runtime.stream(request, trigger_hook=False)]
+
+        user = asyncio.create_task(foreground())
+        await asyncio.wait_for(old.close_entered.wait(), 2)
+        assert not user.done()
+        assert not chain.foreground_prepared.is_set()
+        assert SESSION in chain.heartbeat.execution.active_session_ids()
+        assert not next(e for e in _executions(chain) if e.work_kind is SessionWorkKind.HEARTBEAT).state.terminal
+        assert len(chain.providers) == 1
+        old.allow_close.set()
+        await asyncio.wait_for(user, 3)
+        assert old.exited.is_set()
+        assert original_session.closed
+        assert chain.foreground_prepared.is_set()
+        assert (await _settle(chain)).run_state.last_run_status == "cancelled"
+        if action in {"chat", "set", "resume"}:
+            assert len(chain.providers) == 2
+            assert chain.adapter.execution_session.binding is original_session.binding
+            assert chain.adapter._tool_gateway is not original_gateway
+            names = {tool.name for tool in await chain.adapter._tool_gateway.definitions()}
+            assert len(names) == 15
+    finally:
+        old.allow_close.set()
+        if user is not None and not user.done():
+            user.cancel()
+            await asyncio.gather(user, return_exceptions=True)
+        await _finish(chain)
+        await chain.facade.cleanup()
+
+
+async def test_external_heartbeat_failed_exit_retains_owner_until_explicit_retry(
+    make_chain, tmp_path, monkeypatch,
+):
+    chain = await _external_provider_chain(make_chain, tmp_path, monkeypatch, fail_close=1)
+    old = chain.providers[0]
+    old.allow_close.set()
+    chain.heartbeat.execution._cancel_timeout_seconds = 0.05
+    original_session = chain.adapter.execution_session
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        await asyncio.wait_for(old.entered.wait(), 2)
+        run_id = (await chain.heartbeat.store.get_job(chain.job.id)).run_state.current_run_id
+        assert not await chain.heartbeat.execution.cancel(run_id, reason="user_request")
+        await asyncio.wait_for(old.close_failed.wait(), 2)
+        assert chain.adapter.execution_session is original_session
+        assert SESSION in chain.heartbeat.execution.active_session_ids()
+        assert not old.exited.is_set()
+        assert len(chain.providers) == 1
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert old.close_calls == 1  # no autonomous retry after failure
+        assert (await chain.heartbeat.store.get_job(chain.job.id)).run_state.current_run_id == run_id
+        assert await chain.heartbeat.execution.cancel(run_id, reason="user_request")
+        assert old.close_calls == 2
+        assert old.exited.is_set()
+        assert (await _settle(chain)).run_state.last_run_status == "cancelled"
+        await _user_turn(chain)
+        assert len(chain.providers) == 2
+        assert chain.adapter.execution_session.binding is original_session.binding
+    finally:
+        old.allow_close.set()
+        old.fail_close = 0
+        await _finish(chain)
+        await chain.facade.cleanup()
+
+
+async def test_external_browser_disconnect_keeps_provider_detached(
+    make_chain, tmp_path, monkeypatch,
+):
+    chain = await _external_provider_chain(make_chain, tmp_path, monkeypatch)
+    provider = chain.providers[0]
+    reader = asyncio.create_task(_user_turn(chain))
+    try:
+        await asyncio.wait_for(provider.entered.wait(), 2)
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+        assert not provider.close_entered.is_set()
+        assert not chain.adapter.execution_session.closed
+        provider.release.set()
+    finally:
+        provider.allow_close.set()
+        provider.release.set()
+        await _finish(chain)
+        await chain.facade.cleanup()
+
+
+@pytest.mark.parametrize("ending", ["failed", "aborted", "unknown"])
+async def test_external_heartbeat_unconfirmed_end_keeps_owner_until_stop(
+    make_chain, tmp_path, monkeypatch, ending,
+):
+    from openjiuwen.harness_protocol import TurnEventKind
+
+    chain = await _external_provider_chain(make_chain, tmp_path, monkeypatch)
+    provider = chain.providers[0]
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        await asyncio.wait_for(provider.entered.wait(), 2)
+        if ending == "unknown":
+            # End the sole observation channel while the fake Provider task is
+            # still alive. EOF must not become successful execution ownership.
+            await provider._event_buffer.close()
+        else:
+            provider.terminal_kind = (
+                TurnEventKind.FAILED if ending == "failed" else TurnEventKind.ABORTED
+            )
+            provider.release.set()
+        await asyncio.wait_for(provider.close_entered.wait(), 2)
+        assert SESSION in chain.heartbeat.execution.active_session_ids()
+        assert not provider.exited.is_set()
+        assert not next(e for e in _executions(chain) if e.work_kind is SessionWorkKind.HEARTBEAT).state.terminal
+        provider.allow_close.set()
+        assert (await _settle(chain)).run_state.last_run_status == "failed"
+        assert provider.exited.is_set()
+    finally:
+        provider.allow_close.set()
+        provider.release.set()
+        await _finish(chain)
+        await chain.facade.cleanup()
+
+
+async def test_external_heartbeat_cancel_covers_accepted_send_without_receipt(
+    make_chain, tmp_path, monkeypatch,
+):
+    chain = await _external_provider_chain(make_chain, tmp_path, monkeypatch)
+    provider = chain.providers[0]
+    provider.hold_receipt = True
+    cancellation = None
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        await asyncio.wait_for(provider.receipt_accepted.wait(), 2)
+        await asyncio.wait_for(provider.entered.wait(), 2)
+        run_id = (await chain.heartbeat.store.get_job(chain.job.id)).run_state.current_run_id
+        cancellation = asyncio.create_task(chain.heartbeat.execution.cancel(run_id))
+        await asyncio.wait_for(provider.close_entered.wait(), 2)
+        assert not provider.return_receipt.is_set()
+        assert SESSION in chain.heartbeat.execution.active_session_ids()
+        provider.allow_close.set()
+        assert await asyncio.wait_for(cancellation, 2)
+        assert provider.exited.is_set()
+        assert (await _settle(chain)).run_state.last_run_status == "cancelled"
+    finally:
+        provider.allow_close.set()
+        provider.return_receipt.set()
+        if cancellation is not None:
+            await cancellation
+        await _finish(chain)
+        await chain.facade.cleanup()
+
+
+async def test_external_heartbeat_parent_exit_precedes_child_cleanup_and_retry(
+    make_chain, tmp_path, monkeypatch,
+):
+    chain = await _external_provider_chain(make_chain, tmp_path, monkeypatch)
+    provider = chain.providers[0]
+    subagents = chain.adapter._subagent_runtime
+    gateway = chain.adapter._tool_gateway
+    factory_close = subagents._factory.close_pending
+    child_cleanup_calls = 0
+
+    async def close_child():
+        nonlocal child_cleanup_calls
+        child_cleanup_calls += 1
+        assert provider.exited.is_set()
+        assert chain.adapter.execution_session.closed
+        if child_cleanup_calls == 1:
+            raise RuntimeError("child exit unconfirmed")
+        await factory_close()
+
+    monkeypatch.setattr(subagents._factory, "close_pending", close_child)
+    chain.heartbeat.execution._cancel_timeout_seconds = 0.05
+    cancellation = None
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        await asyncio.wait_for(provider.entered.wait(), 2)
+        run_id = (await chain.heartbeat.store.get_job(chain.job.id)).run_state.current_run_id
+        cancellation = asyncio.create_task(chain.heartbeat.execution.cancel(run_id))
+        await asyncio.wait_for(provider.close_entered.wait(), 2)
+        assert child_cleanup_calls == 0
+        assert chain.adapter._subagent_runtime is subagents
+        provider.allow_close.set()
+        assert not await cancellation
+        assert child_cleanup_calls == 1
+        assert chain.adapter._subagent_runtime is subagents
+        assert chain.adapter._tool_gateway is gateway
+        assert len(chain.providers) == 1
+        assert SESSION in chain.heartbeat.execution.active_session_ids()
+        assert await chain.heartbeat.execution.cancel(run_id)
+        assert child_cleanup_calls == 2
+        assert subagents._closed
+        await _user_turn(chain)
+        assert len(chain.providers) == 2
+        assert chain.adapter._subagent_runtime is not subagents
+        assert chain.adapter._tool_gateway is not gateway
+        from openjiuwen.harness_protocol import ToolInvocation
+        result = await chain.adapter._tool_gateway.invoke(
+            ToolInvocation("after-restart", "subagent_list", {}),
+        )
+        assert not result.is_error
+    finally:
+        provider.allow_close.set()
+        monkeypatch.setattr(subagents._factory, "close_pending", factory_close)
+        if cancellation is not None:
+            await cancellation
+        await _finish(chain)
+        await chain.facade.cleanup()
+
+
+async def test_external_heartbeat_rebuild_failure_retains_new_parent_cache_for_retry(
+    make_chain, tmp_path, monkeypatch,
+):
+    from jiuwenswarm.server.runtime.agent_adapter import engine_adapter
+
+    chain = await _external_provider_chain(make_chain, tmp_path, monkeypatch)
+    provider = chain.providers[0]
+    original_session = chain.adapter.execution_session
+    build = engine_adapter.prepare_execution_session
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("replacement construction unavailable")
+        return build(*args, **kwargs)
+
+    try:
+        await chain.heartbeat.scheduler._tick_once()
+        await asyncio.wait_for(provider.entered.wait(), 2)
+        provider.allow_close.set()
+        run_id = (await chain.heartbeat.store.get_job(chain.job.id)).run_state.current_run_id
+        assert await chain.heartbeat.execution.cancel(run_id)
+        monkeypatch.setattr(engine_adapter, "prepare_execution_session", fail_once)
+        events = await _user_turn(chain)
+        assert any(event.event_type == "chat.error" for event in events)
+        assert chain.adapter.execution_session is original_session
+        parent = chain.adapter._subagent_runtime.parent_session
+        gateway = chain.adapter._tool_gateway
+        assert len(chain.providers) == 1
+        retry = _user_request(chain)
+        retry.request_id = "retry-user-request"
+        _ = [event async for event in chain.runtime.stream(retry, trigger_hook=False)]
+        assert calls == 2
+        assert chain.adapter._subagent_runtime.parent_session is parent
+        assert chain.adapter._tool_gateway is gateway
+        assert chain.adapter.execution_session.binding is original_session.binding
+        assert len(chain.providers) == 2
+    finally:
+        provider.allow_close.set()
+        monkeypatch.setattr(engine_adapter, "prepare_execution_session", build)
+        await _finish(chain)
+        await chain.facade.cleanup()

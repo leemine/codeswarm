@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from types import SimpleNamespace
 from typing import Any
 
@@ -21,6 +21,7 @@ from jiuwenswarm.runtime.harness.external_subagent import (
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
 from jiuwenswarm.runtime.harness.recovery_store import SessionExecutionRecovery
 from jiuwenswarm.runtime.harness.tool_gateway import (
+    ProductTool,
     ProductToolGateway,
     ProductToolScope,
 )
@@ -85,6 +86,7 @@ class ExternalSubagentRuntime:
         route: AdmittedExecutionRoute,
         *,
         write_output: Callable[[OutputSchema], Awaitable[None]],
+        additional_tools: Sequence[ProductTool] = (),
     ) -> None:
         if route.provider_id not in SUPPORTED_SUBAGENT_PROVIDERS:
             raise ValueError(
@@ -113,7 +115,7 @@ class ExternalSubagentRuntime:
             execution_factory=self._factory,
         )
         self._gateway = ProductToolGateway(
-            tools,
+            [*tools, *additional_tools],
             scope=ProductToolScope(
                 subject_id=binding.subject_id,
                 host_session_id=binding.host_session_id,

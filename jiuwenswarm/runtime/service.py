@@ -346,6 +346,7 @@ class AgentRuntime:
         )
         self._resource_lease = resource_lease
         self._session_coordinator = session_coordinator or RuntimeSessionCoordinator()
+        self.set_admission_controller(admission_controller)
         # Covers chat admission and preparation before the Team adapter creates
         # its own in-flight marker (including first-run Team construction).
         self._pending_chat_requests: dict[str, set[str]] = {}
@@ -389,6 +390,35 @@ class AgentRuntime:
     def set_admission_controller(self, controller: Any | None) -> None:
         """Attach optional host-owned scheduling admission to chat execution."""
         self._admission_controller = controller
+        setter = getattr(controller, "set_runtime_busy_checker", None)
+        if callable(setter):
+            setter(self._session_has_heartbeat_blocking_work)
+
+    def _session_has_heartbeat_blocking_work(self, session_id: str) -> bool:
+        snapshot = self._session_coordinator.snapshot_session(session_id)
+        if snapshot is None:
+            return False
+        return any(
+            execution.generation == snapshot.generation
+            and not execution.state.terminal
+            and execution.work_kind in {
+                SessionWorkKind.CHAT_UNARY, SessionWorkKind.CHAT_STREAM,
+                SessionWorkKind.SESSION_MESSAGE, SessionWorkKind.GOAL_STREAM,
+                SessionWorkKind.GOAL_ATTACH,
+            }
+            for execution in snapshot.executions
+        )
+
+    def owns_heartbeat_execution(self, session_id: str, request_id: str) -> bool:
+        """Identify an exact live Heartbeat from the existing execution registry."""
+        snapshot = self._session_coordinator.snapshot_session(session_id)
+        return snapshot is not None and any(
+            execution.request_id == request_id
+            and execution.generation == snapshot.generation
+            and execution.work_kind is SessionWorkKind.HEARTBEAT
+            and not execution.state.terminal
+            for execution in snapshot.executions
+        )
 
     async def _mark_pending_interaction(self, event: RuntimeEvent) -> None:
         key = (
@@ -1391,7 +1421,9 @@ class AgentRuntime:
         )
         activity_execution_started = False
         activity_execution_succeeded = False
-        admitted = foreground and not self._request_targets_team(request)
+        admitted = (foreground or self._is_mutating_goal_request(request)) and (
+            not self._request_targets_team(request)
+        )
         interrupt_resume = self._is_interrupt_resume_request(request)
         interaction_answer = (
             interrupt_resume or request.req_method == ReqMethod.CHAT_ANSWER
@@ -1877,7 +1909,8 @@ class AgentRuntime:
         activity_execution_started = False
         activity_execution_succeeded = False
         admitted = (
-            is_chat_turn and not background and not self._request_targets_team(request)
+            (is_chat_turn or self._is_mutating_goal_request(request))
+            and not background and not self._request_targets_team(request)
         )
         interrupt_resume = self._is_interrupt_resume_request(request)
         interaction_answer = (
@@ -3017,6 +3050,15 @@ class AgentRuntime:
                 "plugin_packages.",
             )
         )
+
+    @staticmethod
+    def _is_mutating_goal_request(request: AgentRequest) -> bool:
+        if request.req_method is not ReqMethod.COMMAND_GOAL:
+            return False
+        params = request.params if isinstance(request.params, dict) else {}
+        return str(params.get("action") or "get").strip().lower() in {
+            "set", "resume", "pause", "clear",
+        }
 
     @staticmethod
     def _is_readonly_goal_get_request(request: AgentRequest) -> bool:

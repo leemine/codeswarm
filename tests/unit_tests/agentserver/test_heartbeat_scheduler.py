@@ -1614,7 +1614,9 @@ async def test_reload_recovers_orphan_run_immediately(tmp_path: Path) -> None:
     )
     await sched.reload()
     recovered = await store.get_job(job.id)
-    assert recovered.status == STATUS_SCHEDULED
+    assert recovered.status == STATUS_DISABLED
+    assert recovered.enabled is False
+    assert recovered.next_run_at is None
     assert recovered.run_state.current_run_id is None
     assert recovered.run_state.last_run_status == "failed"
 

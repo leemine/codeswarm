@@ -4,18 +4,22 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 
 from openjiuwen.harness_providers.output_buffer import OutputBudgetExceeded, OutputText
 
+from jiuwenswarm.agents.harness.code.rails.heartbeat.tools import HeartbeatRuntimeBridge
 from jiuwenswarm.common.schema.agent import (
     AgentRequest,
     AgentResponse,
     AgentResponseChunk,
 )
+from jiuwenswarm.runtime.context import get_current_runtime
 from jiuwenswarm.runtime.harness.bridge import prepare_execution_session
 from jiuwenswarm.runtime.harness.context_bridge import (
     build_external_context,
@@ -23,11 +27,14 @@ from jiuwenswarm.runtime.harness.context_bridge import (
     cleanup_staged_inputs,
 )
 from jiuwenswarm.runtime.harness.event_projection import ExternalEventProjection
-from jiuwenswarm.runtime.harness.execution_session import ExecutionSession
+from jiuwenswarm.runtime.harness.execution_session import ExecutionExitState, ExecutionSession
 from jiuwenswarm.runtime.harness.external_subagents import ExternalSubagentRuntime
 from jiuwenswarm.runtime.harness.output_router import TurnOutputIncompleteError
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
 from jiuwenswarm.runtime.terminal_outcome import unknown_terminal_payload
+
+
+logger = logging.getLogger(__name__)
 
 
 class EngineAgentAdapter:
@@ -42,8 +49,11 @@ class EngineAgentAdapter:
             raise ValueError("EngineAgentAdapter requires an External provider")
         self._route = route
         self._tool_gateway = tool_gateway
+        self._owns_tool_gateway = tool_gateway is None
+        self._heartbeat_bridge = HeartbeatRuntimeBridge()
         self._subagent_runtime: ExternalSubagentRuntime | None = None
         self._session: ExecutionSession | None = None
+        self._heartbeat_stopped_session: ExecutionSession | None = None
         self._projection = ExternalEventProjection(route.bound.binding.host_session_id)
         self._start_lock = asyncio.Lock()
         self._personal_context_runtime_enabled = False
@@ -73,6 +83,9 @@ class EngineAgentAdapter:
         del config, mode, sub_mode
         if self._session is not None:
             raise RuntimeError("External execution instance already exists")
+        self._session = self._build_session()
+
+    def _build_session(self) -> ExecutionSession:
         binding = self._route.bound.binding
         if self._tool_gateway is None and self._route.provider_id in {
             "codex",
@@ -81,6 +94,18 @@ class EngineAgentAdapter:
             self._subagent_runtime = ExternalSubagentRuntime(
                 self._route,
                 write_output=self._projection.project_product_chunk,
+                additional_tools=self._heartbeat_bridge.build_tools(
+                    context=SimpleNamespace(
+                        channel_id=self._route.channel_id,
+                        session_id=binding.host_session_id,
+                        user_id=(
+                            "" if binding.subject_id == (
+                                f"{self._route.channel_id}:{binding.host_session_id}"
+                            ) else binding.subject_id
+                        ),
+                        metadata={},
+                    )
+                ),
             )
             self._tool_gateway = self._subagent_runtime.gateway
         session = prepare_execution_session(
@@ -98,15 +123,14 @@ class EngineAgentAdapter:
             raise RuntimeError(
                 "External construction did not retain its admitted binding"
             )
-        self._session = session
+        return session
 
     def select_execution_for_request(self, request: AgentRequest) -> None:
         route = getattr(request, "_execution_route", None)
         if not isinstance(route, AdmittedExecutionRoute):
             raise RuntimeError("External request has no admitted execution route")
         self.bind_route(route)
-        if self._session is None or self._session.closed:
-            raise RuntimeError("External execution session is unavailable")
+        self._require_session()
 
     async def reload_agent_config(
         self,
@@ -169,6 +193,74 @@ class EngineAgentAdapter:
         )
 
     async def process_message_stream_impl(
+        self, request: AgentRequest, inputs: dict[str, Any]
+    ) -> AsyncIterator[AgentResponseChunk]:
+        session = self._require_session()
+        runtime = get_current_runtime()
+        owns_heartbeat = bool(
+            runtime is not None
+            and runtime.owns_heartbeat_execution(
+                session.binding.host_session_id, request.request_id,
+            )
+        )
+        completed = False
+        stream = self._process_message_stream_impl(request, inputs)
+        try:
+            async for chunk in stream:
+                if chunk.runtime_completion == "completed":
+                    completed = True
+                yield chunk
+        finally:
+            try:
+                await stream.aclose()
+            finally:
+                if owns_heartbeat and not completed:
+                    # A detached Web reader is intentionally different from a
+                    # cancelled Runtime-owned Heartbeat. Neither reader EOF nor
+                    # abort/ABORTED proves that its Provider resources exited.
+                    await self._stop_heartbeat_execution(session)
+
+    async def _stop_heartbeat_execution(self, session: ExecutionSession) -> None:
+        async def stop_owned() -> None:
+            # Close the parent and its product transport before clearing the
+            # child registry: a live parent could otherwise spawn another child
+            # after that registry was released.
+            await session.stop()
+            if session.exit_state is not ExecutionExitState.EXIT_CONFIRMED:
+                raise RuntimeError("Heartbeat stop did not confirm execution exit")
+            await self.release_subagent_runtime_for_session(
+                session.binding.host_session_id, reason="parent_ended",
+            )
+
+        while True:
+            stop = asyncio.create_task(stop_owned())
+            try:
+                while True:
+                    try:
+                        await asyncio.shield(stop)
+                        break
+                    except asyncio.CancelledError:
+                        # Repeated user/delete/timeout cancellation must not
+                        # release the Runtime owner before the shared stop ends.
+                        if stop.cancelled():
+                            raise RuntimeError("Heartbeat execution stop cancelled")
+            except Exception:
+                logger.exception("Heartbeat execution exit unconfirmed; retain owner")
+                # The original admission timeout reports failure. Keep this
+                # exact execution alive; another explicit cancel retries stop.
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    continue
+            else:
+                # Only this confirmed retired instance may be replaced. The
+                # immutable binding, checkpoint recovery and tool scope survive.
+                if self._owns_tool_gateway:
+                    self._tool_gateway = None
+                self._heartbeat_stopped_session = session
+                return
+
+    async def _process_message_stream_impl(
         self, request: AgentRequest, inputs: dict[str, Any]
     ) -> AsyncIterator[AgentResponseChunk]:
         session = self._require_session()
@@ -462,6 +554,10 @@ class EngineAgentAdapter:
             session_id=self._route.bound.binding.host_session_id,
         )
 
+    def set_heartbeat_service(self, service: Any | None) -> None:
+        """Reuse the AgentServer service; tools retain the admitted parent scope."""
+        self._heartbeat_bridge.set_service(service)
+
     def set_personal_context_runtime_enabled(self, enabled: bool) -> None:
         self._personal_context_runtime_enabled = bool(enabled)
 
@@ -471,8 +567,18 @@ class EngineAgentAdapter:
 
     def _require_session(self) -> ExecutionSession:
         session = self._session
+        if session is not None and session is self._heartbeat_stopped_session:
+            # Construct lazily through the original bridge. Failed construction
+            # retains the retired instance so the next request can retry safely.
+            replacement = self._build_session()
+            self._session = session = replacement
+            self._heartbeat_stopped_session = None
         if session is None or session.closed:
             raise RuntimeError("External execution session is unavailable")
+        if getattr(session, "exit_state", None) in {
+            ExecutionExitState.STOP_REQUESTED, ExecutionExitState.EXIT_UNCONFIRMED,
+        }:
+            raise RuntimeError("External execution session cleanup is pending")
         return session
 
     async def _ensure_started(self, session: ExecutionSession) -> None:
