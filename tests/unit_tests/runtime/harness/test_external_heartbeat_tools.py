@@ -37,6 +37,7 @@ async def test_original_heartbeat_tools_share_parent_gateway_and_fixed_identity(
         assert names == HEARTBEAT_TOOL_NAMES | {
             "subagent_spawn", "subagent_wait", "subagent_list", "subagent_send_input",
             "subagent_close", "subagent_resume",
+            "get_current_goal", "submit_goal_report",
         }
         cases = [
             ("list_jobs", "list", {}),
@@ -79,12 +80,15 @@ async def test_original_heartbeat_tools_share_parent_gateway_and_fixed_identity(
     assert not adapter.has_session_runtime()
 
 
-async def test_no_service_retains_existing_six_tool_catalog(tmp_path):
+async def test_no_service_retains_subagent_and_goal_tool_catalog(tmp_path):
     adapter = EngineAgentAdapter(_route(tmp_path, "codex"))
     try:
         await adapter.create_instance()
         names = {tool.name for tool in await adapter.execution_session._tool_gateway.definitions()}
-        assert len(names) == 6
+        assert names == {
+            "subagent_spawn", "subagent_wait", "subagent_list", "subagent_send_input",
+            "subagent_close", "subagent_resume", "get_current_goal", "submit_goal_report",
+        }
         assert not names & HEARTBEAT_TOOL_NAMES
     finally:
         await adapter.cleanup()

@@ -42,6 +42,9 @@ class _SessionRecord:
     state: RuntimeSessionState = RuntimeSessionState.READY
     control_ready: asyncio.Event = field(default_factory=asyncio.Event)
     stream_control_claims: set[str] = field(default_factory=set)
+    external_execution: bool = False
+    external_owner: str | None = None
+    execution_changed: asyncio.Event = field(default_factory=asyncio.Event)
 
     def __post_init__(self) -> None:
         self.control_ready.set()
@@ -74,6 +77,74 @@ class RuntimeSessionCoordinator:
         self._control_claims: set[tuple[str, int, str, str]] = set()
         self._accepting = True
         self._lock = asyncio.Lock()
+
+    def external_execution_owner(self, session_id: str, request_id: str) -> SessionExecutionHandle:
+        """Resolve authority from the original registry, never request metadata."""
+        record = self._require_open_session(session_id)
+        matches = self._registry.select(
+            session_id=session_id, request_id=request_id,
+            generation=record.generation, active_only=True,
+        )
+        if len(matches) != 1 or matches[0].cancellation_requested:
+            raise SessionExecutionEndedError("External execution owner is unavailable")
+        record.external_execution = True
+        return matches[0]
+
+    async def acquire_external_execution(self, owner: SessionExecutionHandle, *, goal: bool) -> None:
+        """Grant one actual External send inside the existing Runtime producer.
+
+        Native scheduling is unchanged. Goal controls and interaction answers
+        never acquire this permit, so they can unblock its current holder.
+        """
+        while True:
+            async with self._lock:
+                record = self._require_open_session(owner.session_id)
+                self._require_generation(record, owner.generation)
+                if owner.state.terminal or owner.cancellation_requested:
+                    raise SessionExecutionEndedError("External execution owner ended")
+                active = self._registry.select(
+                    session_id=owner.session_id, generation=owner.generation,
+                    active_only=True,
+                )
+                user_waiting = goal and any(
+                    other is not owner and other.work_kind in {
+                        SessionWorkKind.CHAT_UNARY, SessionWorkKind.CHAT_STREAM,
+                        SessionWorkKind.SESSION_MESSAGE, SessionWorkKind.HEARTBEAT,
+                    } for other in active
+                )
+                if record.external_owner in (None, owner.execution_id) and not user_waiting:
+                    record.external_execution = True
+                    record.external_owner = owner.execution_id
+                    return
+                changed = record.execution_changed
+            await changed.wait()
+
+    async def request_external_execution_cancel(self, owner: SessionExecutionHandle) -> None:
+        """Request the original producer's cancellation without joining it.
+
+        GoalManager calls this under its control lock after Provider exit; the
+        producer must be free to settle after that lock is released.
+        """
+        record = self._sessions.get(owner.session_id)
+        if record is not None and record.generation == owner.generation and not owner.state.terminal:
+            await self._request_direct_cancel([owner], wait_timeout=0)
+
+    def holds_external_execution(self, owner: SessionExecutionHandle) -> bool:
+        record = self._sessions.get(owner.session_id)
+        return bool(record is not None and record.generation == owner.generation
+                    and record.external_owner == owner.execution_id)
+
+    def release_external_execution(self, owner: SessionExecutionHandle) -> None:
+        record = self._sessions.get(owner.session_id)
+        if (record is not None and record.generation == owner.generation
+                and record.external_owner == owner.execution_id):
+            record.external_owner = None
+            self._notify_execution_changed(record)
+
+    @staticmethod
+    def _notify_execution_changed(record: _SessionRecord) -> None:
+        record.execution_changed.set()
+        record.execution_changed = asyncio.Event()
 
     async def register_session(
         self,
@@ -915,7 +986,7 @@ class RuntimeSessionCoordinator:
                 SessionWorkKind.CHAT_STREAM,
                 SessionWorkKind.HEARTBEAT,
             }
-        elif work_kind is SessionWorkKind.GOAL_STREAM:
+        elif work_kind is SessionWorkKind.GOAL_STREAM and not record.external_execution:
             superseded_kinds = {
                 SessionWorkKind.GOAL_STREAM,
                 SessionWorkKind.GOAL_ATTACH,
@@ -943,6 +1014,7 @@ class RuntimeSessionCoordinator:
             parent_execution_id=parent_execution_id,
         )
         self._registry.register(handle)
+        self._notify_execution_changed(record)
         record.state = RuntimeSessionState.ACTIVE
         return handle
 
@@ -986,9 +1058,8 @@ class RuntimeSessionCoordinator:
             )
         return handle
 
-    @staticmethod
     def _observe_submission_value(
-        handle: SessionExecutionHandle, value: object
+        self, handle: SessionExecutionHandle, value: object
     ) -> None:
         values = value if isinstance(value, (list, tuple)) else (value,)
         for item in values:
@@ -1014,7 +1085,8 @@ class RuntimeSessionCoordinator:
                 if handle.submission_state is not SessionSubmissionState.PROVIDER_ACCEPTED:
                     handle.submission_state = SessionSubmissionState.UNKNOWN
             elif (
-                event_type.startswith(("chat.", "harness.", "goal."))
+                not ((record := self._sessions.get(handle.session_id)) is not None and record.external_execution)
+                and event_type.startswith(("chat.", "harness.", "goal."))
                 and event_type not in {"chat.interrupt_result"}
                 and payload.get("terminal_status") != "unknown"
             ):
@@ -1212,8 +1284,12 @@ class RuntimeSessionCoordinator:
         *,
         wait_timeout: float | None,
     ) -> tuple[str, ...]:
-        pending = [handle for handle in handles if handle.cancellation_requested]
-        fresh = [handle for handle in handles if not handle.cancellation_requested]
+        def explicit_external_retry(handle):
+            record = self._sessions.get(handle.session_id)
+            return record is not None and record.external_owner == handle.execution_id
+
+        pending = [handle for handle in handles if handle.cancellation_requested and not explicit_external_retry(handle)]
+        fresh = [handle for handle in handles if not handle.cancellation_requested or explicit_external_retry(handle)]
         for handle in fresh:
             handle.cancellation_requested = True
         cancelled_timeouts = await self._cancel_direct_handles(
@@ -1240,6 +1316,7 @@ class RuntimeSessionCoordinator:
                 continue
 
     def _refresh_session_state(self, record: _SessionRecord) -> None:
+        self._notify_execution_changed(record)
         if self._sessions.get(record.session_id) is not record:
             return
         if record.state in {RuntimeSessionState.QUIESCING, RuntimeSessionState.CLOSED}:

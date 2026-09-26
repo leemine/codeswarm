@@ -122,7 +122,7 @@ from openjiuwen.harness.tools import (
     create_audio_tools,
     create_vision_tools,
 )
-from openjiuwen.harness.goal.schema import GoalOperationError, GoalStatus
+from openjiuwen.harness.goal.schema import GoalStatus
 from openjiuwen.harness.schema.interaction import (
     InteractionEventType,
     InputDispatchMode,
@@ -131,6 +131,9 @@ from openjiuwen.harness.schema.interaction import (
 from openjiuwen.harness.schema.task import TodoStatus
 from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
 from openjiuwen.harness.schema.config import SubAgentConfig
+
+from jiuwenswarm.server.runtime.agent_adapter import goal_control as _goal_control
+from jiuwenswarm.server.runtime.agent_adapter import goal_history as _goal_history
 
 from jiuwenswarm.server.runtime.session.history_io import (
     run_history_io, run_stream_parser, stream_chunk_writes_history,
@@ -431,7 +434,7 @@ from jiuwenswarm.server.runtime import extension_package_manager as equipment
 
 # Goal 用户历史：忙碌插队时先挂起，等上一轮→goal 边界（或流结束）再落盘，
 # 时间戳与 live「答完再入列」对齐。按 session 暂存，跨同 session 的并发 stream 共享。
-_pending_goal_objective_history: dict[str, dict[str, Any]] = {}
+_pending_goal_objective_history = _goal_history.pending_goal_objective_history
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     EVOLUTION_ACCEPT_LABELS,
@@ -12967,7 +12970,7 @@ class JiuWenSwarmDeepAdapter:
 
     @staticmethod
     def _wants_attach_goal(params: Any) -> bool:
-        return isinstance(params, dict) and params.get("attach_goal") is True
+        return _goal_control.wants_attach_goal(params)
 
     @staticmethod
     def _should_parse_tui_goal_slash(
@@ -12977,30 +12980,16 @@ class JiuWenSwarmDeepAdapter:
         channel_id: Any,
         query: Any,
     ) -> bool:
-        """Whether to parse chat text ``/goal ...`` (TUI only, when no structured op)."""
-        if pending_goal_op is not None or attach_goal_request:
-            return False
-        if str(channel_id or "").strip().lower() != "tui":
-            return False
-        return isinstance(query, str)
+        return _goal_control.should_parse_tui_goal_slash(
+            pending_goal_op=pending_goal_op,
+            attach_goal_request=attach_goal_request,
+            channel_id=channel_id,
+            query=query,
+        )
 
     @staticmethod
     def _parse_goal_slash_intent(query: str) -> dict[str, Any] | None:
-        """Parse ``/goal ...`` into an action dict without touching GoalManager."""
-        text = query.strip()
-        if not text.startswith("/goal"):
-            return None
-        args = text[5:].strip()
-        if not args:
-            return {"action": "get"}
-        lower = args.lower()
-        if lower in {"pause", "resume", "clear"}:
-            return {"action": lower}
-        if lower.startswith("set "):
-            return {"action": "set", "objective": args[4:].strip()}
-        if lower == "set":
-            return {"action": "set", "objective": ""}
-        return {"action": "set", "objective": args}
+        return _goal_control.parse_goal_slash_intent(query)
 
     def _is_ack_only_dispatch(self, params: Any) -> bool:
         """Steer / follow_up prefer an existing reader when one is present."""
@@ -13417,31 +13406,7 @@ class JiuWenSwarmDeepAdapter:
     def _structured_goal_op_from_request(
         request: AgentRequest,
     ) -> dict[str, Any] | None:
-        """Map streaming ``command.goal`` set/resume onto the attach→control path.
-
-        Plain chat text like ``/goal set ...`` is never parsed here — only an
-        explicit ``command.goal`` method (Web/TUI structured API).
-        """
-        if request.req_method != ReqMethod.COMMAND_GOAL:
-            return None
-        raw = request.params if isinstance(request.params, dict) else {}
-        action = str(raw.get("action", "get") or "get").strip().lower()
-        if action not in {"set", "resume"}:
-            return None
-        op: dict[str, Any] = {"action": action}
-        if action == "set":
-            objective = raw.get("objective")
-            op["objective"] = objective if isinstance(objective, str) else ""
-            op["overwrite_confirmed"] = bool(raw.get("overwrite_confirmed", False))
-            for key in ("token_budget", "max_attempts"):
-                value = raw.get(key)
-                if value is None or isinstance(value, bool):
-                    continue
-                if isinstance(value, int):
-                    op[key] = value
-                elif isinstance(value, str) and value.strip().lstrip("-").isdigit():
-                    op[key] = int(value.strip())
-        return op
+        return _goal_control.structured_goal_operation(request)
 
     async def _abort_shared_agent_if_safe(self, normalized_sid: str, intent: str) -> bool:
         """Global DeepAgent/scheduler abort when safe for unrelated sessions."""
@@ -14695,22 +14660,11 @@ class JiuWenSwarmDeepAdapter:
 
     @staticmethod
     def _goal_record_payload(record: Any | None) -> dict[str, Any] | None:
-        if record is None:
-            return None
-        to_dict = getattr(record, "to_dict", None)
-        return to_dict() if callable(to_dict) else None
+        return _goal_control.goal_record_payload(record)
 
     @staticmethod
     def _format_goal_control_message(action: str, goal: dict[str, Any] | None) -> str:
-        if action == "get":
-            return "No goal in this session." if goal is None else f"Goal: {goal.get('objective', '')}"
-        if action == "pause":
-            return "Goal paused." if goal is not None else "No goal in this session."
-        if action == "clear":
-            return "Goal cleared." if goal is None else "Goal was not cleared."
-        if action == "resume":
-            return "Goal resumed." if goal is not None else "No goal in this session."
-        return "Goal set." if goal is not None else "Goal was not set."
+        return _goal_control.format_goal_control_message(action, goal)
 
     def _session_has_other_running_agent_tasks(self, session_id: str) -> bool:
         """同 session 是否还有「不是当前 task」的未完成 agent 流。"""
@@ -14760,31 +14714,12 @@ class JiuWenSwarmDeepAdapter:
         defer: bool | None = None,
     ) -> None:
         """成功 set 后写入 objective 用户历史；忙碌时推迟到上一轮收尾后再写。"""
-        if str(action or "").strip().lower() != "set":
+        record_kwargs = _goal_history.objective_record(
+            request, action=action, result_type=result_type, goal_payload=goal_payload,
+        )
+        if record_kwargs is None:
             return
-        if result_type in {"goal_error", "goal_confirm_required", None}:
-            return
-        if not isinstance(goal_payload, dict):
-            return
-        objective = str(goal_payload.get("objective") or "").strip()
-        if not objective:
-            return
-        params = request.params if isinstance(request.params, dict) else {}
-        goal_id = str(goal_payload.get("goal_id") or "").strip() or None
         sid = request.session_id or "default"
-        record_kwargs: dict[str, Any] = {
-            "session_id": sid,
-            "request_id": request.request_id,
-            "channel_id": request.channel_id,
-            "role": "user",
-            "content": objective,
-            "channel_metadata": request.metadata,
-            "mode": params.get("mode", "unknown"),
-            "extra": {
-                "goal_id": goal_id,
-                "is_goal_objective_message": True,
-            },
-        }
         should_defer = (
             defer if defer is not None else self._should_defer_goal_objective_history(sid)
         )
@@ -14826,58 +14761,22 @@ class JiuWenSwarmDeepAdapter:
         goal_payload: dict[str, Any] | None,
     ) -> None:
         """Persist a goal-completed card once when status first becomes completed."""
-        if not isinstance(goal_payload, dict):
-            return
-        status = goal_payload.get("status")
-        status_value = getattr(status, "value", status)
-        if str(status_value or "").strip().lower() != "completed":
-            return
-        goal_id = str(goal_payload.get("goal_id") or "").strip()
-        if not goal_id:
-            return
-        sid = (session_id or "default").strip() or "default"
-        if await run_history_io(JiuWenSwarmDeepAdapter._goal_completed_history_exists, sid, goal_id):
-            return
-
-        evidence = ""
-        last_assessment = goal_payload.get("last_assessment")
-        if isinstance(last_assessment, dict):
-            evidence = str(last_assessment.get("evidence") or "").strip()
-        # Keep the existing frontend GoalCompletedCard wire format so history
-        # restore / localStorage merge keep working without a content-parser fork.
-        content = "goal.completed:" + json.dumps({"evidence": evidence}, ensure_ascii=False)
-        message_id = f"goal-completed-{goal_id}"
-        await run_history_io(append_history_record,
-            session_id=sid,
-            request_id=message_id,
-            channel_id=channel_id,
-            role="assistant",
-            content=content,
-            timestamp=time.time(),
-            channel_metadata=channel_metadata,
-            mode=mode,
-            extra={
-                "id": message_id,
-                "goal_id": goal_id,
-                "is_goal_completed_message": True,
-                "evidence": evidence,
-            },
+        record = _goal_history.completion_record(
+            session_id=session_id, channel_id=channel_id,
+            channel_metadata=channel_metadata, mode=mode, goal_payload=goal_payload,
         )
+        if record is None:
+            return
+        if await run_history_io(
+            JiuWenSwarmDeepAdapter._goal_completed_history_exists,
+            record["session_id"], record["extra"]["goal_id"],
+        ):
+            return
+        await run_history_io(append_history_record, timestamp=time.time(), **record)
 
     @staticmethod
     def _interaction_goal_updated_payload(payload: Any) -> dict[str, Any]:
-        """Normalize goal updates to the public Web/TUI payload shape."""
-        if not isinstance(payload, dict):
-            return {"event_type": GOAL_UPDATED_EVENT_TYPE, "goal": None}
-        if "goal" in payload:
-            return {
-                "event_type": GOAL_UPDATED_EVENT_TYPE,
-                "goal": payload.get("goal"),
-            }
-        return {
-            "event_type": GOAL_UPDATED_EVENT_TYPE,
-            "goal": payload or None,
-        }
+        return _goal_control.goal_updated_payload(payload)
 
     def _get_goal_manager(self) -> Any:
         if self._instance is None:
@@ -14931,146 +14830,14 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None:
             return None
 
-        normalized_action = action.strip().lower()
-        goal_manager = self._get_goal_manager()
-        if goal_manager is None:
-            return {
-                "result_type": "goal_error",
-                "action": normalized_action,
-                "error_code": "goal_manager_not_started",
-                "error": "goal manager is not started",
-            }
-        try:
-            if normalized_action == "get":
-                # Read-only status query: use the lock-free ``peek`` snapshot so a
-                # long-running / stuck goal round (which holds the shared
-                # interaction control lock across ``set``/``clear`` -> abort) can
-                # never block a plain ``command.goal get`` up to the unary timeout.
-                # ``await get()`` would serialize on that same control lock.
-                peek = getattr(goal_manager, "peek", None)
-                goal = peek() if callable(peek) else await goal_manager.get()
-            elif normalized_action == "set":
-                goal = await goal_manager.set(
-                    objective or "",
-                    overwrite_confirmed=overwrite_confirmed,
-                    token_budget=token_budget,
-                    max_attempts=max_attempts,
-                )
-            elif normalized_action == "pause":
-                before = await goal_manager.get()
-                if before is None:
-                    return {
-                        "result_type": "goal_error",
-                        "action": normalized_action,
-                        "error_code": "no_goal",
-                        "error": "No goal in this session; cannot pause.",
-                        "goal": None,
-                    }
-                before_status = before.status
-                goal = await goal_manager.pause()
-                goal_payload = self._goal_record_payload(goal)
-                if before_status is not GoalStatus.ACTIVE:
-                    status_value = getattr(before_status, "value", str(before_status))
-                    return {
-                        "result_type": "goal_error",
-                        "action": normalized_action,
-                        "error_code": "invalid_state",
-                        "error": (
-                            f"Goal is {status_value}; only active goals can be paused."
-                        ),
-                        "goal": goal_payload,
-                    }
-                return {
-                    "result_type": "goal_control",
-                    "action": normalized_action,
-                    "goal": goal_payload,
-                    "output": "Goal paused.",
-                }
-            elif normalized_action == "resume":
-                before = await goal_manager.get()
-                if before is None:
-                    return {
-                        "result_type": "goal_error",
-                        "action": normalized_action,
-                        "error_code": "no_goal",
-                        "error": "No goal in this session; cannot resume.",
-                        "goal": None,
-                    }
-                before_status = before.status
-                if before_status is GoalStatus.ACTIVE:
-                    goal_payload = self._goal_record_payload(before)
-                    return {
-                        "result_type": "goal_control",
-                        "action": normalized_action,
-                        "goal": goal_payload,
-                        "output": "Goal already active.",
-                    }
-                if before_status not in (GoalStatus.PAUSED, GoalStatus.BLOCKED):
-                    status_value = getattr(before_status, "value", str(before_status))
-                    return {
-                        "result_type": "goal_error",
-                        "action": normalized_action,
-                        "error_code": "invalid_state",
-                        "error": (
-                            f"Goal is {status_value}; only paused/blocked goals "
-                            "can be resumed."
-                        ),
-                        "goal": self._goal_record_payload(before),
-                    }
-                goal = await goal_manager.resume()
-            elif normalized_action == "clear":
-                removed = await goal_manager.clear()
-                if removed is None:
-                    return {
-                        "result_type": "goal_error",
-                        "action": normalized_action,
-                        "error_code": "no_goal",
-                        "error": "No goal in this session; nothing to clear.",
-                        "goal": None,
-                        "cleared_goal": None,
-                    }
-                return {
-                    "result_type": "goal_control",
-                    "action": normalized_action,
-                    "goal": None,
-                    "cleared_goal": self._goal_record_payload(removed),
-                    "output": "Goal cleared.",
-                }
-            else:
-                return {
-                    "result_type": "goal_error",
-                    "action": normalized_action,
-                    "error_code": "invalid_action",
-                    "error": f"unsupported goal action: {action}",
-                }
-        except GoalOperationError as exc:
-            if exc.code == "already_exists":
-                return {
-                    "result_type": "goal_confirm_required",
-                    "action": normalized_action,
-                    "error_code": exc.code,
-                    "error": str(exc),
-                    "existing_goal": self._goal_record_payload(exc.goal),
-                    "requested_objective": objective,
-                }
-            return {
-                "result_type": "goal_error",
-                "action": normalized_action,
-                "error_code": exc.code,
-                "error": str(exc),
-                "goal": self._goal_record_payload(exc.goal),
-            }
-
-        goal_payload = self._goal_record_payload(goal)
-        active = goal is not None and goal.status is GoalStatus.ACTIVE
-        return {
-            "result_type": "goal_stream"
-            if normalized_action in {"set", "resume"} and active
-            else "goal_control",
-            "action": normalized_action,
-            "goal": goal_payload,
-            "output": self._format_goal_control_message(normalized_action, goal_payload),
-        }
+        return await _goal_control.dispatch_goal_control(
+            self._get_goal_manager(),
+            action=action,
+            objective=objective,
+            overwrite_confirmed=overwrite_confirmed,
+            token_budget=token_budget,
+            max_attempts=max_attempts,
+        )
 
     async def handle_goal_command_structured(
         self,
@@ -15078,14 +14845,8 @@ class JiuWenSwarmDeepAdapter:
         session_id: str = "default",
     ) -> dict[str, Any] | None:
         """Structured ``command.goal`` endpoint."""
-        raw = params if isinstance(params, dict) else {}
-        objective = raw.get("objective")
         return await self._dispatch_goal_control(
-            action=str(raw.get("action", "get")),
-            objective=objective if isinstance(objective, str) else None,
-            overwrite_confirmed=bool(raw.get("overwrite_confirmed", False)),
-            token_budget=raw.get("token_budget"),
-            max_attempts=raw.get("max_attempts"),
+            **_goal_control.structured_goal_control_kwargs(params),
             session_id=session_id,
         )
 
@@ -15095,26 +14856,10 @@ class JiuWenSwarmDeepAdapter:
         session_id: str = "default",
     ) -> dict[str, Any] | None:
         """Translate only product syntax; the SDK receives capability calls."""
-        text = query.strip()
-        if not text.startswith("/goal"):
+        intent = self._parse_goal_slash_intent(query)
+        if intent is None:
             return None
-        args = text[5:].strip()
-        if not args:
-            return await self._dispatch_goal_control(action="get", session_id=session_id)
-        lower = args.lower()
-        if lower in {"pause", "resume", "clear"}:
-            return await self._dispatch_goal_control(action=lower, session_id=session_id)
-        if lower.startswith("set "):
-            objective = args[4:].strip()
-        elif lower == "set":
-            objective = ""
-        else:
-            # ``get`` and ``stop`` are not user command words.  They remain
-            # valid goal text in the documented ``/goal <objective>`` form.
-            objective = args
-        return await self._dispatch_goal_control(
-            action="set", objective=objective, session_id=session_id
-        )
+        return await self._dispatch_goal_control(**intent, session_id=session_id)
 
     async def _cancel_pending_todos(self, session_id: str) -> list[dict] | None:
         """将未完成的 todo 项标记为 cancelled.

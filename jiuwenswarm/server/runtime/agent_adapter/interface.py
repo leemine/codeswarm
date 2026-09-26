@@ -331,6 +331,18 @@ def is_external_user_authored_dispatch(
     return not str(params.get("source") or "").strip()
 
 
+def _external_goal_slash_intent(request: AgentRequest) -> dict[str, Any] | None:
+    route = getattr(request, "_execution_route", None)
+    if (
+        not isinstance(route, AdmittedExecutionRoute)
+        or route.provider_id == "native"
+    ):
+        return None
+    from jiuwenswarm.server.runtime.agent_adapter.goal_control import tui_goal_operation
+
+    return tui_goal_operation(request)
+
+
 def _should_record_user_history(params: Any) -> bool:
     # History visibility is not permission authority: retain Heartbeat turns.
     if not isinstance(params, dict):
@@ -386,6 +398,24 @@ def _request_history_delivery_id(
 
 
 async def _append_request_assistant_history(
+    **kwargs: Any,
+) -> None:
+    """Drain an accepted history write before propagating request cancellation."""
+    write = asyncio.create_task(_append_request_assistant_history_impl(**kwargs))
+    cancelled = None
+    while True:
+        try:
+            await asyncio.shield(write)
+            break
+        except asyncio.CancelledError as exc:
+            if write.cancelled():
+                raise
+            cancelled = exc
+    if cancelled is not None:
+        raise cancelled
+
+
+async def _append_request_assistant_history_impl(
     *,
     session_id: str,
     request_id: str,
@@ -1357,6 +1387,27 @@ class JiuWenSwarm:
         if not callable(select):
             raise RuntimeError("selected execution provider has no adapter route")
         select(request)
+        route = getattr(request, "_execution_route", None)
+        params = request.params if isinstance(request.params, dict) else {}
+        intent = _external_goal_slash_intent(request)
+        action = str((intent or params).get("action") or "get").strip().lower()
+        needs_assessor = getattr(adapter, "needs_goal_assessor", None)
+        starts_goal = (
+            (request.req_method == ReqMethod.COMMAND_GOAL or intent is not None)
+            and action in {"set", "resume"}
+        )
+        if (
+            isinstance(route, AdmittedExecutionRoute)
+            and route.provider_id != "native"
+            and (starts_goal or (callable(needs_assessor) and needs_assessor(request)))
+        ):
+            setter = getattr(adapter, "set_goal_assessor_factory", None)
+            if callable(setter):
+                from jiuwenswarm.server.runtime.agent_adapter.goal_model import (
+                    request_goal_assessor_factory,
+                )
+
+                setter(request_goal_assessor_factory(request), request=request)
 
     def set_personal_context_runtime_enabled(self, enabled: bool) -> None:
         """Store and forward the PersonalContext Host runtime switch."""
@@ -2915,6 +2966,28 @@ class JiuWenSwarm:
         *,
         schedule_session: bool,
     ) -> AgentResponse:
+        route = getattr(request, "_execution_route", None)
+        external = isinstance(route, AdmittedExecutionRoute) and route.provider_id != "native"
+        if external:
+            request._defer_execution_until_history = True
+        history_failed = False
+        try:
+            return await self._process_message_impl(request, schedule_session=schedule_session)
+        except Exception:
+            history_failed = True
+            raise
+        finally:
+            if external and not history_failed:
+                complete = getattr(self._adapter, "complete_request_history", None)
+                if callable(complete):
+                    await complete(request)
+
+    async def _process_message_impl(
+        self,
+        request: AgentRequest,
+        *,
+        schedule_session: bool,
+    ) -> AgentResponse:
         """处理非流式请求.
 
         支持多 session 并发执行，同 session 内任务按先进后出顺序执行.
@@ -3033,7 +3106,7 @@ class JiuWenSwarm:
                     request_id=request.request_id,
                     channel_id=request.channel_id,
                     ok=False,
-                    payload={"error": f"Goal command error: {exc}"},
+                    payload={"error": f"Goal command error: {exc}", **({"code": exc.code} if getattr(exc, "code", None) else {})},
                     metadata=request.metadata,
                 )
 
@@ -3072,7 +3145,7 @@ class JiuWenSwarm:
         query = request.params.get("query", "")
         # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
         # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
-        if _should_record_user_history(request.params):
+        if _should_record_user_history(request.params) and _external_goal_slash_intent(request) is None:
             await _run_history_io(
                 append_history_record,
                 session_id=session_id,
@@ -3247,6 +3320,31 @@ class JiuWenSwarm:
     async def process_message_stream(
             self, request: AgentRequest
     ) -> AsyncIterator[AgentResponseChunk]:
+        route = getattr(request, "_execution_route", None)
+        external = isinstance(route, AdmittedExecutionRoute) and route.provider_id != "native"
+        if external:
+            # The adapter's producer can run ahead of the original history
+            # consumer. Release its execution permit only after that consumer
+            # has drained or persisted its cancellation boundary.
+            request._defer_execution_until_history = True
+        stream = self._process_message_stream(request)
+        history_failed = False
+        try:
+            async for chunk in stream:
+                yield chunk
+        except Exception:
+            history_failed = True
+            raise
+        finally:
+            await stream.aclose()
+            if external and not history_failed:
+                complete = getattr(self._adapter, "complete_request_history", None)
+                if callable(complete):
+                    await complete(request)
+
+    async def _process_message_stream(
+            self, request: AgentRequest
+    ) -> AsyncIterator[AgentResponseChunk]:
         """处理流式请求.
 
         支持多 session 并发执行，同 session 内任务按先进后出顺序执行.
@@ -3305,7 +3403,7 @@ class JiuWenSwarm:
                     yield AgentResponseChunk(
                         request_id=request.request_id,
                         channel_id=request.channel_id,
-                        payload={"event_type": "chat.error", "error": f"Goal command error: {exc}"},
+                        payload={"event_type": "chat.error", "error": f"Goal command error: {exc}", **({"code": exc.code} if getattr(exc, "code", None) else {})},
                         is_complete=True,
                     )
                 return
@@ -3379,6 +3477,7 @@ class JiuWenSwarm:
         if (
             request.req_method != ReqMethod.COMMAND_GOAL
             and _should_record_user_history(params_for_history)
+            and _external_goal_slash_intent(request) is None
         ):
             await _run_history_io(
                 append_history_record,

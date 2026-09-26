@@ -409,9 +409,11 @@ async def test_shared_engine_adapter_constructs_without_native_deep_adapter(
     class Session:
         binding = route.bound.binding
         closed = False
+        exit_state = ExecutionExitState.NOT_STARTED
 
         async def stop(self) -> None:
             self.closed = True
+            self.exit_state = ExecutionExitState.EXIT_CONFIRMED
             stopped.append(True)
 
         async def abort(self, *, immediate: bool = False) -> None:
@@ -484,7 +486,8 @@ async def test_actual_facade_constructs_external_provider_through_shared_engine_
         tool_names = {tool.name for tool in await session._tool_gateway.definitions()}
         assert "heartbeat_create_job" in tool_names
         assert "subagent_spawn" in tool_names
-        assert len(tool_names) == 15
+        assert len(tool_names) == 17
+        assert {"get_current_goal", "submit_goal_report"} <= tool_names
         assert facade.owns_external_execution("session-1") is True
     finally:
         await facade.cleanup()
@@ -1493,9 +1496,11 @@ async def test_request_owned_critical_history_waits_for_durable_receipt(
 
     receipt: Future[None] = Future()
     calls: list[dict[str, Any]] = []
+    accepted = asyncio.Event()
 
     async def direct_history(fn, **kwargs):
         calls.append(kwargs)
+        accepted.set()
         return receipt
 
     monkeypatch.setattr(module, "_run_history_io", direct_history)
@@ -1511,7 +1516,7 @@ async def test_request_owned_critical_history_waits_for_durable_receipt(
             mode="code",
         )
     )
-    await asyncio.sleep(0)
+    await asyncio.wait_for(accepted.wait(), 1)
 
     assert persistence.done() is False
     assert calls[0]["delivery_id"].startswith("request:request-1:chat.final:")
