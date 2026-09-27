@@ -1,0 +1,71 @@
+name: Real Provider and browser acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'Explicit acceptance scope (remote suites consume configured model API)'
+        required: true
+        type: choice
+        default: local-cli
+        options: [local-cli, goal, heartbeat, ui, all]
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    environment: provider-acceptance
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check explicit remote configuration
+        if: inputs.suite != 'local-cli'
+        env:
+          HEARTBEAT_REMOTE_API_BASE: ${{ secrets.HEARTBEAT_REMOTE_API_BASE }}
+          HEARTBEAT_REMOTE_API_KEY: ${{ secrets.HEARTBEAT_REMOTE_API_KEY }}
+          HEARTBEAT_REMOTE_MODEL: ${{ secrets.HEARTBEAT_REMOTE_MODEL }}
+        run: |
+          python3 - <<'PY'
+          import os
+          required = ('HEARTBEAT_REMOTE_API_BASE', 'HEARTBEAT_REMOTE_API_KEY', 'HEARTBEAT_REMOTE_MODEL')
+          missing = [name for name in required if not os.environ.get(name, '').strip()]
+          if missing:
+              raise SystemExit('Missing explicit remote configuration: ' + ', '.join(missing))
+          PY
+      - uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: '0.12.5'
+      - name: Install locked Provider dependencies
+        run: uv sync --locked --group test --extra codex --python 3.13
+      - name: Warm legacy pysbd bytecode
+        run: .venv/bin/python -W 'ignore:invalid escape sequence:SyntaxWarning' -c 'import pysbd'
+      - uses: actions/setup-node@v7.0.0
+        if: inputs.suite == 'ui' || inputs.suite == 'all'
+        with:
+          node-version: '22'
+      - name: Build original Web frontend and install Chromium
+        if: inputs.suite == 'ui' || inputs.suite == 'all'
+        run: |
+          npm ci --prefix jiuwenswarm/channels/web/frontend
+          npm run build --prefix jiuwenswarm/channels/web/frontend
+          .venv/bin/python -m playwright install --with-deps chromium
+      - name: Run selected real acceptance with closed accounting
+        env:
+          ACCEPTANCE_SUITE: ${{ inputs.suite }}
+          HEARTBEAT_REMOTE_API_BASE: ${{ secrets.HEARTBEAT_REMOTE_API_BASE }}
+          HEARTBEAT_REMOTE_API_KEY: ${{ secrets.HEARTBEAT_REMOTE_API_KEY }}
+          HEARTBEAT_REMOTE_MODEL: ${{ secrets.HEARTBEAT_REMOTE_MODEL }}
+          PLAYWRIGHT_BROWSERS_PATH: /home/runner/.cache/ms-playwright
+        run: .venv/bin/python tools/run_provider_acceptance.py --suite "$ACCEPTANCE_SUITE" --output artifacts/test-runs/provider-acceptance
+      - name: Upload sanitized acceptance evidence
+        if: always() && hashFiles('artifacts/test-runs/provider-acceptance/archive-safe.json') != ''
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: provider-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/test-runs/provider-acceptance/
+          if-no-files-found: warn
+          retention-days: 30

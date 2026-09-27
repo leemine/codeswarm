@@ -60,7 +60,7 @@ jobs:
       - name: Build TUI contract fixture
         run: npm run build --prefix jiuwenswarm/channels/tui/frontend
       - name: Verify orchestrator
-        run: python3 -m unittest tools.tests.test_testctl -v
+        run: python3 -m unittest tools.tests.test_testctl tools.tests.test_provider_acceptance -v
       - name: Run stable regression
         env:
           TESTCTL_RETENTION_DAYS: ${{ github.event_name == 'schedule' && '90' || '30' }}
@@ -123,7 +123,7 @@ jobs:
           npm ci --prefix jiuwenswarm/channels/tui/frontend
           npm run build --prefix jiuwenswarm/channels/tui/frontend
       - name: Verify full-run accounting
-        run: python3 -m unittest tools.tests.test_full_shards -v
+        run: python3 -m unittest tools.tests.test_full_shards tools.tests.test_provider_acceptance -v
       - name: Run full Python regression
         run: .venv/bin/python tools/full_regression.py --workers 2
       - name: Upload full Python archive
