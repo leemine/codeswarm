@@ -2013,17 +2013,23 @@ async def test_external_heartbeat_preemption_waits_for_provider_exit(
         assert not next(e for e in _executions(chain) if e.work_kind is SessionWorkKind.HEARTBEAT).state.terminal
         assert len(chain.providers) == 1
         old.allow_close.set()
-        await asyncio.wait_for(user, 3)
+        foreground_events = await asyncio.wait_for(user, 3)
         assert old.exited.is_set()
         assert original_session.closed
         assert chain.foreground_prepared.is_set()
         assert (await _settle(chain)).run_state.last_run_status == "cancelled"
-        if action in {"chat", "set", "resume"}:
+        if action == "chat":
             assert len(chain.providers) == 2
             assert chain.adapter.execution_session.binding is original_session.binding
             assert chain.adapter._tool_gateway is not original_gateway
             names = {tool.name for tool in await chain.adapter._tool_gateway.definitions()}
-            assert len(names) == 15
+            assert len(names) == 17
+            assert {"get_current_goal", "submit_goal_report"} <= names
+        elif action in {"set", "resume"}:
+            # Missing objective / absent Goal is rejected before a fresh
+            # Provider is needed; preemption must still confirm the old exit.
+            assert len(chain.providers) == 1
+            assert any(event.payload.get("event_type") == "chat.error" for event in foreground_events)
     finally:
         old.allow_close.set()
         if user is not None and not user.done():

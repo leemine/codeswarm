@@ -409,6 +409,21 @@ class AgentRuntime:
             for execution in snapshot.executions
         )
 
+    def external_execution_owner(self, session_id: str, request_id: str):
+        return self._session_coordinator.external_execution_owner(session_id, request_id)
+
+    async def acquire_external_execution(self, owner, *, goal: bool) -> None:
+        await self._session_coordinator.acquire_external_execution(owner, goal=goal)
+
+    async def request_external_execution_cancel(self, owner) -> None:
+        await self._session_coordinator.request_external_execution_cancel(owner)
+
+    def holds_external_execution(self, owner) -> bool:
+        return self._session_coordinator.holds_external_execution(owner)
+
+    def release_external_execution(self, owner) -> None:
+        self._session_coordinator.release_external_execution(owner)
+
     def owns_heartbeat_execution(self, session_id: str, request_id: str) -> bool:
         """Identify an exact live Heartbeat from the existing execution registry."""
         snapshot = self._session_coordinator.snapshot_session(session_id)
@@ -1374,7 +1389,7 @@ class AgentRuntime:
 
         token = set_runtime_context(self, self._agent_manager)
         try:
-            work_kind = self.session_work_kind(request)
+            work_kind = self._request_work_kind(request)
             if work_kind is not None:
                 await self._ensure_session_registered(request)
                 if work_kind is SessionWorkKind.CONTROL_INPUT:
@@ -1674,7 +1689,7 @@ class AgentRuntime:
             for event in events:
                 yield event
             return
-        if self.session_work_kind(request) is SessionWorkKind.CONTROL_INPUT:
+        if self._request_work_kind(request) is SessionWorkKind.CONTROL_INPUT:
             await self._ensure_session_registered(request)
             stream = self._session_coordinator.deliver_control_stream(
                 request.session_id or "default",
@@ -1806,7 +1821,7 @@ class AgentRuntime:
                 raise RuntimeStateError("session is not owned by this Runtime")
             if snapshot and snapshot.state in {RuntimeSessionState.CLOSED, RuntimeSessionState.QUIESCING}:
                 raise RuntimeStateError("session is closing or closed")
-        work_kind = self.session_work_kind(request, background=background)
+        work_kind = self._request_work_kind(request, background=background)
         if work_kind is not None:
             await self._ensure_session_registered(request)
             if work_kind is SessionWorkKind.CONTROL_INPUT:
@@ -2737,6 +2752,38 @@ class AgentRuntime:
             and resolve_session_input_mode(request.params) is not None
             and not cls._is_interrupt_resume_request(request)
         )
+
+    def _request_work_kind(self, request: AgentRequest, *, background: bool = False):
+        """Classify External TUI controls from server-owned Session routing facts.
+
+        This only selects the existing Runtime lane; the normal admission path
+        must still validate the complete immutable route before execution.
+        """
+        original = self.session_work_kind(request, background=background)
+        if (background or request.channel_id != "tui" or request.req_method != ReqMethod.CHAT_SEND
+                or original not in {SessionWorkKind.CHAT_STREAM, SessionWorkKind.CHAT_UNARY}):
+            return original
+        from jiuwenswarm.server.runtime.agent_adapter.goal_control import tui_goal_operation
+        operation = tui_goal_operation(request)
+        if operation is None:
+            return original
+        from jiuwenswarm.common.config import get_config
+        from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
+        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+        from openjiuwen.harness.engine.config import config_fingerprint
+        metadata = get_session_metadata(request.session_id, cache_bust=True, enable_writeback=False)
+        if not isinstance(metadata, dict) or not metadata.get("execution_profile_id"):
+            return original
+        catalog = load_execution_catalog(get_config())
+        try:
+            spec = catalog.source(explicit_profile_id=metadata["execution_profile_id"]).resolve() if catalog else None
+        except ValueError:
+            return original
+        if (spec is None or spec.provider_id == "native"
+                or spec.config_revision != metadata.get("execution_config_revision")
+                or config_fingerprint(spec) != metadata.get("execution_config_fingerprint")):
+            return original
+        return SessionWorkKind.GOAL_STREAM if operation["action"] in {"set", "resume"} else SessionWorkKind.GOAL_CONTROL
 
     @classmethod
     def session_work_kind(

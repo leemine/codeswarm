@@ -50,6 +50,7 @@ class ExternalSubagentParentSession:
             recovery.load_host_state() if recovery is not None else {}
         )
         self._write_output = write_output
+        self.state_write_failed = False
 
     def get_session_id(self) -> str:
         return self._session_id
@@ -68,9 +69,16 @@ class ExternalSubagentParentSession:
         return None
 
     def update_state(self, data: dict[str, Any]) -> None:
-        self._state.update(data)
+        updated = {**self._state, **data}
         if self._recovery is not None:
-            self._recovery.save_host_state(self._state)
+            try:
+                self._recovery.save_host_state(updated)
+            except Exception:
+                # A failed persistence acknowledgement is not a committed
+                # product state. Goal must not resume from this memory cache.
+                self.state_write_failed = True
+                raise
+        self._state = updated
 
     async def write_stream(self, data: dict | OutputSchema) -> None:
         if not isinstance(data, OutputSchema):
@@ -87,6 +95,7 @@ class ExternalSubagentRuntime:
         *,
         write_output: Callable[[OutputSchema], Awaitable[None]],
         additional_tools: Sequence[ProductTool] = (),
+        parent_session: ExternalSubagentParentSession | None = None,
     ) -> None:
         if route.provider_id not in SUPPORTED_SUBAGENT_PROVIDERS:
             raise ValueError(
@@ -94,7 +103,7 @@ class ExternalSubagentRuntime:
             )
         binding = route.bound.binding
         self._route = route
-        self._parent_session = ExternalSubagentParentSession(
+        self._parent_session = parent_session or ExternalSubagentParentSession(
             binding.host_session_id,
             write_output=write_output,
             recovery=route.recovery,

@@ -19,6 +19,7 @@ from jiuwenswarm.common.schema.agent import (
     AgentResponse,
     AgentResponseChunk,
 )
+from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.runtime.context import get_current_runtime
 from jiuwenswarm.runtime.harness.bridge import prepare_execution_session
 from jiuwenswarm.runtime.harness.context_bridge import (
@@ -27,8 +28,22 @@ from jiuwenswarm.runtime.harness.context_bridge import (
     cleanup_staged_inputs,
 )
 from jiuwenswarm.runtime.harness.event_projection import ExternalEventProjection
-from jiuwenswarm.runtime.harness.execution_session import ExecutionExitState, ExecutionSession
-from jiuwenswarm.runtime.harness.external_subagents import ExternalSubagentRuntime
+from jiuwenswarm.runtime.harness.execution_session import (
+    ExecutionExitState,
+    ExecutionSession,
+)
+from jiuwenswarm.runtime.harness.external_subagents import (
+    ExternalSubagentParentSession,
+    ExternalSubagentRuntime,
+)
+from jiuwenswarm.runtime.harness.external_goal import ExternalGoalRuntime
+from jiuwenswarm.runtime.harness.tool_gateway import ProductToolScope
+from jiuwenswarm.server.runtime.agent_adapter.goal_control import (
+    structured_goal_operation,
+    structured_goal_control_kwargs,
+    wants_attach_goal,
+    tui_goal_operation,
+)
 from jiuwenswarm.runtime.harness.output_router import TurnOutputIncompleteError
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
 from jiuwenswarm.runtime.terminal_outcome import unknown_terminal_payload
@@ -54,9 +69,23 @@ class EngineAgentAdapter:
         self._subagent_runtime: ExternalSubagentRuntime | None = None
         self._session: ExecutionSession | None = None
         self._heartbeat_stopped_session: ExecutionSession | None = None
-        self._projection = ExternalEventProjection(route.bound.binding.host_session_id)
+        self._projection = ExternalEventProjection(
+            route.bound.binding.host_session_id,
+            on_detached_terminal=self.complete_detached_turn,
+        )
         self._start_lock = asyncio.Lock()
         self._personal_context_runtime_enabled = False
+        self._parent_session = None
+        self._goal_runtime = None
+        self._goal_assessor_factory = None
+        self._ordinary_owner = None
+        self._ordinary_runtime = None
+        self._ordinary_turn = None
+        self._ordinary_terminal = set()
+        self._ordinary_detached = False
+        self._ordinary_send_attempted = False
+        self._ordinary_request = None
+        self._history_release = {}
 
     @property
     def route(self) -> AdmittedExecutionRoute:
@@ -91,30 +120,57 @@ class EngineAgentAdapter:
             "codex",
             "opencode",
         }:
+            if self._parent_session is None:
+                self._parent_session = ExternalSubagentParentSession(
+                    binding.host_session_id,
+                    write_output=self._projection.project_product_chunk,
+                    recovery=self._route.recovery,
+                )
+                self._goal_runtime = ExternalGoalRuntime(
+                    self,
+                    self._parent_session,
+                    ProductToolScope(
+                        subject_id=binding.subject_id,
+                        host_session_id=binding.host_session_id,
+                        workspace=binding.workspace,
+                    ),
+                )
+                self._goal_runtime.assessor_factory = self._goal_assessor_factory
             self._subagent_runtime = ExternalSubagentRuntime(
                 self._route,
                 write_output=self._projection.project_product_chunk,
-                additional_tools=self._heartbeat_bridge.build_tools(
-                    context=SimpleNamespace(
-                        channel_id=self._route.channel_id,
-                        session_id=binding.host_session_id,
-                        user_id=(
-                            "" if binding.subject_id == (
-                                f"{self._route.channel_id}:{binding.host_session_id}"
-                            ) else binding.subject_id
-                        ),
-                        metadata={},
-                    )
-                ),
+                parent_session=self._parent_session,
+                additional_tools=[
+                    *self._goal_runtime.tools(),
+                    *self._heartbeat_bridge.build_tools(
+                        context=SimpleNamespace(
+                            channel_id=self._route.channel_id,
+                            session_id=binding.host_session_id,
+                            user_id=(
+                                ""
+                                if binding.subject_id
+                                == (
+                                    f"{self._route.channel_id}:{binding.host_session_id}"
+                                )
+                                else binding.subject_id
+                            ),
+                            metadata={},
+                        )
+                    ),
+                ],
             )
             self._tool_gateway = self._subagent_runtime.gateway
+
+        async def observe(envelope):
+            await self._observe(envelope, source_session=session)
+
         session = prepare_execution_session(
             self._route.source,
             bindings=self._route.bindings,
             subject_id=binding.subject_id,
             host_session_id=binding.host_session_id,
             runtime_paths=self._route.runtime_paths,
-            event_observer=self._projection.observe,
+            event_observer=observe,
             detached_output=self._projection,
             tool_gateway=self._tool_gateway,
             recovery=self._route.recovery,
@@ -125,12 +181,159 @@ class EngineAgentAdapter:
             )
         return session
 
+    def _release_external_owner(self, runtime, owner, request, *, goal=None) -> None:
+        if (getattr(request, "_defer_execution_until_history", False)
+                and not getattr(request, "_execution_history_complete", False)
+                and runtime.holds_external_execution(owner)):
+            previous = self._history_release.get(request.request_id)
+            self._history_release[request.request_id] = (
+                runtime, owner, goal or (previous[2] if previous else None),
+            )
+            return
+        runtime.release_external_execution(owner)
+        if goal is not None:
+            goal.release_owner(owner)
+
+    async def complete_request_history(self, request) -> None:
+        """Release only this request's exited owner after Facade history flush."""
+        pending = self._history_release.get(request.request_id)
+        if pending is not None:
+            from jiuwenswarm.server.runtime.agent_adapter.goal_history import flush_goal_set
+            await flush_goal_set(pending[1].session_id)
+            self._history_release.pop(request.request_id, None)
+            runtime, owner, goal = pending
+            runtime.release_external_execution(owner)
+            if self._ordinary_owner is owner:
+                self._ordinary_owner = self._ordinary_runtime = self._ordinary_turn = None
+            if goal is not None:
+                goal.release_owner(owner)
+        request._execution_history_complete = True
+
+    async def complete_detached_turn(self, turn_id: str) -> None:
+        """Called by the original projection only after durable terminal output."""
+        if (self._ordinary_owner is None or turn_id != self._ordinary_turn
+                or turn_id not in self._ordinary_terminal):
+            return
+        runtime, owner, request = self._ordinary_runtime, self._ordinary_owner, self._ordinary_request
+        if (getattr(request, "_defer_execution_until_history", False)
+                and not getattr(request, "_execution_history_complete", False)):
+            self._release_external_owner(runtime, owner, request)
+            return
+        from jiuwenswarm.server.runtime.agent_adapter.goal_history import flush_goal_set
+        await flush_goal_set(owner.session_id)
+        runtime.release_external_execution(owner)
+        if self._ordinary_owner is owner:
+            self._ordinary_owner = self._ordinary_runtime = self._ordinary_turn = None
+
+    def needs_goal_assessor(self, request: AgentRequest) -> bool:
+        from openjiuwen.harness.goal import GoalStatus
+
+        goal = self._goal_runtime
+        if (
+            goal is None
+            or goal.cold_unconfirmed
+            or goal.accounting_unknown
+            or goal.parent_session.state_write_failed
+            or goal.owner is not None
+        ):
+            return False
+        record = goal.manager.peek()
+        return (
+            wants_attach_goal(request.params)
+            and record is not None
+            and record.status is GoalStatus.ACTIVE
+        )
+
+    def set_goal_assessor_factory(self, factory, *, request=None) -> None:
+        if request is not None:
+            request._goal_assessor_factory = factory
+            return
+        self._goal_assessor_factory = factory
+        if self._goal_runtime is not None:
+            self._goal_runtime.assessor_factory = factory
+
+    async def _observe(self, envelope, *, source_session=None) -> None:
+        from openjiuwen.harness_protocol import TurnLifecycleEvent, TurnEventKind
+
+        if source_session is not self._session:
+            return
+        if self._goal_runtime is not None:
+            self._goal_runtime.observe(envelope, source_session=source_session)
+        await self._projection.observe(envelope)
+        event = envelope.event
+        if self._ordinary_owner is None or not isinstance(event, TurnLifecycleEvent):
+            return
+        if (
+            self._ordinary_turn is None
+            and self._ordinary_send_attempted
+            and event.kind is TurnEventKind.STARTED
+        ):
+            self._ordinary_turn = envelope.turn_id
+            request = self._ordinary_request
+            self._projection.register_turn(
+                envelope.turn_id,
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                mode=str((request.params or {}).get("mode") or "unknown"),
+            )
+        # FAILED/ABORTED (including synthesized aborts) are not proof that the
+        # old Provider resources exited. Retain its permit until explicit stop.
+        if (
+            event.kind is TurnEventKind.FINISHED
+            and self._ordinary_turn == envelope.turn_id
+        ):
+            self._ordinary_terminal.add(envelope.turn_id)
+
+    async def handle_goal_command_structured(self, params, session_id):
+        if session_id != self._route.bound.binding.host_session_id:
+            raise ValueError("Goal control Session does not match admitted binding")
+        if self._goal_runtime is None:
+            return {
+                "result_type": "goal_error",
+                "error_code": "goal_provider_unsupported",
+                "error": "Goal execution requires the admitted product gateway.",
+            }
+        params = params if isinstance(params, dict) else {}
+        operation = structured_goal_control_kwargs(params)
+        return await self._goal_runtime.control(operation)
+
+    async def _record_goal_set_history_if_needed(
+        self, request, *, action, result_type, goal_payload
+    ):
+        from jiuwenswarm.server.runtime.agent_adapter.goal_history import (
+            record_goal_set,
+        )
+
+        await record_goal_set(
+            request,
+            action=action,
+            result_type=result_type,
+            goal_payload=goal_payload,
+            defer=bool(
+                self._ordinary_owner
+                or (self._goal_runtime and self._goal_runtime.owner)
+            ),
+        )
+
+    async def dispatch_goal_control(self, **operation):
+        if self._goal_runtime is None:
+            raise RuntimeError("External Goal runtime is unavailable")
+        return await self._goal_runtime.control(operation)
+
     def select_execution_for_request(self, request: AgentRequest) -> None:
         route = getattr(request, "_execution_route", None)
         if not isinstance(route, AdmittedExecutionRoute):
             raise RuntimeError("External request has no admitted execution route")
         self.bind_route(route)
-        self._require_session()
+        raw_params = getattr(request, "params", None)
+        params = raw_params if isinstance(raw_params, dict) else {}
+        goal_control = getattr(
+            request, "req_method", None
+        ) == ReqMethod.COMMAND_GOAL or wants_attach_goal(params)
+        if getattr(request, "req_method", None) == ReqMethod.CHAT_SEND:
+            goal_control = goal_control or tui_goal_operation(request) is not None
+        if not goal_control:
+            self._require_session()
 
     async def reload_agent_config(
         self,
@@ -195,12 +398,59 @@ class EngineAgentAdapter:
     async def process_message_stream_impl(
         self, request: AgentRequest, inputs: dict[str, Any]
     ) -> AsyncIterator[AgentResponseChunk]:
-        session = self._require_session()
         runtime = get_current_runtime()
+        params = request.params if isinstance(request.params, dict) else {}
+        operation = (
+            structured_goal_operation(request)
+            if hasattr(request, "req_method")
+            else None
+        )
+        attach = wants_attach_goal(params)
+        if (
+            operation is None
+            and not attach
+            and getattr(request, "req_method", None) == ReqMethod.CHAT_SEND
+        ):
+            operation = tui_goal_operation(request)
+        if isinstance(inputs.get("query"), InteractiveInput):
+            async for chunk in self._process_message_stream_impl(request, inputs):
+                yield chunk
+            return
+        owner = (
+            runtime.external_execution_owner(
+                self._route.bound.binding.host_session_id, request.request_id
+            )
+            if runtime
+            else None
+        )
+        if operation is not None or attach:
+            if self._goal_runtime is None or runtime is None or owner is None:
+                raise RuntimeError(
+                    "External Goal requires its admitted Runtime producer"
+                )
+            stream = self._goal_runtime.stream(
+                request, inputs, runtime=runtime, owner=owner, operation=operation
+            )
+            try:
+                async for chunk in stream:
+                    yield chunk
+            finally:
+                await stream.aclose()
+            return
+        session = self._require_session()
+        if owner is not None:
+            await runtime.acquire_external_execution(owner, goal=False)
+            self._ordinary_owner, self._ordinary_runtime = owner, runtime
+            self._ordinary_turn = None
+            self._ordinary_terminal.clear()
+            self._ordinary_detached = False
+            self._ordinary_send_attempted = False
+            self._ordinary_request = request
         owns_heartbeat = bool(
             runtime is not None
             and runtime.owns_heartbeat_execution(
-                session.binding.host_session_id, request.request_id,
+                session.binding.host_session_id,
+                request.request_id,
             )
         )
         completed = False
@@ -219,21 +469,36 @@ class EngineAgentAdapter:
                     # cancelled Runtime-owned Heartbeat. Neither reader EOF nor
                     # abort/ABORTED proves that its Provider resources exited.
                     await self._stop_heartbeat_execution(session)
+                self._ordinary_detached = True
+                if owner is not None and (
+                    completed
+                    or owns_heartbeat
+                    or not self._ordinary_send_attempted
+                    or self._ordinary_turn in self._ordinary_terminal
+                ):
+                    self._release_external_owner(runtime, owner, request)
+                    if self._ordinary_owner is owner:
+                        self._ordinary_owner = self._ordinary_runtime = (
+                            self._ordinary_turn
+                        ) = None
+
+    async def _stop_owned_execution_once(self, session: ExecutionSession) -> None:
+        await session.stop()
+        if session.exit_state is not ExecutionExitState.EXIT_CONFIRMED:
+            raise RuntimeError("External stop did not confirm execution exit")
+        await self.release_subagent_runtime_for_session(
+            session.binding.host_session_id, reason="parent_ended"
+        )
+        if self._ordinary_owner is not None and session is self._session:
+            self._release_external_owner(self._ordinary_runtime, self._ordinary_owner, self._ordinary_request)
+            self._ordinary_owner = self._ordinary_runtime = self._ordinary_turn = None
+        if self._owns_tool_gateway:
+            self._tool_gateway = None
+        self._heartbeat_stopped_session = session
 
     async def _stop_heartbeat_execution(self, session: ExecutionSession) -> None:
-        async def stop_owned() -> None:
-            # Close the parent and its product transport before clearing the
-            # child registry: a live parent could otherwise spawn another child
-            # after that registry was released.
-            await session.stop()
-            if session.exit_state is not ExecutionExitState.EXIT_CONFIRMED:
-                raise RuntimeError("Heartbeat stop did not confirm execution exit")
-            await self.release_subagent_runtime_for_session(
-                session.binding.host_session_id, reason="parent_ended",
-            )
-
         while True:
-            stop = asyncio.create_task(stop_owned())
+            stop = asyncio.create_task(self._stop_owned_execution_once(session))
             try:
                 while True:
                     try:
@@ -261,7 +526,11 @@ class EngineAgentAdapter:
                 return
 
     async def _process_message_stream_impl(
-        self, request: AgentRequest, inputs: dict[str, Any]
+        self,
+        request: AgentRequest,
+        inputs: dict[str, Any],
+        *,
+        goal_attempt=None,
     ) -> AsyncIterator[AgentResponseChunk]:
         session = self._require_session()
         await self._ensure_started(session)
@@ -280,13 +549,21 @@ class EngineAgentAdapter:
             return
 
         immediate = str(params.get("input_mode") or "").strip().lower() == "steer"
+        if goal_attempt is None and self._ordinary_owner is not None:
+            self._ordinary_send_attempted = True
         receipt = await session.send(external_input, immediate=immediate)
+        if goal_attempt is not None:
+            goal_attempt.bind_turn(receipt.turn_id)
+        elif self._ordinary_owner is not None:
+            self._ordinary_turn = receipt.turn_id
         try:
             self._projection.register_turn(
                 receipt.turn_id,
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 mode=str(params.get("mode") or "unknown"),
+                goal_attempt=goal_attempt is not None,
+                goal_id=goal_attempt.attempt.identity.goal_id if goal_attempt else None,
             )
         except OutputBudgetExceeded:
             session.abandon_output(receipt.turn_id)
@@ -357,6 +634,10 @@ class EngineAgentAdapter:
             except TurnOutputIncompleteError:
                 pass
             if not terminal_seen:
+                if goal_attempt is not None:
+                    raise RuntimeError(
+                        "Goal output ended without a confirmed Provider terminal"
+                    )
                 provider_started = getattr(session, "provider_started", None)
                 if (
                     not provider_acceptance_emitted
@@ -406,20 +687,36 @@ class EngineAgentAdapter:
                 forget_submission(receipt.turn_id)
 
     async def process_interrupt(self, request: AgentRequest) -> AgentResponse:
-        session = self._require_session()
         params = request.params if isinstance(request.params, dict) else {}
         intent = str(params.get("intent") or "cancel").strip().lower()
         success = True
         message = "任务已取消"
         try:
-            if intent == "pause":
+            goal = self._goal_runtime
+            if self._ordinary_owner is not None and intent not in {"pause", "resume"}:
+                await self._stop_owned_execution_once(self._session)
+                if goal is not None and goal.owner is not None:
+                    await goal.runtime.request_external_execution_cancel(goal.owner)
+            elif (
+                goal is not None
+                and goal.owner is not None
+                and intent not in {"pause", "resume"}
+            ):
+                if goal.attempt is not None:
+                    await goal.cancel_attempt(
+                        goal_id=goal.attempt.identity.goal_id, reason="user_cancel"
+                    )
+                else:
+                    await goal.runtime.request_external_execution_cancel(goal.owner)
+            elif intent == "pause":
+                session = self._require_session()
                 await session.io.pause()
                 message = "任务已暂停"
             elif intent == "resume":
-                await session.io.resume()
+                await self._require_session().io.resume()
                 message = "任务已恢复"
             else:
-                await session.abort(immediate=True)
+                await self._require_session().abort(immediate=True)
                 message = "任务已切换" if intent == "supplement" else "任务已取消"
         except Exception as exc:
             success = False
@@ -476,24 +773,12 @@ class EngineAgentAdapter:
             return False
         if session is None and self._subagent_runtime is None:
             return False
-        failures: list[Exception] = []
-        try:
-            await self.release_subagent_runtime_for_session(
-                session_id,
-                reason="parent_ended",
-            )
-        except Exception as exc:
-            failures.append(exc)
         if session is not None:
-            try:
-                await session.stop()
-            except Exception as exc:
-                failures.append(exc)
-            else:
-                self._session = None
-        if failures:
-            raise ExceptionGroup(
-                "External Session exits could not be confirmed", failures
+            await self._stop_owned_execution_once(session)
+            self._session = None
+        else:
+            await self.release_subagent_runtime_for_session(
+                session_id, reason="parent_ended"
             )
         cleanup_staged_inputs(
             self._route.runtime_paths,
@@ -530,24 +815,12 @@ class EngineAgentAdapter:
 
     async def cleanup(self) -> None:
         session = self._session
-        failures: list[Exception] = []
-        try:
-            await self.release_subagent_runtime_for_session(
-                self._route.bound.binding.host_session_id,
-                reason="parent_ended",
-            )
-        except Exception as exc:
-            failures.append(exc)
         if session is not None:
-            try:
-                await session.stop()
-            except Exception as exc:
-                failures.append(exc)
-            else:
-                self._session = None
-        if failures:
-            raise ExceptionGroup(
-                "External Session exits could not be confirmed", failures
+            await self._stop_owned_execution_once(session)
+            self._session = None
+        else:
+            await self.release_subagent_runtime_for_session(
+                self._route.bound.binding.host_session_id, reason="parent_ended"
             )
         cleanup_staged_inputs(
             self._route.runtime_paths,
@@ -580,6 +853,15 @@ class EngineAgentAdapter:
         }:
             raise RuntimeError("External execution session cleanup is pending")
         return session
+
+    def _external_context(self):
+        binding = self._route.bound.binding
+        return build_external_context(
+            paths=self._route.runtime_paths,
+            host_session_id=binding.host_session_id,
+            channel_id=self._route.channel_id,
+            provider_id=binding.provider_id,
+        )
 
     async def _ensure_started(self, session: ExecutionSession) -> None:
         if session.started:
