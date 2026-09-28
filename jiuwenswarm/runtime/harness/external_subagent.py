@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from openjiuwen.harness.engine import ExecutionBinding
 from openjiuwen.harness.subagent_runtime.ports import (
@@ -24,7 +25,25 @@ from jiuwenswarm.runtime.harness.bridge import prepare_execution_session
 from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
 from jiuwenswarm.runtime.harness.context_bridge import build_external_context
 from jiuwenswarm.runtime.harness.execution_session import ExecutionSession
+from jiuwenswarm.runtime.harness.external_subagent_profiles import (
+    ExternalSubagentExecutionKind,
+    ExternalSubagentProfile,
+    validate_external_subagent_request,
+)
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
+
+if TYPE_CHECKING:
+    from openjiuwen.harness.tools.browser_move.playwright_runtime import (
+        BrowserToolAdmission,
+    )
+
+
+def _build_external_browser_resources(**kwargs: Any):
+    from jiuwenswarm.runtime.harness.external_browser import (
+        build_external_browser_resources,
+    )
+
+    return build_external_browser_resources(**kwargs)
 
 
 _CHILD_SUBJECT_PREFIX = "subagent:"
@@ -131,7 +150,12 @@ class ExternalSubagentExecutionFactory:
     is deliberately no child Provider/config/cwd override surface.
     """
 
-    def __init__(self, parent_route: AdmittedExecutionRoute) -> None:
+    def __init__(
+        self,
+        parent_route: AdmittedExecutionRoute,
+        *,
+        browser_admit: BrowserToolAdmission | None = None,
+    ) -> None:
         binding = parent_route.bound.binding
         if (
             binding.provider_id not in SUPPORTED_SUBAGENT_PROVIDERS
@@ -144,6 +168,8 @@ class ExternalSubagentExecutionFactory:
             parent_route.runtime_paths.runtime_workspace_root.resolve()
         ):
             raise ValueError("External parent workspace does not match runtime paths")
+        if browser_admit is not None and not callable(browser_admit):
+            raise ValueError("Browser admission adapter must be callable")
         try:
             parent_route.runtime_paths.cwd.resolve().relative_to(
                 parent_route.runtime_paths.runtime_workspace_root.resolve()
@@ -157,6 +183,7 @@ class ExternalSubagentExecutionFactory:
         self._parent_binding = binding
         self._parent_spec = parent_route.bound.spec
         self._child_source = ExecutionConfigSource(explicit=self._parent_spec)
+        self._browser_admit = browser_admit
         self._live: dict[str, ExternalSubagentExecution] = {}
         self._cleanup_pending: dict[str, ExecutionSession] = {}
         self._reserved: set[str] = set()
@@ -172,7 +199,7 @@ class ExternalSubagentExecutionFactory:
         context: ParentExecutionContext,
     ) -> SubagentExecution:
         self._validate_parent_context(context)
-        self._validate_build_request(request, context)
+        profile = self._validate_build_request(request, context)
         async with self._lock:
             existing = self._live.get(request.subagent_id)
             if (
@@ -186,6 +213,7 @@ class ExternalSubagentExecutionFactory:
             self._reserved.add(request.subagent_id)
 
         session: ExecutionSession | None = None
+        browser_resources = None
         try:
             child_subject_id = f"{_CHILD_SUBJECT_PREFIX}{request.subagent_id}"
             prospective_binding = ExecutionBinding.create(
@@ -202,12 +230,25 @@ class ExternalSubagentExecutionFactory:
                 if self._parent_route.recovery is not None
                 else None
             )
+            if profile.execution_kind is ExternalSubagentExecutionKind.BROWSER:
+                browser_resources = _build_external_browser_resources(
+                    request=request,
+                    child_binding=prospective_binding,
+                    parent_subject_id=context.parent_subject_id,
+                    parent_session_id=context.parent_session_id,
+                    channel_id=self._parent_route.channel_id,
+                    runtime_paths=self._parent_route.runtime_paths,
+                    admit=self._require_browser_admission(),
+                )
             session = prepare_execution_session(
                 self._child_source,
                 bindings=self._parent_route.bindings,
                 subject_id=child_subject_id,
                 host_session_id=request.subagent_id,
                 runtime_paths=self._parent_route.runtime_paths,
+                tool_gateway=(
+                    browser_resources.gateway if browser_resources is not None else None
+                ),
                 recovery=child_recovery,
             )
             child_binding = session.binding
@@ -238,6 +279,8 @@ class ExternalSubagentExecutionFactory:
                 f"Display name: {request.display_name}.\n"
                 f"Role: {request.role}."
             )
+            if browser_resources is not None:
+                child_prompt += f"\n{browser_resources.system_prompt}"
             context_value = dataclasses.replace(
                 context_value,
                 agent_name=request.display_name,
@@ -261,18 +304,26 @@ class ExternalSubagentExecutionFactory:
                 self._live[request.subagent_id] = execution
             return execution
         except BaseException as create_error:
+            cleanup_failures: list[BaseException] = []
             if session is not None:
                 try:
                     await session.stop()
                 except Exception as cleanup_error:
+                    cleanup_failures.append(cleanup_error)
                     async with self._lock:
                         self._cleanup_pending[request.subagent_id] = session
-                    raise BaseExceptionGroup(
-                        "External child startup failed and exit was not confirmed",
-                        [create_error, cleanup_error],
-                    ) from None
                 else:
                     self._parent_route.bindings.release(session.binding)
+            elif browser_resources is not None:
+                try:
+                    await browser_resources.gateway.close()
+                except Exception as cleanup_error:
+                    cleanup_failures.append(cleanup_error)
+            if cleanup_failures:
+                raise BaseExceptionGroup(
+                    "External child startup failed and exit was not confirmed",
+                    [create_error, *cleanup_failures],
+                ) from None
             raise
         finally:
             async with self._lock:
@@ -307,16 +358,28 @@ class ExternalSubagentExecutionFactory:
         if context.parent_subject_id != self._parent_binding.subject_id:
             raise ValueError("External child parent subject does not match the binding")
 
-    @staticmethod
     def _validate_build_request(
+        self,
         request: SubagentBuildRequest,
         context: ParentExecutionContext,
-    ) -> None:
+    ) -> ExternalSubagentProfile:
+        profile = validate_external_subagent_request(
+            subagent_type=request.subagent_type,
+            browser_capabilities=request.browser_capabilities,
+            browser_available=self._browser_admit is not None,
+        )
         expected_prefix = f"{context.parent_session_id}_sub_"
         if not request.subagent_id.startswith(expected_prefix):
             raise ValueError(
                 "External child identity does not belong to the parent Session"
             )
+        return profile
+
+    def _require_browser_admission(self) -> BrowserToolAdmission:
+        admission = self._browser_admit
+        if admission is None:
+            raise RuntimeError("Browser admission adapter is unavailable")
+        return admission
 
     async def _release(self, execution: ExternalSubagentExecution) -> None:
         binding = execution.binding

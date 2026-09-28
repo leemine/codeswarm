@@ -356,6 +356,17 @@ host Session ID, Binding, same-engine harness and Provider session while retaini
 parent configuration fingerprint, workspace root and task cwd. There is no
 child Provider, profile, model, workspace or cwd override input.
 
+The host resolves `subagent_type` through a fixed trusted catalog before child
+Binding or Provider construction. `general-purpose` is the advertised generic
+profile; existing built-in type labels remain unadvertised compatibility aliases
+and do not gain their Native preset tools. `browser_agent` is advertised only
+when the host installs an action-admission adapter; it then receives the same
+Provider in a distinct child Binding plus an identity-bound core Browser
+gateway and never nests the Native Browser worker. The default product wiring
+keeps this profile unavailable until the R1-10D interaction policy is installed.
+Unknown Browser capabilities, Browser capabilities on a generic profile, and
+unknown type names fail before Browser, MCP, or Provider side effects.
+
 Construction checks the parent subject and Session again before allocating a
 child. An existing child Binding for another Provider or configuration fails
 closed. The child reuses `ExecutionSession` and its single event consumer;
