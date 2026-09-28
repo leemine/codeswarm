@@ -690,6 +690,39 @@ async def test_execution_session_retries_unconfirmed_provider_exit(
 
 
 @pytest.mark.asyncio
+async def test_execution_session_closes_owned_tool_gateway(tmp_path: Path) -> None:
+    route = _route(tmp_path)
+
+    class Harness:
+        card = SimpleNamespace(name="fake")
+        state = HarnessState.TERMINATED
+        provider_session_id = None
+
+        async def stop(self) -> None:
+            return None
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    gateway = Gateway()
+    session = ExecutionSession(
+        HarnessEngine(route.bound.binding, Harness()),
+        route.runtime_paths,
+        tool_gateway=gateway,  # type: ignore[arg-type]
+    )
+
+    await session.stop()
+    await session.stop()
+
+    assert gateway.close_calls == 1
+    assert session.exit_state is ExecutionExitState.EXIT_CONFIRMED
+
+
+@pytest.mark.asyncio
 async def test_execution_session_stop_timeout_is_unconfirmed_and_retryable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

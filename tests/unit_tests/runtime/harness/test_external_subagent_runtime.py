@@ -115,7 +115,7 @@ def _install_factory(monkeypatch: pytest.MonkeyPatch, factory: _Factory) -> None
     monkeypatch.setattr(
         module,
         "ExternalSubagentExecutionFactory",
-        lambda _route: factory,
+        lambda _route, **_kwargs: factory,
     )
 
 
