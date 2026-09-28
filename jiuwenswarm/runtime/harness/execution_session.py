@@ -169,7 +169,9 @@ class ExecutionSession:
             self._started = True
             self._exit_state = ExecutionExitState.RUNNING
 
-    async def send(self, content: HarnessInput, *, immediate: bool = False) -> SendReceipt:
+    async def send(
+        self, content: HarnessInput, *, immediate: bool = False
+    ) -> SendReceipt:
         router = self._require_router()
         receipt = await router.submit(
             lambda: self.io.send(content, immediate=immediate)
@@ -185,7 +187,9 @@ class ExecutionSession:
             return False
         receipt = await self.io.send(content)
         if receipt is not None:
-            raise RuntimeError("External interaction answer unexpectedly created a Turn")
+            raise RuntimeError(
+                "External interaction answer unexpectedly created a Turn"
+            )
         return True
 
     def provider_started(self, turn_id: str) -> bool:
@@ -247,6 +251,9 @@ class ExecutionSession:
         await stop_one("provider", self.io.stop)
         if self._tool_transport is not None:
             await stop_one("product_mcp", self._tool_transport.stop)
+        close_gateway = getattr(self._tool_gateway, "close", None)
+        if callable(close_gateway):
+            await stop_one("tool_gateway", close_gateway)
         if failures:
             self._exit_state = ExecutionExitState.EXIT_UNCONFIRMED
             raise ExecutionExitUnconfirmedError(failures)
@@ -307,7 +314,9 @@ class ExecutionSession:
             server.name.replace("-", "_") for server in context.mcp_servers
         }
         if PRODUCT_MCP_SERVER_NAME in normalized_names:
-            raise ValueError("External context already defines the product MCP namespace")
+            raise ValueError(
+                "External context already defines the product MCP namespace"
+            )
         transport = ManagedProductToolTransport(
             gateway,
             host_session_id=self.binding.host_session_id,
@@ -337,16 +346,30 @@ class ExecutionSession:
         )
 
     def _validate_gateway_scope(self, gateway: ToolGateway) -> None:
-        if not isinstance(gateway, ProductToolGateway):
+        if isinstance(gateway, ProductToolGateway):
+            scope = gateway.scope
+            binding = self.binding
+            if (
+                scope.subject_id != binding.subject_id
+                or scope.host_session_id != binding.host_session_id
+                or scope.workspace != binding.workspace
+            ):
+                raise ValueError("Product ToolGateway scope does not match the binding")
             return
-        scope = gateway.scope
-        binding = self.binding
-        if (
-            scope.subject_id != binding.subject_id
-            or scope.host_session_id != binding.host_session_id
-            or scope.workspace != binding.workspace
-        ):
-            raise ValueError("Product ToolGateway scope does not match the binding")
+
+        from openjiuwen.harness.tools.browser_move.playwright_runtime import (
+            BrowserExecutionToolGateway,
+        )
+
+        if isinstance(gateway, BrowserExecutionToolGateway):
+            identity = gateway.execution_identity
+            binding = self.binding
+            if (
+                identity.instance.subagent_id != binding.host_session_id
+                or identity.instance.workspace != binding.workspace
+            ):
+                raise ValueError("Browser ToolGateway scope does not match the binding")
+            return
 
     def _require_router(self) -> TurnOutputRouter:
         router = self._output_router

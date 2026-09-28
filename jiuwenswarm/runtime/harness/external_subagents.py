@@ -6,17 +6,19 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openjiuwen.core.session.stream.base import OutputSchema
 from openjiuwen.harness.tools.subagent import (
     build_subagent_tools,
     release_subagent_control,
 )
-
 from jiuwenswarm.runtime.harness.external_subagent import (
     ExternalSubagentExecutionFactory,
     SUPPORTED_SUBAGENT_PROVIDERS,
+)
+from jiuwenswarm.runtime.harness.external_subagent_profiles import (
+    render_external_subagent_catalog,
 )
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
 from jiuwenswarm.runtime.harness.recovery_store import SessionExecutionRecovery
@@ -26,10 +28,10 @@ from jiuwenswarm.runtime.harness.tool_gateway import (
     ProductToolScope,
 )
 
-_SAME_ENGINE_AGENT_DESCRIPTION = (
-    "- general-purpose: same Provider, fixed parent configuration and workspace; "
-    "display_name and role describe the delegated assignment"
-)
+if TYPE_CHECKING:
+    from openjiuwen.harness.tools.browser_move.playwright_runtime import (
+        BrowserToolAdmission,
+    )
 
 
 class ExternalSubagentParentSession:
@@ -96,6 +98,7 @@ class ExternalSubagentRuntime:
         write_output: Callable[[OutputSchema], Awaitable[None]],
         additional_tools: Sequence[ProductTool] = (),
         parent_session: ExternalSubagentParentSession | None = None,
+        browser_admit: BrowserToolAdmission | None = None,
     ) -> None:
         if route.provider_id not in SUPPORTED_SUBAGENT_PROVIDERS:
             raise ValueError(
@@ -116,11 +119,16 @@ class ExternalSubagentRuntime:
                 subagents=(),
             )
         )
-        self._factory = ExternalSubagentExecutionFactory(route)
+        self._factory = ExternalSubagentExecutionFactory(
+            route,
+            browser_admit=browser_admit,
+        )
         tools = build_subagent_tools(
             self._parent_host,
             language="cn",
-            available_agents=_SAME_ENGINE_AGENT_DESCRIPTION,
+            available_agents=render_external_subagent_catalog(
+                browser_available=browser_admit is not None,
+            ),
             execution_factory=self._factory,
         )
         self._gateway = ProductToolGateway(

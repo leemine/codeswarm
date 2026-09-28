@@ -279,6 +279,99 @@ async def test_child_identity_from_another_parent_is_rejected_before_constructio
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("subagent_type", ["browser_agent", "unknown-agent"])
+async def test_unavailable_profile_is_rejected_before_child_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    subagent_type: str,
+) -> None:
+    calls = _install_session_builder(monkeypatch)
+    route = _route(tmp_path)
+    factory = ExternalSubagentExecutionFactory(route)
+    request = dataclasses.replace(_request(), subagent_type=subagent_type)
+    binding_count = len(route.bindings._bindings)
+
+    with pytest.raises(ValueError):
+        await factory.create(request, _context())
+
+    assert calls == []
+    assert len(route.bindings._bindings) == binding_count
+
+
+@pytest.mark.asyncio
+async def test_browser_profile_uses_same_provider_session_and_browser_gateway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.runtime.harness import external_subagent as module
+
+    class FakeBrowserGateway:
+        async def close(self) -> None:
+            return None
+
+    gateway = FakeBrowserGateway()
+    build_calls: list[dict[str, Any]] = []
+
+    def build_browser(**kwargs: Any):
+        build_calls.append(kwargs)
+        return SimpleNamespace(
+            gateway=gateway,
+            system_prompt="Dedicated Browser child prompt.",
+        )
+
+    monkeypatch.setattr(module, "_build_external_browser_resources", build_browser)
+    calls = _install_session_builder(monkeypatch)
+
+    def admission(_identity: Any, _invocation: Any) -> bool:
+        return True
+
+    factory = ExternalSubagentExecutionFactory(
+        _route(tmp_path),
+        browser_admit=admission,
+    )
+    request = dataclasses.replace(
+        _request(),
+        subagent_type="browser_agent",
+        browser_capabilities=("vision",),
+    )
+
+    execution = await factory.create(request, _context())
+
+    assert len(build_calls) == 1
+    assert build_calls[0]["request"] is request
+    assert build_calls[0]["admit"] is admission
+    assert calls[0][0]["tool_gateway"] is gateway
+    assert (
+        "Dedicated Browser child prompt." in calls[0][1].started_context.system_prompt
+    )
+    assert execution.binding.provider_id == "codex"
+    await execution.close("test")
+
+
+@pytest.mark.asyncio
+async def test_generic_profile_rejects_browser_capabilities_before_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _install_session_builder(monkeypatch)
+    factory = ExternalSubagentExecutionFactory(_route(tmp_path))
+    request = dataclasses.replace(_request(), browser_capabilities=("core",))
+
+    with pytest.raises(ValueError, match="only valid"):
+        await factory.create(request, _context())
+
+    assert calls == []
+
+
+def test_non_callable_browser_admission_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="must be callable"):
+        ExternalSubagentExecutionFactory(
+            _route(tmp_path),
+            browser_admit=object(),  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.asyncio
 async def test_turn_projects_chunks_and_settles_from_provider_terminal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
