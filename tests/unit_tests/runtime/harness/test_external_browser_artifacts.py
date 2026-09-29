@@ -184,7 +184,7 @@ async def test_ignores_in_progress_download_until_renamed(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_classifies_chrome_guid_output_as_download(tmp_path: Path) -> None:
+async def test_completed_guid_filename_remains_a_download(tmp_path: Path) -> None:
     delivered = []
 
     async def sink(artifact, path) -> None:
@@ -196,6 +196,8 @@ async def test_classifies_chrome_guid_output_as_download(tmp_path: Path) -> None
 
     wrapper, outputs = _wrapper(tmp_path, invoke, sink)
     generated = outputs / "2ed12580-13bd-4757-bb09-4e6f3e1efb81"
+    wrapper._download_state_root.mkdir(parents=True)
+    (wrapper._download_state_root / "transfer.completed").write_text(generated.name)
 
     result = await wrapper.invoke(ToolInvocation("call-1", "browser_click", {}))
 
@@ -517,3 +519,56 @@ async def test_close_keeps_pending_download_until_exit_confirmed(tmp_path: Path)
     await wrapper.close()
     assert not marker.exists()
     assert (state / "guid.canceled").exists()
+
+
+@pytest.mark.asyncio
+async def test_raw_chrome_guid_is_not_an_artifact_before_final_name(tmp_path: Path) -> None:
+    delivered = []
+
+    async def sink(_artifact, path):
+        delivered.append(path.name)
+
+    async def invoke(invocation):
+        if invocation.call_id == "snapshot":
+            raw.write_bytes(b"internal Chrome transfer")
+        else:
+            raw.rename(outputs / "result.txt")
+        return ToolExecutionResult(content={"ok": True})
+
+    wrapper, outputs = _wrapper(tmp_path, invoke, sink)
+    raw = outputs / "435642be-256e-4a30-9020-b27e942b9cf9"
+    result = await wrapper.invoke(ToolInvocation("snapshot", "browser_snapshot", {}))
+    assert not result.is_error
+    assert delivered == [], "a raw GUID without a finalized filename is not a user Artifact"
+    result = await wrapper.invoke(ToolInvocation("finalized", "browser_snapshot", {}))
+    assert not result.is_error
+    assert delivered == ["result.txt"]
+
+
+@pytest.mark.asyncio
+async def test_completion_marker_promotes_unchanged_guid_but_symlink_does_not(tmp_path: Path) -> None:
+    delivered = []
+
+    async def sink(_artifact, path):
+        delivered.append(path.name)
+
+    async def invoke(invocation):
+        if invocation.call_id == "complete":
+            marker.unlink()
+            marker.write_text(raw.name)
+        return ToolExecutionResult(content={"ok": True})
+
+    wrapper, outputs = _wrapper(tmp_path, invoke, sink)
+    raw = outputs / "435642be-256e-4a30-9020-b27e942b9cf9"
+    raw.write_bytes(b"finished")
+    wrapper._download_state_root.mkdir(parents=True)
+    outside = tmp_path / "foreign"
+    outside.write_text(raw.name)
+    marker = wrapper._download_state_root / "transfer.completed"
+    marker.symlink_to(outside)
+    assert not (await wrapper.invoke(ToolInvocation("snapshot", "browser_snapshot", {}))).is_error
+    assert delivered == []
+    assert not (await wrapper.invoke(ToolInvocation("complete", "browser_snapshot", {}))).is_error
+    assert delivered == [raw.name]
+    assert not (await wrapper.invoke(ToolInvocation("again", "browser_snapshot", {}))).is_error
+    assert delivered == [raw.name]
