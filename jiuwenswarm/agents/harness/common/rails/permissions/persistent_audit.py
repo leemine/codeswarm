@@ -28,6 +28,8 @@ EXTRA_ALLOWLIST = frozenset(
     {
         "authorization_outcome",
         "authorization_stage",
+        "browser_request_id",
+        "browser_task_id",
         "decision_source",
         "host_context_failure",
         "host_route_reason",
@@ -39,6 +41,7 @@ EXTRA_ALLOWLIST = frozenset(
         "reviewer_reason_code",
         "reviewer_reason_summary",
         "stage_outcome",
+        "tool_call_id",
     }
 )
 _SAFE_AUDIT_TEXT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.: -]{0,159}$")

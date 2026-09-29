@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -19,7 +20,7 @@ from openjiuwen.harness.subagent_runtime.ports import (
     SubagentTurnResult,
 )
 from openjiuwen.harness.subagent_runtime.stream_output import TurnOutputAggregator
-from openjiuwen.harness_protocol import HarnessInput, TurnEventKind
+from openjiuwen.harness_protocol import HarnessInput, ToolInvocation, TurnEventKind
 
 from jiuwenswarm.runtime.harness.bridge import prepare_execution_session
 from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
@@ -36,6 +37,10 @@ if TYPE_CHECKING:
     from openjiuwen.harness.tools.browser_move.playwright_runtime import (
         BrowserToolAdmission,
     )
+    from jiuwenswarm.runtime.harness.external_browser_artifacts import (
+        BrowserArtifactSink,
+        BrowserDecisionId,
+    )
 
 
 def _build_external_browser_resources(**kwargs: Any):
@@ -44,6 +49,12 @@ def _build_external_browser_resources(**kwargs: Any):
     )
 
     return build_external_browser_resources(**kwargs)
+
+
+def _build_external_browser_identity(**kwargs: Any):
+    from jiuwenswarm.runtime.harness.external_browser import build_external_browser_identity
+
+    return build_external_browser_identity(**kwargs)
 
 
 _CHILD_SUBJECT_PREFIX = "subagent:"
@@ -155,6 +166,8 @@ class ExternalSubagentExecutionFactory:
         parent_route: AdmittedExecutionRoute,
         *,
         browser_admit: BrowserToolAdmission | None = None,
+        browser_artifact_sink: BrowserArtifactSink | None = None,
+        browser_decision_id_for: BrowserDecisionId | None = None,
     ) -> None:
         binding = parent_route.bound.binding
         if (
@@ -170,6 +183,16 @@ class ExternalSubagentExecutionFactory:
             raise ValueError("External parent workspace does not match runtime paths")
         if browser_admit is not None and not callable(browser_admit):
             raise ValueError("Browser admission adapter must be callable")
+        if (browser_artifact_sink is None) != (browser_decision_id_for is None):
+            raise ValueError(
+                "Browser Artifact sink and decision identity must be configured together"
+            )
+        if browser_artifact_sink is not None and browser_admit is None:
+            raise ValueError("Browser Artifact delivery requires Browser admission")
+        if browser_artifact_sink is not None and not callable(browser_artifact_sink):
+            raise ValueError("Browser Artifact sink must be callable")
+        if browser_decision_id_for is not None and not callable(browser_decision_id_for):
+            raise ValueError("Browser Artifact decision identity must be callable")
         try:
             parent_route.runtime_paths.cwd.resolve().relative_to(
                 parent_route.runtime_paths.runtime_workspace_root.resolve()
@@ -184,9 +207,13 @@ class ExternalSubagentExecutionFactory:
         self._parent_spec = parent_route.bound.spec
         self._child_source = ExecutionConfigSource(explicit=self._parent_spec)
         self._browser_admit = browser_admit
+        self._browser_artifact_sink = browser_artifact_sink
+        self._browser_decision_id_for = browser_decision_id_for
         self._live: dict[str, ExternalSubagentExecution] = {}
         self._cleanup_pending: dict[str, ExecutionSession] = {}
         self._reserved: set[str] = set()
+        self._browser_identities: dict[str, Any] = {}
+        self._browser_resources: dict[str, Any] = {}
         self._lock = asyncio.Lock()
 
     @property
@@ -214,6 +241,7 @@ class ExternalSubagentExecutionFactory:
 
         session: ExecutionSession | None = None
         browser_resources = None
+        browser_identity = None
         try:
             child_subject_id = f"{_CHILD_SUBJECT_PREFIX}{request.subagent_id}"
             prospective_binding = ExecutionBinding.create(
@@ -222,15 +250,16 @@ class ExternalSubagentExecutionFactory:
                 host_session_id=request.subagent_id,
                 workspace=str(self._parent_route.runtime_paths.runtime_workspace_root),
             )
-            child_recovery = (
-                self._parent_route.recovery.child(
-                    prospective_binding,
-                    self._parent_route.runtime_paths,
-                )
-                if self._parent_route.recovery is not None
-                else None
-            )
             if profile.execution_kind is ExternalSubagentExecutionKind.BROWSER:
+                browser_identity = _build_external_browser_identity(
+                    request=request, child_binding=prospective_binding,
+                    parent_subject_id=context.parent_subject_id,
+                    parent_session_id=context.parent_session_id,
+                    channel_id=self._parent_route.channel_id,
+                    runtime_paths=self._parent_route.runtime_paths,
+                )
+                self._browser_identities[request.subagent_id] = browser_identity
+                await self._admit_browser_profile(browser_identity)
                 browser_resources = _build_external_browser_resources(
                     request=request,
                     child_binding=prospective_binding,
@@ -239,7 +268,18 @@ class ExternalSubagentExecutionFactory:
                     channel_id=self._parent_route.channel_id,
                     runtime_paths=self._parent_route.runtime_paths,
                     admit=self._require_browser_admission(),
+                    artifact_sink=self._browser_artifact_sink,
+                    decision_id_for=self._browser_decision_id_for,
                 )
+                self._browser_resources[request.subagent_id] = browser_resources
+            child_recovery = (
+                self._parent_route.recovery.child(
+                    prospective_binding,
+                    self._parent_route.runtime_paths,
+                )
+                if self._parent_route.recovery is not None
+                else None
+            )
             session = prepare_execution_session(
                 self._child_source,
                 bindings=self._parent_route.bindings,
@@ -319,6 +359,11 @@ class ExternalSubagentExecutionFactory:
                     await browser_resources.gateway.close()
                 except Exception as cleanup_error:
                     cleanup_failures.append(cleanup_error)
+            if not cleanup_failures and browser_identity is not None:
+                try:
+                    await self._release_browser_identity(request.subagent_id)
+                except Exception as cleanup_error:
+                    cleanup_failures.append(cleanup_error)
             if cleanup_failures:
                 raise BaseExceptionGroup(
                     "External child startup failed and exit was not confirmed",
@@ -381,13 +426,51 @@ class ExternalSubagentExecutionFactory:
             raise RuntimeError("Browser admission adapter is unavailable")
         return admission
 
+    async def _admit_browser_profile(self, identity: Any) -> None:
+        """Authorize persistent Profile use before Provider/MCP/Chrome startup."""
+
+        invocation = ToolInvocation(
+            call_id=f"{identity.task.task_id}:profile-use",
+            name="browser_profile_use",
+            arguments={},
+        )
+        admission = self._require_browser_admission()
+        try:
+            admitted = admission(identity, invocation)
+            if inspect.isawaitable(admitted):
+                admitted = await admitted
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(
+                "External Browser profile admission failed"
+            ) from exc
+        if admitted is not True:
+            raise PermissionError("External Browser profile use is not allowed")
+
     async def _release(self, execution: ExternalSubagentExecution) -> None:
         binding = execution.binding
+        await self._release_browser_identity(binding.host_session_id)
         async with self._lock:
             current = self._live.get(binding.host_session_id)
             if current is execution:
                 del self._live[binding.host_session_id]
         self._parent_route.bindings.release(binding)
+
+    async def _release_browser_identity(self, subagent_id: str) -> None:
+        identity = self._browser_identities.get(subagent_id)
+        if identity is None:
+            return
+        from jiuwenswarm.runtime.harness.external_browser import cleanup_external_browser_configuration
+
+        cleanup_external_browser_configuration(self._parent_route.runtime_paths, identity)
+        release = getattr(self._browser_admit, "release_task", None)
+        if callable(release):
+            result = release(identity)
+            if inspect.isawaitable(result):
+                await result
+        self._browser_identities.pop(subagent_id, None)
+        self._browser_resources.pop(subagent_id, None)
 
     async def close_pending(self) -> None:
         """Retry half-started child cleanup retained by this factory."""
@@ -398,6 +481,7 @@ class ExternalSubagentExecutionFactory:
         for subagent_id, session in pending:
             try:
                 await session.stop()
+                await self._release_browser_identity(subagent_id)
             except Exception as exc:
                 failures.append(exc)
                 continue
@@ -405,6 +489,19 @@ class ExternalSubagentExecutionFactory:
             async with self._lock:
                 if self._cleanup_pending.get(subagent_id) is session:
                     self._cleanup_pending.pop(subagent_id, None)
+        # Retain and retry resources from failures before a child Session was
+        # created, rather than losing the only cleanup owner.
+        for subagent_id in tuple(self._browser_identities):
+            if (subagent_id in self._live or subagent_id in self._reserved
+                    or subagent_id in self._cleanup_pending):
+                continue
+            try:
+                resources = self._browser_resources.get(subagent_id)
+                if resources is not None:
+                    await resources.gateway.close()
+                await self._release_browser_identity(subagent_id)
+            except Exception as exc:
+                failures.append(exc)
         if failures:
             raise ExceptionGroup(
                 "one or more half-started External children did not confirm exit",

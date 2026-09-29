@@ -89,6 +89,7 @@ class SessionExecutionRecovery:
         parent_session_id: str | None = None,
         create_if_missing: bool = True,
     ) -> None:
+        history_path: Path | None
         if parent_session_id is None:
             session_dir, error = resolve_session_dir(
                 session_id,
@@ -202,6 +203,19 @@ class SessionExecutionRecovery:
         """Clear blockers after the interaction Turn reaches a terminal boundary."""
 
         await asyncio.to_thread(self._clear_pending_interactions_sync)
+
+    async def mark_pending_browser_task(self, task_id: str) -> None:
+        """Block cold replay until this task's browser resources confirm exit."""
+        await asyncio.to_thread(
+            self._mark_pending_interaction_sync,
+            f"browser-task:{task_id}", task_id, "browser",
+        )
+
+    async def clear_pending_browser_task(self, task_id: str) -> None:
+        """Release one Browser owner without clearing sibling/Provider waits."""
+        await asyncio.to_thread(
+            self._clear_pending_interactions_sync, f"browser-task:{task_id}",
+        )
 
     def prepare(self, card: HarnessCard, *, agent_id: str) -> ExecutionRecoveryPlan:
         """Validate Provider compatibility and return its exact resume inputs."""
@@ -340,6 +354,7 @@ class SessionExecutionRecovery:
         self,
         request_id: str,
         turn_id: str | None,
+        owner: str = "provider",
     ) -> None:
         normalized_id = str(request_id or "").strip()
         if not normalized_id or len(normalized_id.encode("utf-8")) > 1024:
@@ -355,9 +370,11 @@ class SessionExecutionRecovery:
             record = {
                 "turn_id": normalized_turn,
                 "recorded_at": time.time(),
+                "owner": owner,
             }
             if current is not None:
-                if current.get("turn_id") != normalized_turn:
+                if (current.get("turn_id") != normalized_turn
+                        or current.get("owner", "provider") != owner):
                     raise ExecutionRecoveryUnavailableError(
                         "interaction id was reused by another Turn"
                     )
@@ -371,14 +388,24 @@ class SessionExecutionRecovery:
             archive["updated_at"] = time.time()
             self._write_archive(archive)
 
-    def _clear_pending_interactions_sync(self) -> None:
+    def _clear_pending_interactions_sync(self, browser_id: str | None = None) -> None:
         with self._archive_lock():
             archive = self._read_archive()
             self._validate_scope(archive)
             pending = self._load_pending_interactions(archive)
             if not pending:
                 return
-            archive.pop("encrypted_pending_interactions", None)
+            if browser_id is None:
+                pending = {
+                    key: record for key, record in pending.items()
+                    if record.get("owner", "provider") != "provider"
+                }
+            elif pending.get(browser_id, {}).get("owner") == "browser":
+                pending.pop(browser_id)
+            if pending:
+                archive["encrypted_pending_interactions"] = encrypt_json(pending)
+            else:
+                archive.pop("encrypted_pending_interactions", None)
             archive["updated_at"] = time.time()
             self._write_archive(archive)
 

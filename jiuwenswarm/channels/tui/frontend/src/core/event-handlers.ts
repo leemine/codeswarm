@@ -752,6 +752,16 @@ function handleMediaEvent(
 
   const infoEntry = createAttachmentInfoEntry(payload, activeSessionId, effectiveEvent, at);
   if (infoEntry) {
+    if (effectiveEvent === "chat.file" && typeof payload.delivery_id === "string") {
+      const entries = delegate.getEntries();
+      const existing = entries.findIndex(
+        (entry) => entry.sessionId === activeSessionId && entry.id === infoEntry.id,
+      );
+      if (existing !== -1) {
+        delegate.setEntries(entries.map((entry, index) => index === existing ? infoEntry : entry));
+        return true;
+      }
+    }
     appendEntry(delegate, infoEntry);
     return true;
   }

@@ -619,6 +619,10 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
         } else if (eventType === 'chat.file') {
           const files = Array.isArray(payload.files)
             ? payload.files.filter(isRecord).map((file) => ({
+                delivery_id: pickString(file, ['delivery_id']) || undefined,
+                artifact: isRecord(file.artifact)
+                  ? { artifactId: pickString(file.artifact, ['artifactId']) || undefined }
+                  : undefined,
                 name: pickString(file, ['name']) || 'file',
                 size: typeof file.size === 'number' ? file.size : undefined,
                 mime_type: pickString(file, ['mime_type']) || undefined,

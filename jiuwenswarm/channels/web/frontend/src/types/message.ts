@@ -32,6 +32,8 @@ export interface UsageSummary {
 }
 
 export interface FileDownloadItem {
+  delivery_id?: string;
+  artifact?: { artifactId?: string };
   name: string;
   size: number;
   mime_type: string;

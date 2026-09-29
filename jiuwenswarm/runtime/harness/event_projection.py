@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from openjiuwen.harness_protocol import (
@@ -15,6 +17,7 @@ from openjiuwen.harness_protocol import (
     TurnEventKind,
     TurnLifecycleEvent,
 )
+from openjiuwen.core.single_agent.schema.agent_result import Artifact
 from openjiuwen.harness_providers.io_adapter import ProjectedOutput
 from openjiuwen.harness_providers.output_buffer import OutputBudget, OutputBudgetExceeded, OutputText
 
@@ -74,15 +77,17 @@ class ExternalEventProjection:
     def __init__(
         self, session_id: str, *,
         on_detached_terminal: Callable[[str], Awaitable[None]] | None = None,
+        workspace_root: Path | None = None,
     ) -> None:
         self._session_id = session_id
         self._on_detached_terminal = on_detached_terminal
+        self._workspace_root = workspace_root.resolve() if workspace_root else None
         self._text_budget = OutputBudget()
         self._max_turns = 128
         self._turns: dict[str, _TurnProjection] = {}
         self._terminal_errors: dict[str, str] = {}
         self._terminal_error_codes: dict[str, str] = {}
-        self._terminal_cancellations: dict[str, str] = {}
+        self._terminal_cancellations: dict[str, str | None] = {}
         self._terminated_turns: set[str] = set()
         self._terminal_order: deque[str] = deque()
 
@@ -347,6 +352,92 @@ class ExternalEventProjection:
                 fallback_channel_id=state.channel_id,
             )
         )
+
+    async def publish_product_interaction(
+        self,
+        payload: dict[str, Any],
+        delivery_id: str,
+    ) -> None:
+        """Persist and push a host-owned product interaction exactly once."""
+
+        if payload.get("event_type") != "chat.ask_user_question":
+            raise ValueError("product interaction must be chat.ask_user_question")
+        if not str(payload.get("request_id") or "").strip():
+            raise ValueError("product interaction request_id is required")
+        if not isinstance(payload.get("questions"), list):
+            raise ValueError("product interaction questions must be a list")
+        state = next(reversed(self._turns.values()), None)
+        if state is None:
+            state = self._fallback_state("product-interaction")
+        await self._publish(state, dict(payload), delivery_id=delivery_id)
+
+    async def publish_product_artifact(
+        self,
+        artifact: Artifact,
+        file_path: Path,
+    ) -> None:
+        """Deliver one core-projected Browser Artifact through the file service."""
+
+        workspace = self._workspace_root
+        if workspace is None:
+            raise RuntimeError("product Artifact projection requires a workspace")
+        lexical = Path(os.path.abspath(os.path.normpath(str(file_path))))
+        resolved = file_path.resolve(strict=True)
+        if lexical != resolved or not resolved.is_file():
+            raise ValueError("product Artifact path must be a non-symlink file")
+        try:
+            relative_path = resolved.relative_to(workspace).as_posix()
+        except ValueError as exc:
+            raise ValueError("product Artifact path is outside the workspace") from exc
+        if not isinstance(artifact, Artifact):
+            raise TypeError("product Artifact must use the core Artifact model")
+        artifact_id = str(artifact.artifactId or "").strip()
+        if not artifact_id or len(artifact.parts) != 1:
+            raise ValueError("product Artifact requires one identified file part")
+        part_url = str(artifact.parts[0].url or "").strip()
+        metadata_path = str(
+            artifact.metadata.get("workspace_relative_path") or ""
+        ).strip()
+        if part_url != relative_path or metadata_path != relative_path:
+            raise ValueError("product Artifact file identity does not match its path")
+
+        state = next(reversed(self._turns.values()), None)
+        if state is None:
+            state = self._fallback_state("product-artifact")
+        delivery = get_session_delivery_context(self._session_id) or {}
+        metadata = get_session_metadata(
+            self._session_id, enable_writeback=False
+        ) or {}
+        route_metadata = delivery.get("route_metadata")
+        from jiuwenswarm.agents.harness.common.tools.send_file_to_user import (
+            SendFileToolkit,
+        )
+
+        toolkit = SendFileToolkit(
+            request_id=state.request_id,
+            session_id=self._session_id,
+            channel_id=state.channel_id,
+            metadata=route_metadata if isinstance(route_metadata, dict) else None,
+            user_id=str(metadata.get("user_id") or ""),
+            project_dir=str(metadata.get("project_dir") or "") or None,
+        )
+        await toolkit.deliver_projected_artifact(
+            resolved,
+            artifact.model_dump(mode="json", exclude_none=True),
+        )
+
+    async def replay_product_artifacts(self) -> None:
+        """Drain persisted file deliveries before admitting another execution."""
+        from jiuwenswarm.agents.harness.common.tools.send_file_to_user import SendFileToolkit
+
+        state = self._fallback_state("product-artifact-replay")
+        delivery = get_session_delivery_context(self._session_id) or {}
+        route_metadata = delivery.get("route_metadata")
+        await SendFileToolkit(
+            request_id=state.request_id, session_id=self._session_id,
+            channel_id=state.channel_id,
+            metadata=route_metadata if isinstance(route_metadata, dict) else None,
+        ).replay_projected_artifacts()
 
     async def _report_delivery_failure(
         self,

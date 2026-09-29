@@ -413,6 +413,12 @@ function buildEventPayloadForRecord(record: Record<string, unknown>): Record<str
   // 历史记录中 tool_call/tool_result 可能直接在 record 顶层，也可能在 event_payload 里
   const eventPayload = asRecord(record.event_payload);
   const base = eventPayload ? { ...eventPayload } : {};
+  if (typeof record.delivery_id === "string") {
+    base.delivery_id = record.delivery_id;
+  }
+  if (Array.isArray(record.files) && !Array.isArray(base.files)) {
+    base.files = record.files;
+  }
 
   // 复制顶层字段（如果有）
   if (typeof record.content === "string" && typeof base.content !== "string") {
@@ -558,7 +564,7 @@ export function createAttachmentInfoEntry(
 
   return {
     kind: "info",
-    id: pickFirstString(payload, ["id", "message_id", "msg_id"]) ?? `media-${Date.now()}`,
+    id: pickFirstString(payload, ["delivery_id", "id", "message_id", "msg_id"]) ?? `media-${Date.now()}`,
     sessionId,
     content,
     at,

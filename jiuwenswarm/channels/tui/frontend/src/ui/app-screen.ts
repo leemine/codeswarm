@@ -1053,9 +1053,10 @@ export function isPlanApprovalRequest(
   return false;
 }
 
-function isPermissionRequest(source: string | undefined, questionText: string): boolean {
+export function isPermissionRequest(source: string | undefined, questionText: string): boolean {
   return (
     source === "permission_interrupt" ||
+    source === "browser_permission" ||
     source === "confirm_interrupt" ||
     PERMISSION_TOOL_RE.test(questionText) ||
     CONFIRM_TOOL_RE.test(questionText) ||

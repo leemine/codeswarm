@@ -20,6 +20,13 @@ from jiuwenswarm.runtime.harness.external_subagent import (
 from jiuwenswarm.runtime.harness.external_subagent_profiles import (
     render_external_subagent_catalog,
 )
+from jiuwenswarm.runtime.harness.external_browser_admission import (
+    close_browser_admission,
+)
+from jiuwenswarm.runtime.harness.external_browser_artifacts import (
+    BrowserArtifactSink,
+    BrowserDecisionId,
+)
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
 from jiuwenswarm.runtime.harness.recovery_store import SessionExecutionRecovery
 from jiuwenswarm.runtime.harness.tool_gateway import (
@@ -99,6 +106,8 @@ class ExternalSubagentRuntime:
         additional_tools: Sequence[ProductTool] = (),
         parent_session: ExternalSubagentParentSession | None = None,
         browser_admit: BrowserToolAdmission | None = None,
+        browser_artifact_sink: BrowserArtifactSink | None = None,
+        browser_decision_id_for: BrowserDecisionId | None = None,
     ) -> None:
         if route.provider_id not in SUPPORTED_SUBAGENT_PROVIDERS:
             raise ValueError(
@@ -122,7 +131,10 @@ class ExternalSubagentRuntime:
         self._factory = ExternalSubagentExecutionFactory(
             route,
             browser_admit=browser_admit,
+            browser_artifact_sink=browser_artifact_sink,
+            browser_decision_id_for=browser_decision_id_for,
         )
+        self._browser_admit = browser_admit
         tools = build_subagent_tools(
             self._parent_host,
             language="cn",
@@ -160,6 +172,10 @@ class ExternalSubagentRuntime:
             if self._closed:
                 return
             failures: list[Exception] = []
+            try:
+                await close_browser_admission(self._browser_admit)
+            except Exception as exc:
+                failures.append(exc)
             try:
                 await release_subagent_control(
                     self._parent_host,

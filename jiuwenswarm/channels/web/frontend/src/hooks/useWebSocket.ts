@@ -3527,6 +3527,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           if (memberId) {
             const timestamp = eventTimestampMs(payload);
             const mappedFiles = files.map((file) => ({
+              delivery_id: file.delivery_id,
+              artifact: file.artifact,
               name: file.name,
               size: file.size,
               mime_type: file.mime_type,
