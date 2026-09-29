@@ -201,6 +201,7 @@ def _bind_managed_download_init(
         "    try {\n"
         "      if (fs.existsSync(target)) target = path.join(downloadPath, `${event.guid}-${name}`);\n"
         "      fs.renameSync(source, target);\n"
+        '      fs.writeFileSync(path.join(statePath, `${event.guid}.completed`), path.basename(target));\n'
         "      fs.unlinkSync(pending);\n"
         "    } catch {\n"
         '      try { fs.renameSync(pending, path.join(statePath, `${event.guid}.failed`)); } catch {}\n'
@@ -309,7 +310,7 @@ def cleanup_external_browser_configuration(
         raise ValueError("Browser download cleanup scope changed")
     if state_root.exists():
         for marker in state_root.iterdir():
-            if marker.is_symlink() or not marker.is_file() or marker.suffix not in {".pending", ".failed", ".canceled"}:
+            if marker.is_symlink() or not marker.is_file() or marker.suffix not in {".pending", ".failed", ".canceled", ".completed"}:
                 raise ValueError("Browser download cleanup contains an unknown entry")
             marker.unlink()
         state_root.rmdir()

@@ -119,11 +119,22 @@ def _artifact_kind(path: Path, *, tool_name: str) -> BrowserArtifactKind:
     return BrowserArtifactKind.EXPORT
 
 
-def _is_internal_mcp_output(path: Path, *, root: Path) -> bool:
+def _is_internal_mcp_output(
+    path: Path, *, root: Path, completed_downloads: frozenset[str] = frozenset(),
+) -> bool:
     # Chrome keeps these files mutable until the final rename. Publishing them
     # can both expose incomplete bytes and fail projection of completed outputs.
     if path.suffix.lower() == ".crdownload":
         return True
+    # A bare Chrome GUID is not evidence of a finished, user-facing download.
+    # Background/raw transfers may appear even during browser_snapshot.
+    if not path.suffix and path.name not in completed_downloads:
+        try:
+            uuid.UUID(path.name)
+        except ValueError:
+            pass
+        else:
+            return True
     try:
         relative = path.relative_to(root)
     except ValueError:
@@ -133,6 +144,17 @@ def _is_internal_mcp_output(path: Path, *, root: Path) -> bool:
         and relative.name.startswith("page-")
         and relative.suffix.lower() in {".yaml", ".yml"}
     )
+
+
+def _completed_download_names(root: Path) -> frozenset[str]:
+    names = set()
+    for marker in root.glob("*.completed"):
+        if marker.is_symlink() or not marker.is_file():
+            continue
+        name = marker.read_text(encoding="utf-8")
+        if name and Path(name).name == name and name not in {".", ".."}:
+            names.add(name)
+    return frozenset(names)
 
 
 def _download_markers(root: Path) -> tuple[frozenset[str], frozenset[str]]:
@@ -272,6 +294,7 @@ class ExternalBrowserArtifactGateway:
                     is_error=True,
                 )
             before = _snapshot_outputs(self._outputs_root)
+            completed_before = _completed_download_names(self._download_state_root)
             marker_before = _download_markers(self._download_state_root)
             if marker_before[0]:
                 return ToolExecutionResult(
@@ -288,11 +311,14 @@ class ExternalBrowserArtifactGateway:
             if settlement_error is not None:
                 return settlement_error
             after = _snapshot_outputs(self._outputs_root)
+            completed_downloads = _completed_download_names(self._download_state_root)
             changed = sorted(
                 path
                 for path, stamp in after.items()
-                if before.get(path) != stamp
-                and not _is_internal_mcp_output(path, root=self._outputs_root)
+                if (before.get(path) != stamp or path.name in completed_downloads - completed_before)
+                and not _is_internal_mcp_output(
+                    path, root=self._outputs_root, completed_downloads=completed_downloads,
+                )
             )
             if len(changed) > _MAX_CHANGED_OUTPUTS:
                 return ToolExecutionResult(
