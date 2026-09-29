@@ -40,6 +40,9 @@ from jiuwenswarm.runtime.harness.execution_session import (
     ExecutionSession,
 )
 from jiuwenswarm.runtime.harness.event_projection import ExternalEventProjection
+from jiuwenswarm.runtime.harness.external_browser_artifacts import (
+    ExternalBrowserArtifactGateway,
+)
 from jiuwenswarm.runtime.harness.context_bridge import (
     build_external_input,
     cleanup_staged_inputs,
@@ -446,6 +449,94 @@ async def test_shared_engine_adapter_constructs_without_native_deep_adapter(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_engine_adapter_injects_browser_admission_only_when_opted_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    enabled: bool,
+) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter import engine_adapter as module
+
+    route = _route(tmp_path)
+    captured: list[object | None] = []
+
+    class SubagentRuntime:
+        gateway = object()
+
+        def __init__(self, _route, **kwargs) -> None:
+            captured.append(kwargs.get("browser_admit"))
+
+        async def close(self, _reason: str) -> None:
+            return None
+
+    class Session:
+        binding = route.bound.binding
+        closed = False
+        exit_state = ExecutionExitState.NOT_STARTED
+
+    monkeypatch.setattr(module, "ExternalSubagentRuntime", SubagentRuntime)
+    monkeypatch.setattr(
+        module,
+        "prepare_execution_session",
+        lambda *args, **kwargs: Session(),
+    )
+    monkeypatch.delenv("PLAYWRIGHT_RUNTIME_MCP_ENABLED", raising=False)
+    monkeypatch.delenv("BROWSER_RUNTIME_MCP_ENABLED", raising=False)
+    if enabled:
+        monkeypatch.setenv("PLAYWRIGHT_RUNTIME_MCP_ENABLED", "true")
+    adapter = module.EngineAgentAdapter(route)
+
+    await adapter.create_instance(mode="code")
+
+    assert len(captured) == 1
+    assert captured[0] is adapter._browser_admission
+    assert callable(captured[0]) is enabled
+
+
+@pytest.mark.asyncio
+async def test_engine_adapter_routes_browser_answer_before_provider_session(
+    tmp_path: Path,
+) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import (
+        EngineAgentAdapter,
+    )
+
+    route = _route(tmp_path)
+
+    class BrowserAdmission:
+        def __init__(self) -> None:
+            self.answers: list[dict] = []
+
+        async def answer(self, params: dict) -> bool:
+            self.answers.append(params)
+            return True
+
+    class Session:
+        async def answer(self, _interaction) -> bool:
+            raise AssertionError("Browser answer must not reach the Provider session")
+
+    adapter = EngineAgentAdapter(route)
+    admission = BrowserAdmission()
+    adapter._browser_admission = admission
+    adapter._session = Session()
+    request = SimpleNamespace(
+        request_id="answer-browser-1",
+        channel_id="web",
+        metadata={},
+        params={
+            "request_id": "browser-permission-1",
+            "source": "browser_permission",
+            "answers": [{"selected_options": ["allow_once"]}],
+        },
+    )
+
+    response = await adapter.handle_user_answer(request)
+
+    assert response.payload == {"accepted": True, "resolved": True}
+    assert admission.answers == [request.params]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("provider_id", "harness_type"),
     [
@@ -720,6 +811,33 @@ async def test_execution_session_closes_owned_tool_gateway(tmp_path: Path) -> No
 
     assert gateway.close_calls == 1
     assert session.exit_state is ExecutionExitState.EXIT_CONFIRMED
+
+
+def test_execution_session_rejects_wrapped_browser_gateway_scope_mismatch(
+    tmp_path: Path,
+) -> None:
+    route = _route(tmp_path)
+
+    class Harness:
+        card = SimpleNamespace(name="fake")
+        state = HarnessState.TERMINATED
+        provider_session_id = None
+
+    gateway = object.__new__(ExternalBrowserArtifactGateway)
+    gateway._identity = SimpleNamespace(
+        instance=SimpleNamespace(
+            subagent_id="another-child",
+            workspace=route.bound.binding.workspace,
+        )
+    )
+    session = ExecutionSession(
+        HarnessEngine(route.bound.binding, Harness()),
+        route.runtime_paths,
+        tool_gateway=gateway,
+    )
+
+    with pytest.raises(ValueError, match="Browser ToolGateway scope"):
+        session._validate_gateway_scope(gateway)
 
 
 @pytest.mark.asyncio

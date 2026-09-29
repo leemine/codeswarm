@@ -50,6 +50,10 @@ const promptBundle = buildBundle(
   'AuthorizationPrompt.mjs',
   { externalReact: true },
 );
+const promptRoutingBundle = buildBundle(
+  'src/components/InteractionSlot/promptRouting.ts',
+  'promptRouting.mjs',
+);
 const { bindPendingPermissionCard } = await import(
   pathToFileURL(pendingQueueBundle).href
 );
@@ -72,6 +76,7 @@ const {
   resolveAuthorizationActions,
   formatPermissionPayload,
 } = await import(pathToFileURL(promptBundle).href);
+const { classifyPrompt } = await import(pathToFileURL(promptRoutingBundle).href);
 
 function question(cardId) {
   return {
@@ -93,6 +98,14 @@ test('binds the backend card id and ignores a caller-provided card id', () => {
     },
   ]);
   assert.equal(answers[0].card_id, 'caller-controlled');
+});
+
+test('routes Browser admission to an authorization prompt', () => {
+  assert.equal(classifyPrompt({
+    request_id: 'browser-permission-1',
+    source: 'browser_permission',
+    questions: [question('browser-permission-1')],
+  }), 'authorization');
 });
 
 test('preserves legacy answers and rejects invalid smart card bindings', () => {

@@ -46,3 +46,16 @@ test('records without rendered_result still parse the compatibility result', () 
 
   assert.deepEqual(state.members.map((member) => member.member_id), []);
 });
+
+test('Artifact history preserves IDs across replay and keeps same-path versions', () => {
+  const records = ['a', 'a', 'b'].map((artifactId, index) => ({
+    id: `file-${index}`, role: 'teammate', event_type: 'chat.file',
+    session_id: 'session-1', member_id: 'browser', timestamp: 1700000000 + index,
+    files: [{ name: 'report.pdf', path: '/outputs/report.pdf', size: 42,
+      delivery_id: `browser-artifact:${artifactId}`, artifact: { artifactId } }],
+  }));
+  const state = parseTeamHistoryPanelRecords(records, 'session-1');
+  const events = state.executionEvents.filter((event) => event.kind === 'file');
+  assert.equal(events.length, 2);
+  assert.deepEqual(events.flatMap((event) => event.files.map((file) => file.artifact.artifactId)), ['a', 'b']);
+});

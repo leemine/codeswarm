@@ -224,6 +224,27 @@ async def test_checkpoint_is_encrypted_and_cold_restore_reuses_exact_scope(
 
 
 @pytest.mark.asyncio
+async def test_browser_recovery_blockers_survive_provider_terminal_and_clear_exactly(
+    tmp_path: Path, recovery_env: Path,
+) -> None:
+    recovery = SessionExecutionRecovery(
+        session_id="session-1", execution_profile_id="codex-profile",
+        binding=_binding(tmp_path), runtime_paths=_paths(tmp_path),
+    )
+    await recovery.mark_pending_interaction("provider-question", turn_id="turn")
+    await recovery.mark_pending_browser_task("browser-a")
+    await recovery.mark_pending_browser_task("browser-b")
+    await recovery.clear_pending_interactions()
+    with pytest.raises(ExecutionRecoveryUnavailableError, match="interaction Turn"):
+        recovery.prepare(_card(), agent_id="agent")
+    await recovery.clear_pending_browser_task("browser-a")
+    with pytest.raises(ExecutionRecoveryUnavailableError, match="interaction Turn"):
+        recovery.prepare(_card(), agent_id="agent")
+    await recovery.clear_pending_browser_task("browser-b")
+    assert recovery.prepare(_card(), agent_id="agent").resume_policy is ResumePolicy.NEW
+
+
+@pytest.mark.asyncio
 async def test_child_checkpoint_lives_under_parent_and_is_restorable(
     tmp_path: Path,
     recovery_env: Path,

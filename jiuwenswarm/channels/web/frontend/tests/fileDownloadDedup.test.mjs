@@ -13,6 +13,16 @@ function makeToken(path, exp = 9_999_999_999) {
   return `${payload}.fakesig`;
 }
 
+test('Artifact identity deduplicates replay and preserves same-path content versions', () => {
+  const first = { path: '/ws/report.pdf', artifact: { artifactId: 'version-1' }, delivery_id: 'delivery-1' };
+  const replay = { ...first, download_url: '/refreshed' };
+  const newer = { ...first, artifact: { artifactId: 'version-2' }, delivery_id: 'delivery-2' };
+  const result = mergeFileDownloadItems([first], [replay, newer]);
+  assert.equal(result.length, 2);
+  assert.equal(result[0].download_url, '/refreshed');
+  assert.equal(getFileIdentityKey({ delivery_id: 'delivery-1' }), 'delivery:delivery-1');
+});
+
 test('identity prefers explicit path over name/size', () => {
   assert.equal(
     getFileIdentityKey({ path: 'E:\\ws\\a.pdf', name: 'a.pdf', size: 1 }),
