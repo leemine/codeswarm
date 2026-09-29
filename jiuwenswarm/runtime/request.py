@@ -337,6 +337,7 @@ async def prepare_chat_turn(
     raw_mode = params.get("mode")
     explicit_mode_provided = isinstance(raw_mode, str) and bool(raw_mode.strip())
     runtime_work_mode = None
+    external_surface = False
     session_metadata: dict[str, Any] = {}
     session_id = str(request.session_id or "").strip()
     if session_id:
@@ -349,6 +350,29 @@ async def prepare_chat_turn(
             cache_bust=True,
             enable_writeback=False,
         )
+        if isinstance(session_metadata, dict) and session_metadata.get("execution_profile_id"):
+            # Surface admission needs persisted facts, not channel-default UI
+            # inference. Do this before mode rewriting or metadata writeback.
+            raw_metadata = get_session_metadata(
+                session_id, cache_bust=True, enable_writeback=False, infer_defaults=False,
+            )
+            from jiuwenswarm.common.config import get_config
+            from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
+            catalog = load_execution_catalog(get_config())
+            if catalog is not None and catalog.source(
+                explicit_profile_id=raw_metadata["execution_profile_id"]
+            ).resolve().provider_id != "native":
+                from jiuwenswarm.runtime.harness.surface import (
+                    validate_surface_request, validate_external_surface_state,
+                )
+                external_surface = True
+                surface_mode = validate_surface_request(raw_metadata, params)
+                validate_external_surface_state(surface_mode)
+                if (raw_metadata.get("user_id") and request.user_id
+                        and raw_metadata["user_id"] != request.user_id):
+                    from jiuwenswarm.runtime.harness.surface import SurfaceAdmissionError
+                    raise SurfaceAdmissionError("Surface subject changed")
+                session_metadata = raw_metadata
         stored_work_mode = (
             session_metadata.get("work_mode")
             if isinstance(session_metadata, dict)
@@ -433,6 +457,7 @@ async def prepare_chat_turn(
                 session_metadata = get_session_metadata(
                     session_id,
                     enable_writeback=False,
+                    infer_defaults=not external_surface,
                 )
         else:
             project_dir = requested_project_dir

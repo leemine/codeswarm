@@ -19,6 +19,8 @@ from jiuwenswarm.server.runtime.attachments.upload_storage import (
     safe_upload_filename,
 )
 
+from jiuwenswarm.runtime.harness.surface import EffectiveSurfaceSnapshot
+
 _PROJECT_MEMORY_FILES = (
     "JIUWENSWARM.md",
     "JIUWENSWARM.local.md",
@@ -36,6 +38,7 @@ def build_external_context(
     host_session_id: str,
     channel_id: str,
     provider_id: str,
+    surface: EffectiveSurfaceSnapshot | None = None,
 ) -> HarnessContext:
     """Build the immutable Provider-cycle context from admitted paths only."""
 
@@ -56,6 +59,8 @@ def build_external_context(
         system_prompt=system_prompt,
         cwd=str(paths.cwd),
         metadata={
+            **({"surface": surface.identity.record(), "surface_policy_revision": surface.policy_revision}
+               if surface is not None else {}),
             "channel_id": channel_id,
             "project_root": str(paths.project_root),
             "runtime_workspace_root": str(paths.runtime_workspace_root),
@@ -72,6 +77,7 @@ async def build_external_input(
     params: dict[str, Any],
     paths: RuntimeWorkspacePaths,
     include_personal_context: bool,
+    surface: EffectiveSurfaceSnapshot | None = None,
 ) -> HarnessInput | InteractiveInput:
     """Freeze one authorized context/attachment snapshot for a Provider Turn."""
 
@@ -110,6 +116,8 @@ async def build_external_input(
     return HarnessInput(
         content=content,
         metadata={
+            **({"surface_work_mode": surface.identity.work_mode,
+                "surface_topology": surface.identity.topology} if surface is not None else {}),
             "request_id": request_id,
             "attachment_count": len(attachments),
             "context_sections": tuple(

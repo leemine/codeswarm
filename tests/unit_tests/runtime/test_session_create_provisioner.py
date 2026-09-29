@@ -181,6 +181,9 @@ async def test_execution_choice_is_locked_before_legacy_prewarm(
     assert manager.last_claim["prewarm_eligible"] is False
     metadata = get_session_metadata("created-session", cache_bust=True)
     assert metadata["execution_profile_id"] == "codex"
+    assert metadata["surface_creation"]["creation_mode"] == "agent.work.normal"
+    assert metadata["surface_creation"]["execution_profile_id"] == "codex"
+    assert metadata["surface_creation"]["session_id"] == metadata["session_id"]
     assert metadata["execution_config_revision"] == "r2"
     assert len(metadata["execution_config_fingerprint"]) == 64
 

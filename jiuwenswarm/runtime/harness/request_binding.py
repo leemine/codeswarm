@@ -22,6 +22,11 @@ from jiuwenswarm.runtime.harness.recovery_store import (
     SessionExecutionRecovery,
 )
 
+from jiuwenswarm.runtime.harness.surface import (
+    EffectiveSurfaceSnapshot, build_surface_identity, validate_surface_request,
+    validate_external_surface_state,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class AdmittedExecutionRoute:
@@ -33,6 +38,7 @@ class AdmittedExecutionRoute:
     bound: BoundExecution
     runtime_paths: RuntimeWorkspacePaths
     recovery: SessionExecutionRecovery | None = None
+    surface: EffectiveSurfaceSnapshot | None = None
 
     @property
     def provider_id(self) -> str:
@@ -66,7 +72,7 @@ def bind_admitted_request_execution(
         )
 
         session_metadata = get_session_metadata(
-            session_id, cache_bust=True, enable_writeback=False
+            session_id, cache_bust=True, enable_writeback=False, infer_defaults=False
         )
     if not isinstance(session_metadata, dict):
         session_metadata = {}
@@ -106,6 +112,10 @@ def bind_admitted_request_execution(
         raise ExecutionRecoveryUnavailableError(
             "execution configuration fingerprint changed"
         )
+    mode = None
+    if spec.provider_id != "native":
+        mode = validate_surface_request(session_metadata, params or {})
+        validate_external_surface_state(mode)
     runtime_paths = bind_session_runtime_workspace(
         internal_workspace_dir=get_agent_workspace_dir(),
         project_dir=project_dir,
@@ -123,11 +133,20 @@ def bind_admitted_request_execution(
         host_session_id=session_id,
         workspace=str(runtime_paths.runtime_workspace_root),
     )
+    surface = None
+    if mode is not None:
+        identity = build_surface_identity(
+            metadata=session_metadata, binding=prospective_binding,
+            paths=runtime_paths, channel_id=channel_id,
+        )
+        surface = EffectiveSurfaceSnapshot(identity, mode)
+        surface.validate_mode(mode)
     recovery = SessionExecutionRecovery(
         session_id=session_id,
         execution_profile_id=selected_profile_id,
         binding=prospective_binding,
         runtime_paths=runtime_paths,
+        surface_identity=surface.identity if surface else None,
     )
     bindings = agent_manager.execution_bindings
     bound = bindings.bind(
@@ -143,6 +162,7 @@ def bind_admitted_request_execution(
         bound=bound,
         runtime_paths=runtime_paths,
         recovery=recovery,
+        surface=surface,
     )
     setattr(request, "_bound_execution", bound)
     setattr(request, "_execution_source", source)

@@ -68,6 +68,7 @@ class EngineAgentAdapter:
         if route.provider_id == "native":
             raise ValueError("EngineAgentAdapter requires an External provider")
         self._route = route
+        self._surface = route.surface
         self._tool_gateway = tool_gateway
         self._owns_tool_gateway = tool_gateway is None
         self._heartbeat_bridge = HeartbeatRuntimeBridge()
@@ -108,6 +109,13 @@ class EngineAgentAdapter:
             or route.bound.binding is not self._route.bound.binding
         ):
             raise RuntimeError("External adapter route changed")
+        if self._surface is not None and (
+            (route.surface is None and self._route.surface is not None)
+            or (route.surface is not None and self._surface.identity != route.surface.identity)
+        ):
+            raise ValueError("External Surface identity changed")
+        if route.surface is not None:
+            route.surface.validate_mode(route.surface.initial_mode)
 
     async def create_instance(
         self,
@@ -116,7 +124,22 @@ class EngineAgentAdapter:
         mode: str = "agent",
         sub_mode: str | None = None,
     ) -> None:
-        del config, mode, sub_mode
+        del config
+        if self._surface is None:
+            from jiuwenswarm.runtime.harness.surface import (
+                build_surface_identity, EffectiveSurfaceSnapshot, canonical_surface_mode,
+            )
+            # Programmatic routes predate persisted Session admission.
+            raw_mode = f"{mode}.{sub_mode}" if sub_mode else mode
+            canonical = canonical_surface_mode({"mode": raw_mode})
+            identity = build_surface_identity(
+                metadata={"mode": canonical}, binding=self._route.bound.binding,
+                paths=self._route.runtime_paths, channel_id=self._route.channel_id,
+            )
+            self._surface = EffectiveSurfaceSnapshot(identity, canonical)
+        raw_mode = f"{mode}.{sub_mode}" if sub_mode else mode
+        self._surface.validate_mode(raw_mode)
+        self._surface.validate_mode(self._surface.initial_mode)
         if self._session is not None:
             raise RuntimeError("External execution instance already exists")
         self._session = self._build_session()
@@ -562,8 +585,16 @@ class EngineAgentAdapter:
         goal_attempt=None,
     ) -> AsyncIterator[AgentResponseChunk]:
         session = self._require_session()
-        await self._ensure_started(session)
         params = request.params if isinstance(request.params, dict) else {}
+        if self._surface is not None:
+            from jiuwenswarm.runtime.harness.surface import validate_surface_request
+            mode = validate_surface_request(
+                {"mode": self._surface.initial_mode,
+                 "project_id": self._surface.identity.project_id,
+                 "project_dir": str(self._surface.identity.paths.project_root)}, params,
+            )
+            self._surface.validate_mode(mode)
+        await self._ensure_started(session)
         external_input = await build_external_input(
             query=inputs.get("query", ""),
             request_id=request.request_id,
@@ -571,6 +602,7 @@ class EngineAgentAdapter:
             params=params,
             paths=self._route.runtime_paths,
             include_personal_context=self._personal_context_runtime_enabled,
+            surface=self._surface,
         )
         if isinstance(external_input, InteractiveInput):
             if not await session.answer(external_input):
@@ -900,6 +932,7 @@ class EngineAgentAdapter:
             host_session_id=binding.host_session_id,
             channel_id=self._route.channel_id,
             provider_id=binding.provider_id,
+            surface=self._surface,
         )
 
     async def _ensure_started(self, session: ExecutionSession) -> None:
@@ -916,6 +949,7 @@ class EngineAgentAdapter:
                     host_session_id=binding.host_session_id,
                     channel_id=self._route.channel_id,
                     provider_id=binding.provider_id,
+                    surface=self._surface,
                 )
             )
 

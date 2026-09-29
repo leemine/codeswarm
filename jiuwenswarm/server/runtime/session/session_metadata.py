@@ -879,6 +879,7 @@ def init_session_metadata(
     execution_profile_id: str | None = None,
     execution_config_revision: str | None = None,
     execution_config_fingerprint: str | None = None,
+    surface_creation: dict[str, Any] | None = None,
 ) -> None:
     """初始化会话元数据(同步写,确保创建后立即可读)
 
@@ -920,6 +921,8 @@ def init_session_metadata(
         metadata["execution_profile_id"] = execution_profile_id
         metadata["execution_config_revision"] = execution_config_revision
         metadata["execution_config_fingerprint"] = execution_config_fingerprint
+    if surface_creation is not None:
+        metadata["surface_creation"] = surface_creation
     _write_metadata_sync(session_id, metadata)
 
 
@@ -1331,12 +1334,14 @@ def get_session_metadata(
     cache_bust: bool = False,
     *,
     enable_writeback: bool = True,
+    infer_defaults: bool = True,
 ) -> dict[str, Any]:
     """获取会话元数据
 
     Args:
         session_id: 会话 ID
         cache_bust: 强制跳过缓存，直接从磁盘读取（用于跨进程同步场景）
+        infer_defaults: False 返回持久事实而不补 channel 默认值，供执行身份准入。
         enable_writeback: 是否允许推断后异步写盘持久化。默认 ``True`` 保持
             原行为;只读校验场景(如 ``discard_turn_changes`` 的绑定校验)应传
             ``False``,避免读路径触发写盘副作用,同时仍享受推断能力(存量会话
@@ -1346,7 +1351,7 @@ def get_session_metadata(
     if lc.state("session", session_id).get("write_blocked") or lc.session_paths(session_id)[1].exists():
         return lc.raw_metadata(session_id)
     metadata = _read_metadata(session_id, cache_bust)
-    if isinstance(metadata, dict) and metadata:
+    if infer_defaults and isinstance(metadata, dict) and metadata:
         metadata = _apply_metadata_defaults_with_inference(
             session_id,
             metadata,

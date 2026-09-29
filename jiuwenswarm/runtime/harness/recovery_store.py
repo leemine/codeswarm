@@ -11,7 +11,7 @@ import secrets
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +31,7 @@ from openjiuwen.harness_protocol import (
 
 from jiuwenswarm.common.auth.session_store import decrypt_json, encrypt_json
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
+from jiuwenswarm.runtime.harness.surface import SessionSurfaceIdentity
 from jiuwenswarm.server.runtime.session.session_history import (
     flush_history_writes,
     get_read_history_path,
@@ -39,6 +40,7 @@ from jiuwenswarm.server.runtime.session.session_history import (
 )
 
 _RECOVERY_SCHEMA_VERSION = 1
+_SURFACE_RECOVERY_SCHEMA_VERSION = 2
 _RECOVERY_FILE_NAME = "execution-recovery.json"
 _MAX_PENDING_INTERACTIONS = 128
 _LOCK = threading.RLock()
@@ -88,6 +90,7 @@ class SessionExecutionRecovery:
         runtime_paths: RuntimeWorkspacePaths,
         parent_session_id: str | None = None,
         create_if_missing: bool = True,
+        surface_identity: SessionSurfaceIdentity | None = None,
     ) -> None:
         history_path: Path | None
         if parent_session_id is None:
@@ -112,6 +115,7 @@ class SessionExecutionRecovery:
         self._profile_id = execution_profile_id
         self._binding = binding
         self._runtime_paths = runtime_paths
+        self._surface_identity = surface_identity
         self._path = session_dir / _RECOVERY_FILE_NAME
         self._history_path = history_path
         self._created = False
@@ -146,6 +150,8 @@ class SessionExecutionRecovery:
             binding=binding,
             runtime_paths=runtime_paths,
             create_if_missing=create_if_missing,
+            surface_identity=(replace(self._surface_identity, binding=binding, paths=runtime_paths)
+                              if self._surface_identity is not None else None),
         )
         if not create_if_missing and not child.path.exists():
             return None
@@ -263,6 +269,10 @@ class SessionExecutionRecovery:
             if self._path.exists():
                 archive = self._read_archive()
                 self._validate_scope(archive)
+                if self._surface_identity is not None and archive['schema_version'] == 1:
+                    archive['surface_identity'] = self._surface_identity.record()
+                    archive['schema_version'] = _SURFACE_RECOVERY_SCHEMA_VERSION
+                    self._write_archive(archive)
                 self._created = (
                     archive.get("checkpoint") is None
                     and archive.get("initializing_process") == _process_identity()
@@ -281,6 +291,9 @@ class SessionExecutionRecovery:
                 "updated_at": time.time(),
                 "initializing_process": _process_identity(),
             }
+            if self._surface_identity is not None:
+                archive['surface_identity'] = self._surface_identity.record()
+                archive['schema_version'] = _SURFACE_RECOVERY_SCHEMA_VERSION
             self._write_archive(archive)
             self._created = True
 
@@ -453,8 +466,12 @@ class SessionExecutionRecovery:
         return checkpoint
 
     def _validate_scope(self, archive: dict[str, Any]) -> None:
-        if archive.get("schema_version") != _RECOVERY_SCHEMA_VERSION:
+        if archive.get("schema_version") not in (_RECOVERY_SCHEMA_VERSION, _SURFACE_RECOVERY_SCHEMA_VERSION):
             raise ExecutionRecoveryUnavailableError("recovery archive version is unsupported")
+        if archive.get("schema_version") == _SURFACE_RECOVERY_SCHEMA_VERSION:
+            if (self._surface_identity is None
+                    or archive.get("surface_identity") != self._surface_identity.record()):
+                raise ExecutionRecoveryUnavailableError("Surface identity changed")
         if archive.get("execution_profile_id") != self._profile_id:
             raise ExecutionRecoveryUnavailableError("execution profile changed")
         if archive.get("binding") != self._binding_record():
