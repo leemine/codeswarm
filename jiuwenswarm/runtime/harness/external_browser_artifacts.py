@@ -120,6 +120,10 @@ def _artifact_kind(path: Path, *, tool_name: str) -> BrowserArtifactKind:
 
 
 def _is_internal_mcp_output(path: Path, *, root: Path) -> bool:
+    # Chrome keeps these files mutable until the final rename. Publishing them
+    # can both expose incomplete bytes and fail projection of completed outputs.
+    if path.suffix.lower() == ".crdownload":
+        return True
     try:
         relative = path.relative_to(root)
     except ValueError:
@@ -300,6 +304,7 @@ class ExternalBrowserArtifactGateway:
             page_state = self._page_state()
             source_url = str(page_state.get("url") or "about:blank")
             permission_id = self._decision_id_for(self._identity, invocation)
+            receipts: list[dict[str, str]] = []
             try:
                 for path in changed:
                     artifact = self._project_artifact(
@@ -312,6 +317,12 @@ class ExternalBrowserArtifactGateway:
                     artifact_id = str(artifact.artifactId or "").strip()
                     if not artifact_id:
                         raise ValueError("Browser Artifact id is required")
+                    receipts.append({
+                        "artifact_id": artifact_id,
+                        "name": path.name,
+                        "workspace_relative_path": path.relative_to(self._workspace_root).as_posix(),
+                        "delivery_status": "delivered",
+                    })
                     if artifact_id in self._delivered:
                         continue
                     self._pending_artifacts[artifact_id] = (artifact, path)
@@ -324,7 +335,12 @@ class ExternalBrowserArtifactGateway:
                     ),
                     is_error=True,
                 )
-            return result
+            # The Browser's click result does not report Chrome-level downloads.
+            # Acknowledge the successful product delivery so the model can finish
+            # without repeating the download or sending the same file again.
+            content = dict(result.content) if isinstance(result.content, Mapping) else {"result": result.content}
+            content["browser_artifacts"] = receipts
+            return ToolExecutionResult(content=content)
 
     async def _wait_for_downloads(
         self,

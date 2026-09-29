@@ -369,7 +369,17 @@ class ExternalEventProjection:
         state = next(reversed(self._turns.values()), None)
         if state is None:
             state = self._fallback_state("product-interaction")
-        await self._publish(state, dict(payload), delivery_id=delivery_id)
+        from jiuwenswarm.runtime.context import get_current_runtime
+        from jiuwenswarm.runtime.events import RuntimeEvent
+
+        payload = dict(payload)
+        runtime = get_current_runtime()
+        if runtime is not None:
+            await runtime.register_host_interaction(RuntimeEvent.control(
+                request_id=state.request_id, channel_id=state.channel_id,
+                session_id=self._session_id, payload=payload,
+            ))
+        await self._publish(state, payload, delivery_id=delivery_id)
 
     async def publish_product_artifact(
         self,
