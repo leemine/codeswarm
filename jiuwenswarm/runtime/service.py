@@ -456,6 +456,15 @@ class AgentRuntime:
             str(payload.get(key) or ""),
         )
 
+    async def register_host_interaction(self, event: RuntimeEvent) -> None:
+        """Bind a host-pushed question to its existing execution before delivery."""
+        control_id = self._waiting_control_id(event)
+        if not control_id or not self._session_coordinator.record_interaction(
+            event.session_id or "default", event.request_id, control_id,
+        ):
+            raise RuntimeError("host interaction has no active execution owner")
+        await self._mark_pending_interaction(event)
+
     async def _mark_pending_interaction_id(
         self, session_id: str, request_id: str
     ) -> None:
@@ -2801,7 +2810,10 @@ class AgentRuntime:
             work_mode=params.get("work_mode"),
         ):
             return None
-        if cls._is_interrupt_resume_request(request):
+        if cls._is_interrupt_resume_request(request) or (
+            request.req_method == ReqMethod.CHAT_ANSWER
+            and params.get("source") == "browser_permission"
+        ):
             return SessionWorkKind.CONTROL_INPUT
         if request.req_method is ReqMethod.COMMAND_GOAL:
             action = str(params.get("action") or "get").strip().lower()

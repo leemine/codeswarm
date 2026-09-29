@@ -144,6 +144,43 @@ async def test_projects_only_changed_controlled_outputs_and_sanitizes_source(
     )
     assert preexisting not in [item[1] for item in delivered]
     assert internal not in [item[1] for item in delivered]
+    assert result.content["ok"] is True
+    receipt = result.content["browser_artifacts"][0]
+    assert receipt["artifact_id"] == artifact.artifactId
+    assert receipt["delivery_status"] == "delivered"
+    assert receipt["workspace_relative_path"].endswith("/artifacts/report.pdf")
+    assert str(tmp_path) not in str(receipt)
+
+
+@pytest.mark.asyncio
+async def test_ignores_in_progress_download_until_renamed(tmp_path: Path) -> None:
+    delivered = []
+    phase = 0
+
+    async def sink(artifact, path) -> None:
+        delivered.append((artifact, path))
+
+    async def invoke(_invocation):
+        nonlocal phase
+        phase += 1
+        if phase == 1:
+            temporary.write_bytes(b"incomplete")
+        elif phase == 2:
+            temporary.write_bytes(b"still growing")
+            completed.write_bytes(b"finished")
+        else:
+            temporary.rename(renamed)
+        return ToolExecutionResult(content={"ok": True})
+
+    wrapper, outputs = _wrapper(tmp_path, invoke, sink)
+    temporary = outputs / "background.crdownload"
+    completed = outputs / "result.txt"
+    renamed = outputs / "background.txt"
+    for call_id, expected in (("snapshot", []), ("click", [completed]),
+                              ("rename", [completed, renamed])):
+        result = await wrapper.invoke(ToolInvocation(call_id, "browser_snapshot", {}))
+        assert result.is_error is False
+        assert [path for _, path in delivered] == expected
 
 
 @pytest.mark.asyncio

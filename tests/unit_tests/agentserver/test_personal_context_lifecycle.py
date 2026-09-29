@@ -306,3 +306,27 @@ async def test_stop_does_not_swallow_cancelled_error(
 
 async def _noop_async() -> None:
     return None
+
+@pytest.mark.asyncio
+async def test_stop_closes_managed_chrome_after_runtime_and_propagates_failure(monkeypatch):
+    from openjiuwen.harness.tools import browser_move
+    server = _server(monkeypatch)
+    runtime = server._runtime
+    events = []
+    close = runtime.close
+
+    async def close_runtime():
+        await close()
+        events.append('runtime-closed')
+
+    async def close_browser():
+        assert runtime.closed
+        events.append('browser-close')
+        raise RuntimeError('browser exit unconfirmed')
+
+    monkeypatch.setattr(runtime, 'close', close_runtime)
+    monkeypatch.setattr(browser_move, 'shutdown_managed_browser_runtimes', close_browser)
+    with pytest.raises(RuntimeError, match='browser exit unconfirmed'):
+        await server.stop()
+    assert events == ['runtime-closed', 'browser-close']
+    assert _FakePersonalContextHost.instances[0].events == [('stop', 30.0)]

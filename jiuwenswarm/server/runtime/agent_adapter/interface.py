@@ -3299,6 +3299,25 @@ class JiuWenSwarm:
         self, request: AgentRequest
     ) -> AsyncIterator[AgentResponseChunk]:
         """Inject an interaction answer into this Session's active execution."""
+        params = request.params if isinstance(request.params, dict) else {}
+        if request.req_method == ReqMethod.CHAT_ANSWER and params.get("source") == "browser_permission":
+            # The Browser awaits a host future, not a suspended Provider Turn.
+            # Runtime has already claimed the exact execution/generation.
+            adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+            response = await adapter.handle_user_answer(request)
+            payload = response.payload or {}
+            if not response.ok or payload.get("resolved") is not True:
+                raise ValueError("Browser interaction answer is stale or unknown")
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={"event_type": "runtime.accepted", "accepted": True,
+                         "resolved": True, "request_id": request.request_id,
+                         "interaction_id": params.get("request_id"),
+                         "session_id": request.session_id},
+                metadata=request.metadata or {},
+            )
+            return
         if not is_interrupt_resume_payload(request.params):
             raise ValueError("control input must answer an active interaction")
         adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))

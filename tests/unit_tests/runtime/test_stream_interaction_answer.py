@@ -700,3 +700,77 @@ async def test_awaitable_stream_factory_and_waiting_terminal_semantics(harness) 
     assert control.parent_execution_id == parent.execution_id
     assert control.state is SessionExecutionState.WAITING_FOR_CONTROL
     assert control.waiting_control_id == "question_2"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host_push", [False, True])
+async def test_browser_answer_reaches_waiting_host_without_a_second_turn(harness, host_push):
+    """A host Browser future must not wait behind the Turn awaiting that future."""
+    from jiuwenswarm.common.schema.agent import AgentResponse
+    from jiuwenswarm.server.runtime.agent_adapter import interface
+
+    resolved = asyncio.Event()
+
+    async def parent(request):
+        if host_push:
+            from jiuwenswarm.runtime.harness.event_projection import ExternalEventProjection
+            projection = ExternalEventProjection(SESSION_ID)
+            projection.register_turn('turn', request_id=request.request_id,
+                                     channel_id=request.channel_id, mode='agent.code')
+
+            async def pushed(_state, payload, **_kwargs):
+                assert harness.coordinator.has_control_target(SESSION_ID, 'browser-1')
+                assert payload['session_generation'] == 1
+
+            projection._publish = pushed
+            try:
+                await projection.publish_product_interaction({
+                    'event_type': 'chat.ask_user_question', 'request_id': 'browser-1',
+                    'source': 'browser_permission', 'questions': [],
+                }, 'browser-test')
+            finally:
+                await projection.close()
+            yield _chunk(request, 'runtime.accepted')
+        else:
+            yield _chunk(request, 'chat.ask_user_question', request_id='browser-1', source='browser_permission')
+        await resolved.wait()
+        yield _chunk(request, 'chat.final', content='browser finished')
+
+    async def answer(request):
+        assert request.params['request_id'] == 'browser-1'
+        resolved.set()
+        return AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
+                             ok=True, payload={'accepted': True, 'resolved': True})
+
+    adapter = SimpleNamespace(handle_user_answer=AsyncMock(side_effect=answer),
+                              process_message_stream_impl=Mock(side_effect=AssertionError('must not resume Provider')))
+    facade = SimpleNamespace(_ensure_adapter=Mock(return_value=adapter),
+                             _adapter_mode_for_request=Mock(return_value='normal'))
+    harness.agent.process_message_stream = parent
+    harness.agent.deliver_control_input = lambda request: interface.JiuWenSwarm.deliver_control_input(facade, request)
+    stream = harness.runtime.stream(_request(), trigger_hook=False)
+    async with aclosing(stream):
+        assert (await anext(stream)).event_type == ('runtime.accepted' if host_push else 'chat.ask_user_question')
+        with pytest.raises(RuntimeError, match='stale Session generation'):
+            await harness.runtime.answer_interaction(
+                _answer('browser-1', source='browser_permission', session_generation=2).to_agent_request(),
+                trigger_hook=False,
+            )
+        with pytest.raises(RuntimeError, match='no active execution'):
+            await harness.runtime.answer_interaction(
+                _answer('foreign', source='browser_permission').to_agent_request(), trigger_hook=False,
+            )
+        adapter.handle_user_answer.assert_not_awaited()
+        value = _answer('browser-1', source='browser_permission')
+        assert value.resumes_interrupted_turn is False
+        request = value.to_agent_request()
+        assert harness.runtime.session_work_kind(request) is SessionWorkKind.CONTROL_INPUT
+        events = await asyncio.wait_for(harness.runtime.answer_interaction(request, trigger_hook=False), 1)
+        assert [event.event_type for event in events] == ['runtime.accepted']
+        duplicate = await harness.runtime.answer_interaction(request, trigger_hook=False)
+        assert duplicate[0].payload['duplicate'] is True
+        assert (await anext(stream)).event_type == 'chat.final'
+        with pytest.raises(StopAsyncIteration):
+            await anext(stream)
+    adapter.handle_user_answer.assert_awaited_once()
+    adapter.process_message_stream_impl.assert_not_called()
