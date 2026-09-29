@@ -11,11 +11,11 @@ on:
       full_workers:
         description: Full Python shard worker count
         required: false
-        default: '2'
+        default: '4'
         type: choice
         options:
-          - '2'
           - '4'
+          - '2'
 
 permissions:
   contents: read
@@ -135,7 +135,7 @@ jobs:
         run: python3 -m unittest tools.tests.test_full_shards tools.tests.test_provider_acceptance -v
       - name: Run full Python regression
         env:
-          FULL_PYTHON_WORKERS: ${{ inputs.full_workers || '2' }}
+          FULL_PYTHON_WORKERS: ${{ inputs.full_workers || '4' }}
         run: .venv/bin/python tools/full_regression.py --workers "$FULL_PYTHON_WORKERS"
       - name: Upload full Python archive
         if: always()
