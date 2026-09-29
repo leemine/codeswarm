@@ -439,13 +439,17 @@ async def test_goal_waiting_resume_keeps_locator_and_answer_bypasses_permit(chai
     provider = chain.providers[0]
     provider.ask = True
     task = asyncio.create_task(run(chain, request()))
-    for _ in range(100):
-        await asyncio.sleep(0)
-        handles = chain.runtime.coordinator._registry.select(
-            session_id="session-1", request_id="goal"
-        )
-        if handles and handles[0].waiting_control_id:
-            break
+    async with asyncio.timeout(5):
+        while True:
+            handles = chain.runtime.coordinator._registry.select(
+                session_id="session-1", request_id="goal"
+            )
+            if handles and handles[0].waiting_control_id:
+                break
+            if task.done():
+                await task
+                raise AssertionError("Goal completed before publishing its interaction")
+            await asyncio.sleep(0.01)
     handle = handles[0]
     assert (
         handle.state is SessionExecutionState.RUNNING and handle.waiting_control_id
