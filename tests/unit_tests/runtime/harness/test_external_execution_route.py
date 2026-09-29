@@ -138,6 +138,7 @@ def test_admission_reuses_runtime_workspace_and_freezes_route(
         params={},
     )
     metadata = {
+        "mode": "agent.code.normal", "work_mode": "code",
         "execution_profile_id": "codex",
         "execution_config_revision": "r1",
         "execution_config_fingerprint": config_fingerprint(spec),

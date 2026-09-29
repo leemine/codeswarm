@@ -894,6 +894,19 @@ class RuntimeSessionProvisioner:
                             "cwd": workspace,
                             "project_dir": project_dir or workspace,
                         }
+                surface_creation = None
+                if execution_profile_id is not None and selected_spec.provider_id != "native":
+                    from jiuwenswarm.runtime.harness.surface import creation_surface
+
+                    surface_creation = creation_surface({
+                        "session_id": session_id, "channel_id": channel_id,
+                        "user_id": str(provision_input.user_id or "").strip(),
+                        "mode": canonical_mode, "work_mode": final_work_mode,
+                        "project_id": project_id, "project_dir": project_dir,
+                        "execution_profile_id": execution_profile_id,
+                        "execution_config_revision": execution_revision,
+                        "execution_config_fingerprint": execution_fingerprint,
+                    })
                 init_session_metadata(
                     session_id=session_id,
                     channel_id=channel_id,
@@ -910,6 +923,7 @@ class RuntimeSessionProvisioner:
                     execution_profile_id=execution_profile_id,
                     execution_config_revision=execution_revision,
                     execution_config_fingerprint=execution_fingerprint,
+                    surface_creation=surface_creation,
                 )
                 if not explicit_tui_session:
                     self._agent_manager.activate_session_prewarm(session_id)
