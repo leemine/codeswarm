@@ -44,6 +44,8 @@ from jiuwenswarm.common.e2a.constants import (
     E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
     E2A_INTERNAL_CANCEL_SOURCE_KEY,
     E2A_WIRE_INTERNAL_METADATA_KEYS,
+    E2A_ARTIFACT_ACCEPTANCE_KEY,
+    E2A_ARTIFACT_ACCEPTED_EVENT,
 )
 from jiuwenswarm.common.e2a.gateway_normalize import (
     E2A_FALLBACK_FAILED_KEY,
@@ -2233,6 +2235,12 @@ class AgentWebSocketServer:
                         describe_ws_exception(send_exc),
                     ),
                 )
+            return
+
+        if isinstance(data, dict) and data.get("type") == "event" and data.get("event") == E2A_ARTIFACT_ACCEPTED_EVENT:
+            receipts = getattr(self, "_artifact_acceptance_receipts", None)
+            if receipts is not None and isinstance(data.get("payload"), dict):
+                receipts.settle(ws, data["payload"].get("nonce"))
             return
 
         try:
@@ -10755,6 +10763,11 @@ class AgentWebSocketServer:
             )
             return False
 
+        nonce = None
+        receipts = None
+        future = None
+        ws = self._current_ws
+        send_lock = self._current_send_lock
         try:
             payload = msg.get("payload") if isinstance(msg, dict) else None
             if isinstance(payload, dict) and payload.get("event_type") == "chat.error":
@@ -10762,8 +10775,17 @@ class AgentWebSocketServer:
                 msg = {**msg, "payload": dict(payload)}
                 self._annotate_model_error(msg["payload"], msg.get("session_id"))
             wire = build_server_push_wire(msg)
-            async with self._current_send_lock:
-                sent_original = await send_wire_payload(self._current_ws, wire)
+            delivery_id = payload.get("delivery_id") if isinstance(payload, dict) else None
+            if (isinstance(delivery_id, str) and delivery_id.startswith("browser-artifact:")
+                    and payload.get("event_type") == "chat.file"):
+                from jiuwenswarm.server.gateway_push.artifact_receipts import ArtifactAcceptanceReceipts
+                receipts = getattr(self, "_artifact_acceptance_receipts", None)
+                if receipts is None:
+                    receipts = self._artifact_acceptance_receipts = ArtifactAcceptanceReceipts()
+                nonce, future = receipts.begin(ws)
+                wire.setdefault("metadata", {})[E2A_ARTIFACT_ACCEPTANCE_KEY] = nonce
+            async with send_lock:
+                sent_original = await send_wire_payload(ws, wire)
             if not sent_original:
                 logger.warning(
                     "[AgentWebSocketServer] send_push 内容过大已降级为错误帧: channel_id=%s",
@@ -10782,10 +10804,16 @@ class AgentWebSocketServer:
                     "[AgentWebSocketServer] send_push 已发送(E2A wire): channel_id=%s",
                     msg.get("channel_id", ""),
                 )
+            if future is not None:
+                await asyncio.wait_for(future, timeout=10)
             return True
         except Exception as e:
             logger.warning("[AgentWebSocketServer] send_push 失败: %s", e)
             return False
+
+        finally:
+            if receipts is not None and nonce is not None:
+                receipts.discard(nonce)
 
     def get_agent(self):
         """获取 default agent 实例（向后兼容）."""

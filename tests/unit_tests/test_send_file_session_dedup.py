@@ -408,3 +408,39 @@ async def test_artifact_replay_uses_real_durable_history_after_owner_recreation(
     assert len([r for r in rows if r.get("event_type") == "chat.file"]) == 1
     assert len([r for r in rows if r.get("event_type") == "harness.artifact_delivery"]) == 1
     assert history.flush_pending_writes()
+
+
+@pytest.mark.asyncio
+async def test_legacy_transport_acceptance_cannot_suppress_durable_gateway_replay(artifact_history, monkeypatch):
+    artifact_history.extend([
+        {'event_type': 'chat.file', 'delivery_id': 'browser-artifact:legacy',
+         'request_id': 'original', 'channel_id': 'web', 'files': [{'name': 'legacy.txt'}],
+         'artifact_route_metadata': {'app_id': 'original-app'}},
+        {'event_type': 'harness.artifact_delivery', 'artifact_delivery_id': 'browser-artifact:legacy',
+         'delivery_id': 'browser-artifact:legacy:accepted'},
+    ])
+    pushes = []
+    async def push(msg):
+        pushes.append(msg)
+        return True
+    monkeypatch.setattr(sfu, 'send_runtime_push', push)
+    toolkit = sfu.SendFileToolkit(request_id='replacement', session_id='session', channel_id='tui')
+    await toolkit.replay_projected_artifacts()
+    await toolkit.replay_projected_artifacts()
+    assert len(pushes) == 1
+    assert pushes[0]['metadata'] == {'app_id': 'original-app'}
+    assert any(row.get('acceptance') == 'gateway_durable_v1' for row in artifact_history)
+
+
+@pytest.mark.asyncio
+async def test_artifact_durable_route_omits_unrelated_request_secrets(tmp_path, artifact_history, monkeypatch):
+    async def push(msg):
+        assert msg['metadata'] == {'app_id': 'app'}
+        return True
+    monkeypatch.setattr(sfu, 'send_runtime_push', push)
+    path = tmp_path / 'artifact.txt'
+    path.write_text('artifact')
+    toolkit = sfu.SendFileToolkit(request_id='r', session_id='s', channel_id='web',
+                                  metadata={'app_id': 'app', 'access_token': 'private-secret'})
+    await toolkit.deliver_projected_artifact(path, {'artifactId': 'private-route', 'metadata': {}})
+    assert 'private-secret' not in str(artifact_history)

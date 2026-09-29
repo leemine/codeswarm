@@ -72,6 +72,10 @@ class ChannelManager(ABC):
         # 下一次 on_config_updated 时强制重启的 channel_id（例如微信解绑：YAML 中 bot_token 本就为空时配置 dict 对比不会变，但内存里仍有旧凭据）
         self._pending_channel_restart: set[str] = set()
         self._dispatch_diag_count: int = 0
+        self._artifact_queue = None
+        self._artifact_task = None
+        # Browser Artifact acceptance is durable, unlike the ordinary bus queue.
+        self._message_handler._artifact_acceptor = self._accept_artifact
         # Channel 连接事件订阅回调列表
         self._channel_event_callbacks: list[Callable[[ChannelEvent], Awaitable[None]]] = []
 
@@ -409,6 +413,60 @@ class ChannelManager(ABC):
         """设置在配置更新时触发的回调，用于由外部实现具体的 Channel 重新实例化逻辑."""
         self._on_config_updated = callback
 
+    def _get_artifact_queue(self):
+        if self._artifact_queue is None:
+            from jiuwenswarm.common.utils import get_config_dir
+            from jiuwenswarm.gateway.routing.artifact_delivery import ArtifactDeliveryQueue, ArtifactInbox
+            self._artifact_queue = ArtifactDeliveryQueue(ArtifactInbox(get_config_dir() / "gateway-artifacts.sqlite3"))
+        return self._artifact_queue
+
+    async def _accept_artifact(self, msg):
+        from jiuwenswarm.gateway.routing.artifact_delivery import freeze_message, freeze_target
+        from jiuwenswarm.gateway.routing.session_sharing import LogicalTarget, SessionDispatcher
+
+        envelope = freeze_message(msg)
+        queue = self._get_artifact_queue()
+        if await queue.contains(envelope):
+            return True
+        await self._inject_file_delivery_fanout(msg, "chat.file")
+        raw = (msg.metadata or {}).get("fan_out_targets") or []
+        targets = []
+        if raw:
+            logical = [item if isinstance(item, LogicalTarget) else LogicalTarget(**item) for item in raw]
+            registry = self._message_handler.get_session_sharing_registry()
+            for logical_target, subs, key in SessionDispatcher.resolve_targets(msg.session_id, logical, registry):
+                routing = SessionDispatcher._build_routing_target(logical_target, subs, subs[0].delivery)
+                targets.append(freeze_target(key.channel_id, key.app_id, routing))
+        else:
+            app_id = self._message_handler.resolve_app_id(msg)
+            channel = self.get_by_key(ChannelKey(msg.channel_id, app_id or "default"))
+            snapshot = getattr(channel, "artifact_session_targets", None)
+            if not callable(snapshot):
+                raise RuntimeError("Artifact origin channel has no durable routing support")
+            for routing in await snapshot(msg.session_id):
+                targets.append(freeze_target(msg.channel_id, app_id or "default", routing))
+        await queue.accept(envelope, targets)
+        return True
+
+    async def _send_artifact_target(self, envelope, target):
+        from jiuwenswarm.gateway.routing.artifact_delivery import restore_message, restore_target
+        channel = self.get_by_key(ChannelKey(target["channel_id"], target["app_id"]))
+        if channel is None:
+            raise RuntimeError("Artifact target channel unavailable")
+        send = getattr(channel, "send_confirmed", None)
+        if not callable(send):
+            # Do not mistake legacy send(None), often swallowing errors, for a receipt.
+            raise RuntimeError("Artifact target has no confirmed delivery capability")
+        await send(restore_message(envelope), routing_target=restore_target(target))
+
+    async def _retry_artifacts(self):
+        while self._running:
+            try:
+                await self._get_artifact_queue().drain(self._send_artifact_target)
+            except Exception:
+                logger.exception("Artifact inbox retry failed; durable obligations retained")
+            await asyncio.sleep(2)
+
     async def _dispatch_robot_messages(self) -> None:
         """出队派发循环：从 MessageHandler 消费 robot_messages，按 channel_id 投递到对应 Channel.
 
@@ -690,11 +748,16 @@ class ChannelManager(ABC):
             return
         self._running = True
         self._dispatch_task = asyncio.create_task(self._dispatch_robot_messages())
+        self._artifact_task = asyncio.create_task(self._retry_artifacts(), name="artifact-delivery-retry")
         logger.info("[ChannelManager] 出队派发循环已启动 (robot_messages -> Channel.send)")
 
     async def stop_dispatch(self) -> None:
         """停止出队派发任务."""
         self._running = False
+        if self._artifact_task is not None:
+            self._artifact_task.cancel()
+            await asyncio.gather(self._artifact_task, return_exceptions=True)
+            self._artifact_task = None
         if self._dispatch_task is not None:
             self._dispatch_task.cancel()
             try:

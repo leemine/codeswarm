@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+
 import asyncio
 import copy
 import hashlib
@@ -27,6 +28,8 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
+
+from jiuwenswarm.common.e2a.constants import E2A_ARTIFACT_ROUTE_METADATA_KEYS
 
 from jiuwenswarm.server.runtime.session.history_io import run_history_io
 
@@ -460,6 +463,7 @@ class SendFileToolkit:
         acknowledged = {
             row.get("artifact_delivery_id") for row in records
             if row.get("event_type") == "harness.artifact_delivery"
+            and row.get("acceptance") == "gateway_durable_v1"
         }
         for row in records:
             delivery_id = row.get("delivery_id")
@@ -474,11 +478,11 @@ class SendFileToolkit:
     async def _push_durable_artifact(
         envelope: _SendFileRuntimeEnvelope, record: Mapping[str, Any], delivery_id: str,
     ) -> None:
-        """Record host transport acceptance, not a downstream display receipt.
+        """Record durable Gateway acceptance, not downstream display completion.
 
-        The durable chat.file remains the UI recovery source if the Gateway
-        disconnects after the socket write. Channel consumers must deduplicate
-        replay by the supplied identity; IM delivery is not exactly-once.
+        Browser file push waits for the Gateway inbox commit. The inbox owns
+        per-target retry after that boundary; the original history remains the
+        UI recovery source. Legacy transport-only receipts do not suppress replay.
         """
         from jiuwenswarm.server.runtime.session.session_history import (
             append_history_record_durable, wait_for_history_receipt,
@@ -491,8 +495,10 @@ class SendFileToolkit:
             "payload": {"event_type": "chat.file", "files": record["files"], "delivery_id": delivery_id},
             "is_complete": False,
         }
-        if envelope.metadata:
-            msg["metadata"] = dict(envelope.metadata)
+        route_metadata = record.get("artifact_route_metadata", envelope.metadata)
+        if route_metadata:
+            msg["metadata"] = {key: value for key, value in route_metadata.items()
+                               if key in E2A_ARTIFACT_ROUTE_METADATA_KEYS}
         if not await send_runtime_push(msg):
             raise RuntimeError("Browser Artifact push was not accepted")
         receipt = await run_history_io(
@@ -500,8 +506,8 @@ class SendFileToolkit:
             session_id=envelope.session_id, request_id=record["request_id"],
             channel_id=record["channel_id"], role="assistant", content="",
             event_type="harness.artifact_delivery", timestamp=time.time(),
-            delivery_id=f"{delivery_id}:accepted",
-            extra={"artifact_delivery_id": delivery_id, "transcript_only": True},
+            delivery_id=f"{delivery_id}:gateway-accepted",
+            extra={"artifact_delivery_id": delivery_id, "acceptance": "gateway_durable_v1", "transcript_only": True},
         )
         if receipt is None:
             raise RuntimeError("Browser Artifact acknowledgement was not persisted")
@@ -719,7 +725,8 @@ class SendFileToolkit:
                     session_id=envelope.session_id, request_id=envelope.routing_request_id,
                     channel_id=envelope.channel_id, role="assistant", content="",
                     event_type="chat.file", timestamp=time.time(),
-                    extra={"files": files_payload}, delivery_id=history_delivery_id,
+                    extra={"files": files_payload, "artifact_route_metadata": {key: value for key, value in (msg.get("metadata") or {}).items()
+                            if key in E2A_ARTIFACT_ROUTE_METADATA_KEYS}}, delivery_id=history_delivery_id,
                 )
                 if receipt is None:
                     raise RuntimeError("Browser Artifact history was not persisted")
@@ -730,6 +737,7 @@ class SendFileToolkit:
                 accepted = any(
                     row.get("event_type") == "harness.artifact_delivery"
                     and row.get("artifact_delivery_id") == history_delivery_id
+                    and row.get("acceptance") == "gateway_durable_v1"
                     for row in records
                 )
                 if not accepted:

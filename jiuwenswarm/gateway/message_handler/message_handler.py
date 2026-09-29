@@ -3209,7 +3209,7 @@ class MessageHandler(ABC):
             return False
         return bool(getattr(resp, "ok", False))
 
-    async def _handle_agent_server_push(self, wire: dict[str, Any]) -> None:
+    async def _handle_agent_server_push(self, wire: dict[str, Any]) -> bool | None:
         """AgentServer ``send_push`` 下行：与 RPC 共用连接但不得占用 unary/stream 等待队列。"""
         from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_chunk
 
@@ -3305,6 +3305,14 @@ class MessageHandler(ABC):
             chunk, session_id=session_id, metadata=bus_metadata,
             app_id=_push_app_id,
         )
+        from jiuwenswarm.gateway.routing.artifact_delivery import artifact_delivery_id
+        if artifact_delivery_id(out.payload):
+            accept = getattr(self, "_artifact_acceptor", None)
+            if not callable(accept):
+                raise RuntimeError("Browser Artifact durable inbox is unavailable")
+            if self._outbound_pipeline is not None:
+                await self._outbound_pipeline.apply(out)
+            return await accept(out)
         await self.publish_robot_messages(out)
         logger.info(
             "[MessageHandler] server_push 已写入 robot_messages: request_id=%s channel_id=%s app_id=%s",

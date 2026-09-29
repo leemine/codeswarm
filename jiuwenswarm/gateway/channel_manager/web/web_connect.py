@@ -1067,6 +1067,8 @@ class WebChannel(BaseWsChannel):
                 for w in ws_set:
                     self._enqueue_send(w, frame_data)
                 return
+            if self.requires_delivery_confirmation:
+                raise ConnectionError("Artifact exact recipient is disconnected")
             # V2 精确路由未命中 —— 回退到 session_id 路由
             logger.debug(
                 "[WebChannel] V2 routing miss: looked up %d routing_keys + ws_id=%s,"

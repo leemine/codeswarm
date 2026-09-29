@@ -447,26 +447,25 @@ class SessionDispatcher:
         """对每个 LogicalTarget 查 Registry → 按物理容器去重 → 组装 RoutingTarget →
         调 channel.send(msg, routing_target=RoutingTarget)。
         """
+        for target, group_subs, container_key in SessionDispatcher.resolve_targets(session_id, fan_out, registry):
+            await SessionDispatcher._send_to_container(msg, target, group_subs, container_key, channel_manager)
+
+    @staticmethod
+    def resolve_targets(session_id: str, fan_out: list, registry: SessionSharingRegistry) -> list:
+        """Resolve once so durable file delivery freezes the existing route policy."""
+        resolved = []
         if not fan_out:
-            return
-
+            return resolved
         godview_subs = registry.lookup_member(session_id, SubRole.GODVIEW)
-        # 已发送的物理容器集合，跨 intent 去重：broadcast 的 fan_out=[godview, mention_all]
-        # 可能打到同一个 IM 群，godview 先发到群 G、mention_all 又发到群 G → 重复
-        sent_containers: set[SessionDispatcher._ContainerKey] = set()
-
+        sent_containers = set()
         for target in fan_out:
             subs = SessionDispatcher._select_subs(target, godview_subs, registry, session_id)
-            if not subs:
-                # 未认领的 LLM target 无 GodView 抄送，静默跳过（流式 chunk 高频路径）
-                continue
             for container_key, _delivery, group_subs in SessionDispatcher._group_by_container(subs):
                 if container_key in sent_containers:
                     continue
                 sent_containers.add(container_key)
-                await SessionDispatcher._send_to_container(
-                    msg, target, group_subs, container_key, channel_manager,
-                )
+                resolved.append((target, group_subs, container_key))
+        return resolved
 
     @staticmethod
     def _select_subs(
