@@ -400,3 +400,28 @@ async def test_session_create_ignores_params_user_id(tmp_path, monkeypatch):
     # 请求 params 中显式携带的 user_id("victim")必须被忽略并移除，
     # 不得覆盖连接身份；envelope.user_id 始终以连接为准。
     assert "user_id" not in agent_client.requests[-1].params
+
+
+@pytest.mark.asyncio
+async def test_browser_artifact_origin_uses_registered_key_not_client_metadata():
+    from jiuwenswarm.common.e2a.constants import E2A_ARTIFACT_ORIGIN_KEY
+    from jiuwenswarm.common.e2a.gateway_normalize import message_to_e2a
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    ws = FakeWebSocket(query_user_id='alice')
+    seen = []
+    channel.on_message(lambda msg: seen.append(msg))
+    try:
+        await channel._handle_raw_message(ws, json.dumps({
+            'type': 'req', 'id': 'original', 'method': 'chat.send',
+            'metadata': {E2A_ARTIFACT_ORIGIN_KEY: {'user_id': 'mallory'}},
+            'params': {'session_id': 'original-session', 'content': 'hello', 'mode': 'agent.code',
+                       'metadata': {E2A_ARTIFACT_ORIGIN_KEY: {'user_id': 'mallory'}}},
+        }), {'app_id': ['original-app']})
+        origin = seen[0].metadata[E2A_ARTIFACT_ORIGIN_KEY]
+        key = origin['routing']['routing_keys'][0]
+        assert (key['user_id'], key['session_id'], key['app_id']) == ('alice', 'original-session', 'original-app')
+        assert key['agent_ref']['mode'] == 'agent.code'
+        assert not origin['routing'].get('delivery')
+        assert E2A_ARTIFACT_ORIGIN_KEY in str(message_to_e2a(seen[0]))
+    finally:
+        await channel.unregister_ws(ws)

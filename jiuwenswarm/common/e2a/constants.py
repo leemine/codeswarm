@@ -98,7 +98,9 @@ E2A_WIRE_SERVER_PUSH_KEY = "_jiuwenswarm_server_push"
 E2A_ARTIFACT_ACCEPTANCE_KEY = "_browser_artifact_acceptance"
 E2A_ARTIFACT_ACCEPTED_EVENT = "gateway.artifact.accepted"
 # Persist only routing hints needed by Browser Artifact recovery, never whole request metadata.
+E2A_ARTIFACT_ORIGIN_KEY = "_browser_artifact_origin"
 E2A_ARTIFACT_ROUTE_METADATA_KEYS = frozenset({
+    E2A_ARTIFACT_ORIGIN_KEY,
     "app_id", "send_file_targets", "fan_out_targets", "member_name", "team_name",
 })
 # Gateway 内部断连 cancel 来源；不得由 channel/user metadata 透传生成。

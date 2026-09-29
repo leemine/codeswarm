@@ -1398,6 +1398,10 @@ class AgentWebSocketServer:
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
         )
 
+        from jiuwenswarm.server.gateway_push.artifact_outbox import ArtifactOutbox
+        self._artifact_outbox = ArtifactOutbox(self.send_push)
+        self._artifact_outbox.start()
+
         self._asset_start_task = asyncio.create_task(self._start_asset_services())
 
         # The port is already listening. Remote tokenizer downloads must not
@@ -1809,7 +1813,15 @@ class AgentWebSocketServer:
         try:
             await self._stop_main_services()
         finally:
-            await self._stop_personal_context_best_effort()
+            try:
+                # Runtime close may still commit a final Browser file. Keep the
+                # history retry owner alive until those producers have drained.
+                outbox = getattr(self, "_artifact_outbox", None)
+                if outbox is not None:
+                    await outbox.close()
+                    self._artifact_outbox = None
+            finally:
+                await self._stop_personal_context_best_effort()
 
     async def _stop_main_services(self) -> None:
         """Stop AgentServer-owned services before optional host cleanup."""

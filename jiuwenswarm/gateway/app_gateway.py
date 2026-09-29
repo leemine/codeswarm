@@ -1559,6 +1559,7 @@ class GatewayServer(BaseWebChannel):
             # 同步把 ws_id 注入 metadata，供 _maybe_register_godview 构造带真 ws_id 的
             # TuiDeliveryTarget（修掉原 tui _kind="group" + ws_id 恒空导致投递不到）。
             _ws_id_for_metadata = ""
+            _artifact_origin = None
             if route.ws_channel is not None:
                 from jiuwenswarm.gateway.routing.keys import RoutingKey
 
@@ -1573,6 +1574,8 @@ class GatewayServer(BaseWebChannel):
                 )
                 try:
                     await route.ws_channel.register_ws(ws, _tui_rk)
+                    from jiuwenswarm.gateway.routing.artifact_delivery import freeze_origin
+                    _artifact_origin = freeze_origin(_tui_rk)
                     _ws_id_for_metadata = getattr(ws, "_jiuwen_ws_id", "") or ""
                 except Exception:
                     logger.warning(
@@ -1583,6 +1586,9 @@ class GatewayServer(BaseWebChannel):
             # 从 params 中提取 cwd/project_dir，注入到 metadata 中
             # cwd 供 message_handler 解析 @file 引用；project_dir 供 session.list 按项目过滤
             metadata = {"method": method}
+            if _artifact_origin is not None:
+                from jiuwenswarm.common.e2a.constants import E2A_ARTIFACT_ORIGIN_KEY
+                metadata[E2A_ARTIFACT_ORIGIN_KEY] = _artifact_origin
             if _ws_id_for_metadata:
                 metadata["ws_id"] = _ws_id_for_metadata
             cwd = params.get("cwd")

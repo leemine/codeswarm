@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from jiuwenswarm.gateway.channel_manager.base import BaseWebChannel
-from jiuwenswarm.gateway.routing.keys import DeliveryTarget, RoutingKey
+from jiuwenswarm.gateway.routing.keys import RoutingKey
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
@@ -263,6 +263,17 @@ class BaseWsChannel(BaseWebChannel):
         This is a transport receipt, not proof that a person saw the message.
         Durable inbox retry and frontend delivery IDs cover interrupted sends.
         """
+        # A reconnect initially registers history.get in generic "agent" mode,
+        # even when the file was produced in agent.code. Mode is a view/execution
+        # choice, not a recipient identity; keep user/app/session/agent ID exact.
+        if routing_target is not None:
+            from dataclasses import replace
+            def recipient(key):
+                return (key.user_id, key.channel_id, key.app_id, key.session_id, key.agent_ref.id)
+            wanted = {recipient(key) for key in routing_target.routing_keys}
+            async with self._lock:
+                keys = [key for key in self._clients_by_key if recipient(key) in wanted]
+            routing_target = replace(routing_target, routing_keys=keys)
         receipts = []
         token = _delivery_receipts.set((self, receipts))
         try:

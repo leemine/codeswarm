@@ -109,3 +109,102 @@ async def test_real_socket_acceptance_and_gateway_restart(tmp_path, monkeypatch)
                     listener.close()
                 await asyncio.gather(*(listener.wait_closed() for listener in channel_servers))
                 assert session_history.flush_pending_writes()
+
+
+@pytest.mark.asyncio
+async def test_offline_history_auto_recovery_and_original_recipient_real_sockets(tmp_path, monkeypatch):
+    import websockets
+    from jiuwenswarm.agents.harness.common.tools import send_file_to_user as sfu
+    from jiuwenswarm.common.e2a.constants import E2A_ARTIFACT_ORIGIN_KEY
+    from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
+    from jiuwenswarm.gateway.channel_manager.tui.tui_channel import TuiChannel
+    from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+    from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
+    from jiuwenswarm.gateway.routing.artifact_delivery import ArtifactDeliveryQueue, ArtifactInbox, freeze_origin
+    from jiuwenswarm.gateway.routing.keys import AgentRef, RoutingKey
+    from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+    from jiuwenswarm.server.gateway_push.artifact_outbox import ArtifactOutbox
+    from jiuwenswarm.server.runtime.session import lifecycle, session_history, session_metadata
+
+    sessions = tmp_path / 'sessions'
+    sessions.mkdir()
+    for module in (lifecycle, session_history, session_metadata):
+        monkeypatch.setattr(module, 'get_agent_sessions_dir', lambda: sessions)
+    server = object.__new__(AgentWebSocketServer)
+    server._current_ws = None
+    server._current_send_lock = asyncio.Lock()
+    monkeypatch.setattr(sfu, 'send_runtime_push', server.send_push)
+    key = RoutingKey('alice', 'tui', 'default', AgentRef.default(), 'offline-session')
+    toolkit = sfu.SendFileToolkit(request_id='original-offline', session_id=key.session_id,
+        channel_id='tui', metadata={E2A_ARTIFACT_ORIGIN_KEY: freeze_origin(key)})
+    artifact = tmp_path / 'offline.txt'
+    artifact.write_text('R1-10D_OFFLINE_RECOVERY')
+    with pytest.raises(RuntimeError, match='not accepted'):
+        await toolkit.deliver_projected_artifact(artifact, {'artifactId': 'offline', 'metadata': {}})
+
+    async def agent_connection(ws):
+        server._current_ws = ws
+        await ws.send(json.dumps({'type': 'event', 'event': 'connection.ack'}))
+        try:
+            async for raw in ws:
+                await server._handle_message(ws, raw, server._current_send_lock)
+        finally:
+            server._release_current_connection(ws)
+
+    client = WebSocketAgentServerClient()
+    handler = object.__new__(MessageHandler)
+    MessageHandler.__init__(handler, client)
+    handler._register_agent_server_push_handler()
+    manager = ChannelManager(handler)
+    path = tmp_path / 'gateway.sqlite3'
+    manager._artifact_queue = ArtifactDeliveryQueue(ArtifactInbox(path))
+    worker = ArtifactOutbox(server.send_push, retry_seconds=.02)
+    ready = asyncio.Queue()
+    channel = TuiChannel()
+    async def recipient_connection(ws):
+        user = await ws.recv()
+        recipient_key = RoutingKey(user, 'tui', 'default', AgentRef.default(), key.session_id)
+        await channel.register_ws(ws, recipient_key)
+        await ready.put(user)
+        try:
+            await ws.wait_closed()
+        finally:
+            await channel.unregister_ws(ws)
+
+    async with asyncio.timeout(60):
+        async with websockets.serve(agent_connection, '127.0.0.1', 0) as listener:
+            try:
+                await client.connect('ws://127.0.0.1:' + str(listener.sockets[0].getsockname()[1]))
+                # Recreated resident service discovers committed history; no Turn starts.
+                worker.start()
+                while not any(row.get('acceptance') == 'gateway_durable_v1'
+                              for row in session_history.load_history_records(key.session_id)):
+                    await asyncio.sleep(.02)
+                await worker.close()
+                assert len(manager._artifact_queue.inbox.pending()) == 1
+                recovered = ChannelManager(handler)
+                recovered._artifact_queue = ArtifactDeliveryQueue(ArtifactInbox(path))
+                recovered.register_external_channel('tui', channel)
+                async with websockets.serve(recipient_connection, '127.0.0.1', 0) as recipients:
+                    uri = 'ws://127.0.0.1:' + str(recipients.sockets[0].getsockname()[1])
+                    async with websockets.connect(uri) as bob:
+                        await bob.send('bob')
+                        assert await ready.get() == 'bob'
+                        await recovered._artifact_queue.drain(recovered._send_artifact_target)
+                        assert len(recovered._artifact_queue.inbox.pending()) == 1
+                        async with websockets.connect(uri) as alice:
+                            await alice.send('alice')
+                            assert await ready.get() == 'alice'
+                            await recovered._artifact_queue.drain(recovered._send_artifact_target)
+                            frame = json.loads(await asyncio.wait_for(alice.recv(), 3))
+                            assert frame['event'] == 'chat.file'
+                            assert frame['payload']['files'][0]['name'] == 'offline.txt'
+                            assert recovered._artifact_queue.inbox.pending() == []
+                        with pytest.raises(TimeoutError):
+                            await asyncio.wait_for(bob.recv(), .1)
+                assert len([row for row in session_history.load_history_records(key.session_id)
+                            if row.get('event_type') == 'chat.file']) == 1
+            finally:
+                await worker.close()
+                await client.disconnect()
+                assert session_history.flush_pending_writes()

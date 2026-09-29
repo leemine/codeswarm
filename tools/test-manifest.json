@@ -25,6 +25,63 @@
   "profiles": {
     "mvp": {
       "suites": [
+    {
+      "id": "codeswarm.python.browser-artifact-delivery",
+      "owner": "runtime",
+      "tier": "unit",
+      "runner": "pytest",
+      "workdir": ".",
+      "writable_workdir": true,
+      "capabilities": [
+        "filesystem"
+      ],
+      "required": true,
+      "shard_timeout_seconds": 180,
+      "discover": {
+        "command": [
+          "{python}",
+          "-m",
+          "pytest",
+          "tests/unit_tests/gateway/test_artifact_delivery.py",
+          "tests/unit_tests/gateway/test_artifact_transport.py",
+          "tests/unit_tests/gateway/test_artifact_outbox.py",
+          "tests/unit_tests/test_send_file_session_dedup.py",
+          "tests/unit_tests/runtime/test_runtime_host_services.py",
+          "tests/unit_tests/channel/test_web_channel_user_id.py",
+          "tests/unit_tests/agentserver/test_personal_context_lifecycle.py",
+          "--collect-only",
+          "-q",
+          "-o",
+          "addopts=",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "parser": "pytest",
+        "timeout_seconds": 90
+      },
+      "command": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/unit_tests/gateway/test_artifact_delivery.py",
+        "tests/unit_tests/gateway/test_artifact_transport.py",
+        "tests/unit_tests/gateway/test_artifact_outbox.py",
+        "tests/unit_tests/test_send_file_session_dedup.py",
+        "tests/unit_tests/runtime/test_runtime_host_services.py",
+        "tests/unit_tests/channel/test_web_channel_user_id.py",
+        "tests/unit_tests/agentserver/test_personal_context_lifecycle.py",
+        "-q",
+        "-o",
+        "addopts=",
+        "-o",
+        "asyncio_mode=auto",
+        "-p",
+        "no:cacheprovider",
+        "--timeout=30",
+        "--timeout-method=signal",
+        "--junitxml={junit}"
+      ]
+    },
         "codeswarm.python.acp",
         "codeswarm.browser.unit",
         "codeswarm.tui.contract"
@@ -42,6 +99,7 @@
     "pr-stable": {
       "suites": [
         "codeswarm.python.execution-construction",
+        "codeswarm.python.browser-artifact-delivery",
         "codeswarm.python.acp",
         "codeswarm.python.common",
         "codeswarm.python.e2a",

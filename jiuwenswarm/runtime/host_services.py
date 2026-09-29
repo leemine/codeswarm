@@ -178,6 +178,9 @@ def get_runtime_xiaoyi_channel(channel_id: str = "xiaoyi") -> Any:
 
 
 __all__ = [
+    "install_artifact_retry_handler",
+    "remove_artifact_retry_handler",
+    "enqueue_artifact_retry",
     "RuntimePushHandler",
     "RuntimeHostPushTransport",
     "RuntimeWakeHandler",
@@ -192,3 +195,24 @@ __all__ = [
     "send_runtime_push",
     "send_runtime_wake",
 ]
+
+
+# A resident host can assume retry responsibility after the history fsync.
+# This is deliberately distinct from Gateway durable acceptance.
+_artifact_retry_handlers: list[Callable[[str], bool]] = []
+
+
+def install_artifact_retry_handler(handler: Callable[[str], bool]) -> None:
+    with _runtime_host_handlers_lock:
+        _artifact_retry_handlers.append(handler)
+
+
+def remove_artifact_retry_handler(handler: Callable[[str], bool]) -> None:
+    with _runtime_host_handlers_lock:
+        _remove_handler_owner(_artifact_retry_handlers, handler)
+
+
+def enqueue_artifact_retry(session_id: str) -> bool:
+    with _runtime_host_handlers_lock:
+        handler = _artifact_retry_handlers[-1] if _artifact_retry_handlers else None
+    return bool(handler(session_id)) if handler is not None else False

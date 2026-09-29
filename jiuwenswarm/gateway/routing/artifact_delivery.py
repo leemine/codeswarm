@@ -198,3 +198,25 @@ def restore_target(target):
     values['member_names'] = tuple(raw['member_names'])
     values['delivery'] = make_delivery_target(target['channel_id'])
     return RoutingTarget(**values)
+
+
+def freeze_origin(key):
+    """Capture the registered inbound identity, never a physical socket ID."""
+    from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
+    return freeze_target(key.channel_id, key.app_id, RoutingTarget("godview", routing_keys=[key]))
+
+
+def origin_target(msg):
+    """Validate the immutable request origin before accepting an offline file."""
+    from jiuwenswarm.common.e2a.constants import E2A_ARTIFACT_ORIGIN_KEY
+    raw = (msg.metadata or {}).get(E2A_ARTIFACT_ORIGIN_KEY)
+    if raw is None:
+        return None
+    routing = restore_target(raw)
+    if routing is None or len(routing.routing_keys) != 1:
+        raise ValueError("Artifact origin requires exactly one logical identity")
+    key = routing.routing_keys[0]
+    if (key.session_id != msg.session_id or key.channel_id != msg.channel_id
+            or raw["channel_id"] != key.channel_id or raw["app_id"] != key.app_id):
+        raise ValueError("Artifact origin does not match its envelope")
+    return freeze_origin(key)

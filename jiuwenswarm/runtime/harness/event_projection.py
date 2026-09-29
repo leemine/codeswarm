@@ -427,9 +427,12 @@ class ExternalEventProjection:
         )
 
     async def replay_product_artifacts(self) -> None:
-        """Drain persisted file deliveries before admitting another execution."""
+        """Schedule history recovery without coupling it to Browser admission."""
         from jiuwenswarm.agents.harness.common.tools.send_file_to_user import SendFileToolkit
+        from jiuwenswarm.runtime.host_services import enqueue_artifact_retry
 
+        if enqueue_artifact_retry(self._session_id):
+            return
         state = self._fallback_state("product-artifact-replay")
         delivery = get_session_delivery_context(self._session_id) or {}
         route_metadata = delivery.get("route_metadata")
@@ -437,7 +440,7 @@ class ExternalEventProjection:
             request_id=state.request_id, session_id=self._session_id,
             channel_id=state.channel_id,
             metadata=route_metadata if isinstance(route_metadata, dict) else None,
-        ).replay_projected_artifacts()
+        ).replay_projected_artifacts(require_origin=True)
 
     async def _report_delivery_failure(
         self,

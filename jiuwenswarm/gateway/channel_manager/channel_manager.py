@@ -428,6 +428,11 @@ class ChannelManager(ABC):
         queue = self._get_artifact_queue()
         if await queue.contains(envelope):
             return True
+        from jiuwenswarm.gateway.routing.artifact_delivery import origin_target
+        origin = origin_target(msg)
+        if origin is not None and not any((msg.metadata or {}).get(key) for key in ("fan_out_targets", "send_file_targets")):
+            await queue.accept(envelope, [origin])
+            return True
         await self._inject_file_delivery_fanout(msg, "chat.file")
         raw = (msg.metadata or {}).get("fan_out_targets") or []
         targets = []

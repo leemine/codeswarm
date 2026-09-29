@@ -209,3 +209,70 @@ async def test_gateway_pipeline_acceptance_restart_and_exact_target_retry(tmp_pa
     finally:
         for channel, ws, _ in sockets:
             await channel.unregister_ws(ws)
+
+
+@pytest.mark.asyncio
+async def test_first_offline_acceptance_keeps_original_recipient_after_restart(tmp_path):
+    from jiuwenswarm.common.e2a.constants import E2A_ARTIFACT_ORIGIN_KEY
+    from jiuwenswarm.gateway.routing.artifact_delivery import freeze_origin, ArtifactDeliveryQueue, ArtifactInbox
+    from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
+    from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+    handler = object.__new__(MessageHandler)
+    MessageHandler.__init__(handler, object())
+    manager = ChannelManager(handler)
+    path = tmp_path / 'offline.sqlite3'
+    manager._artifact_queue = ArtifactDeliveryQueue(ArtifactInbox(path))
+    msg = artifact_message()
+    key = RoutingKey('alice', 'web', 'default', AgentRef('agent.code', 'default'), msg.session_id)
+    msg.metadata = {E2A_ARTIFACT_ORIGIN_KEY: freeze_origin(key)}
+    # No channel, subscription or socket exists at first delivery.
+    assert await manager._accept_artifact(msg) is True
+    recovered = ChannelManager(handler)
+    recovered._artifact_queue = ArtifactDeliveryQueue(ArtifactInbox(path))
+    web = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    recovered.register_external_channel('web', web)
+    bob, alice = Socket(), Socket()
+    wrong_key = RoutingKey('bob', 'web', 'default', AgentRef.default(), msg.session_id)
+    await web.register_ws(bob, wrong_key)
+    try:
+        await recovered._artifact_queue.drain(recovered._send_artifact_target)
+        assert bob.sent == []
+        assert len(recovered._artifact_queue.inbox.pending()) == 1
+        await web.register_ws(alice, RoutingKey('alice', 'web', 'default', AgentRef('agent', 'default'), msg.session_id))
+        await recovered._artifact_queue.drain(recovered._send_artifact_target)
+        assert bob.sent == []
+        assert len(alice.sent) == 1
+        assert recovered._artifact_queue.inbox.pending() == []
+    finally:
+        await web.unregister_ws(bob)
+        await web.unregister_ws(alice)
+
+
+@pytest.mark.asyncio
+async def test_foreign_session_origin_is_rejected(tmp_path):
+    from jiuwenswarm.common.e2a.constants import E2A_ARTIFACT_ORIGIN_KEY
+    from jiuwenswarm.gateway.routing.artifact_delivery import freeze_origin, origin_target
+    msg = artifact_message()
+    key = RoutingKey('alice', 'web', 'default', AgentRef.default(), 'another-session')
+    msg.metadata = {E2A_ARTIFACT_ORIGIN_KEY: freeze_origin(key)}
+    with pytest.raises(ValueError, match='does not match'):
+        origin_target(msg)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field,value', [('user_id', 'bob'), ('app_id', 'other-app'), ('session_id', 'other-session'), ('agent_ref', AgentRef('agent', 'other-child'))])
+@pytest.mark.parametrize('kind', ['web', 'tui'])
+async def test_history_view_mode_fallback_cannot_change_recipient(field, value, kind):
+    from dataclasses import replace
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter()) if kind == 'web' else TuiChannel()
+    key = RoutingKey('alice', kind, 'default', AgentRef('agent.code', 'default'), 'session')
+    viewer = replace(key, agent_ref=AgentRef('agent', 'default'))
+    wrong = replace(viewer, **{field: value})
+    socket = Socket()
+    await channel.register_ws(socket, wrong)
+    try:
+        with pytest.raises(ConnectionError):
+            await channel.send_confirmed(artifact_message(), routing_target=RoutingTarget('godview', routing_keys=[key]))
+        assert socket.sent == []
+    finally:
+        await channel.unregister_ws(socket)

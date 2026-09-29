@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
-from jiuwenswarm.common.e2a.constants import E2A_ARTIFACT_ROUTE_METADATA_KEYS
+from jiuwenswarm.common.e2a.constants import E2A_ARTIFACT_ORIGIN_KEY, E2A_ARTIFACT_ROUTE_METADATA_KEYS
 
 from jiuwenswarm.server.runtime.session.history_io import run_history_io
 
@@ -454,7 +454,7 @@ class SendFileToolkit:
             history_delivery_id=_projected_artifact_delivery_id(artifact_id),
         )
 
-    async def replay_projected_artifacts(self) -> None:
+    async def replay_projected_artifacts(self, *, push=None, require_origin=False) -> None:
         """Retry durable file events without rerunning their Browser actions."""
         from jiuwenswarm.server.runtime.session.session_history import load_history_records
 
@@ -465,6 +465,7 @@ class SendFileToolkit:
             if row.get("event_type") == "harness.artifact_delivery"
             and row.get("acceptance") == "gateway_durable_v1"
         }
+        failures = []
         for row in records:
             delivery_id = row.get("delivery_id")
             if (row.get("event_type") != "chat.file"
@@ -472,11 +473,18 @@ class SendFileToolkit:
                     or not delivery_id.startswith("browser-artifact:")
                     or delivery_id in acknowledged):
                 continue
-            await self._push_durable_artifact(envelope, row, delivery_id)
+            if require_origin and not (row.get("artifact_route_metadata") or {}).get(E2A_ARTIFACT_ORIGIN_KEY):
+                continue
+            try:
+                await self._push_durable_artifact(envelope, row, delivery_id, push=push)
+            except Exception as exc:
+                failures.append(exc)
+        if failures:
+            raise failures[0]
 
     @staticmethod
     async def _push_durable_artifact(
-        envelope: _SendFileRuntimeEnvelope, record: Mapping[str, Any], delivery_id: str,
+        envelope: _SendFileRuntimeEnvelope, record: Mapping[str, Any], delivery_id: str, *, push=None,
     ) -> None:
         """Record durable Gateway acceptance, not downstream display completion.
 
@@ -499,7 +507,7 @@ class SendFileToolkit:
         if route_metadata:
             msg["metadata"] = {key: value for key, value in route_metadata.items()
                                if key in E2A_ARTIFACT_ROUTE_METADATA_KEYS}
-        if not await send_runtime_push(msg):
+        if not await (push or send_runtime_push)(msg):
             raise RuntimeError("Browser Artifact push was not accepted")
         receipt = await run_history_io(
             append_history_record_durable,
@@ -744,6 +752,10 @@ class SendFileToolkit:
                     # Use the first durable payload when retrying. URLs or
                     # current request routing must not change the stored event.
                     record = next(row for row in records if row.get("delivery_id") == history_delivery_id)
+                    from jiuwenswarm.runtime.host_services import enqueue_artifact_retry
+                    if ((record.get("artifact_route_metadata") or {}).get(E2A_ARTIFACT_ORIGIN_KEY)
+                            and enqueue_artifact_retry(envelope.session_id)):
+                        return f"已保存 {len(valid_files)} 个文件，等待投递"
                     await self._push_durable_artifact(envelope, record, history_delivery_id)
                 return f"成功发送 {len(valid_files)} 个文件"
 

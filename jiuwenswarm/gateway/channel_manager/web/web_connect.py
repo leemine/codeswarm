@@ -1535,6 +1535,11 @@ class WebChannel(BaseWsChannel):
             },
         )
 
+        if has_explicit_session:
+            from jiuwenswarm.common.e2a.constants import E2A_ARTIFACT_ORIGIN_KEY
+            from jiuwenswarm.gateway.routing.artifact_delivery import freeze_origin
+            user_message.metadata[E2A_ARTIFACT_ORIGIN_KEY] = freeze_origin(_rk)
+
         # 发布到 route 或回调
         handler = self._method_handlers.get(method)
         if method in self._local_only_methods:
