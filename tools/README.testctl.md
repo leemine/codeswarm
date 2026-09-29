@@ -50,9 +50,9 @@ python3 tools/archivectl.py recover artifacts/test-runs/<interrupted-run>
 
 `pr-stable` 仅覆盖首批稳定套件，不代表全量回归。Web 106 脚本和 TUI 完整入口已进入独立诊断 profile；Web 已知 6 个脚本失败，暂不进入 PR 绿色门禁。GitHub Actions 已提供 PR、主干及夜间稳定回归入口，结果上传为制品；远程执行状态与发布级不可变归档仍需在平台上验证。`archivectl.py prune --execute` 会删除已到期的本地运行目录，默认仅预览。
 
-`full_regression.py` 是独立于 PR 稳定门禁的全量 Python 诊断入口，夜间或手动触发。默认每片约 250 例、2 个 worker、单例 30 秒/分片 1,800 秒上限；显式保留 `--asyncio-mode=auto`，因为清除 pytest 默认 `addopts` 时该模式也会被清除。归档位于 `artifacts/test-runs/full-python-<UTC>/`，保存提交和锁文件指纹、全仓及分片收集日志、JUnit、闭合摘要与逐例 `failure_inventory.csv`。Desktop `webview` 来自 `desktop` extra；未安装时应报告 `not_run`，不能把模块级 collection skip 当作逐例跳过。全量中的任何失败都会如实标红并上传证据。
+`full_regression.py` 是独立于 PR 稳定门禁的全量 Python 诊断入口，仅由每日定时 CI 自动触发；提交/PR/合入及手动 workflow_dispatch 只运行 stable。默认每片约 250 例、2 个 worker、单例 30 秒/分片 1,800 秒上限；显式保留 `--asyncio-mode=auto`，因为清除 pytest 默认 `addopts` 时该模式也会被清除。归档位于 `artifacts/test-runs/full-python-<UTC>/`，保存提交和锁文件指纹、全仓及分片收集日志、JUnit、闭合摘要与逐例 `failure_inventory.csv`。Desktop `webview` 来自 `desktop` extra；未安装时应报告 `not_run`，不能把模块级 collection skip 当作逐例跳过。全量中的任何失败都会如实标红并上传证据。
 
-手动触发 GitHub Actions 时可通过 `full_workers` 在 4 和 2 个 worker 之间选择；默认值及定时任务使用 4，资源受限或诊断时可显式回退到 2。该有界输入只调整全量分片并发，不改变分片大小、超时或闭合判定。
+每日全量使用 4 个 worker；本地诊断仍可用 `full_regression.py --workers 2` 降低并发。全量结果按实际 SHA 留档，不作为每次提交/合入的必经门禁；不因调整频率放宽分片大小、超时、失败归因或闭合判定。
 
 完整 Python 套件中有调用 Web 前端 `jsdom`/`vite` 的跨语言用例，因此夜间 job 同时对 Web、Browser、TUI 前端执行 `npm ci`；这不等于已经运行 Web 的 106 个独立脚本。
 

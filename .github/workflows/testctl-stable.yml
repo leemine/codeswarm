@@ -7,15 +7,6 @@ on:
   schedule:
     - cron: '20 18 * * *'
   workflow_dispatch:
-    inputs:
-      full_workers:
-        description: Full Python shard worker count
-        required: false
-        default: '4'
-        type: choice
-        options:
-          - '4'
-          - '2'
 
 permissions:
   contents: read
@@ -86,7 +77,8 @@ jobs:
           retention-days: ${{ github.event_name == 'schedule' && 90 || 30 }}
 
   full-python:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Full Python regression is a daily audit, not a per-commit gate.
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -135,7 +127,7 @@ jobs:
         run: python3 -m unittest tools.tests.test_full_shards tools.tests.test_provider_acceptance -v
       - name: Run full Python regression
         env:
-          FULL_PYTHON_WORKERS: ${{ inputs.full_workers || '4' }}
+          FULL_PYTHON_WORKERS: '4'
         run: .venv/bin/python tools/full_regression.py --workers "$FULL_PYTHON_WORKERS"
       - name: Upload full Python archive
         if: always()
