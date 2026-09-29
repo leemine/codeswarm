@@ -1956,6 +1956,15 @@ class AgentWebSocketServer:
                 ):
                     self._adapter_registry.register(adapter)
 
+        browser_close_error: BaseException | None = None
+        if runtime_close_completed or closing_runtime.closed:
+            try:
+                from openjiuwen.harness.tools.browser_move import shutdown_managed_browser_runtimes
+                await shutdown_managed_browser_runtimes()
+            except BaseException as exc:
+                # Finish other host cleanup, then preserve the unconfirmed exit.
+                browser_close_error = exc
+
         try:
             from jiuwenswarm.symphony.service import get_swarm_symphony_service
 
@@ -1975,6 +1984,8 @@ class AgentWebSocketServer:
             self._runtime_push_handler = None
 
         if not had_server:
+            if browser_close_error is not None:
+                raise browser_close_error
             if runtime_close_error is not None and (
                 not isinstance(runtime_close_error, Exception)
                 or not closing_runtime.closed
@@ -1985,6 +1996,8 @@ class AgentWebSocketServer:
             await self._jiuwenbox_runner.stop()
         except Exception as exc:  # noqa: BLE001
             logger.warning("[AgentWebSocketServer] jiuwenbox_runner.stop failed: %s", exc)
+        if browser_close_error is not None:
+            raise browser_close_error
         if runtime_close_error is not None and (
             not isinstance(runtime_close_error, Exception)
             or not closing_runtime.closed

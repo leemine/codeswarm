@@ -189,3 +189,15 @@ def test_default_managed_browser_stays_unverified_and_uses_upstream_settings(
     assert "settings" not in captured_final
     assert captured_final["sys_operation"] is adapter._sys_operation
     assert subagents[-1].factory_kwargs["settings"] is settings
+
+@pytest.mark.parametrize('driver', ['managed', 'remote'])
+def test_native_download_root_uses_configured_workspace_only_for_managed(monkeypatch, tmp_path, driver):
+    adapter = _adapter(JiuWenSwarmDeepAdapter)
+    config = McpServerConfig(server_id='browser', server_name='browser',
+                             server_path='stdio://browser', client_type='stdio', params={})
+    spec = SimpleNamespace(workspace=str(tmp_path), factory_kwargs={'settings': _Settings(config)})
+    monkeypatch.setenv('BROWSER_DRIVER', driver)
+    monkeypatch.setattr(interface_deep, 'apply_browser_runtime_security_profile',
+                        lambda cfg: (cfg, SimpleNamespace(network_guard_enforced=False)))
+    adapter._prepare_browser_runtime_security(spec)
+    assert spec.factory_kwargs.get('downloads_root') == (str(tmp_path / 'outputs/browser') if driver == 'managed' else None)

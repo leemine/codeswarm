@@ -4611,6 +4611,14 @@ class JiuWenSwarmDeepAdapter:
             mcp_cfg = getattr(settings, "mcp_cfg", None)
             if not isinstance(mcp_cfg, McpServerConfig):
                 raise TypeError("browser_runtime_settings_missing_mcp_config")
+            # Native keeps its original rails and tool surface. The core owns
+            # Chrome download events; completed paths stay inside this workspace
+            # for the existing SendFile tool and history/UI consumers.
+            workspace = getattr(browser_spec, "workspace", None)
+            instance = getattr(settings, "instance", None)
+            driver = str(getattr(instance, "driver_mode", "") or os.getenv("BROWSER_DRIVER", ""))
+            if driver == "managed" and isinstance(workspace, str) and workspace:
+                factory_kwargs["downloads_root"] = str(Path(workspace).resolve() / "outputs" / "browser")
             guarded_cfg, profile = apply_browser_runtime_security_profile(mcp_cfg)
             self._browser_runtime_security_profile = profile
             if profile.network_guard_enforced:
