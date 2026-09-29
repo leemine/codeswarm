@@ -439,13 +439,17 @@ async def test_goal_waiting_resume_keeps_locator_and_answer_bypasses_permit(chai
     provider = chain.providers[0]
     provider.ask = True
     task = asyncio.create_task(run(chain, request()))
-    for _ in range(100):
-        await asyncio.sleep(0)
-        handles = chain.runtime.coordinator._registry.select(
-            session_id="session-1", request_id="goal"
-        )
-        if handles and handles[0].waiting_control_id:
-            break
+    async with asyncio.timeout(5):
+        while True:
+            handles = chain.runtime.coordinator._registry.select(
+                session_id="session-1", request_id="goal"
+            )
+            if handles and handles[0].waiting_control_id:
+                break
+            if task.done():
+                await task
+                raise AssertionError("Goal completed before publishing its interaction")
+            await asyncio.sleep(0.01)
     handle = handles[0]
     assert (
         handle.state is SessionExecutionState.RUNNING and handle.waiting_control_id
@@ -551,10 +555,14 @@ async def test_cancel_waiting_goal_clears_original_interaction(chain):
     provider = chain.providers[0]
     provider.ask = True
     task = asyncio.create_task(run(chain, request()))
-    for _ in range(100):
-        await asyncio.sleep(0)
-        if chain.adapter.execution_session.io.has_pending_interrupt():
-            break
+    # Startup also awaits durable Artifact history IO. Scheduler turns alone
+    # cannot bound a worker-thread round trip on a clean/loaded environment.
+    async with asyncio.timeout(5):
+        while not chain.adapter.execution_session.io.has_pending_interrupt():
+            if task.done():
+                await task
+                break
+            await asyncio.sleep(0.01)
     old_session = chain.adapter.execution_session
     assert old_session.io.has_pending_interrupt()
     interrupt = request("stop")

@@ -360,8 +360,14 @@ class ExecutionSession:
         from openjiuwen.harness.tools.browser_move.playwright_runtime import (
             BrowserExecutionToolGateway,
         )
+        from jiuwenswarm.runtime.harness.external_browser_artifacts import (
+            ExternalBrowserArtifactGateway,
+        )
 
-        if isinstance(gateway, BrowserExecutionToolGateway):
+        if isinstance(
+            gateway,
+            (BrowserExecutionToolGateway, ExternalBrowserArtifactGateway),
+        ):
             identity = gateway.execution_identity
             binding = self.binding
             if (

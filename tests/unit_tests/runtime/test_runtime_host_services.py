@@ -112,3 +112,21 @@ async def test_runtime_push_propagates_explicit_delivery_failure() -> None:
             await host_services.RuntimeHostPushTransport().send_push({"value": 2})
     finally:
         host_services.restore_runtime_push_handler(reject, previous)
+
+
+def test_artifact_retry_owner_out_of_order_removal(monkeypatch):
+    monkeypatch.setattr(host_services, '_artifact_retry_handlers', [])
+    received = []
+    def first(session):
+        received.append(('first', session))
+        return True
+    def second(session):
+        received.append(('second', session))
+        return True
+    host_services.install_artifact_retry_handler(first)
+    host_services.install_artifact_retry_handler(second)
+    host_services.remove_artifact_retry_handler(first)
+    assert host_services.enqueue_artifact_retry('original')
+    host_services.remove_artifact_retry_handler(second)
+    assert not host_services.enqueue_artifact_retry('original')
+    assert received == [('second', 'original')]

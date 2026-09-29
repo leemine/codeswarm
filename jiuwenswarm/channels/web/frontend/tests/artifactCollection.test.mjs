@@ -90,3 +90,18 @@ test('duplicate file cards select the retained artifact with the same stable id'
   assert.equal(artifacts[0].id, fileArtifactId(olderFile));
   assert.equal(artifacts[0].downloadUrl, newerFile.download_url);
 });
+
+test('preserves distinct artifacts at the same path while merging history replay', () => {
+  const first = file({ path: '/workspace/report.txt', artifact: { artifactId: 'artifact-v1' }, delivery_id: 'delivery-v1' });
+  const second = file({ path: first.path, artifact: { artifactId: 'artifact-v2' }, delivery_id: 'delivery-v2' });
+  const replay = file({ ...first, download_url: '/file-api/download?token=refreshed' });
+  const artifacts = buildArtifacts([
+    message('assistant', 'history', '2026-07-30T08:00:00.000Z', [first, second]),
+    message('assistant', 'replay', '2026-07-30T12:00:00.000Z', [replay]),
+  ]);
+
+  assert.equal(artifacts.length, 2);
+  assert.notEqual(fileArtifactId(first), fileArtifactId(second));
+  assert.equal(artifacts.find(item => item.id === fileArtifactId(first))?.downloadUrl, replay.download_url);
+  assert.ok(artifacts.some(item => item.id === fileArtifactId(second)));
+});

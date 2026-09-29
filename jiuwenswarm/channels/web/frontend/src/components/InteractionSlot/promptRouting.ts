@@ -15,6 +15,7 @@ export type PromptKind = 'authorization' | 'interaction' | 'legacy' | 'none';
 
 const AUTHORIZATION_SOURCES = new Set([
   'permission_interrupt',
+  'browser_permission',
   'confirm_interrupt',
   'activate_confirm',
 ]);

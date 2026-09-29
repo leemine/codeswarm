@@ -13,16 +13,27 @@ import json
 import logging
 import uuid
 from abc import abstractmethod
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 
 from jiuwenswarm.gateway.channel_manager.base import BaseWebChannel
-from jiuwenswarm.gateway.routing.keys import DeliveryTarget, RoutingKey
+from jiuwenswarm.gateway.routing.keys import RoutingKey
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
 
 # 兼容标识：子类可覆写 defaults，或由 GatewayServer 注入
 _BROADCAST_FALLBACK_CHANNEL_IDS: frozenset[str] = frozenset()
+
+
+@dataclass
+class _ConfirmedFrame:
+    data: Any
+    receipt: asyncio.Future
+
+
+_delivery_receipts: ContextVar = ContextVar("gateway_delivery_receipts", default=None)
 
 
 class BaseWsChannel(BaseWebChannel):
@@ -233,6 +244,49 @@ class BaseWsChannel(BaseWebChannel):
 
     # ── per-ws writer：出站背压隔离 ──
 
+    @property
+    def requires_delivery_confirmation(self) -> bool:
+        current = _delivery_receipts.get()
+        return current is not None and current[0] is self
+
+    async def artifact_session_targets(self, session_id: str) -> list[RoutingTarget]:
+        """Freeze the current session audience as exact logical identities."""
+        async with self._lock:
+            return [RoutingTarget(intent="godview", routing_keys=[key])
+                    for key, sockets in self._clients_by_key.items()
+                    if key.session_id == session_id
+                    and any(not getattr(ws, "closed", False) for ws in sockets)]
+
+    async def send_confirmed(self, msg, *, routing_target=None) -> None:
+        """Use the ordinary routing/writer, but require actual socket writes.
+
+        This is a transport receipt, not proof that a person saw the message.
+        Durable inbox retry and frontend delivery IDs cover interrupted sends.
+        """
+        # A reconnect initially registers history.get in generic "agent" mode,
+        # even when the file was produced in agent.code. Mode is a view/execution
+        # choice, not a recipient identity; keep user/app/session/agent ID exact.
+        if routing_target is not None:
+            from dataclasses import replace
+            def recipient(key):
+                return (key.user_id, key.channel_id, key.app_id, key.session_id, key.agent_ref.id)
+            wanted = {recipient(key) for key in routing_target.routing_keys}
+            async with self._lock:
+                keys = [key for key in self._clients_by_key if recipient(key) in wanted]
+            routing_target = replace(routing_target, routing_keys=keys)
+        receipts = []
+        token = _delivery_receipts.set((self, receipts))
+        try:
+            async with asyncio.timeout(12):
+                await self.send(msg, routing_target=routing_target)
+                if not receipts or not all(await asyncio.gather(*receipts)):
+                    raise ConnectionError("Artifact has no confirmed recipient")
+        finally:
+            _delivery_receipts.reset(token)
+            for receipt in receipts:
+                if not receipt.done():
+                    receipt.cancel()
+
     def _enqueue_send(self, ws: Any, data: Any) -> None:
         """非阻塞入队一帧到 ws 的出站队列，立即返回。
 
@@ -240,15 +294,27 @@ class BaseWsChannel(BaseWebChannel):
         与 ``_coalesce`` 解析回 dict 的往返）、str/bytes（原样发送）或 None
         哨兵。ws 已关闭或队列缺失时静默丢弃（与旧 _safe_send 语义一致）。
         """
+        receipt = None
+        current = _delivery_receipts.get()
+        if current is not None and current[0] is self:
+            receipt = asyncio.get_running_loop().create_future()
+            current[1].append(receipt)
+            data = _ConfirmedFrame(data, receipt)
         if getattr(ws, "closed", False):
+            if receipt is not None:
+                receipt.set_result(False)
             return
         ws_id = getattr(ws, "_jiuwen_ws_id", "")
         q = self._send_queues.get(ws_id)
         if q is None:
+            if receipt is not None:
+                receipt.set_result(False)
             return
         try:
             q.put_nowait(data)
         except asyncio.QueueFull:
+            if receipt is not None:
+                receipt.set_result(False)
             logger.warning(
                 "[%s] outbound queue full, dropping frame ws_id=%s", self.channel_id, ws_id,
             )
@@ -274,6 +340,9 @@ class BaseWsChannel(BaseWebChannel):
             for frame in frames:
                 if frame is None:
                     return
+                receipt = frame.receipt if isinstance(frame, _ConfirmedFrame) else None
+                if receipt is not None:
+                    frame = frame.data
                 # dict 帧在出口处序列化一次；str/bytes 原样发送。避免入队前
                 # 预 dumps 与 _coalesce 解析回 dict 的二次编解码往返。序列化
                 # 与 send 共用下方兜底：任一失败都只丢这一帧，不杀 writer。
@@ -281,6 +350,8 @@ class BaseWsChannel(BaseWebChannel):
                     try:
                         wire = json.dumps(frame, ensure_ascii=False)
                     except (TypeError, ValueError) as e:
+                        if receipt is not None and not receipt.done():
+                            receipt.set_result(False)
                         logger.warning(
                             "[%s] frame serialize failed, dropping ws_id=%s err=%s",
                             self.channel_id, ws_id, e,
@@ -290,7 +361,11 @@ class BaseWsChannel(BaseWebChannel):
                     wire = frame
                 try:
                     await asyncio.wait_for(ws.send(wire), timeout=10.0)
+                    if receipt is not None and not receipt.done():
+                        receipt.set_result(True)
                 except asyncio.TimeoutError:
+                    if receipt is not None and not receipt.done():
+                        receipt.set_result(False)
                     # Drop only this frame. Killing the writer leaves an unbounded
                     # queue with nobody draining it — later unary res frames
                     # (e.g. command.workflows list) never reach the TUI and the
@@ -301,6 +376,8 @@ class BaseWsChannel(BaseWebChannel):
                     )
                     continue
                 except Exception as e:
+                    if receipt is not None and not receipt.done():
+                        receipt.set_result(False)
                     if bool(getattr(ws, "closed", False)):
                         logger.debug(
                             "[%s] writer exit on closed ws ws_id=%s err=%s",

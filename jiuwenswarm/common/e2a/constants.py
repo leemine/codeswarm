@@ -95,6 +95,14 @@ E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY = "_e2a_wire_legacy_agent_response"
 E2A_WIRE_LEGACY_AGENT_CHUNK_KEY = "_e2a_wire_legacy_agent_chunk"
 # AgentServer send_push：与 RPC 响应共用 WebSocket，须标出以免抢占 unary/stream 等待队列
 E2A_WIRE_SERVER_PUSH_KEY = "_jiuwenswarm_server_push"
+E2A_ARTIFACT_ACCEPTANCE_KEY = "_browser_artifact_acceptance"
+E2A_ARTIFACT_ACCEPTED_EVENT = "gateway.artifact.accepted"
+# Persist only routing hints needed by Browser Artifact recovery, never whole request metadata.
+E2A_ARTIFACT_ORIGIN_KEY = "_browser_artifact_origin"
+E2A_ARTIFACT_ROUTE_METADATA_KEYS = frozenset({
+    E2A_ARTIFACT_ORIGIN_KEY,
+    "app_id", "send_file_targets", "fan_out_targets", "member_name", "team_name",
+})
 # Gateway 内部断连 cancel 来源；不得由 channel/user metadata 透传生成。
 E2A_INTERNAL_CANCEL_SOURCE_KEY = "_jiuwenswarm_cancel_source"
 E2A_CANCEL_SOURCE_CLIENT_DISCONNECT = "client_disconnect"
@@ -105,6 +113,7 @@ E2A_MODEL_AUTH_PARAM_KEY = "_model_auth"
 # 仅用于编解码 / 队列语义，不得随业务 channel metadata 下发给 Message.metadata
 E2A_WIRE_INTERNAL_METADATA_KEYS: frozenset[str] = frozenset(
     {
+        E2A_ARTIFACT_ACCEPTANCE_KEY,
         E2A_INTERNAL_CANCEL_SOURCE_KEY,
         E2A_WIRE_SERVER_PUSH_KEY,
         E2A_WIRE_LEGACY_AGENT_CHUNK_KEY,

@@ -1067,6 +1067,8 @@ class WebChannel(BaseWsChannel):
                 for w in ws_set:
                     self._enqueue_send(w, frame_data)
                 return
+            if self.requires_delivery_confirmation:
+                raise ConnectionError("Artifact exact recipient is disconnected")
             # V2 精确路由未命中 —— 回退到 session_id 路由
             logger.debug(
                 "[WebChannel] V2 routing miss: looked up %d routing_keys + ws_id=%s,"
@@ -1532,6 +1534,11 @@ class WebChannel(BaseWsChannel):
                 "auth_session": getattr(ws, "_jiuwen_auth_session", "") or "",
             },
         )
+
+        if has_explicit_session:
+            from jiuwenswarm.common.e2a.constants import E2A_ARTIFACT_ORIGIN_KEY
+            from jiuwenswarm.gateway.routing.artifact_delivery import freeze_origin
+            user_message.metadata[E2A_ARTIFACT_ORIGIN_KEY] = freeze_origin(_rk)
 
         # 发布到 route 或回调
         handler = self._method_handlers.get(method)

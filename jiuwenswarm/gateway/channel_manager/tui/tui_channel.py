@@ -145,6 +145,8 @@ class TuiChannel(BaseWsChannel):
                     self._enqueue_send(w, frame_data)
                 return
 
+            if self.requires_delivery_confirmation:
+                raise ConnectionError("Artifact exact recipient is disconnected")
             logger.debug(
                 "[TuiChannel] team routing miss: ws_id=%s routing_keys=%d — falling back to session_id=%s",
                 getattr(delivery, "ws_id", "") if delivery else "",

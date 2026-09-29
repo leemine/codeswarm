@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from openjiuwen.core.session.stream.base import OutputSchema
+from openjiuwen.core.single_agent.schema.agent_result import Artifact, Part
 from openjiuwen.harness.subagent_runtime import SubagentTurnResult
 from openjiuwen.harness_protocol import AgentExecutionSpec, ToolInvocation
 
@@ -384,6 +385,35 @@ async def test_parent_close_retains_failed_child_and_retries_same_control(
 
 
 @pytest.mark.asyncio
+async def test_parent_close_denies_browser_admission_before_child_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Admission:
+        def __call__(self, _identity, _invocation) -> bool:
+            return True
+
+        async def close(self) -> None:
+            events.append("admission")
+
+    factory = _Factory()
+    _install_factory(monkeypatch, factory)
+    runtime = ExternalSubagentRuntime(
+        _route(tmp_path),
+        write_output=lambda _chunk: asyncio.sleep(0),
+        browser_admit=Admission(),
+    )
+    original_release = runtime._parent_host
+
+    await runtime.close("parent_ended")
+
+    assert original_release is runtime._parent_host
+    assert events == ["admission"]
+
+
+@pytest.mark.asyncio
 async def test_product_chunks_reuse_history_parser_and_runtime_push(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -421,3 +451,124 @@ async def test_product_chunks_reuse_history_parser_and_runtime_push(
     assert len(pushes) == 1
     assert pushes[0]["payload"]["event_type"] == "chat.subtask_update"
     assert pushes[0]["session_id"] == "parent-a"
+
+
+@pytest.mark.asyncio
+async def test_product_interaction_reuses_durable_projection_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.runtime.harness import event_projection as module
+
+    observed: list[tuple[dict[str, Any], str]] = []
+    projection = module.ExternalEventProjection("parent-a")
+
+    async def publish(_state, payload, *, delivery_id):
+        observed.append((payload, delivery_id))
+
+    monkeypatch.setattr(projection, "_publish", publish)
+    payload = {
+        "event_type": "chat.ask_user_question",
+        "request_id": "browser-permission-1",
+        "questions": [{"question": "Allow?", "options": []}],
+    }
+
+    await projection.publish_product_interaction(payload, "browser:permission:1")
+
+    assert observed == [(payload, "browser:permission:1")]
+    with pytest.raises(ValueError, match="request_id"):
+        await projection.publish_product_interaction(
+            {"event_type": "chat.ask_user_question", "questions": []},
+            "browser:permission:2",
+        )
+
+
+@pytest.mark.asyncio
+async def test_product_artifact_reuses_existing_file_delivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.agents.harness.common.tools.send_file_to_user import (
+        SendFileToolkit,
+    )
+    from jiuwenswarm.runtime.harness import event_projection as module
+
+    workspace = (tmp_path / "workspace").resolve()
+    file_path = workspace / "outputs" / "browser" / "result.pdf"
+    file_path.parent.mkdir(parents=True)
+    file_path.write_bytes(b"pdf")
+    relative_path = file_path.relative_to(workspace).as_posix()
+    artifact = Artifact(
+        artifactId="artifact-1",
+        name=file_path.name,
+        parts=[Part(url=relative_path, filename=file_path.name)],
+        metadata={"workspace_relative_path": relative_path},
+    )
+    delivered: list[tuple[str, str, str, Path, dict[str, Any]]] = []
+
+    async def deliver(toolkit, path, metadata) -> None:
+        delivered.append(
+            (
+                toolkit.routing_request_id,
+                toolkit.session_id,
+                toolkit.channel_id,
+                path,
+                metadata,
+            )
+        )
+
+    monkeypatch.setattr(SendFileToolkit, "deliver_projected_artifact", deliver)
+    monkeypatch.setattr(
+        module,
+        "get_session_delivery_context",
+        lambda _session_id: {"route_metadata": {"route": "web"}},
+    )
+    monkeypatch.setattr(
+        module,
+        "get_session_metadata",
+        lambda _session_id, *, enable_writeback: {"user_id": "alice"},
+    )
+    projection = module.ExternalEventProjection(
+        "parent-a",
+        workspace_root=workspace,
+    )
+    projection.register_turn(
+        "turn-1",
+        request_id="request-1",
+        channel_id="web",
+        mode="task",
+    )
+
+    await projection.publish_product_artifact(artifact, file_path)
+
+    assert delivered == [
+        (
+            "request-1",
+            "parent-a",
+            "web",
+            file_path,
+            artifact.model_dump(mode="json", exclude_none=True),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_product_artifact_rejects_mismatched_file_identity(
+    tmp_path: Path,
+) -> None:
+    workspace = (tmp_path / "workspace").resolve()
+    file_path = workspace / "outputs" / "result.pdf"
+    file_path.parent.mkdir(parents=True)
+    file_path.write_bytes(b"pdf")
+    artifact = Artifact(
+        artifactId="artifact-1",
+        parts=[Part(url="outputs/other.pdf")],
+        metadata={"workspace_relative_path": "outputs/other.pdf"},
+    )
+    from jiuwenswarm.runtime.harness.event_projection import (
+        ExternalEventProjection,
+    )
+
+    projection = ExternalEventProjection("parent-a", workspace_root=workspace)
+
+    with pytest.raises(ValueError, match="identity does not match"):
+        await projection.publish_product_artifact(artifact, file_path)

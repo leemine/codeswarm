@@ -113,6 +113,25 @@ for (const count of [1, 2]) for (const action of ['allow-once', 'reject']) {
   }));
 }
 
+test('Browser permission uses authorization UI and chat.user_answer transport', async () => mounted(async ({ socket, observed }) => {
+  const browserPayload = {
+    ...payload([question({ card_id: 'browser-permission-1', tool_payload: '[REDACTED]' })]),
+    request_id: 'browser-permission-1',
+    source: 'browser_permission',
+  };
+  await deliver(socket, browserPayload);
+  assert.ok(prompt(), 'Browser permission must be displayed as authorization');
+  await act(async () => document.querySelector('[data-variant="allow-once"]').click());
+  const request = socket.requests.at(-1);
+  assert.equal(request.method, 'chat.user_answer');
+  assert.equal(request.params.request_id, 'browser-permission-1');
+  assert.equal(request.params.source, 'browser_permission');
+  assert.deepEqual(request.params.answers, [{ selected_options: ['allow_once'] }]);
+  await respond(socket, request);
+  assert.deepEqual(observed.results, [true]);
+  assert.equal(prompt(), null);
+}));
+
 test('Smart prompt remains pending after res and unrelated ack; exact runtime ack consumes it', async () => mounted(async ({ socket, observed }) => {
   await deliver(socket, payload([question({ card_id: 'exact-card' })]));
   assert.equal(prompt().dataset.cardIds, 'exact-card');

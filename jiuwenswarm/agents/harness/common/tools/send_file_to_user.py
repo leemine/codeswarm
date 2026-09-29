@@ -12,8 +12,10 @@
 
 from __future__ import annotations
 
+
 import asyncio
 import copy
+import hashlib
 import logging
 import os
 import shutil
@@ -26,6 +28,8 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
+
+from jiuwenswarm.common.e2a.constants import E2A_ARTIFACT_ORIGIN_KEY, E2A_ARTIFACT_ROUTE_METADATA_KEYS
 
 from jiuwenswarm.server.runtime.session.history_io import run_history_io
 
@@ -43,6 +47,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _VERIFIED_ASSET_TTL_SECONDS = 600
+
+
+def _projected_artifact_delivery_id(artifact_id: str) -> str:
+    digest = hashlib.sha256(artifact_id.encode("utf-8")).hexdigest()
+    return f"browser-artifact:{digest}"
 
 
 def looks_like_skill_package(path: str | Path) -> bool:
@@ -409,6 +418,109 @@ class SendFileToolkit:
 
                 clear_send_file_execution_grant()
 
+    async def deliver_projected_artifact(
+        self,
+        file_path: str | Path,
+        artifact_metadata: Mapping[str, Any],
+    ) -> str:
+        """Deliver a host-validated Artifact without exposing metadata to tools.
+
+        The Browser bridge calls this method only after core has validated and
+        hashed a file under its task-scoped outputs root. It deliberately
+        reuses this toolkit's download URLs, runtime push, history writer and
+        channel fan-out instead of introducing another file service.
+        """
+
+        if self._require_execution_authorization:
+            raise ValueError(
+                "projected Artifact delivery owns its Browser authorization"
+            )
+        resolved = Path(file_path).resolve(strict=True)
+        if not resolved.is_file():
+            raise ValueError("projected Artifact must reference a regular file")
+        metadata = copy.deepcopy(dict(artifact_metadata))
+        artifact_id = str(metadata.get("artifactId") or "").strip()
+        if not artifact_id:
+            raise ValueError("projected Artifact id is required")
+        envelope = self._snapshot_runtime_envelope()
+        return await self._send_file_with_envelope(
+            envelope,
+            abs_file_path_list=[str(resolved)],
+            target_channels=None,
+            artifact_metadata_by_path={
+                _normalize_sent_file_path(str(resolved)): metadata,
+            },
+            skip_path_dedup=True,
+            history_delivery_id=_projected_artifact_delivery_id(artifact_id),
+        )
+
+    async def replay_projected_artifacts(self, *, push=None, require_origin=False) -> None:
+        """Retry durable file events without rerunning their Browser actions."""
+        from jiuwenswarm.server.runtime.session.session_history import load_history_records
+
+        envelope = self._snapshot_runtime_envelope()
+        records = await run_history_io(load_history_records, envelope.session_id)
+        acknowledged = {
+            row.get("artifact_delivery_id") for row in records
+            if row.get("event_type") == "harness.artifact_delivery"
+            and row.get("acceptance") == "gateway_durable_v1"
+        }
+        failures = []
+        for row in records:
+            delivery_id = row.get("delivery_id")
+            if (row.get("event_type") != "chat.file"
+                    or not isinstance(delivery_id, str)
+                    or not delivery_id.startswith("browser-artifact:")
+                    or delivery_id in acknowledged):
+                continue
+            if require_origin and not (row.get("artifact_route_metadata") or {}).get(E2A_ARTIFACT_ORIGIN_KEY):
+                continue
+            try:
+                await self._push_durable_artifact(envelope, row, delivery_id, push=push)
+            except Exception as exc:
+                failures.append(exc)
+        if failures:
+            raise failures[0]
+
+    @staticmethod
+    async def _push_durable_artifact(
+        envelope: _SendFileRuntimeEnvelope, record: Mapping[str, Any], delivery_id: str, *, push=None,
+    ) -> None:
+        """Record durable Gateway acceptance, not downstream display completion.
+
+        Browser file push waits for the Gateway inbox commit. The inbox owns
+        per-target retry after that boundary; the original history remains the
+        UI recovery source. Legacy transport-only receipts do not suppress replay.
+        """
+        from jiuwenswarm.server.runtime.session.session_history import (
+            append_history_record_durable, wait_for_history_receipt,
+        )
+
+        msg = {
+            "request_id": record["request_id"],
+            "session_id": envelope.session_id,
+            "channel_id": record["channel_id"],
+            "payload": {"event_type": "chat.file", "files": record["files"], "delivery_id": delivery_id},
+            "is_complete": False,
+        }
+        route_metadata = record.get("artifact_route_metadata", envelope.metadata)
+        if route_metadata:
+            msg["metadata"] = {key: value for key, value in route_metadata.items()
+                               if key in E2A_ARTIFACT_ROUTE_METADATA_KEYS}
+        if not await (push or send_runtime_push)(msg):
+            raise RuntimeError("Browser Artifact push was not accepted")
+        receipt = await run_history_io(
+            append_history_record_durable,
+            session_id=envelope.session_id, request_id=record["request_id"],
+            channel_id=record["channel_id"], role="assistant", content="",
+            event_type="harness.artifact_delivery", timestamp=time.time(),
+            delivery_id=f"{delivery_id}:gateway-accepted",
+            extra={"artifact_delivery_id": delivery_id, "acceptance": "gateway_durable_v1", "transcript_only": True},
+        )
+        if receipt is None:
+            raise RuntimeError("Browser Artifact acknowledgement was not persisted")
+        await wait_for_history_receipt(receipt)
+
     def _snapshot_runtime_envelope(self) -> _SendFileRuntimeEnvelope:
         """Freeze every mutable host field before the first await."""
 
@@ -443,6 +555,9 @@ class SendFileToolkit:
         *,
         abs_file_path_list: Any,
         target_channels: Any,
+        artifact_metadata_by_path: Mapping[str, Mapping[str, Any]] | None = None,
+        skip_path_dedup: bool = False,
+        history_delivery_id: str | None = None,
     ) -> str:
         target_channel_list = SendFileToolkit._normalize_target_channels(
             target_channels
@@ -489,6 +604,8 @@ class SendFileToolkit:
                     )
                 )
             except OSError as exc:
+                if history_delivery_id is not None:
+                    raise RuntimeError("Browser Artifact materialization failed") from exc
                 logger.error(
                     "[SendFileToolkit] 团队交付文件复制到项目目录失败: %s: %s",
                     fp,
@@ -498,6 +615,17 @@ class SendFileToolkit:
                     f"发送文件失败：无法将团队交付文件写入当前项目目录\n  - {fp}: {exc}"
                 )
         valid_files = materialized_files
+        if artifact_metadata_by_path:
+            remapped_artifacts: dict[str, Mapping[str, Any]] = {}
+            for source, delivered in zip(source_files, valid_files):
+                artifact = artifact_metadata_by_path.get(
+                    _normalize_sent_file_path(source)
+                )
+                if artifact is not None:
+                    remapped_artifacts[
+                        _normalize_sent_file_path(delivered)
+                    ] = artifact
+            artifact_metadata_by_path = remapped_artifacts
         copied_to_project = any(
             Path(source).resolve() != Path(delivered).resolve()
             for source, delivered in zip(source_files, valid_files)
@@ -511,15 +639,20 @@ class SendFileToolkit:
                 authorized_delivered_paths.add(normalized_path)
 
         if not valid_files:
+            if history_delivery_id is not None:
+                raise FileNotFoundError("Browser Artifact file is unavailable")
             msg_parts = ["发送文件失败：所有文件均不存在"]
             for mf in missing_files:
                 msg_parts.append(f"  - {mf}")
             return "\n".join(msg_parts)
 
-        valid_files, skipped_files = _partition_sent_files(
-            envelope.session_id,
-            valid_files,
-        )
+        if skip_path_dedup:
+            skipped_files: list[str] = []
+        else:
+            valid_files, skipped_files = _partition_sent_files(
+                envelope.session_id,
+                valid_files,
+            )
         if not valid_files:
             logger.info(
                 "[SendFileToolkit] skip duplicate send session_id=%s skipped=%s missing=%s",
@@ -527,18 +660,18 @@ class SendFileToolkit:
                 skipped_files,
                 missing_files,
             )
-            msg_parts: list[str] = []
+            dedup_msg_parts: list[str] = []
             if skipped_files:
-                msg_parts.append("文件已在本次会话发送过，跳过重复投递：")
+                dedup_msg_parts.append("文件已在本次会话发送过，跳过重复投递：")
                 for sf in skipped_files:
-                    msg_parts.append(f"  - {sf}")
+                    dedup_msg_parts.append(f"  - {sf}")
             if missing_files:
-                msg_parts.append("以下文件不存在，未发送：")
+                dedup_msg_parts.append("以下文件不存在，未发送：")
                 for mf in missing_files:
-                    msg_parts.append(f"  - {mf}")
-            if not msg_parts:
-                msg_parts.append("没有可发送的文件")
-            return "\n".join(msg_parts)
+                    dedup_msg_parts.append(f"  - {mf}")
+            if not dedup_msg_parts:
+                dedup_msg_parts.append("没有可发送的文件")
+            return "\n".join(dedup_msg_parts)
 
         logger.info(
             "[SendFileToolkit] send_file 开始 session_id=%s 有效文件=%d 缺失=%d 跳过重复=%d",
@@ -573,12 +706,58 @@ class SendFileToolkit:
                 envelope,
                 valid_files=valid_files,
                 assets_by_path=assets_by_path,
+                artifact_metadata_by_path=artifact_metadata_by_path,
             )
             msg = self._build_push_message(
                 envelope,
                 files_payload=files_payload,
                 target_channels=target_channel_list,
             )
+
+            if history_delivery_id is not None:
+                from jiuwenswarm.server.runtime.session.session_history import (
+                    append_history_record_durable, load_history_records,
+                    wait_for_history_receipt,
+                )
+
+                for item in files_payload:
+                    item["delivery_id"] = history_delivery_id
+                record = {
+                    "session_id": envelope.session_id,
+                    "request_id": envelope.routing_request_id,
+                    "channel_id": envelope.channel_id,
+                    "files": files_payload,
+                }
+                receipt = await run_history_io(
+                    append_history_record_durable,
+                    session_id=envelope.session_id, request_id=envelope.routing_request_id,
+                    channel_id=envelope.channel_id, role="assistant", content="",
+                    event_type="chat.file", timestamp=time.time(),
+                    extra={"files": files_payload, "artifact_route_metadata": {key: value for key, value in (msg.get("metadata") or {}).items()
+                            if key in E2A_ARTIFACT_ROUTE_METADATA_KEYS}}, delivery_id=history_delivery_id,
+                )
+                if receipt is None:
+                    raise RuntimeError("Browser Artifact history was not persisted")
+                await wait_for_history_receipt(receipt)
+                records = await run_history_io(load_history_records, envelope.session_id)
+                if not any(row.get("delivery_id") == history_delivery_id for row in records):
+                    raise RuntimeError("Browser Artifact history was not persisted")
+                accepted = any(
+                    row.get("event_type") == "harness.artifact_delivery"
+                    and row.get("artifact_delivery_id") == history_delivery_id
+                    and row.get("acceptance") == "gateway_durable_v1"
+                    for row in records
+                )
+                if not accepted:
+                    # Use the first durable payload when retrying. URLs or
+                    # current request routing must not change the stored event.
+                    record = next(row for row in records if row.get("delivery_id") == history_delivery_id)
+                    from jiuwenswarm.runtime.host_services import enqueue_artifact_retry
+                    if ((record.get("artifact_route_metadata") or {}).get(E2A_ARTIFACT_ORIGIN_KEY)
+                            and enqueue_artifact_retry(envelope.session_id)):
+                        return f"已保存 {len(valid_files)} 个文件，等待投递"
+                    await self._push_durable_artifact(envelope, record, history_delivery_id)
+                return f"成功发送 {len(valid_files)} 个文件"
 
             # The Runtime push is the externally visible commit point. Entering
             # it makes delivery uncertain on exceptions, so staged assets must
@@ -610,6 +789,7 @@ class SendFileToolkit:
                     content="",
                     timestamp=time.time(),
                     extra={"files": files_payload},
+                    delivery_id=history_delivery_id,
                 )
             except Exception as history_error:  # noqa: BLE001
                 logger.warning(
@@ -671,6 +851,7 @@ class SendFileToolkit:
         *,
         valid_files: list[str],
         assets_by_path: dict[str, VerifiedDownloadAsset],
+        artifact_metadata_by_path: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         files_payload: list[dict[str, Any]] = []
         if envelope.require_execution_authorization:
@@ -703,7 +884,10 @@ class SendFileToolkit:
                         "is_skill_package": looks_like_skill_package(probe_path),
                     }
                 )
-            return files_payload
+            return SendFileToolkit._attach_artifact_metadata(
+                files_payload,
+                artifact_metadata_by_path,
+            )
 
         try:
             from jiuwenswarm.agents.harness.common.tools.web_file_download import (
@@ -734,14 +918,31 @@ class SendFileToolkit:
                 "[SendFileToolkit] 生成下载信息失败，回退到基础模式: %s",
                 download_err,
             )
-            return [
+            return SendFileToolkit._attach_artifact_metadata([
                 {
                     "path": file_path,
                     "name": os.path.basename(file_path),
                     "is_skill_package": looks_like_skill_package(file_path),
                 }
                 for file_path in valid_files
-            ]
+            ], artifact_metadata_by_path)
+        return SendFileToolkit._attach_artifact_metadata(
+            files_payload,
+            artifact_metadata_by_path,
+        )
+
+    @staticmethod
+    def _attach_artifact_metadata(
+        files_payload: list[dict[str, Any]],
+        artifact_metadata_by_path: Mapping[str, Mapping[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        if not artifact_metadata_by_path:
+            return files_payload
+        for item in files_payload:
+            key = _normalize_sent_file_path(str(item.get("path") or ""))
+            metadata = artifact_metadata_by_path.get(key)
+            if metadata is not None:
+                item["artifact"] = copy.deepcopy(dict(metadata))
         return files_payload
 
     @staticmethod

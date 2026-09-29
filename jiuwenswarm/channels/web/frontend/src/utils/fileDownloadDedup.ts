@@ -3,6 +3,8 @@
  */
 
 export type FileIdentitySource = {
+  delivery_id?: string;
+  artifact?: { artifactId?: string };
   name?: string;
   size?: number;
   download_url?: string;
@@ -61,8 +63,12 @@ export function resolveFilePath(source: FileIdentitySource): string | undefined 
   return typeof path === 'string' && path.trim() ? normalizeFsPath(path) : undefined;
 }
 
-/** 稳定身份：优先绝对路径；无路径时退回 name + size（不含 downloadUrl）。 */
+/** 稳定身份：优先 Artifact/投递 ID；旧文件退回绝对路径或 name + size。 */
 export function getFileIdentityKey(source: FileIdentitySource): string {
+  const artifactId = source.artifact?.artifactId?.trim();
+  if (artifactId) return `artifact:${artifactId}`;
+  const deliveryId = source.delivery_id?.trim();
+  if (deliveryId) return `delivery:${deliveryId}`;
   const path = resolveFilePath(source);
   if (path) return `path:${path}`;
   const name = (source.name || '').trim().toLowerCase() || 'unnamed';

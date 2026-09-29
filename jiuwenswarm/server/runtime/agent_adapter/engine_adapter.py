@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
@@ -31,6 +32,10 @@ from jiuwenswarm.runtime.harness.event_projection import ExternalEventProjection
 from jiuwenswarm.runtime.harness.execution_session import (
     ExecutionExitState,
     ExecutionSession,
+)
+from jiuwenswarm.runtime.harness.external_browser_admission import (
+    ExternalBrowserAdmission,
+    browser_runtime_enabled,
 )
 from jiuwenswarm.runtime.harness.external_subagents import (
     ExternalSubagentParentSession,
@@ -67,11 +72,13 @@ class EngineAgentAdapter:
         self._owns_tool_gateway = tool_gateway is None
         self._heartbeat_bridge = HeartbeatRuntimeBridge()
         self._subagent_runtime: ExternalSubagentRuntime | None = None
+        self._browser_admission: ExternalBrowserAdmission | None = None
         self._session: ExecutionSession | None = None
         self._heartbeat_stopped_session: ExecutionSession | None = None
         self._projection = ExternalEventProjection(
             route.bound.binding.host_session_id,
             on_detached_terminal=self.complete_detached_turn,
+            workspace_root=route.runtime_paths.runtime_workspace_root,
         )
         self._start_lock = asyncio.Lock()
         self._personal_context_runtime_enabled = False
@@ -136,6 +143,17 @@ class EngineAgentAdapter:
                     ),
                 )
                 self._goal_runtime.assessor_factory = self._goal_assessor_factory
+            if (
+                self._browser_admission is None
+                and browser_runtime_enabled(os.environ)
+            ):
+                self._browser_admission = ExternalBrowserAdmission(
+                    parent_subject_id=binding.subject_id,
+                    parent_session_id=binding.host_session_id,
+                    runtime_paths=self._route.runtime_paths,
+                    publish=self._projection.publish_product_interaction,
+                    recovery=self._route.recovery,
+                )
             self._subagent_runtime = ExternalSubagentRuntime(
                 self._route,
                 write_output=self._projection.project_product_chunk,
@@ -158,6 +176,17 @@ class EngineAgentAdapter:
                         )
                     ),
                 ],
+                browser_admit=self._browser_admission,
+                browser_artifact_sink=(
+                    self._projection.publish_product_artifact
+                    if self._browser_admission is not None
+                    else None
+                ),
+                browser_decision_id_for=(
+                    self._browser_admission.decision_id_for
+                    if self._browser_admission is not None
+                    else None
+                ),
             )
             self._tool_gateway = self._subagent_runtime.gateway
 
@@ -739,6 +768,15 @@ class EngineAgentAdapter:
 
     async def handle_user_answer(self, request: AgentRequest) -> AgentResponse:
         params = request.params if isinstance(request.params, dict) else {}
+        browser_admission = self._browser_admission
+        if browser_admission is not None and await browser_admission.answer(params):
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"accepted": True, "resolved": True},
+                metadata=request.metadata,
+            )
         interaction = self._interaction_answer(params)
         resolved = bool(
             interaction and await self._require_session().answer(interaction)
@@ -801,6 +839,7 @@ class EngineAgentAdapter:
             return
         await runtime.close(reason)
         self._subagent_runtime = None
+        self._browser_admission = None
 
     def has_session_runtime(self, session_id: str | None = None) -> bool:
         session = self._session
@@ -870,6 +909,7 @@ class EngineAgentAdapter:
             if session.started:
                 return
             binding = session.binding
+            await self._projection.replay_product_artifacts()
             await session.start(
                 build_external_context(
                     paths=self._route.runtime_paths,

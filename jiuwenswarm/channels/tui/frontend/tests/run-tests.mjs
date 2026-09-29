@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { parseHistoryFrame } from "../dist/core/history-parser.js";
 
 import {
   AppScreen,
@@ -7,6 +8,7 @@ import {
   getPendingQuestionTitle,
   getPlanApprovalListLayout,
   getPlanRejectFeedbackHint,
+  isPermissionRequest,
   isPlanApprovalRequest,
   renderWrappedQuestionOptions,
   shouldCaptureTerminalMouse,
@@ -191,6 +193,7 @@ for (const nonCodeMode of ["agent.work.normal", "team.work.normal"]) {
 assert.equal(isPlanApprovalRequest("confirm_interrupt", planApprovalKind), true);
 assert.equal(isPlanApprovalRequest("confirm_interrupt", "permission"), false);
 assert.equal(isPlanApprovalRequest("permission_interrupt", planApprovalKind), false);
+assert.equal(isPermissionRequest("browser_permission", "Allow Browser action"), true);
 
 assert.equal(getPendingQuestionTitle("confirm_interrupt", "", 0, 1, planApprovalKind), "Exit Plan and Execute:");
 assert.equal(getPendingQuestionTitle("confirm_interrupt", "", 0, 1), "Confirm action");
@@ -303,6 +306,34 @@ assert.deepEqual(
 
 const narrowQuestionTitle =
   "[Redis 方案] Redis 接入有三种方案，范围和依赖递增。请根据当前项目选择。";
+let artifactEntries = [parseHistoryFrame({
+  event: "history.message",
+  payload: { message: {
+    role: "assistant", event_type: "chat.file", session_id: "root-session",
+    delivery_id: "browser-artifact:a",
+    files: [{ name: "report.pdf", path: "/outputs/report.pdf", size: 42 }],
+  } },
+})];
+assert.equal(artifactEntries[0]?.id, "browser-artifact:a");
+const artifactDelegate = new Proxy({}, {
+  get: (_target, property) => {
+    if (property === "getSessionId") return () => "root-session";
+    if (property === "getEntries") return () => artifactEntries;
+    if (property === "setEntries") return (entries) => { artifactEntries = entries; };
+    return () => undefined;
+  },
+});
+for (const deliveryId of ["browser-artifact:a", "browser-artifact:a", "browser-artifact:b"]) {
+  handleIncomingFrame(artifactDelegate, {
+    event: "chat.file",
+    payload: {
+      session_id: "root-session", delivery_id: deliveryId,
+      files: [{ name: "report.pdf", path: "/outputs/report.pdf", size: 42 }],
+    },
+  });
+}
+assert.equal(artifactEntries.length, 2, "Artifact replay must not duplicate a TUI entry");
+assert.notEqual(artifactEntries[0].id, artifactEntries[1].id);
 const wrappedQuestionTitle = wrapPlainText(narrowQuestionTitle, 30);
 assert.ok(wrappedQuestionTitle.length > 1);
 assert.ok(wrappedQuestionTitle.every((line) => visibleWidth(line) <= 29));

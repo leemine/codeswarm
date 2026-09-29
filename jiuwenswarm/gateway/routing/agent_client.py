@@ -15,7 +15,9 @@ from urllib.parse import urlsplit
 
 from websockets.exceptions import ConnectionClosed, PayloadTooBig
 
-from jiuwenswarm.common.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
+from jiuwenswarm.common.e2a.constants import (
+    E2A_WIRE_SERVER_PUSH_KEY, E2A_ARTIFACT_ACCEPTANCE_KEY, E2A_ARTIFACT_ACCEPTED_EVENT,
+)
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.e2a.wire_codec import (
     parse_agent_server_wire_chunk,
@@ -164,14 +166,15 @@ class WebSocketAgentServerClient(AgentServerClient):
         self._queue_lock = asyncio.Lock()  # 保护队列操作的锁
         self._cancelled_request_ids: set[str] = set()  # 已取消但等待清理的 request_id
         self._receiver_task: asyncio.Task | None = None
+        self._server_push_tasks: set[asyncio.Task] = set()
         self._running = False
         # AgentServer send_push：旁路投递，勿进入与 request_id 绑定的 RPC 等待队列
-        self._on_server_push: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+        self._on_server_push: Callable[[dict[str, Any]], Awaitable[bool | None]] | None = None
         # receiver 致命错误（连接断开 / ping 超时 / 发送失败）后的断连通知回调
         self._on_disconnect: Callable[[BaseException], Awaitable[None]] | None = None
 
     def set_server_push_handler(
-        self, handler: Callable[[dict[str, Any]], Awaitable[None]] | None
+        self, handler: Callable[[dict[str, Any]], Awaitable[bool | None]] | None
     ) -> None:
         """注册 Agent 主动推送处理回调（metadata 含 ``E2A_WIRE_SERVER_PUSH_KEY`` 的帧）。"""
         self._on_server_push = handler
@@ -275,6 +278,18 @@ class WebSocketAgentServerClient(AgentServerClient):
         self._receiver_task = asyncio.create_task(self._message_receiver_loop())
         logger.info("[WebSocketAgentServerClient] 消息接收任务已启动")
 
+    async def _dispatch_server_push(self, wire, ws):
+        try:
+            accepted = await self._on_server_push(wire)
+            nonce = (wire.get("metadata") or {}).get(E2A_ARTIFACT_ACCEPTANCE_KEY)
+            if nonce and accepted is True:
+                # Reply on the exact source socket; a replacement connection
+                # must never settle another connection's pending acceptance.
+                await ws.send(json.dumps({"type": "event", "event": E2A_ARTIFACT_ACCEPTED_EVENT,
+                                          "payload": {"nonce": nonce}}))
+        except Exception:
+            logger.exception("Gateway server push not durably accepted")
+
     async def _message_receiver_loop(self) -> None:
         """后台任务：从 WebSocket 接收消息并根据 request_id 分发到对应队列."""
         try:
@@ -297,7 +312,9 @@ class WebSocketAgentServerClient(AgentServerClient):
                     meta = data.get("metadata")
                     if isinstance(meta, dict) and meta.get(E2A_WIRE_SERVER_PUSH_KEY):
                         if self._on_server_push is not None:
-                            asyncio.create_task(self._on_server_push(data))
+                            task = asyncio.create_task(self._dispatch_server_push(data, self._ws))
+                            self._server_push_tasks.add(task)
+                            task.add_done_callback(self._server_push_tasks.discard)
                         else:
                             logger.warning(
                                 "[WebSocketAgentServerClient] 收到 server_push 但未注册 handler，已丢弃: "
@@ -417,6 +434,12 @@ class WebSocketAgentServerClient(AgentServerClient):
             except asyncio.CancelledError:
                 pass
             self._receiver_task = None
+
+        # Cancel this client's acceptance handlers; committed inbox rows survive.
+        for task in self._server_push_tasks:
+            task.cancel()
+        await asyncio.gather(*self._server_push_tasks, return_exceptions=True)
+        self._server_push_tasks.clear()
 
         # 清理所有队列
         self._message_queues.clear()

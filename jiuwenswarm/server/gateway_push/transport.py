@@ -10,7 +10,7 @@ from typing import Any, Protocol, runtime_checkable
 @runtime_checkable
 class GatewayPushTransport(Protocol):
     async def send_push(self, msg: dict[str, Any]) -> bool:
-        """向 Gateway 发送一条消息，并返回是否已写入传输。"""
+        """返回传输成功；Browser Artifact 还须等待 Gateway 持久接纳回执。"""
         ...
 
 

@@ -104,13 +104,7 @@ export function buildArtifacts(messages: Message[]): ArtifactItem[] {
 
   const deduped = new Map<string, ArtifactItem>();
   artifacts.forEach(artifact => {
-    const key = getFileIdentityKey({
-      name: artifact.name,
-      size: artifact.size,
-      path: artifact.path,
-      download_url: artifact.downloadUrl,
-      download_token: artifact.downloadToken,
-    });
+    const key = artifact.id;
     const existing = deduped.get(key);
     deduped.set(key, existing ? preferArtifact(existing, artifact) : artifact);
   });

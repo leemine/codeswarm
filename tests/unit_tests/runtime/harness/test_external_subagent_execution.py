@@ -306,6 +306,10 @@ async def test_browser_profile_uses_same_provider_session_and_browser_gateway(
     from jiuwenswarm.runtime.harness import external_subagent as module
 
     class FakeBrowserGateway:
+        execution_identity = SimpleNamespace(
+            task=SimpleNamespace(task_id="browser-task-test")
+        )
+
         async def close(self) -> None:
             return None
 
@@ -320,9 +324,15 @@ async def test_browser_profile_uses_same_provider_session_and_browser_gateway(
         )
 
     monkeypatch.setattr(module, "_build_external_browser_resources", build_browser)
+    monkeypatch.setattr(
+        module, "_build_external_browser_identity", lambda **_kwargs: gateway.execution_identity,
+    )
     calls = _install_session_builder(monkeypatch)
 
-    def admission(_identity: Any, _invocation: Any) -> bool:
+    admitted: list[tuple[Any, Any]] = []
+
+    def admission(identity: Any, invocation: Any) -> bool:
+        admitted.append((identity, invocation))
         return True
 
     factory = ExternalSubagentExecutionFactory(
@@ -340,12 +350,77 @@ async def test_browser_profile_uses_same_provider_session_and_browser_gateway(
     assert len(build_calls) == 1
     assert build_calls[0]["request"] is request
     assert build_calls[0]["admit"] is admission
+    assert build_calls[0]["artifact_sink"] is None
+    assert build_calls[0]["decision_id_for"] is None
+    assert admitted[0][0] is gateway.execution_identity
+    assert admitted[0][1].call_id == "browser-task-test:profile-use"
+    assert admitted[0][1].name == "browser_profile_use"
+    assert admitted[0][1].arguments == {}
     assert calls[0][0]["tool_gateway"] is gateway
     assert (
         "Dedicated Browser child prompt." in calls[0][1].started_context.system_prompt
     )
     assert execution.binding.provider_id == "codex"
     await execution.close("test")
+
+
+@pytest.mark.asyncio
+async def test_browser_profile_denial_precedes_resource_and_child_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.runtime.harness import external_subagent as module
+
+    class FakeBrowserGateway:
+        execution_identity = SimpleNamespace(
+            task=SimpleNamespace(task_id="browser-task-denied")
+        )
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    gateway = FakeBrowserGateway()
+    monkeypatch.setattr(
+        module, "_build_external_browser_identity", lambda **_kwargs: gateway.execution_identity,
+    )
+
+    def unexpected_materialization(**_kwargs):
+        raise AssertionError("Profile denial must precede Browser materialization")
+
+    monkeypatch.setattr(
+        module,
+        "_build_external_browser_resources",
+        unexpected_materialization,
+    )
+    calls = _install_session_builder(monkeypatch)
+    admitted: list[Any] = []
+
+    async def deny_profile(_identity: Any, invocation: Any) -> bool:
+        admitted.append(invocation)
+        return False
+
+    factory = ExternalSubagentExecutionFactory(
+        _route(tmp_path),
+        browser_admit=deny_profile,
+    )
+    request = dataclasses.replace(
+        _request(),
+        subagent_type="browser_agent",
+        browser_capabilities=("vision",),
+    )
+
+    with pytest.raises(PermissionError, match="profile use is not allowed"):
+        await factory.create(request, _context())
+
+    assert calls == []
+    assert len(admitted) == 1
+    assert admitted[0].call_id == "browser-task-denied:profile-use"
+    assert admitted[0].name == "browser_profile_use"
+    assert admitted[0].arguments == {}
+    assert gateway.closed is False
 
 
 @pytest.mark.asyncio
@@ -368,6 +443,34 @@ def test_non_callable_browser_admission_is_rejected(tmp_path: Path) -> None:
         ExternalSubagentExecutionFactory(
             _route(tmp_path),
             browser_admit=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_browser_artifact_callbacks_fail_closed_before_construction(
+    tmp_path: Path,
+) -> None:
+    async def sink(_artifact: Any, _path: Path) -> None:
+        return None
+
+    route = _route(tmp_path)
+    with pytest.raises(ValueError, match="configured together"):
+        ExternalSubagentExecutionFactory(
+            route,
+            browser_admit=lambda _identity, _invocation: True,
+            browser_artifact_sink=sink,
+        )
+    with pytest.raises(ValueError, match="sink must be callable"):
+        ExternalSubagentExecutionFactory(
+            route,
+            browser_admit=lambda _identity, _invocation: True,
+            browser_artifact_sink=object(),  # type: ignore[arg-type]
+            browser_decision_id_for=lambda _identity, _invocation: "decision",
+        )
+    with pytest.raises(ValueError, match="requires Browser admission"):
+        ExternalSubagentExecutionFactory(
+            route,
+            browser_artifact_sink=sink,
+            browser_decision_id_for=lambda _identity, _invocation: "decision",
         )
 
 
@@ -626,3 +729,53 @@ def test_unsupported_parent_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="supported, consistent parent"):
         ExternalSubagentExecutionFactory(native_route)
+
+
+@pytest.mark.asyncio
+async def test_browser_start_failure_retains_cleanup_before_releasing_recovery(tmp_path, monkeypatch):
+    from jiuwenswarm.runtime.harness import external_subagent as module
+
+    route = _route(tmp_path)
+    identity = SimpleNamespace(task=SimpleNamespace(task_id="browser-task-cleanup"))
+    configuration = route.runtime_paths.internal_workspace_dir / "browser-config" / identity.task.task_id
+    events = []
+
+    class Admission:
+        def __call__(self, _identity, _invocation):
+            return True
+
+        async def release_task(self, _identity):
+            assert not configuration.exists()
+            events.append("release-recovery")
+
+    class Gateway:
+        failed = True
+
+        async def close(self):
+            events.append("close")
+            if self.failed:
+                raise RuntimeError("exit unconfirmed")
+
+    gateway = Gateway()
+
+    def materialize(**_kwargs):
+        configuration.mkdir(parents=True)
+        (configuration / "managed-download-init.cjs").write_text("test config")
+        return SimpleNamespace(gateway=gateway)
+
+    def fail_session(*_args, **_kwargs):
+        raise ValueError("startup failed")
+
+    monkeypatch.setattr(module, "_build_external_browser_identity", lambda **_kwargs: identity)
+    monkeypatch.setattr(module, "_build_external_browser_resources", materialize)
+    monkeypatch.setattr(module, "prepare_execution_session", fail_session)
+    factory = ExternalSubagentExecutionFactory(route, browser_admit=Admission())
+    request = dataclasses.replace(_request(), subagent_type="browser_agent", browser_capabilities=("vision",))
+    with pytest.raises(BaseExceptionGroup):
+        await factory.create(request, _context())
+    assert configuration.exists()
+    assert events == ["close"]
+    gateway.failed = False
+    await factory.close_pending()
+    await factory.close_pending()
+    assert events == ["close", "close", "release-recovery"]
