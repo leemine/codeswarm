@@ -7,6 +7,15 @@ on:
   schedule:
     - cron: '20 18 * * *'
   workflow_dispatch:
+    inputs:
+      full_workers:
+        description: Full Python shard worker count
+        required: false
+        default: '2'
+        type: choice
+        options:
+          - '2'
+          - '4'
 
 permissions:
   contents: read
@@ -125,7 +134,9 @@ jobs:
       - name: Verify full-run accounting
         run: python3 -m unittest tools.tests.test_full_shards tools.tests.test_provider_acceptance -v
       - name: Run full Python regression
-        run: .venv/bin/python tools/full_regression.py --workers 2
+        env:
+          FULL_PYTHON_WORKERS: ${{ inputs.full_workers || '2' }}
+        run: .venv/bin/python tools/full_regression.py --workers "$FULL_PYTHON_WORKERS"
       - name: Upload full Python archive
         if: always()
         uses: actions/upload-artifact@v7.0.1
