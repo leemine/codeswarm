@@ -551,10 +551,14 @@ async def test_cancel_waiting_goal_clears_original_interaction(chain):
     provider = chain.providers[0]
     provider.ask = True
     task = asyncio.create_task(run(chain, request()))
-    for _ in range(100):
-        await asyncio.sleep(0)
-        if chain.adapter.execution_session.io.has_pending_interrupt():
-            break
+    # Startup also awaits durable Artifact history IO. Scheduler turns alone
+    # cannot bound a worker-thread round trip on a clean/loaded environment.
+    async with asyncio.timeout(5):
+        while not chain.adapter.execution_session.io.has_pending_interrupt():
+            if task.done():
+                await task
+                break
+            await asyncio.sleep(0.01)
     old_session = chain.adapter.execution_session
     assert old_session.io.has_pending_interrupt()
     interrupt = request("stop")
