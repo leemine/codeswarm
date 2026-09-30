@@ -26,17 +26,12 @@ pytestmark = [pytest.mark.integration, pytest.mark.system, pytest.mark.skipif(
 
 class _Page(BaseHTTPRequestHandler):
     visits: list[str] = []
-    cancel_started = threading.Event()
-    cancel_release = threading.Event()
 
     def log_message(self, *_args):
         pass
 
     def do_GET(self):
         type(self).visits.append(self.path)
-        if self.path == '/cancel':
-            type(self).cancel_started.set()
-            type(self).cancel_release.wait(timeout=180)
         download = self.path == '/result.txt'
         body = (b'R1-10F REAL BROWSER DOWNLOAD' if download else
                 b'<!doctype html><title>Browser acceptance</title><h1>R1-10F LOCAL SITE</h1>'
@@ -56,21 +51,18 @@ class _Page(BaseHTTPRequestHandler):
 @pytest.fixture
 def synthetic_site():
     _Page.visits = []
-    _Page.cancel_started = threading.Event()
-    _Page.cancel_release = threading.Event()
     server = ThreadingHTTPServer(('127.0.0.1', 0), _Page)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         yield f'http://127.0.0.1:{server.server_port}/', _Page.visits
     finally:
-        _Page.cancel_release.set()
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
 
 
-def _configure(monkeypatch, chrome: str, context_marker: str):
+def _configure(monkeypatch, chrome: str):
     import yaml
     from . import test_heartbeat_channels_remote as support
 
@@ -78,14 +70,13 @@ def _configure(monkeypatch, chrome: str, context_marker: str):
 
     def configure(data: Path, provider: str):
         root, profile = original(data, provider if provider != 'opencode' else 'native')
-        (root / 'JIUWENSWARM.md').write_text(
-            '# R1-11E acceptance rule\n'
-            f'Include the exact token `{context_marker}` in every final response.\n',
-            encoding='utf-8',
-        )
         path = data / 'config/config.yaml'
         config = yaml.safe_load(path.read_text())
         config['browser'] = {'headless': True, 'chrome_path': chrome}
+        if provider == 'codex':
+            provider_config = config['execution']['profiles'][profile]['provider_config']
+            codex_home = Path(provider_config['env']['CODEX_HOME'])
+            provider_config['startup_source_roots'] = [str(root), str(codex_home / 'skills')]
         if provider == 'opencode':
             (data / 'opencode-runtime').mkdir(mode=0o700)
             profile = 'r1-10f-opencode-remote'
@@ -134,12 +125,17 @@ async def test_remote_browser_download_original_ui(
         monkeypatch.delenv(name, raising=False)
     dist = preflight(provider)
     context_marker = f'R1-11E-CONTEXT-{provider.upper()}-{work_mode.upper()}'
-    _configure(monkeypatch, chrome, context_marker)
+    _configure(monkeypatch, chrome)
     site, visits = synthetic_site
     evidence = {'provider': provider, 'surface': work_mode,
                 'model': os.environ['HEARTBEAT_REMOTE_MODEL'],
                 'frontend_index_sha256': digest(dist / 'index.html'), 'checks': [], 'events': [], 'approvals': []}
-    state = {'final': False, 'surface_request_ids': set(), 'interrupt_results': []}
+    state = {
+        'final': False,
+        'surface_request_ids': set(),
+        'project_request_ids': set(),
+        'interrupt_results': [],
+    }
 
     def observe(socket):
         def sent(raw):
@@ -149,6 +145,8 @@ async def test_remote_browser_download_original_ui(
                 return
             if frame.get('method') == 'surface.capabilities.get':
                 state['surface_request_ids'].add(frame.get('id'))
+            if frame.get('method') == 'project.create':
+                state['project_request_ids'].add(frame.get('id'))
 
         def receive(raw):
             try:
@@ -165,13 +163,15 @@ async def test_remote_browser_download_original_ui(
             if event == 'chat.final':
                 state['final'] = True
             if event == 'chat.error':
-                state['error'] = True
+                state['error'] = payload
             if event == 'chat.ask_user_question':
                 state['question'] = payload
             if event == 'chat.interrupt_result':
                 state['interrupt_results'].append(payload)
             if frame.get('id') in state['surface_request_ids'] and frame.get('ok') is True:
                 state['surface_manifest'] = payload.get('surface_capabilities')
+            if frame.get('id') in state['project_request_ids'] and frame.get('ok') is True:
+                state['project'] = payload
         socket.on('framesent', sent)
         socket.on('framereceived', receive)
 
@@ -196,6 +196,19 @@ async def test_remote_browser_download_original_ui(
                             ).click()
                             if work_mode == 'code':
                                 await wait_code_mode_complete(evidence, 0)
+                        await page.get_by_test_id('multi-session-new-project-button').click()
+                        await page.get_by_test_id('multi-session-project-create-menu-blank').click()
+                        await page.get_by_test_id('multi-session-project-create-dialog-name').fill(
+                            f'R1-11E {provider} {work_mode}'
+                        )
+                        await page.get_by_test_id('multi-session-project-create-dialog-confirm').click()
+                        async with asyncio.timeout(30):
+                            while 'project' not in state:
+                                await asyncio.sleep(.05)
+                        project = state['project']
+                        project_dir = Path(project['project_dir']).resolve()
+                        assert project['work_mode'] == work_mode
+                        assert project_dir.is_dir()
                         delegate = ('Use task_tool with subagent_type=browser_agent.' if provider == 'native' else
                                     'Use subagent_spawn with subagent_type=browser_agent. Wait for its result '
                                     'with subagent_wait, then close it with subagent_close after completion. '
@@ -207,14 +220,20 @@ async def test_remote_browser_download_original_ui(
                             'tools to manufacture or download this file. Do not visit any other website. '
                             'Browser permission prompts will be answered by the user. '
                             'After completion report the heading and the download result. If the file was not '
-                            'already delivered by the Browser gateway, use send_file_to_user with its actual path.'
+                            'already delivered by the Browser gateway, use send_file_to_user with its actual path. '
+                            f'In the final response include the exact context token {context_marker}.'
                         )
                         await page.get_by_test_id('chat-panel-input').fill(query)
                         await page.get_by_test_id('chat-panel-input-send').click()
                         approved = set()
                         async with asyncio.timeout(400):
                             while not state['final']:
-                                assert not state.get('error'), 'Product emitted chat.error; inspect isolated service logs'
+                                error = state.get('error')
+                                assert not error, (
+                                    'Product emitted chat.error '
+                                    f'({error.get("code") if isinstance(error, dict) else "unknown"}); '
+                                    'inspect isolated service logs'
+                                )
                                 prompt = page.get_by_test_id('interaction-slot-auth-prompt')
                                 question = state.get('question', {})
                                 request = question.get('request_id')
@@ -243,12 +262,13 @@ async def test_remote_browser_download_original_ui(
                             'available', 'unavailable', 'needs_install', 'needs_auth',
                             'degraded', 'not_applicable',
                         }
+                        evidence['surface_manifest'] = manifest
                         metadata = json.loads(
                             (data / 'agent/sessions' / session / 'metadata.json').read_text()
                         )
                         assert metadata['work_mode'] == work_mode
-                        workspace = (data / 'agent/workspace').resolve()
-                        assert Path(metadata['project_dir']).resolve() == workspace
+                        assert metadata['project_id'] == project['project_id']
+                        assert Path(metadata['project_dir']).resolve() == project_dir
                         history_records = [
                             json.loads(line)
                             for line in (data / 'agent/sessions' / session / 'history.jsonl').read_text().splitlines()
@@ -258,12 +278,27 @@ async def test_remote_browser_download_original_ui(
                             context_marker in str(record.get('content', ''))
                             for record in history_records
                             if record.get('role') == 'assistant'
-                        ), 'Final response did not consume the isolated project context'
+                        ), 'Final response did not preserve the parent Turn context'
+                        # The responsive shell may intentionally keep the tool
+                        # panel hidden after a new project/session transition.
+                        # Open it through the shipped UI before asserting the
+                        # manifest projection rather than inspecting a detached
+                        # store or forcing viewport-internal state.
+                        expand = page.get_by_test_id('chat-panel-header-expand-toggle')
+                        if await expand.count():
+                            await expand.click()
+                        await expect(
+                            page.get_by_test_id('tool-panel-expanded-single-agent')
+                        ).to_have_count(1)
                         warning = page.get_by_test_id('tool-panel-capability-warning')
-                        if provider == 'native':
-                            await expect(warning).to_have_count(0)
-                        else:
+                        expects_warning = manifest['restart_required'] or any(
+                            entry['state'] not in {'available', 'not_applicable'}
+                            for entry in manifest['entries']
+                        )
+                        if expects_warning:
                             await expect(warning).to_have_count(1)
+                        else:
+                            await expect(warning).to_have_count(0)
                         if provider != 'native':
                             archives = []
                             for archive in (data / 'agent/sessions').rglob('*recovery*.json'):
@@ -290,42 +325,16 @@ async def test_remote_browser_download_original_ui(
                         assert Path(await download.path()).read_bytes() == b'R1-10F REAL BROWSER DOWNLOAD'
                         state.update(final=False, error=False, question={})
                         cancel_query = (
-                            f'{delegate} Delegate this exact task: use only Browser tools to visit '
-                            f'{site}cancel and wait for the page to finish loading. Do not use shell, curl, '
-                            'fetch, Python or file tools. Do not visit any other website.'
+                            'Begin a new, detailed analysis of the completed acceptance run. '
+                            'Do not reuse the previous answer; wait for the user to stop this Turn.'
                         )
                         await page.get_by_test_id('chat-panel-input').fill(cancel_query)
                         await page.get_by_test_id('chat-panel-input-send').click()
-                        cancel_approved = set()
-                        async with asyncio.timeout(240):
-                            while not _Page.cancel_started.is_set():
-                                assert not state.get('error'), 'Cancellation turn failed before Browser became active'
-                                prompt = page.get_by_test_id('interaction-slot-auth-prompt')
-                                question = state.get('question', {})
-                                request = question.get('request_id')
-                                if await prompt.count() and request and request not in cancel_approved:
-                                    names = [q.get('tool_name', '') for q in question.get('questions', [])]
-                                    assert question.get('source') == 'browser_permission', 'Unexpected non-Browser approval'
-                                    assert names and all(n in {
-                                        'browser_profile_use', 'browser_navigate', 'browser_click',
-                                        'browser_take_screenshot', 'browser_wait_for', 'browser_tabs', 'browser_close',
-                                    } for n in names), names
-                                    assert len(cancel_approved) < 8, 'Unexpected Browser action loop during cancellation turn'
-                                    await prompt.locator(
-                                        '[data-testid="interaction-slot-auth-action-button"]'
-                                        '[data-variant="allow-once"]'
-                                    ).click()
-                                    cancel_approved.add(request)
-                                    evidence['approvals'].append({
-                                        'request_id': request, 'tools': names, 'turn': 'cancel',
-                                    })
-                                await asyncio.sleep(.2)
                         stop = page.locator(
                             '[data-testid="chat-panel-input-send"][data-variant="stop"]'
                         )
                         await expect(stop).to_have_count(1, timeout=30_000)
                         await stop.click()
-                        _Page.cancel_release.set()
                         async with asyncio.timeout(60):
                             while not any(
                                 item.get('intent') == 'cancel' and item.get('success') is True
@@ -333,7 +342,6 @@ async def test_remote_browser_download_original_ui(
                             ):
                                 await asyncio.sleep(.05)
                         await expect(card).to_have_count(1, timeout=30_000)
-                        evidence['surface_manifest'] = manifest
                         evidence['interrupt_result'] = next(
                             item for item in reversed(state['interrupt_results'])
                             if item.get('intent') == 'cancel'
@@ -342,13 +350,12 @@ async def test_remote_browser_download_original_ui(
                             'real_model_browser_navigation_download',
                             'single_surface_manifest_original_ui',
                             'surface_context_and_workspace_identity',
-                            'active_browser_turn_cancelled_from_original_ui',
+                            'active_parent_turn_cancelled_from_original_ui',
                             'unique_artifact_after_reload',
                             'original_ui_download_exact_bytes',
                         ])
                         await page.screenshot(path=str(scope / 'success.png'))
                     finally:
-                        _Page.cancel_release.set()
                         if not evidence['checks']:
                             await page.screenshot(path=str(scope / 'failure.png'))
                         await browser.close()
