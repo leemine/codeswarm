@@ -9,6 +9,7 @@ from openjiuwen.harness_protocol import (
     ProviderCapability,
     ProviderCapabilityInventory,
     ProviderCapabilityKind,
+    RuntimeSurface,
 )
 
 from jiuwenswarm.runtime.harness.capability_catalog import (
@@ -29,8 +30,16 @@ def _inventory(*entries: ProviderCapability) -> ProviderCapabilityInventory:
     return ProviderCapabilityInventory(
         "codex",
         (
-            ProviderCapability("filesystem", ProviderCapabilityKind.CATEGORY),
-            ProviderCapability("terminal", ProviderCapabilityKind.CATEGORY),
+            ProviderCapability(
+                "filesystem",
+                ProviderCapabilityKind.CATEGORY,
+                frozenset({RuntimeSurface.CODE}),
+            ),
+            ProviderCapability(
+                "terminal",
+                ProviderCapabilityKind.CATEGORY,
+                frozenset({RuntimeSurface.CODE}),
+            ),
             *entries,
         ),
     )
@@ -74,6 +83,15 @@ def test_work_and_code_mount_distinct_subagents_and_explain_missing_categories(
     }
     assert "research_agent" not in code_subagents
     assert "code_agent" not in work_subagents
+    assert "portable-helper" in {
+        item.name for item in work.available(CapabilityKind.SKILL)
+    }
+    assert {"filesystem", "terminal"} <= {
+        item.name for item in code.available(CapabilityKind.CATEGORY)
+    }
+    assert "filesystem" not in {
+        item.name for item in work.entries if item.kind is CapabilityKind.CATEGORY
+    }
     work_categories = {
         item.name: item
         for item in work.entries
