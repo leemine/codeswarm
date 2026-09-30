@@ -124,6 +124,64 @@ async def _invoke(runtime: ExternalSubagentRuntime, name: str, arguments: dict):
     return await runtime.gateway.invoke(ToolInvocation(f"call-{name}", name, arguments))
 
 
+@pytest.mark.asyncio
+async def test_code_surface_mounts_code_profiles_and_rejects_work_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.unit_tests.runtime.harness.test_external_subagent_execution import (
+        _surface_route,
+    )
+
+    factory = _Factory()
+    _install_factory(monkeypatch, factory)
+
+    async def write_output(_chunk: OutputSchema) -> None:
+        return None
+
+    route = _surface_route(tmp_path)
+    persisted_catalog = route.surface.capability_catalog
+    runtime = ExternalSubagentRuntime(route, write_output=write_output)
+    assert runtime.surface.capability_catalog is not None
+    # Recovery input may carry an older audit record, but each provider cycle
+    # rebuilds the effective catalog from the admitted spec and mounted tools.
+    assert runtime.surface.capability_catalog is not persisted_catalog
+    assert runtime.surface.capability_catalog.fingerprint != persisted_catalog.fingerprint
+    subagents = {
+        entry.name
+        for entry in runtime.surface.capability_catalog.entries
+        if entry.kind.value == "subagent"
+    }
+    assert "code_agent" in subagents
+    assert "research_agent" not in subagents
+
+    rejected = await _invoke(
+        runtime,
+        "subagent_spawn",
+        {
+            "subagent_type": "research_agent",
+            "task_description": "must not run",
+            "display_name": "Researcher",
+            "role": "research",
+        },
+    )
+    assert rejected.is_error is True
+    assert factory.created == []
+
+    admitted = await _invoke(
+        runtime,
+        "subagent_spawn",
+        {
+            "subagent_type": "code_agent",
+            "task_description": "implement",
+            "display_name": "Coder",
+            "role": "code",
+        },
+    )
+    assert admitted.is_error is False
+    await runtime.close("test_complete")
+
+
 def test_parent_subagent_state_is_restored_and_checkpointed() -> None:
     saved: list[dict[str, Any]] = []
     recovery = type(

@@ -26,22 +26,19 @@ class ExternalSubagentProfile:
     subagent_type: str
     execution_kind: ExternalSubagentExecutionKind
     description: str = ""
+    surfaces: frozenset[str] = frozenset({"work", "code"})
     advertised: bool = False
     compatibility_alias: bool = False
+
+    def __post_init__(self) -> None:
+        surfaces = frozenset(self.surfaces)
+        if not surfaces or not surfaces <= {"work", "code"}:
+            raise ValueError("External subagent profile has invalid Surfaces")
+        object.__setattr__(self, "surfaces", surfaces)
 
 
 class ExternalSubagentProfileUnavailableError(ValueError):
     """Raised before side effects when a profile has no admitted adapter."""
-
-
-_LEGACY_GENERIC_ALIASES = (
-    "code_agent",
-    "explore_agent",
-    "mobile_gui_agent",
-    "plan_agent",
-    "research_agent",
-    "verification_agent",
-)
 
 
 _profile_catalog = {
@@ -63,8 +60,40 @@ _profile_catalog = {
         ),
         advertised=False,
     ),
+    "research_agent": ExternalSubagentProfile(
+        subagent_type="research_agent",
+        execution_kind=ExternalSubagentExecutionKind.GENERIC,
+        description="same Provider research delegation for the Work Surface",
+        surfaces=frozenset({"work"}),
+        advertised=True,
+        compatibility_alias=True,
+    ),
+    "explore_agent": ExternalSubagentProfile(
+        subagent_type="explore_agent",
+        execution_kind=ExternalSubagentExecutionKind.GENERIC,
+        description="same Provider repository exploration for the Code Surface",
+        surfaces=frozenset({"code"}),
+        advertised=True,
+        compatibility_alias=True,
+    ),
+    "plan_agent": ExternalSubagentProfile(
+        subagent_type="plan_agent",
+        execution_kind=ExternalSubagentExecutionKind.GENERIC,
+        description="same Provider implementation planning for the Code Surface",
+        surfaces=frozenset({"code"}),
+        advertised=True,
+        compatibility_alias=True,
+    ),
+    "code_agent": ExternalSubagentProfile(
+        subagent_type="code_agent",
+        execution_kind=ExternalSubagentExecutionKind.GENERIC,
+        description="same Provider code execution for the Code Surface",
+        surfaces=frozenset({"code"}),
+        advertised=True,
+        compatibility_alias=True,
+    ),
 }
-for _subagent_type in _LEGACY_GENERIC_ALIASES:
+for _subagent_type in ("mobile_gui_agent", "verification_agent"):
     _profile_catalog[_subagent_type] = ExternalSubagentProfile(
         subagent_type=_subagent_type,
         execution_kind=ExternalSubagentExecutionKind.GENERIC,
@@ -93,10 +122,18 @@ def validate_external_subagent_request(
     subagent_type: object,
     browser_capabilities: tuple[str, ...] | None,
     browser_available: bool = False,
+    work_mode: str | None = None,
 ) -> ExternalSubagentProfile:
     """Validate profile-specific arguments before child resource allocation."""
 
     profile = resolve_external_subagent_profile(subagent_type)
+    if work_mode is not None:
+        if work_mode not in {"work", "code"}:
+            raise ValueError("External subagent Surface is invalid")
+        if work_mode not in profile.surfaces:
+            raise ExternalSubagentProfileUnavailableError(
+                f"{profile.subagent_type} is not mounted on the {work_mode} Surface"
+            )
     if profile.execution_kind is ExternalSubagentExecutionKind.BROWSER:
         if not browser_available:
             raise ExternalSubagentProfileUnavailableError(
@@ -120,17 +157,61 @@ def validate_external_subagent_request(
     return profile
 
 
-def render_external_subagent_catalog(*, browser_available: bool = False) -> str:
+def surface_external_subagent_profiles(
+    work_mode: str,
+    *,
+    browser_available: bool = False,
+) -> tuple[ExternalSubagentProfile, ...]:
+    """Return only product profiles mounted for one frozen Surface."""
+
+    if work_mode not in {"work", "code"}:
+        raise ValueError("External subagent Surface is invalid")
+    return tuple(
+        profile
+        for profile in EXTERNAL_SUBAGENT_PROFILES.values()
+        if work_mode in profile.surfaces
+        and (
+            profile.advertised
+            or profile.subagent_type == GENERAL_PURPOSE_SUBAGENT_TYPE
+            or (
+                browser_available
+                and profile.execution_kind is ExternalSubagentExecutionKind.BROWSER
+            )
+        )
+        and (
+            profile.execution_kind is not ExternalSubagentExecutionKind.BROWSER
+            or browser_available
+        )
+    )
+
+
+def render_external_subagent_catalog(
+    *,
+    work_mode: str | None = None,
+    browser_available: bool = False,
+) -> str:
     """Render only profiles that the current product runtime can construct."""
 
+    if work_mode is None:
+        profiles = tuple(
+            profile
+            for profile in EXTERNAL_SUBAGENT_PROFILES.values()
+            if (
+                profile.advertised and not profile.compatibility_alias
+                or (
+                    browser_available
+                    and profile.execution_kind
+                    is ExternalSubagentExecutionKind.BROWSER
+                )
+            )
+        )
+    else:
+        profiles = surface_external_subagent_profiles(
+            work_mode, browser_available=browser_available
+        )
     return "\n".join(
         f"- {profile.subagent_type}: {profile.description}"
-        for profile in EXTERNAL_SUBAGENT_PROFILES.values()
-        if profile.advertised
-        or (
-            browser_available
-            and profile.execution_kind is ExternalSubagentExecutionKind.BROWSER
-        )
+        for profile in profiles
     )
 
 
@@ -143,5 +224,6 @@ __all__ = [
     "ExternalSubagentProfileUnavailableError",
     "resolve_external_subagent_profile",
     "render_external_subagent_catalog",
+    "surface_external_subagent_profiles",
     "validate_external_subagent_request",
 ]

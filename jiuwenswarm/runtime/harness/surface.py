@@ -8,7 +8,7 @@ sandbox compilation belong to subsequent slices and are not implied by a mode.
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 from pathlib import Path
 
 from openjiuwen.harness.engine import ExecutionBinding
@@ -27,6 +27,11 @@ from jiuwenswarm.common.mode_matrix import (
     is_new_canonical_mode,
 )
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
+
+if TYPE_CHECKING:
+    from jiuwenswarm.runtime.harness.capability_catalog import (
+        EffectiveCapabilityCatalog,
+    )
 
 
 class SurfaceAdmissionError(ValueError):
@@ -234,6 +239,7 @@ class EffectiveSurfaceSnapshot:
     initial_mode: str
     policy_revision: str = "surface-identity-v1"
     runtime_policy: HarnessRuntimePolicy | None = None
+    capability_catalog: "EffectiveCapabilityCatalog | None" = None
 
     def validate_mode(self, mode: str, *, require_policy: bool = True) -> None:
         canonical = canonical_surface_mode(

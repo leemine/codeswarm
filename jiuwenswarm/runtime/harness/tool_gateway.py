@@ -130,6 +130,11 @@ class ProductToolGateway:
     def scope(self) -> ProductToolScope:
         return self._scope
 
+    @property
+    def tool_names(self) -> tuple[str, ...]:
+        """Return the frozen authoritative namespace without async discovery."""
+        return tuple(self._catalog)
+
     async def definitions(self) -> tuple[ToolDefinition, ...]:
         return self._definitions
 

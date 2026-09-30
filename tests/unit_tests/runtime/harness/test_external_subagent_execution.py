@@ -22,16 +22,29 @@ from openjiuwen.harness.subagent_runtime import (
     SubagentBuildRequest,
     SubagentTurnRequest,
 )
-from openjiuwen.harness_protocol import AgentExecutionSpec, TurnEventKind
+from openjiuwen.harness_protocol import (
+    AgentExecutionSpec,
+    ExecutionAuthorization,
+    ProviderCapability,
+    ProviderCapabilityInventory,
+    ProviderCapabilityKind,
+    TurnEventKind,
+)
 from openjiuwen.harness_providers.io_adapter import ProjectedOutput
 
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
 from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
+from jiuwenswarm.runtime.harness.capability_catalog import compile_capability_catalog
 from jiuwenswarm.runtime.harness.external_subagent import (
     ExternalSubagentExecutionFactory,
 )
 from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
+from jiuwenswarm.runtime.harness.surface import (
+    EffectiveSurfaceSnapshot,
+    build_surface_identity,
+    compile_surface_policy,
+)
 
 
 def _route(
@@ -83,6 +96,48 @@ def _context() -> ParentExecutionContext:
     return ParentExecutionContext(
         parent_session_id="parent-session",
         parent_subject_id="alice",
+    )
+
+
+def _surface_route(tmp_path: Path) -> AdmittedExecutionRoute:
+    route = _route(tmp_path)
+    metadata = {
+        "session_id": "parent-session",
+        "channel_id": "web",
+        "user_id": "alice",
+        "mode": "agent.code.normal",
+        "work_mode": "code",
+        "project_dir": str(route.runtime_paths.project_root),
+        "execution_profile_id": "profile",
+    }
+    identity = build_surface_identity(
+        metadata=metadata,
+        binding=route.bound.binding,
+        paths=route.runtime_paths,
+        channel_id="web",
+    )
+    surface = compile_surface_policy(
+        EffectiveSurfaceSnapshot(identity, metadata["mode"]),
+        authorization=ExecutionAuthorization(),
+        include_personal_context=False,
+    )
+    catalog = compile_capability_catalog(
+        surface,
+        provider_inventory=ProviderCapabilityInventory(
+            "codex",
+            (
+                ProviderCapability(
+                    "filesystem", ProviderCapabilityKind.CATEGORY
+                ),
+            ),
+        ),
+        product_tool_names=("subagent_spawn",),
+        product_subagent_types=("explore_agent",),
+        authorization=ExecutionAuthorization(),
+    )
+    return dataclasses.replace(
+        route,
+        surface=dataclasses.replace(surface, capability_catalog=catalog),
     )
 
 
@@ -208,6 +263,29 @@ async def test_child_inherits_exact_parent_provider_paths_and_gets_new_binding(
 
     await execution.close("test")
     assert session.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_child_inherits_parent_surface_capability_catalog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _surface_route(tmp_path)
+    calls = _install_session_builder(monkeypatch)
+    factory = ExternalSubagentExecutionFactory(
+        route,
+        allowed_subagent_types=("explore_agent",),
+    )
+
+    execution = await factory.create(_request(), _context())
+
+    context = calls[0][1].started_context
+    assert (
+        context.metadata["capability_catalog_fingerprint"]
+        == route.surface.capability_catalog.fingerprint
+    )
+    assert context.metadata["surface"]["work_mode"] == "code"
+    await execution.close("test")
 
 
 @pytest.mark.asyncio

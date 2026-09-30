@@ -219,6 +219,9 @@ class EngineAgentAdapter:
                     else None
                 ),
             )
+            self._surface = getattr(
+                self._subagent_runtime, "surface", self._surface
+            )
             self._tool_gateway = self._subagent_runtime.gateway
 
         async def observe(envelope):

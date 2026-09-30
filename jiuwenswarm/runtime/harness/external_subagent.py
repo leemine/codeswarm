@@ -168,6 +168,7 @@ class ExternalSubagentExecutionFactory:
         self,
         parent_route: AdmittedExecutionRoute,
         *,
+        allowed_subagent_types: tuple[str, ...] | None = None,
         browser_admit: BrowserToolAdmission | None = None,
         browser_artifact_sink: BrowserArtifactSink | None = None,
         browser_decision_id_for: BrowserDecisionId | None = None,
@@ -208,6 +209,16 @@ class ExternalSubagentExecutionFactory:
         self._parent_route = parent_route
         self._parent_binding = binding
         self._parent_spec = parent_route.bound.spec
+        self._work_mode = (
+            parent_route.surface.identity.work_mode
+            if parent_route.surface is not None
+            else None
+        )
+        self._allowed_subagent_types = (
+            frozenset(allowed_subagent_types)
+            if allowed_subagent_types is not None
+            else None
+        )
         self._child_source = ExecutionConfigSource(explicit=self._parent_spec)
         self._browser_admit = browser_admit
         self._browser_artifact_sink = browser_artifact_sink
@@ -431,7 +442,15 @@ class ExternalSubagentExecutionFactory:
             subagent_type=request.subagent_type,
             browser_capabilities=request.browser_capabilities,
             browser_available=self._browser_admit is not None,
+            work_mode=self._work_mode,
         )
+        if (
+            self._allowed_subagent_types is not None
+            and profile.subagent_type not in self._allowed_subagent_types
+        ):
+            raise ValueError(
+                f"External subagent type is not mounted: {profile.subagent_type}"
+            )
         expected_prefix = f"{context.parent_session_id}_sub_"
         if not request.subagent_id.startswith(expected_prefix):
             raise ValueError(

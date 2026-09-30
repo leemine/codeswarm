@@ -118,6 +118,10 @@ def build_external_context(
                 "context_sources_available": context_snapshot.available_sources,
                 "context_sources_unavailable": context_snapshot.unavailable_sources,
             } if policy is not None else {}),
+            **({
+                "capability_catalog": surface.capability_catalog.record(),
+                "capability_catalog_fingerprint": surface.capability_catalog.fingerprint,
+            } if surface is not None and surface.capability_catalog is not None else {}),
             "channel_id": channel_id,
             "project_root": str(paths.project_root),
             "runtime_workspace_root": str(paths.runtime_workspace_root),
