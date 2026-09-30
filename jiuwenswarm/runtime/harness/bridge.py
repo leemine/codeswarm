@@ -1,6 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Opt-in construction entry point; existing chat routing is unchanged."""
 from openjiuwen.harness.engine import HarnessEngine, create_harness_engine
+from openjiuwen.harness_protocol import HarnessRuntimePolicy, WorkspaceAccess
 from openjiuwen.harness_providers.construction import execution_authorization
 
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
@@ -47,6 +48,7 @@ def prepare_execution_session(
     detached_output=None,
     tool_gateway=None,
     recovery: SessionExecutionRecovery | None = None,
+    runtime_policy: HarnessRuntimePolicy | None = None,
 ) -> ExecutionSession:
     """Construct an unstarted External session from one admitted path snapshot."""
     bound = bindings.bind(
@@ -58,7 +60,18 @@ def prepare_execution_session(
     engine = create_harness_engine(bound.spec, binding=bound.binding)
     if engine.binding.provider_id == "native":
         raise ValueError("Native execution must use prepare_native_session")
-    auto_approve_tools = execution_authorization(bound.spec).full_access
+    authorization = execution_authorization(bound.spec)
+    if (
+        runtime_policy is not None
+        and runtime_policy.workspace_access is WorkspaceAccess.FULL_ACCESS
+        and not authorization.full_access
+    ):
+        raise ValueError("runtime policy exceeds the frozen execution authorization")
+    auto_approve_tools = (
+        runtime_policy.workspace_access is WorkspaceAccess.FULL_ACCESS
+        if runtime_policy is not None
+        else authorization.full_access
+    )
     return ExecutionSession(
         engine,
         runtime_paths,

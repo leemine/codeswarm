@@ -24,7 +24,10 @@ from openjiuwen.harness_protocol import HarnessInput, ToolInvocation, TurnEventK
 
 from jiuwenswarm.runtime.harness.bridge import prepare_execution_session
 from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
-from jiuwenswarm.runtime.harness.context_bridge import build_external_context
+from jiuwenswarm.runtime.harness.context_bridge import (
+    build_external_context,
+    build_external_context_snapshot,
+)
 from jiuwenswarm.runtime.harness.execution_session import ExecutionSession
 from jiuwenswarm.runtime.harness.external_subagent_profiles import (
     ExternalSubagentExecutionKind,
@@ -290,6 +293,11 @@ class ExternalSubagentExecutionFactory:
                     browser_resources.gateway if browser_resources is not None else None
                 ),
                 recovery=child_recovery,
+                runtime_policy=(
+                    self._parent_route.surface.runtime_policy
+                    if self._parent_route.surface is not None
+                    else None
+                ),
             )
             child_binding = session.binding
             if (
@@ -305,11 +313,22 @@ class ExternalSubagentExecutionFactory:
                     "External child binding did not inherit the parent scope"
                 )
 
+            parent_surface = self._parent_route.surface
+            context_snapshot = (
+                build_external_context_snapshot(
+                    paths=self._parent_route.runtime_paths,
+                    surface=parent_surface,
+                )
+                if parent_surface is not None
+                else None
+            )
             context_value = build_external_context(
                 paths=self._parent_route.runtime_paths,
                 host_session_id=request.subagent_id,
                 channel_id=self._parent_route.channel_id,
                 provider_id=self._parent_binding.provider_id,
+                surface=parent_surface,
+                context_snapshot=context_snapshot,
             )
             child_prompt = (
                 f"{context_value.system_prompt}\n"

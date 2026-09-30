@@ -24,7 +24,6 @@ from jiuwenswarm.runtime.harness.recovery_store import (
 
 from jiuwenswarm.runtime.harness.surface import (
     EffectiveSurfaceSnapshot, build_surface_identity, validate_surface_request,
-    validate_external_surface_state,
 )
 
 
@@ -115,7 +114,6 @@ def bind_admitted_request_execution(
     mode = None
     if spec.provider_id != "native":
         mode = validate_surface_request(session_metadata, params or {})
-        validate_external_surface_state(mode)
     runtime_paths = bind_session_runtime_workspace(
         internal_workspace_dir=get_agent_workspace_dir(),
         project_dir=project_dir,
@@ -140,7 +138,9 @@ def bind_admitted_request_execution(
             paths=runtime_paths, channel_id=channel_id,
         )
         surface = EffectiveSurfaceSnapshot(identity, mode)
-        surface.validate_mode(mode)
+        # Product context and Provider permissions are compiled by the
+        # adapter after the current host policy switches are known.
+        surface.validate_mode(mode, require_policy=False)
     recovery = SessionExecutionRecovery(
         session_id=session_id,
         execution_profile_id=selected_profile_id,

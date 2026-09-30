@@ -7,11 +7,19 @@ sandbox compilation belong to subsequent slices and are not implied by a mode.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import Any, Mapping
 from pathlib import Path
 
 from openjiuwen.harness.engine import ExecutionBinding
+from openjiuwen.harness_protocol import (
+    ExecutionAuthorization,
+    HarnessRuntimePolicy,
+    RuntimeExecutionState,
+    RuntimeSurface,
+    SourceDiscovery,
+    WorkspaceAccess,
+)
 
 from jiuwenswarm.common.mode_matrix import (
     compose_web_mode,
@@ -197,16 +205,27 @@ def build_surface_identity(
     )
 
 
-def validate_external_surface_state(mode: str) -> None:
-    # A does not yet compile External Plan permissions or Team membership.
-    if mode.endswith(".plan"):
-        raise SurfaceAdmissionError(
-            "External Plan Surface is unavailable until runtime policy compilation is supported"
-        )
+def validate_external_surface_state(
+    mode: str,
+    runtime_policy: HarnessRuntimePolicy | None = None,
+    *,
+    require_policy: bool = True,
+) -> None:
     if mode.startswith("team."):
         raise SurfaceAdmissionError(
             "External Team Surface requires the Team integration"
         )
+    if require_policy and runtime_policy is None:
+        raise SurfaceAdmissionError("External Surface runtime policy is not compiled")
+    if runtime_policy is None:
+        return
+    if runtime_policy.surface.value != mode.split(".")[1]:
+        raise SurfaceAdmissionError("External Surface runtime policy changed Surface")
+    state = mode.rsplit(".", 1)[1]
+    if runtime_policy.execution_state.value != state:
+        raise SurfaceAdmissionError("External Surface runtime policy changed execution state")
+    if state == "plan" and runtime_policy.workspace_access is not WorkspaceAccess.READ_ONLY:
+        raise SurfaceAdmissionError("External Plan Surface must be read-only")
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,8 +233,9 @@ class EffectiveSurfaceSnapshot:
     identity: SessionSurfaceIdentity
     initial_mode: str
     policy_revision: str = "surface-identity-v1"
+    runtime_policy: HarnessRuntimePolicy | None = None
 
-    def validate_mode(self, mode: str) -> None:
+    def validate_mode(self, mode: str, *, require_policy: bool = True) -> None:
         canonical = canonical_surface_mode(
             {"mode": mode, "work_mode": self.identity.work_mode}
         )
@@ -223,4 +243,73 @@ class EffectiveSurfaceSnapshot:
             raise SurfaceAdmissionError(
                 "Surface identity changed; new Session required"
             )
-        validate_external_surface_state(canonical)
+        validate_external_surface_state(
+            canonical,
+            self.runtime_policy,
+            require_policy=require_policy,
+        )
+
+
+_SURFACE_POLICY_REVISION = "r1-11b-v1"
+
+_SURFACE_REQUIREMENTS = {
+    "work": {
+        "memory_sources": ("product_history", "project_memory"),
+        "required_capabilities": (
+            "documents", "web", "artifacts", "browser", "subagents", "memory",
+        ),
+        "artifact_kinds": ("document", "web", "media", "file"),
+    },
+    "code": {
+        "memory_sources": ("product_history", "project_memory", "coding_memory"),
+        "required_capabilities": (
+            "filesystem", "terminal", "git", "diff", "test", "review", "lsp",
+            "browser", "subagents", "memory",
+        ),
+        "artifact_kinds": ("file_change", "diff", "test", "review", "terminal"),
+    },
+}
+
+
+def compile_surface_policy(
+    snapshot: EffectiveSurfaceSnapshot,
+    *,
+    authorization: ExecutionAuthorization,
+    include_personal_context: bool,
+) -> EffectiveSurfaceSnapshot:
+    """Compile one cold-start policy without changing Session identity."""
+
+    mode = canonical_surface_mode(
+        {"mode": snapshot.initial_mode, "work_mode": snapshot.identity.work_mode}
+    )
+    validate_external_surface_state(mode, require_policy=False)
+    state = RuntimeExecutionState(mode.rsplit(".", 1)[1])
+    access = (
+        WorkspaceAccess.READ_ONLY
+        if state is RuntimeExecutionState.PLAN
+        else WorkspaceAccess.FULL_ACCESS
+        if authorization.full_access
+        else WorkspaceAccess.WORKSPACE_WRITE
+    )
+    requirements = _SURFACE_REQUIREMENTS[snapshot.identity.work_mode]
+    context_sources = ["project_rules", "authorized_attachments"]
+    memory_sources = list(requirements["memory_sources"])
+    if include_personal_context:
+        context_sources.append("personal_context")
+        memory_sources.append("personal_context")
+    policy = HarnessRuntimePolicy(
+        revision=_SURFACE_POLICY_REVISION,
+        surface=RuntimeSurface(snapshot.identity.work_mode),
+        execution_state=state,
+        workspace_access=access,
+        context_sources=tuple(context_sources),
+        memory_sources=tuple(memory_sources),
+        required_capabilities=requirements["required_capabilities"],
+        artifact_kinds=requirements["artifact_kinds"],
+        source_discovery=SourceDiscovery.EXPLICIT_ONLY,
+    )
+    return replace(
+        snapshot,
+        policy_revision=policy.revision,
+        runtime_policy=policy,
+    )

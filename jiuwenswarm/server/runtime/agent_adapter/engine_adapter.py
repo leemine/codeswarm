@@ -7,12 +7,14 @@ import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 
 from openjiuwen.harness_providers.output_buffer import OutputBudgetExceeded, OutputText
+from openjiuwen.harness_providers.construction import execution_authorization
 
 from jiuwenswarm.agents.harness.code.rails.heartbeat.tools import HeartbeatRuntimeBridge
 from jiuwenswarm.common.schema.agent import (
@@ -25,6 +27,7 @@ from jiuwenswarm.runtime.context import get_current_runtime
 from jiuwenswarm.runtime.harness.bridge import prepare_execution_session
 from jiuwenswarm.runtime.harness.context_bridge import (
     build_external_context,
+    build_external_context_snapshot,
     build_external_input,
     cleanup_staged_inputs,
 )
@@ -69,6 +72,7 @@ class EngineAgentAdapter:
             raise ValueError("EngineAgentAdapter requires an External provider")
         self._route = route
         self._surface = route.surface
+        self._context_snapshot = None
         self._tool_gateway = tool_gateway
         self._owns_tool_gateway = tool_gateway is None
         self._heartbeat_bridge = HeartbeatRuntimeBridge()
@@ -115,7 +119,10 @@ class EngineAgentAdapter:
         ):
             raise ValueError("External Surface identity changed")
         if route.surface is not None:
-            route.surface.validate_mode(route.surface.initial_mode)
+            route.surface.validate_mode(
+                route.surface.initial_mode,
+                require_policy=route.surface.runtime_policy is not None,
+            )
 
     async def create_instance(
         self,
@@ -138,6 +145,7 @@ class EngineAgentAdapter:
             )
             self._surface = EffectiveSurfaceSnapshot(identity, canonical)
         raw_mode = f"{mode}.{sub_mode}" if sub_mode else mode
+        self._compile_cold_surface_policy()
         self._surface.validate_mode(raw_mode)
         self._surface.validate_mode(self._surface.initial_mode)
         if self._session is not None:
@@ -178,7 +186,7 @@ class EngineAgentAdapter:
                     recovery=self._route.recovery,
                 )
             self._subagent_runtime = ExternalSubagentRuntime(
-                self._route,
+                replace(self._route, surface=self._surface),
                 write_output=self._projection.project_product_chunk,
                 parent_session=self._parent_session,
                 additional_tools=[
@@ -226,6 +234,9 @@ class EngineAgentAdapter:
             detached_output=self._projection,
             tool_gateway=self._tool_gateway,
             recovery=self._route.recovery,
+            runtime_policy=(
+                self._surface.runtime_policy if self._surface is not None else None
+            ),
         )
         if session.binding is not binding:
             raise RuntimeError(
@@ -603,6 +614,7 @@ class EngineAgentAdapter:
             paths=self._route.runtime_paths,
             include_personal_context=self._personal_context_runtime_enabled,
             surface=self._surface,
+            context_snapshot=self._context_snapshot,
         )
         if isinstance(external_input, InteractiveInput):
             if not await session.answer(external_input):
@@ -914,6 +926,7 @@ class EngineAgentAdapter:
         if session is not None and session is self._heartbeat_stopped_session:
             # Construct lazily through the original bridge. Failed construction
             # retains the retired instance so the next request can retry safely.
+            self._compile_cold_surface_policy()
             replacement = self._build_session()
             self._session = session = replacement
             self._heartbeat_stopped_session = None
@@ -933,6 +946,7 @@ class EngineAgentAdapter:
             channel_id=self._route.channel_id,
             provider_id=binding.provider_id,
             surface=self._surface,
+            context_snapshot=self._context_snapshot,
         )
 
     async def _ensure_started(self, session: ExecutionSession) -> None:
@@ -941,6 +955,9 @@ class EngineAgentAdapter:
         async with self._start_lock:
             if session.started:
                 return
+            # Configuration switches change only the next provider cycle. The
+            # snapshot below is then retained for every Turn in that cycle.
+            self._compile_cold_surface_policy()
             binding = session.binding
             await self._projection.replay_product_artifacts()
             await session.start(
@@ -950,8 +967,28 @@ class EngineAgentAdapter:
                     channel_id=self._route.channel_id,
                     provider_id=binding.provider_id,
                     surface=self._surface,
+                    context_snapshot=self._context_snapshot,
                 )
             )
+
+    def _compile_cold_surface_policy(self) -> None:
+        if self._surface is None:
+            # Keep the pre-Surface programmatic adapter contract used by
+            # embedders that construct an ExecutionSession directly. Product
+            # routes admit a Surface before reaching this adapter.
+            self._context_snapshot = None
+            return
+        from jiuwenswarm.runtime.harness.surface import compile_surface_policy
+
+        self._surface = compile_surface_policy(
+            self._surface,
+            authorization=execution_authorization(self._route.bound.spec),
+            include_personal_context=self._personal_context_runtime_enabled,
+        )
+        self._context_snapshot = build_external_context_snapshot(
+            paths=self._route.runtime_paths,
+            surface=self._surface,
+        )
 
     @staticmethod
     def _interaction_answer(params: dict[str, Any]) -> InteractiveInput | None:
