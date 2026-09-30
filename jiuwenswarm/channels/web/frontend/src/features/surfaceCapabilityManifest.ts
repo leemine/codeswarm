@@ -120,6 +120,21 @@ export function isSurfaceCapabilityUsable(
   return state === undefined || state === 'available' || state === 'degraded';
 }
 
+export function resolveCodeSurfaceAvailability(
+  manifest: SurfaceCapabilityManifest | null | undefined,
+  hasCodeSession: boolean,
+): { git: boolean; diff: boolean; review: boolean; visible: boolean } {
+  const git = isSurfaceCapabilityUsable(manifest, 'git');
+  const diff = isSurfaceCapabilityUsable(manifest, 'diff');
+  const review = hasCodeSession && isSurfaceCapabilityUsable(manifest, 'review');
+  return {
+    git,
+    diff,
+    review,
+    visible: hasCodeSession && (git || diff || review),
+  };
+}
+
 export function manifestWarnings(
   manifest: SurfaceCapabilityManifest | null | undefined,
 ): SurfaceCapabilityEntry[] {

@@ -6,6 +6,7 @@ import {
   isSurfaceCapabilityUsable,
   manifestWarnings,
   parseSurfaceCapabilityManifest,
+  resolveCodeSurfaceAvailability,
 } from '../node_modules/.cache/surface-capability-manifest/surfaceCapabilityManifest.mjs';
 
 const ids = [
@@ -51,4 +52,20 @@ test('rejects partial, duplicate, and inconsistent manifests', () => {
   const badReason = manifest();
   badReason.entries.find(entry => entry.id === 'terminal').reason = 'should not exist';
   assert.equal(parseSurfaceCapabilityManifest(badReason), null);
+});
+
+test('keeps Git and Diff usable when Review is unavailable', () => {
+  const value = manifest();
+  value.entries.find(entry => entry.id === 'review').state = 'unavailable';
+  value.entries.find(entry => entry.id === 'review').reason_code = 'provider_unsupported';
+  value.entries.find(entry => entry.id === 'review').reason = 'Review is unsupported';
+  const parsed = parseSurfaceCapabilityManifest(value);
+  assert.ok(parsed);
+  assert.deepEqual(resolveCodeSurfaceAvailability(parsed, true), {
+    git: true,
+    diff: true,
+    review: false,
+    visible: true,
+  });
+  assert.equal(resolveCodeSurfaceAvailability(parsed, false).visible, false);
 });

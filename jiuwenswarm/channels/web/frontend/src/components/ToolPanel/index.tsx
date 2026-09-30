@@ -48,6 +48,7 @@ import {
   getSurfaceCapability,
   isSurfaceCapabilityUsable,
   manifestWarnings,
+  resolveCodeSurfaceAvailability,
 } from '../../features/surfaceCapabilityManifest';
 
 /** 规划/性能模式下把 TodoItem 降级映射为 TeamTask，复用 TaskPlanningPanel 紧凑态样式 */
@@ -273,16 +274,20 @@ export function ToolPanel({
   // 规划/性能模式下复用 TaskPlanningPanel 紧凑态：把 TodoItem 降级为 TeamTask
   const todos = useTodoStore(s => s.runtimes[activeSessionId ?? '']?.todos ?? []);
   const codeProject = project?.work_mode === 'code' && !project.is_default ? project : null;
-  const canReviewCode = Boolean(
-    codeProject
-      && sessionId
-      && sessionId !== 'new'
-      && isSurfaceCapabilityUsable(surfaceCapabilityManifest, 'review'),
+  const hasCodeSession = Boolean(codeProject && sessionId && sessionId !== 'new');
+  const {
+    git: canUseGit,
+    diff: canUseDiff,
+    review: canReviewCode,
+    visible: canInspectCode,
+  } = resolveCodeSurfaceAvailability(
+    surfaceCapabilityManifest,
+    hasCodeSession,
   );
   const codeGitDiffWatch = useCodeGitDiffWatch({
-    projectId: canReviewCode && codeProject ? codeProject.project_id : null,
-    sessionId: canReviewCode && sessionId ? sessionId : null,
-    enabled: canReviewCode,
+    projectId: canInspectCode && codeProject ? codeProject.project_id : null,
+    sessionId: canInspectCode && sessionId ? sessionId : null,
+    enabled: canInspectCode,
   });
   const codeReviewPanel =
     canReviewCode && codeProject && sessionId ? (
@@ -714,7 +719,7 @@ export function ToolPanel({
         </CollapsibleSection>
       ),
     },
-    canReviewCode &&
+    canInspectCode &&
       codeProject &&
       sessionId && {
         key: 'code',
@@ -734,6 +739,9 @@ export function ToolPanel({
               project={codeProject}
               isProcessing={isProcessing}
               diffWatch={codeGitDiffWatch}
+              gitEnabled={canUseGit}
+              diffEnabled={canUseDiff}
+              reviewEnabled={canReviewCode}
               onReview={() => {
                 setCodeReviewTarget?.({ source: 'working_tree' });
                 if (mode === 'team') {
