@@ -168,6 +168,30 @@ export interface MessageForkPoint {
   timestamp: string;
 }
 
+export type SurfaceActivityKind =
+  | 'artifact'
+  | 'browser'
+  | 'code_navigation'
+  | 'diff'
+  | 'file_change'
+  | 'review'
+  | 'subagent'
+  | 'terminal'
+  | 'test'
+  | 'web';
+
+/** Provider-neutral projection carried by live and restored tool events. */
+export interface SurfaceProjection {
+  schemaVersion: 1;
+  kind: SurfaceActivityKind;
+  phase: 'started' | 'updated' | 'completed';
+  surface: 'work' | 'code';
+  toolName: string;
+  itemId: string;
+  status?: string;
+  paths?: string[];
+}
+
 export interface ToolCall {
   id: string;
   name: string;
@@ -180,6 +204,7 @@ export interface ToolCall {
   display_name?: string;
   memberName?: string;
   reviewer?: AutoReviewerMetadata;
+  surfaceProjection?: SurfaceProjection;
 }
 
 export interface ToolResult {
@@ -198,6 +223,7 @@ export interface ToolResult {
   /** 仅 symphony_compose_graph 的合法 planned_graph Mermaid 展示投影。 */
   mermaid?: string;
   reviewer?: AutoReviewerMetadata;
+  surfaceProjection?: SurfaceProjection;
 }
 
 export type ToolExecutionStatus = 'pending' | 'timeout' | 'completed' | 'error';

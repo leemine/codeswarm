@@ -84,6 +84,10 @@ class EngineAgentAdapter:
             route.bound.binding.host_session_id,
             on_detached_terminal=self.complete_detached_turn,
             workspace_root=route.runtime_paths.runtime_workspace_root,
+            work_mode=(route.surface.identity.work_mode if route.surface else None),
+            cwd=route.runtime_paths.cwd,
+            outputs_dir=route.runtime_paths.outputs_dir,
+            provider_id=route.provider_id,
         )
         self._start_lock = asyncio.Lock()
         self._personal_context_runtime_enabled = False
@@ -323,14 +327,11 @@ class EngineAgentAdapter:
 
         if source_session is not self._session:
             return
-        if self._goal_runtime is not None:
-            self._goal_runtime.observe(envelope, source_session=source_session)
-        await self._projection.observe(envelope)
         event = envelope.event
-        if self._ordinary_owner is None or not isinstance(event, TurnLifecycleEvent):
-            return
         if (
-            self._ordinary_turn is None
+            self._ordinary_owner is not None
+            and isinstance(event, TurnLifecycleEvent)
+            and self._ordinary_turn is None
             and self._ordinary_send_attempted
             and event.kind is TurnEventKind.STARTED
         ):
@@ -342,6 +343,11 @@ class EngineAgentAdapter:
                 channel_id=request.channel_id,
                 mode=str((request.params or {}).get("mode") or "unknown"),
             )
+        if self._goal_runtime is not None:
+            self._goal_runtime.observe(envelope, source_session=source_session)
+        await self._projection.observe(envelope)
+        if self._ordinary_owner is None or not isinstance(event, TurnLifecycleEvent):
+            return
         # FAILED/ABORTED (including synthesized aborts) are not proof that the
         # old Provider resources exited. Retain its permit until explicit stop.
         if (

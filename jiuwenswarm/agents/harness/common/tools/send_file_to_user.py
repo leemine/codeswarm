@@ -425,8 +425,8 @@ class SendFileToolkit:
     ) -> str:
         """Deliver a host-validated Artifact without exposing metadata to tools.
 
-        The Browser bridge calls this method only after core has validated and
-        hashed a file under its task-scoped outputs root. It deliberately
+        A Surface bridge calls this method only after its owner has validated
+        and hashed a file under the bound workspace. It deliberately
         reuses this toolkit's download URLs, runtime push, history writer and
         channel fan-out instead of introducing another file service.
         """
