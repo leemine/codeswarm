@@ -161,14 +161,49 @@ the existing product paths. Product MCP and same-engine child-agent tools are
 separate follow-up capabilities and are not implied by selecting an OpenCode
 Single profile.
 
-`context_bridge` builds a per-Turn input snapshot. It reads bounded project
-rules only when their resolved paths remain under the admitted runtime root.
+`context_bridge` freezes project/personal context once per External Provider
+process cycle, then builds each Turn input from that same snapshot plus the
+current authorized attachments. It reads bounded project rules only when their
+resolved paths remain under the admitted runtime root.
 Session uploads are accepted only from that session's upload directory (or
 when already inside the runtime root), bounded by count and byte limits, copied
 to `.jiuwenswarm/session-inputs/<session>/<request>`, and removed on Session
 cleanup. Arbitrary request paths and symlink escapes fail closed. The existing
 fixed PersonalContext publication is read only when its product switch is on;
 the External path does not construct Native rails.
+
+## Work/Code cold-start Surface policy (R1-11B)
+
+The admitted `SessionSurfaceIdentity` remains the Session/Binding identity.
+Immediately before the first Provider start, `compile_surface_policy` combines
+that identity, the current cold-start product switches and the frozen public
+`ExecutionAuthorization` into a provider-neutral `HarnessRuntimePolicy`.
+Work requests knowledge/document/web/artifact semantics; Code requests
+repository/filesystem/terminal/Git/diff/test/review/LSP semantics. These are
+requirements for later capability cataloging, not claims that every tool is
+already installed.
+
+Normal state receives workspace-write unless the admitted authorization already
+permits full access. Plan always narrows to read-only. Project root, cwd and
+outputs come only from the admitted `RuntimeWorkspacePaths`; project rules,
+PersonalContext and attachments are read only from their existing authorized
+sources. Missing enabled cold-start context is recorded as unavailable instead
+of silently mixing old and new bytes. Context and policy remain unchanged for
+every Turn in that Provider cycle; a saved switch or policy update is read only
+when the next cold cycle starts, including recovery. The policy revision and
+fingerprint are audit fields and do not alter Surface or Binding identity.
+
+The core Provider owns private translation and effective verification. Codex
+Surface profiles must disable process-env inheritance and declare trusted
+`startup_source_roots`; full access does not re-enable ambient AGENTS/Skills or
+plugins. OpenCode keeps its sealed runtime root and exact generation permission
+readback. The public layer never writes vendor TOML/JSON. Native retains its
+existing runtime rails and hot-update behavior.
+
+Product capability installation/filtering remains R1-11C, typed output
+projection remains D, and UI/real Provider matrices remain E/F. External Team
+and Work↔Code task conversion are not opened by this slice. Programmatic legacy
+adapters without a product Surface retain their previous context behavior.
 
 The IO adapter remains the sole Provider event consumer and the Turn router
 keeps exactly one output owner. Request-owned output uses the shared stream
