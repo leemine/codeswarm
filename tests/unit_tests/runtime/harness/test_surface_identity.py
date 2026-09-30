@@ -9,12 +9,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from openjiuwen.harness_protocol import ExecutionAuthorization, WorkspaceAccess
 
 from jiuwenswarm.runtime.harness.surface import (
     EffectiveSurfaceSnapshot,
     SurfaceAdmissionError,
     build_surface_identity,
     canonical_surface_mode,
+    compile_surface_policy,
     creation_surface,
     validate_surface_metadata,
     validate_surface_request,
@@ -161,7 +163,7 @@ def test_snapshot_frozen_and_policy_revision_not_recovery_identity(
     new_snapshot = replace(snapshot, policy_revision="new-cold-start-policy")
     _recovery(new_snapshot.identity)
     assert recovery.path.read_bytes() == old_archive
-    with pytest.raises(SurfaceAdmissionError, match="Plan Surface is unavailable"):
+    with pytest.raises(SurfaceAdmissionError, match="runtime policy is not compiled"):
         snapshot.validate_mode("code.plan")
 
 
@@ -224,7 +226,7 @@ def test_concurrent_admission_has_one_surface_winner(tmp_path, recovery_env):
     assert record["surface_identity"] in (identity.record(), rival.record())
 
 
-async def test_adapter_rejects_plan_before_allocating_provider(tmp_path, monkeypatch):
+async def test_adapter_compiles_plan_read_only_before_allocating_provider(tmp_path, monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import (
         EngineAgentAdapter,
     )
@@ -242,9 +244,9 @@ async def test_adapter_rejects_plan_before_allocating_provider(tmp_path, monkeyp
     adapter = EngineAgentAdapter(replace(route, surface=snapshot))
     calls = []
     monkeypatch.setattr(adapter, "_build_session", lambda: calls.append("allocated"))
-    with pytest.raises(SurfaceAdmissionError, match="Plan Surface is unavailable"):
-        await adapter.create_instance(mode="code", sub_mode="plan")
-    assert not calls
+    await adapter.create_instance(mode="code", sub_mode="plan")
+    assert calls == ["allocated"]
+    assert adapter._surface.runtime_policy.workspace_access is WorkspaceAccess.READ_ONLY
 
 
 async def test_request_surface_mismatch_rejected_before_metadata_write(
@@ -319,7 +321,11 @@ def test_effective_surface_is_visible_in_existing_harness_context(tmp_path):
     from jiuwenswarm.runtime.harness.context_bridge import build_external_context
 
     identity = _identity(tmp_path)
-    snapshot = EffectiveSurfaceSnapshot(identity, "agent.code.normal")
+    snapshot = compile_surface_policy(
+        EffectiveSurfaceSnapshot(identity, "agent.code.normal"),
+        authorization=ExecutionAuthorization(),
+        include_personal_context=False,
+    )
     context = build_external_context(
         paths=identity.paths,
         host_session_id="session-1",
@@ -330,3 +336,5 @@ def test_effective_surface_is_visible_in_existing_harness_context(tmp_path):
     assert context.metadata["surface"]["work_mode"] == "code"
     assert context.metadata["surface"]["topology"] == "single"
     assert context.metadata["surface_policy_revision"] == snapshot.policy_revision
+    assert context.runtime_policy is snapshot.runtime_policy
+    assert context.metadata["surface_policy_fingerprint"] == snapshot.runtime_policy.fingerprint
