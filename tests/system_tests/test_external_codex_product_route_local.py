@@ -184,7 +184,9 @@ async def test_real_codex_cli_runs_through_external_product_adapter(
     binary = sdk.client._resolve_codex_bin(sdk.CodexConfig())
     readable = {
         ":minimal": "read",
-        str(root): "read",
+        # Code/normal compiles to workspace-write. Keep the fixture's named
+        # profile aligned while every non-workspace source remains read-only.
+        str(root): "write",
         str(codex_home / "tmp"): "read",
         str(os.path.dirname(binary)): "read",
     }
