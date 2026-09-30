@@ -30,6 +30,36 @@
       "selectAll": "全选"
     }
   },
+  "surfaceCapabilities": {
+    "degraded": "部分任务能力当前不可用",
+    "restartRequired": "能力配置将在重启后生效",
+    "states": {
+      "unavailable": "当前 Provider 不支持此能力",
+      "needs_install": "尚未安装所需运行时",
+      "needs_auth": "需要授权",
+      "degraded": "能力已降级"
+    },
+    "reasons": {
+      "not_installed": "尚未安装所需运行时",
+      "provider_unsupported": "当前 Provider 不支持此能力",
+      "manifest_category_missing": "运行时未报告此能力"
+    },
+    "areas": {
+      "documents": "文档",
+      "web": "网页",
+      "artifacts": "产物",
+      "filesystem": "文件",
+      "terminal": "终端",
+      "git": "Git",
+      "diff": "差异",
+      "test": "测试",
+      "review": "审查",
+      "lsp": "代码导航",
+      "browser": "浏览器",
+      "subagents": "子 Agent",
+      "memory": "记忆"
+    }
+  },
   "a2ui": {
     "generating": "A2UI 界面生成中...",
     "unavailable": "界面内容暂时无法显示，请稍后重试或重新生成结果。",

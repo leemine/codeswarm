@@ -4773,6 +4773,23 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             label="session.plan_status",
         )
 
+    async def _surface_capabilities_get(ws, req_id, params, session_id, user_id=None):
+        """Return the admitted Session's cold-start Surface UI manifest."""
+        from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
+
+        await proxy_unary_request(
+            channel=channel,
+            agent_client=_resolve(agent_client),
+            ws=ws,
+            req_id=req_id,
+            params=params,
+            session_id=session_id,
+            user_id=user_id,
+            req_method=ReqMethod.SURFACE_CAPABILITIES_GET,
+            label="surface.capabilities.get",
+        )
+
     async def _session_create(ws, req_id, params, session_id, user_id=None):
         """创建一个新 session（在 agent/sessions 下创建一个新目录）。
 
@@ -6912,6 +6929,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("session.create", _session_create)
     channel.register_method("session.get_metadata", _session_get_metadata)
     channel.register_method("session.plan_status", _session_plan_status)
+    channel.register_method("surface.capabilities.get", _surface_capabilities_get)
     channel.register_method("session.rename", _session_rename)
     channel.register_method("session.pin", _session_pin)
 

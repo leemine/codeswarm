@@ -262,4 +262,6 @@ def test_web_handler_registered():
     channel = _FakeChannel()
     _register_web_handlers(WebHandlersBindParams(channel=channel))
     assert "session.plan_status" in channel.methods
+    assert "surface.capabilities.get" in channel.methods
     assert ReqMethod.SESSION_PLAN_STATUS.value == "session.plan_status"
+    assert ReqMethod.SURFACE_CAPABILITIES_GET.value == "surface.capabilities.get"

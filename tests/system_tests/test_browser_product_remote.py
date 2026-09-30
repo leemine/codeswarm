@@ -1,9 +1,10 @@
-"""Opt-in Browser product qualification with a real, explicitly supplied model.
+"""Opt-in Browser/Surface qualification with a real, explicitly supplied model.
 
 RUN_BROWSER_PRODUCT_REMOTE=1 and HEARTBEAT_REMOTE_API_BASE/API_KEY/MODEL
 are required. Only synthetic local site content is used. No user configuration
 is discovered. Original Web UI, AgentServer, Gateway, Provider and Browser tools
-perform the work; only the isolated test workspace configuration is customized.
+perform the work. R1-11E runs the same path for the six Single cells
+(``Native/Codex/OpenCode × Work/Code``); only the isolated workspace is customized.
 """
 from __future__ import annotations
 
@@ -94,7 +95,10 @@ def _configure(monkeypatch, chrome: str):
 @pytest.mark.asyncio
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize('provider', ['native', 'codex', 'opencode'])
-async def test_remote_browser_download_original_ui(tmp_path, monkeypatch, synthetic_site, provider):
+@pytest.mark.parametrize('work_mode', ['work', 'code'])
+async def test_remote_browser_download_original_ui(
+    tmp_path, monkeypatch, synthetic_site, provider, work_mode,
+):
     from playwright.async_api import async_playwright, expect
     from .goal_browser_remote_support import browser_services, digest, preflight
 
@@ -102,7 +106,7 @@ async def test_remote_browser_download_original_ui(tmp_path, monkeypatch, synthe
     assert chrome, 'Explicit Browser opt-in requires Chrome'
     output = Path(os.environ.get('BROWSER_PRODUCT_EVIDENCE_DIR', str(tmp_path)))
     output.mkdir(parents=True, exist_ok=True)
-    scope = Path(tempfile.mkdtemp(prefix=f'browser-{provider}-', dir=output))
+    scope = Path(tempfile.mkdtemp(prefix=f'surface-{provider}-{work_mode}-', dir=output))
     monkeypatch.setenv('JIUWENSWARM_DATA_DIR', str(scope / 'data'))
     monkeypatch.setenv('JIUWENSWARM_CONFIG_DIR', str(scope / 'data/config'))
     monkeypatch.setenv('BROWSER_RUNTIME_MCP_ENABLED', '1')
@@ -115,11 +119,20 @@ async def test_remote_browser_download_original_ui(tmp_path, monkeypatch, synthe
     dist = preflight(provider)
     _configure(monkeypatch, chrome)
     site, visits = synthetic_site
-    evidence = {'provider': provider, 'model': os.environ['HEARTBEAT_REMOTE_MODEL'],
+    evidence = {'provider': provider, 'surface': work_mode,
+                'model': os.environ['HEARTBEAT_REMOTE_MODEL'],
                 'frontend_index_sha256': digest(dist / 'index.html'), 'checks': [], 'events': [], 'approvals': []}
-    state = {'final': False}
+    state = {'final': False, 'surface_request_ids': set()}
 
     def observe(socket):
+        def sent(raw):
+            try:
+                frame = json.loads(raw)
+            except (ValueError, TypeError):
+                return
+            if frame.get('method') == 'surface.capabilities.get':
+                state['surface_request_ids'].add(frame.get('id'))
+
         def receive(raw):
             try:
                 frame = json.loads(raw)
@@ -138,6 +151,9 @@ async def test_remote_browser_download_original_ui(tmp_path, monkeypatch, synthe
                 state['error'] = True
             if event == 'chat.ask_user_question':
                 state['question'] = payload
+            if frame.get('id') in state['surface_request_ids'] and frame.get('ok') is True:
+                state['surface_manifest'] = payload.get('surface_capabilities')
+        socket.on('framesent', sent)
         socket.on('framereceived', receive)
 
     try:
@@ -154,10 +170,13 @@ async def test_remote_browser_download_original_ui(tmp_path, monkeypatch, synthe
                         await page.goto(url, wait_until='domcontentloaded')
                         await page.get_by_test_id('model-setup-guide-skip').click()
                         mode = page.get_by_test_id('multi-session-work-mode-label')
-                        if await mode.get_attribute('data-variant') != 'code':
+                        if await mode.get_attribute('data-variant') != work_mode:
                             await page.get_by_test_id('multi-session-work-mode-trigger').click()
-                            await page.get_by_test_id('multi-session-work-mode-menu-code').click()
-                            await wait_code_mode_complete(evidence, 0)
+                            await page.get_by_test_id(
+                                f'multi-session-work-mode-menu-{work_mode}'
+                            ).click()
+                            if work_mode == 'code':
+                                await wait_code_mode_complete(evidence, 0)
                         delegate = ('Use task_tool with subagent_type=browser_agent.' if provider == 'native' else
                                     'Use subagent_spawn with subagent_type=browser_agent. Wait for its result '
                                     'with subagent_wait, then close it with subagent_close after completion. '
@@ -193,6 +212,27 @@ async def test_remote_browser_download_original_ui(tmp_path, monkeypatch, synthe
                         session = await page.get_by_test_id('app-shell').get_attribute('data-session-id')
                         assert session and session != 'new'
                         evidence['session_id'] = session
+                        async with asyncio.timeout(30):
+                            while 'surface_manifest' not in state:
+                                await asyncio.sleep(.05)
+                        manifest = state['surface_manifest']
+                        assert manifest['schema_version'] == 1
+                        assert manifest['provider_id'] == provider
+                        assert manifest['surface'] == work_mode
+                        assert len(manifest['entries']) == 13
+                        assert {entry['state'] for entry in manifest['entries']} <= {
+                            'available', 'unavailable', 'needs_install', 'needs_auth',
+                            'degraded', 'not_applicable',
+                        }
+                        metadata = json.loads(
+                            (data / 'agent/sessions' / session / 'metadata.json').read_text()
+                        )
+                        assert metadata['work_mode'] == work_mode
+                        warning = page.get_by_test_id('tool-panel-capability-warning')
+                        if provider == 'native':
+                            await expect(warning).to_have_count(0)
+                        else:
+                            await expect(warning).to_have_count(1)
                         if provider != 'native':
                             archives = []
                             for archive in (data / 'agent/sessions').rglob('*recovery*.json'):
@@ -217,8 +257,14 @@ async def test_remote_browser_download_original_ui(tmp_path, monkeypatch, synthe
                         download = await result.value
                         assert await download.failure() is None
                         assert Path(await download.path()).read_bytes() == b'R1-10F REAL BROWSER DOWNLOAD'
-                        evidence['checks'].extend(['real_model_browser_navigation_download', 'unique_artifact_after_reload',
-                                                   'original_ui_download_exact_bytes'])
+                        evidence['surface_manifest'] = manifest
+                        evidence['checks'].extend([
+                            'real_model_browser_navigation_download',
+                            'single_surface_manifest_original_ui',
+                            'surface_context_and_workspace_identity',
+                            'unique_artifact_after_reload',
+                            'original_ui_download_exact_bytes',
+                        ])
                         await page.screenshot(path=str(scope / 'success.png'))
                     finally:
                         if not evidence['checks']:

@@ -66,6 +66,7 @@ import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
 } from './features/tool-events/toolEventNormalizer';
+import { parseSurfaceCapabilityManifest } from './features/surfaceCapabilityManifest';
 import { readAgentTemplateName } from './features/agentIdentity';
 import { normalizeTeamLeaderIdentity } from './features/teamLeaderIdentity';
 import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages, useResponsiveLayout, useResponsivePanelResize } from './hooks';
@@ -1056,6 +1057,26 @@ function AppContent({
   const applicationPlugins = applicationPluginState.plugins;
   const visibleApplicationPlugins = enabledApplicationPlugins(applicationPlugins);
   const settingsRequest = useMemo(() => resolveSettingsRequest(request), [request, resolveSettingsRequest]);
+
+  useEffect(() => {
+    if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID || mode === 'team') return;
+    let cancelled = false;
+    const targetSessionId = sessionId;
+    void request<{ surface_capabilities?: unknown }>('surface.capabilities.get', {
+      session_id: targetSessionId,
+    }).then(payload => {
+      if (cancelled || sessionIdRef.current !== targetSessionId) return;
+      const manifest = parseSurfaceCapabilityManifest(payload?.surface_capabilities);
+      if (manifest) {
+        useSessionStore.getState().setSurfaceCapabilityManifest(targetSessionId, manifest);
+      }
+    }).catch(error => {
+      console.warn('Failed to load Surface capability manifest:', error);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isConnected, mode, request, sessionId]);
 
   const applySubagentHistoryReplay = useCallback((sid: string, items: HistorySubagentReplayItem[]) => {
     const subagentStore = useSubagentStore.getState();

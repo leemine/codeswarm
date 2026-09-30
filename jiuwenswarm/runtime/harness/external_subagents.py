@@ -21,6 +21,9 @@ from openjiuwen.harness_providers.construction import (
 from jiuwenswarm.runtime.harness.capability_catalog import (
     compile_capability_catalog,
 )
+from jiuwenswarm.runtime.harness.ui_capability_manifest import (
+    compile_ui_capability_manifest,
+)
 from jiuwenswarm.runtime.harness.external_subagent import (
     ExternalSubagentExecutionFactory,
     SUPPORTED_SUBAGENT_PROVIDERS,
@@ -167,7 +170,11 @@ class ExternalSubagentRuntime:
                 product_subagent_types=allowed_subagent_types or (),
                 authorization=execution_authorization(route.bound.spec),
             )
-            surface = replace(surface, capability_catalog=catalog)
+            surface = replace(
+                surface,
+                capability_catalog=catalog,
+                ui_capability_manifest=compile_ui_capability_manifest(catalog),
+            )
             route = replace(route, surface=surface)
         self._route = route
         self._surface = surface
