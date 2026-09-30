@@ -44,6 +44,12 @@ import { useMinWidth } from '../../hooks/useResponsive';
 import { DesktopBrowserPane } from '../DesktopBrowserPane';
 import './ToolPanel.css';
 import { applicationTasksToTeamTasks, EMPTY_APPLICATION_TASKS, useApplicationTaskStore } from '../../applicationPlugins/taskProgressStore';
+import {
+  getSurfaceCapability,
+  isSurfaceCapabilityUsable,
+  manifestWarnings,
+  resolveCodeSurfaceAvailability,
+} from '../../features/surfaceCapabilityManifest';
 
 /** 规划/性能模式下把 TodoItem 降级映射为 TeamTask，复用 TaskPlanningPanel 紧凑态样式 */
 function todoItemToTeamTask(todo: TodoItem): TeamTask {
@@ -148,6 +154,9 @@ export function ToolPanel({
   const isConnected = useSessionStore((state) => state.isConnected);
   const activeSessionId = useChatStore(s => s.activeSessionId);
   const mode = useSessionStore(s => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
+  const surfaceCapabilityManifest = useSessionStore(
+    s => s.runtimes[activeSessionId ?? '']?.surfaceCapabilityManifest ?? null,
+  );
   const resolvedSessionId = sessionId ?? activeSessionId ?? '';
   const teamMembers = useSessionStore(s => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []);
   const teamHistoryMessages = useSessionStore(s => s.runtimes[activeSessionId ?? '']?.teamHistoryMessages ?? []);
@@ -265,11 +274,20 @@ export function ToolPanel({
   // 规划/性能模式下复用 TaskPlanningPanel 紧凑态：把 TodoItem 降级为 TeamTask
   const todos = useTodoStore(s => s.runtimes[activeSessionId ?? '']?.todos ?? []);
   const codeProject = project?.work_mode === 'code' && !project.is_default ? project : null;
-  const canReviewCode = Boolean(codeProject && sessionId && sessionId !== 'new');
+  const hasCodeSession = Boolean(codeProject && sessionId && sessionId !== 'new');
+  const {
+    git: canUseGit,
+    diff: canUseDiff,
+    review: canReviewCode,
+    visible: canInspectCode,
+  } = resolveCodeSurfaceAvailability(
+    surfaceCapabilityManifest,
+    hasCodeSession,
+  );
   const codeGitDiffWatch = useCodeGitDiffWatch({
-    projectId: canReviewCode && codeProject ? codeProject.project_id : null,
-    sessionId: canReviewCode && sessionId ? sessionId : null,
-    enabled: canReviewCode,
+    projectId: canInspectCode && codeProject ? codeProject.project_id : null,
+    sessionId: canInspectCode && sessionId ? sessionId : null,
+    enabled: canInspectCode,
   });
   const codeReviewPanel =
     canReviewCode && codeProject && sessionId ? (
@@ -311,7 +329,43 @@ export function ToolPanel({
   const hasBrowserAgentActivity = useBrowserAgentActivity(resolvedSessionId);
   const desktopBrowserTabFlags = useDesktopBrowserTabFlags(resolvedSessionId);
   const showBrowserTab =
-    isElectron && !desktopBrowserTabFlags.closed && (hasBrowserAgentActivity || desktopBrowserTabFlags.requested);
+    isElectron
+    && !desktopBrowserTabFlags.closed
+    && (hasBrowserAgentActivity || desktopBrowserTabFlags.requested)
+    && (
+      hasBrowserAgentActivity
+      || isSurfaceCapabilityUsable(surfaceCapabilityManifest, 'browser')
+    );
+  const capabilityWarnings = manifestWarnings(surfaceCapabilityManifest);
+  const showCapabilityWarning = Boolean(
+    surfaceCapabilityManifest
+      && (capabilityWarnings.length > 0 || surfaceCapabilityManifest.restart_required),
+  );
+  const capabilityWarning = showCapabilityWarning ? (
+    <div
+      className="mx-4 my-2 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn"
+      data-testid="tool-panel-capability-warning"
+      data-variant={surfaceCapabilityManifest?.restart_required ? 'restart-required' : surfaceCapabilityManifest?.state}
+    >
+      <div data-testid="tool-panel-capability-warning-title">
+        {surfaceCapabilityManifest?.restart_required
+          ? t('surfaceCapabilities.restartRequired')
+          : t('surfaceCapabilities.degraded')}
+      </div>
+      {capabilityWarnings.map(entry => (
+        <div
+          key={entry.id}
+          data-testid="tool-panel-capability-warning-item"
+          data-variant={entry.id}
+        >
+          {t(`surfaceCapabilities.areas.${entry.id}`)}: {t(
+            `surfaceCapabilities.reasons.${entry.reason_code}`,
+            { defaultValue: t(`surfaceCapabilities.states.${entry.state}`) },
+          )}
+        </div>
+      ))}
+    </div>
+  ) : null;
   const handleTabClose = (tab: string) => {
     if (tab === 'browser') closeDesktopBrowserTab();
   };
@@ -435,6 +489,7 @@ export function ToolPanel({
     return (
       <div data-testid={testId} className="bg-panel h-full overflow-hidden flex-1 flex flex-col min-w-[512px]">
         <div className="h-full bg-panel flex flex-col overflow-hidden">
+          {capabilityWarning}
           <ExpandedPanel
             activeTab={isTeam ? teamAreaActiveTab : singleAgentPanelActiveTab}
             onTabChange={
@@ -664,7 +719,7 @@ export function ToolPanel({
         </CollapsibleSection>
       ),
     },
-    canReviewCode &&
+    canInspectCode &&
       codeProject &&
       sessionId && {
         key: 'code',
@@ -684,6 +739,9 @@ export function ToolPanel({
               project={codeProject}
               isProcessing={isProcessing}
               diffWatch={codeGitDiffWatch}
+              gitEnabled={canUseGit}
+              diffEnabled={canUseDiff}
+              reviewEnabled={canReviewCode}
               onReview={() => {
                 setCodeReviewTarget?.({ source: 'working_tree' });
                 if (mode === 'team') {
@@ -698,7 +756,8 @@ export function ToolPanel({
           </CollapsibleSection>
         ),
       },
-    {
+    (getSurfaceCapability(surfaceCapabilityManifest, 'artifacts')?.state !== 'not_applicable'
+      || artifactsCount > 0) && {
       key: 'artifacts',
       testId: 'tool-panel-artifacts-pane',
       render: () => (
@@ -771,6 +830,7 @@ export function ToolPanel({
   return (
     <div ref={floatingPanelRef} data-testid="tool-panel-collapsed" className="bg-panel py-0 pl-6 pr-4 tool-panel-floating">
       <div className="bg-panel flex flex-col">
+        {capabilityWarning}
         {collapsedSections.map(section => (
           <div key={section.key} data-testid={section.testId}>
             {section.render()}

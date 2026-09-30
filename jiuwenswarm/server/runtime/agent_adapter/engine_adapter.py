@@ -111,6 +111,14 @@ class EngineAgentAdapter:
     def execution_session(self) -> ExecutionSession | None:
         return self._session
 
+    @property
+    def ui_capability_manifest(self):
+        return (
+            self._surface.ui_capability_manifest
+            if self._surface is not None
+            else None
+        )
+
     def bind_route(self, route: AdmittedExecutionRoute) -> None:
         if (
             route.cache_identity != self._route.cache_identity

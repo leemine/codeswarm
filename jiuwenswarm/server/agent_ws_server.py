@@ -2409,6 +2409,9 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.SESSION_PLAN_STATUS:
                 await self._handle_session_plan_status(ws, request, send_lock)
                 return
+            if request.req_method == ReqMethod.SURFACE_CAPABILITIES_GET:
+                await self._handle_surface_capabilities_get(ws, request, send_lock)
+                return
             if request.req_method == ReqMethod.SESSION_INPUT_INTENT:
                 await self._handle_session_input_intent(ws, request, send_lock)
                 return
@@ -4686,6 +4689,103 @@ class AgentWebSocketServer:
                             abort_exc,
                         )
 
+    async def _handle_surface_capabilities_get(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """Return the current cold-start UI manifest without starting a Turn."""
+
+        params = request.params if isinstance(request.params, dict) else {}
+        session_id = str(params.get("session_id") or request.session_id or "").strip()
+        if not session_id:
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": "session_id is required", "code": "BAD_REQUEST"},
+                metadata=request.metadata,
+            )
+        else:
+            metadata = get_session_metadata(
+                session_id,
+                cache_bust=True,
+                enable_writeback=False,
+            )
+            if not isinstance(metadata, dict) or not metadata:
+                response = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": "session not found", "code": "NOT_FOUND"},
+                    metadata=request.metadata,
+                )
+            else:
+                mode = str(metadata.get("mode") or "agent.work.normal").strip()
+                if mode.startswith("team.") or mode == "team":
+                    response = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=False,
+                        payload={
+                            "error": "Team Surface capabilities require R1-11F",
+                            "code": "UNSUPPORTED_MODE",
+                        },
+                        metadata=request.metadata,
+                    )
+                else:
+                    profile_id = metadata.get("execution_profile_id")
+                    manifest = None
+                    if isinstance(profile_id, str) and profile_id.strip():
+                        probe = AgentRequest(
+                            request_id=f"{request.request_id}:surface-capabilities",
+                            channel_id=request.channel_id,
+                            session_id=session_id,
+                            req_method=ReqMethod.SURFACE_CAPABILITIES_GET,
+                            params={"mode": mode},
+                            user_id=str(getattr(request, "user_id", "") or ""),
+                        )
+                        from jiuwenswarm.runtime.request import prepare_chat_turn
+
+                        _, _, agent = await prepare_chat_turn(
+                            self._agent_manager,
+                            probe,
+                            request.channel_id,
+                            sync_metadata=False,
+                        )
+                        adapter = getattr(agent, "_adapter", None)
+                        manifest = getattr(adapter, "ui_capability_manifest", None)
+
+                    if manifest is None:
+                        from openjiuwen.harness_protocol import RuntimeSurface
+
+                        from jiuwenswarm.runtime.harness.ui_capability_manifest import (
+                            compile_native_ui_capability_manifest,
+                        )
+
+                        work_mode = str(metadata.get("work_mode") or "work").strip().lower()
+                        manifest = compile_native_ui_capability_manifest(
+                            RuntimeSurface.CODE
+                            if work_mode == "code"
+                            else RuntimeSurface.WORK
+                        )
+
+                    response = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=True,
+                        payload={
+                            "session_id": session_id,
+                            "surface_capabilities": manifest.record(),
+                            "surface_capabilities_fingerprint": manifest.fingerprint,
+                        },
+                        metadata=request.metadata,
+                    )
+        response.agent_ref = request.agent_ref
+        wire = encode_agent_response_for_wire(response, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
 
     async def _find_team_session_ids(self, team_name: str) -> list[str]:
         sessions_dir = get_agent_sessions_dir()

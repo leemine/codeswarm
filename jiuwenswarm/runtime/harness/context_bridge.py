@@ -122,6 +122,10 @@ def build_external_context(
                 "capability_catalog": surface.capability_catalog.record(),
                 "capability_catalog_fingerprint": surface.capability_catalog.fingerprint,
             } if surface is not None and surface.capability_catalog is not None else {}),
+            **({
+                "ui_capability_manifest": surface.ui_capability_manifest.record(),
+                "ui_capability_manifest_fingerprint": surface.ui_capability_manifest.fingerprint,
+            } if surface is not None and surface.ui_capability_manifest is not None else {}),
             "channel_id": channel_id,
             "project_root": str(paths.project_root),
             "runtime_workspace_root": str(paths.runtime_workspace_root),

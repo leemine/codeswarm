@@ -1,9 +1,10 @@
-"""Opt-in Browser product qualification with a real, explicitly supplied model.
+"""Opt-in Browser/Surface qualification with a real, explicitly supplied model.
 
 RUN_BROWSER_PRODUCT_REMOTE=1 and HEARTBEAT_REMOTE_API_BASE/API_KEY/MODEL
 are required. Only synthetic local site content is used. No user configuration
 is discovered. Original Web UI, AgentServer, Gateway, Provider and Browser tools
-perform the work; only the isolated test workspace configuration is customized.
+perform the work. R1-11E runs the same path for the six Single cells
+(``Native/Codex/OpenCode × Work/Code``); only the isolated workspace is customized.
 """
 from __future__ import annotations
 
@@ -41,7 +42,10 @@ class _Page(BaseHTTPRequestHandler):
             self.send_header('Content-Disposition', 'attachment; filename="result.txt"')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
 
 @pytest.fixture
@@ -69,6 +73,10 @@ def _configure(monkeypatch, chrome: str):
         path = data / 'config/config.yaml'
         config = yaml.safe_load(path.read_text())
         config['browser'] = {'headless': True, 'chrome_path': chrome}
+        if provider == 'codex':
+            provider_config = config['execution']['profiles'][profile]['provider_config']
+            codex_home = Path(provider_config['env']['CODEX_HOME'])
+            provider_config['startup_source_roots'] = [str(root), str(codex_home / 'skills')]
         if provider == 'opencode':
             (data / 'opencode-runtime').mkdir(mode=0o700)
             profile = 'r1-10f-opencode-remote'
@@ -92,9 +100,12 @@ def _configure(monkeypatch, chrome: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(900)
 @pytest.mark.parametrize('provider', ['native', 'codex', 'opencode'])
-async def test_remote_browser_download_original_ui(tmp_path, monkeypatch, synthetic_site, provider):
+@pytest.mark.parametrize('work_mode', ['work', 'code'])
+async def test_remote_browser_download_original_ui(
+    tmp_path, monkeypatch, synthetic_site, provider, work_mode,
+):
     from playwright.async_api import async_playwright, expect
     from .goal_browser_remote_support import browser_services, digest, preflight
 
@@ -102,7 +113,7 @@ async def test_remote_browser_download_original_ui(tmp_path, monkeypatch, synthe
     assert chrome, 'Explicit Browser opt-in requires Chrome'
     output = Path(os.environ.get('BROWSER_PRODUCT_EVIDENCE_DIR', str(tmp_path)))
     output.mkdir(parents=True, exist_ok=True)
-    scope = Path(tempfile.mkdtemp(prefix=f'browser-{provider}-', dir=output))
+    scope = Path(tempfile.mkdtemp(prefix=f'surface-{provider}-{work_mode}-', dir=output))
     monkeypatch.setenv('JIUWENSWARM_DATA_DIR', str(scope / 'data'))
     monkeypatch.setenv('JIUWENSWARM_CONFIG_DIR', str(scope / 'data/config'))
     monkeypatch.setenv('BROWSER_RUNTIME_MCP_ENABLED', '1')
@@ -113,35 +124,59 @@ async def test_remote_browser_download_original_ui(tmp_path, monkeypatch, synthe
                  'PLAYWRIGHT_CDP_URL', 'PLAYWRIGHT_MCP_TARGET_ID', 'PLAYWRIGHT_MCP_TARGET_RESOLVER'):
         monkeypatch.delenv(name, raising=False)
     dist = preflight(provider)
+    context_marker = f'R1-11E-CONTEXT-{provider.upper()}-{work_mode.upper()}'
     _configure(monkeypatch, chrome)
     site, visits = synthetic_site
-    evidence = {'provider': provider, 'model': os.environ['HEARTBEAT_REMOTE_MODEL'],
+    evidence = {'provider': provider, 'surface': work_mode,
+                'model': os.environ['HEARTBEAT_REMOTE_MODEL'],
                 'frontend_index_sha256': digest(dist / 'index.html'), 'checks': [], 'events': [], 'approvals': []}
-    state = {'final': False}
+    state = {
+        'final': False,
+        'surface_request_ids': set(),
+        'project_request_ids': set(),
+        'interrupt_results': [],
+    }
 
     def observe(socket):
+        def sent(raw):
+            try:
+                frame = json.loads(raw)
+            except (ValueError, TypeError):
+                return
+            if frame.get('method') == 'surface.capabilities.get':
+                state['surface_request_ids'].add(frame.get('id'))
+            if frame.get('method') == 'project.create':
+                state['project_request_ids'].add(frame.get('id'))
+
         def receive(raw):
             try:
                 frame = json.loads(raw)
             except (ValueError, TypeError):
                 return
-            event = frame.get('event', '')
             payload = frame.get('payload') or {}
             if not isinstance(payload, dict):
                 return
+            event = frame.get('event', '') or payload.get('event_type', '')
             if event.startswith('chat.'):
                 evidence['events'].append({'event': event, 'session_id': payload.get('session_id'),
                                            'delivery_id': payload.get('delivery_id')})
             if event == 'chat.final':
                 state['final'] = True
             if event == 'chat.error':
-                state['error'] = True
+                state['error'] = payload
             if event == 'chat.ask_user_question':
                 state['question'] = payload
+            if event == 'chat.interrupt_result':
+                state['interrupt_results'].append(payload)
+            if frame.get('id') in state['surface_request_ids'] and frame.get('ok') is True:
+                state['surface_manifest'] = payload.get('surface_capabilities')
+            if frame.get('id') in state['project_request_ids'] and frame.get('ok') is True:
+                state['project'] = payload
+        socket.on('framesent', sent)
         socket.on('framereceived', receive)
 
     try:
-        async with asyncio.timeout(540):
+        async with asyncio.timeout(840):
             async with browser_services(scope, provider) as (url, data):
                 async with async_playwright() as playwright:
                     browser = await playwright.chromium.launch(executable_path=chrome, headless=True)
@@ -154,10 +189,26 @@ async def test_remote_browser_download_original_ui(tmp_path, monkeypatch, synthe
                         await page.goto(url, wait_until='domcontentloaded')
                         await page.get_by_test_id('model-setup-guide-skip').click()
                         mode = page.get_by_test_id('multi-session-work-mode-label')
-                        if await mode.get_attribute('data-variant') != 'code':
+                        if await mode.get_attribute('data-variant') != work_mode:
                             await page.get_by_test_id('multi-session-work-mode-trigger').click()
-                            await page.get_by_test_id('multi-session-work-mode-menu-code').click()
-                            await wait_code_mode_complete(evidence, 0)
+                            await page.get_by_test_id(
+                                f'multi-session-work-mode-menu-{work_mode}'
+                            ).click()
+                            if work_mode == 'code':
+                                await wait_code_mode_complete(evidence, 0)
+                        await page.get_by_test_id('multi-session-new-project-button').click()
+                        await page.get_by_test_id('multi-session-project-create-menu-blank').click()
+                        await page.get_by_test_id('multi-session-project-create-dialog-name').fill(
+                            f'R1-11E {provider} {work_mode}'
+                        )
+                        await page.get_by_test_id('multi-session-project-create-dialog-confirm').click()
+                        async with asyncio.timeout(30):
+                            while 'project' not in state:
+                                await asyncio.sleep(.05)
+                        project = state['project']
+                        project_dir = Path(project['project_dir']).resolve()
+                        assert project['work_mode'] == work_mode
+                        assert project_dir.is_dir()
                         delegate = ('Use task_tool with subagent_type=browser_agent.' if provider == 'native' else
                                     'Use subagent_spawn with subagent_type=browser_agent. Wait for its result '
                                     'with subagent_wait, then close it with subagent_close after completion. '
@@ -169,14 +220,20 @@ async def test_remote_browser_download_original_ui(tmp_path, monkeypatch, synthe
                             'tools to manufacture or download this file. Do not visit any other website. '
                             'Browser permission prompts will be answered by the user. '
                             'After completion report the heading and the download result. If the file was not '
-                            'already delivered by the Browser gateway, use send_file_to_user with its actual path.'
+                            'already delivered by the Browser gateway, use send_file_to_user with its actual path. '
+                            f'In the final response include the exact context token {context_marker}.'
                         )
                         await page.get_by_test_id('chat-panel-input').fill(query)
                         await page.get_by_test_id('chat-panel-input-send').click()
                         approved = set()
                         async with asyncio.timeout(400):
                             while not state['final']:
-                                assert not state.get('error'), 'Product emitted chat.error; inspect isolated service logs'
+                                error = state.get('error')
+                                assert not error, (
+                                    'Product emitted chat.error '
+                                    f'({error.get("code") if isinstance(error, dict) else "unknown"}); '
+                                    'inspect isolated service logs'
+                                )
                                 prompt = page.get_by_test_id('interaction-slot-auth-prompt')
                                 question = state.get('question', {})
                                 request = question.get('request_id')
@@ -193,6 +250,55 @@ async def test_remote_browser_download_original_ui(tmp_path, monkeypatch, synthe
                         session = await page.get_by_test_id('app-shell').get_attribute('data-session-id')
                         assert session and session != 'new'
                         evidence['session_id'] = session
+                        async with asyncio.timeout(30):
+                            while 'surface_manifest' not in state:
+                                await asyncio.sleep(.05)
+                        manifest = state['surface_manifest']
+                        assert manifest['schema_version'] == 1
+                        assert manifest['provider_id'] == provider
+                        assert manifest['surface'] == work_mode
+                        assert len(manifest['entries']) == 13
+                        assert {entry['state'] for entry in manifest['entries']} <= {
+                            'available', 'unavailable', 'needs_install', 'needs_auth',
+                            'degraded', 'not_applicable',
+                        }
+                        evidence['surface_manifest'] = manifest
+                        metadata = json.loads(
+                            (data / 'agent/sessions' / session / 'metadata.json').read_text()
+                        )
+                        assert metadata['work_mode'] == work_mode
+                        assert metadata['project_id'] == project['project_id']
+                        assert Path(metadata['project_dir']).resolve() == project_dir
+                        history_records = [
+                            json.loads(line)
+                            for line in (data / 'agent/sessions' / session / 'history.jsonl').read_text().splitlines()
+                            if line.strip()
+                        ]
+                        assert any(
+                            context_marker in str(record.get('content', ''))
+                            for record in history_records
+                            if record.get('role') == 'assistant'
+                        ), 'Final response did not preserve the parent Turn context'
+                        # The responsive shell may intentionally keep the tool
+                        # panel hidden after a new project/session transition.
+                        # Open it through the shipped UI before asserting the
+                        # manifest projection rather than inspecting a detached
+                        # store or forcing viewport-internal state.
+                        expand = page.get_by_test_id('chat-panel-header-expand-toggle')
+                        if await expand.count():
+                            await expand.click()
+                        await expect(
+                            page.get_by_test_id('tool-panel-expanded-single-agent')
+                        ).to_have_count(1)
+                        warning = page.get_by_test_id('tool-panel-capability-warning')
+                        expects_warning = manifest['restart_required'] or any(
+                            entry['state'] not in {'available', 'not_applicable'}
+                            for entry in manifest['entries']
+                        )
+                        if expects_warning:
+                            await expect(warning).to_have_count(1)
+                        else:
+                            await expect(warning).to_have_count(0)
                         if provider != 'native':
                             archives = []
                             for archive in (data / 'agent/sessions').rglob('*recovery*.json'):
@@ -217,8 +323,37 @@ async def test_remote_browser_download_original_ui(tmp_path, monkeypatch, synthe
                         download = await result.value
                         assert await download.failure() is None
                         assert Path(await download.path()).read_bytes() == b'R1-10F REAL BROWSER DOWNLOAD'
-                        evidence['checks'].extend(['real_model_browser_navigation_download', 'unique_artifact_after_reload',
-                                                   'original_ui_download_exact_bytes'])
+                        state.update(final=False, error=False, question={})
+                        cancel_query = (
+                            'Begin a new, detailed analysis of the completed acceptance run. '
+                            'Do not reuse the previous answer; wait for the user to stop this Turn.'
+                        )
+                        await page.get_by_test_id('chat-panel-input').fill(cancel_query)
+                        await page.get_by_test_id('chat-panel-input-send').click()
+                        stop = page.locator(
+                            '[data-testid="chat-panel-input-send"][data-variant="stop"]'
+                        )
+                        await expect(stop).to_have_count(1, timeout=30_000)
+                        await stop.click()
+                        async with asyncio.timeout(60):
+                            while not any(
+                                item.get('intent') == 'cancel' and item.get('success') is True
+                                for item in state['interrupt_results']
+                            ):
+                                await asyncio.sleep(.05)
+                        await expect(card).to_have_count(1, timeout=30_000)
+                        evidence['interrupt_result'] = next(
+                            item for item in reversed(state['interrupt_results'])
+                            if item.get('intent') == 'cancel'
+                        )
+                        evidence['checks'].extend([
+                            'real_model_browser_navigation_download',
+                            'single_surface_manifest_original_ui',
+                            'surface_context_and_workspace_identity',
+                            'active_parent_turn_cancelled_from_original_ui',
+                            'unique_artifact_after_reload',
+                            'original_ui_download_exact_bytes',
+                        ])
                         await page.screenshot(path=str(scope / 'success.png'))
                     finally:
                         if not evidence['checks']:

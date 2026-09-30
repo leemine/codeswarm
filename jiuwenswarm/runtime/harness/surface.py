@@ -32,6 +32,9 @@ if TYPE_CHECKING:
     from jiuwenswarm.runtime.harness.capability_catalog import (
         EffectiveCapabilityCatalog,
     )
+    from jiuwenswarm.runtime.harness.ui_capability_manifest import (
+        UICapabilityManifest,
+    )
 
 
 class SurfaceAdmissionError(ValueError):
@@ -240,6 +243,7 @@ class EffectiveSurfaceSnapshot:
     policy_revision: str = "surface-identity-v1"
     runtime_policy: HarnessRuntimePolicy | None = None
     capability_catalog: "EffectiveCapabilityCatalog | None" = None
+    ui_capability_manifest: "UICapabilityManifest | None" = None
 
     def validate_mode(self, mode: str, *, require_policy: bool = True) -> None:
         canonical = canonical_surface_mode(

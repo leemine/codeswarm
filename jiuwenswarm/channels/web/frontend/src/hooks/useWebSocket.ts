@@ -119,6 +119,7 @@ import {
 import { readAgentTemplateName } from '../features/agentIdentity';
 import { normalizeTeamLeaderIdentity } from '../features/teamLeaderIdentity';
 import { NEW_CONVERSATION_ID } from '../multi-session/state/newConversationLifecycle';
+import { parseSurfaceCapabilityManifest } from '../features/surfaceCapabilityManifest';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
@@ -3827,6 +3828,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // 不当作错误、不重试、不新增消息（文档 §6.1）。
         const sessionId = getPayloadSessionId(payload);
         if (!sessionId) return;
+        const surfaceCapabilities = parseSurfaceCapabilityManifest(payload.surface_capabilities);
+        if (surfaceCapabilities) {
+          useSessionStore.getState().setSurfaceCapabilityManifest(
+            sessionId,
+            surfaceCapabilities,
+          );
+        }
         const pendingAction = useGoalStore.getState().runtimes[sessionId]?.pendingAction;
         if (pendingAction === 'resume' || pendingAction === 'set') {
           useGoalStore.getState().setPendingAction(sessionId, null);

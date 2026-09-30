@@ -15,6 +15,7 @@ interface CodeCommitPushControlProps {
   isGit: boolean;
   transient: boolean;
   isProcessing: boolean;
+  capabilityAvailable?: boolean;
   variant: 'environment' | 'review';
   onSuccess: () => void | Promise<void>;
 }
@@ -35,6 +36,7 @@ export function CodeCommitPushControl({
   isGit,
   transient,
   isProcessing,
+  capabilityAvailable = true,
   variant,
   onSuccess,
 }: CodeCommitPushControlProps) {
@@ -118,14 +120,16 @@ export function CodeCommitPushControl({
   const includesPush = operationIncludesPush(operation);
   const resolvedCommitMessage = message.trim() || defaultCommitMessage(filesChanged);
   const isUnbornHead = Boolean(status?.repo.is_git && currentBranch && !status.repo.head);
-  const triggerDisabled = isProcessing || !isGit || transient;
-  const disabledReason = isProcessing
-    ? '当前任务执行中，请停止后再操作'
-    : !isGit
-      ? '当前项目不是 Git 仓库'
-      : transient
-        ? '仓库正在执行其他 Git 操作'
-        : '提交或推送';
+  const triggerDisabled = !capabilityAvailable || isProcessing || !isGit || transient;
+  const disabledReason = !capabilityAvailable
+    ? '当前 Surface 不提供 Git 能力'
+    : isProcessing
+      ? '当前任务执行中，请停止后再操作'
+      : !isGit
+        ? '当前项目不是 Git 仓库'
+        : transient
+          ? '仓库正在执行其他 Git 操作'
+          : '提交或推送';
   const canSubmit = Boolean(
     status && !loading && !submitting && !creatingBranch && (!includesCommit || repositoryHasChanges) && (!includesPush || (selectedBranch && remote.trim())),
   );

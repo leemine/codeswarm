@@ -30,6 +30,36 @@
       "selectAll": "Select All"
     }
   },
+  "surfaceCapabilities": {
+    "degraded": "Some task capabilities are unavailable",
+    "restartRequired": "Capability updates will apply after restart",
+    "states": {
+      "unavailable": "Provider does not support this capability",
+      "needs_install": "Required runtime is not installed",
+      "needs_auth": "Authorization is required",
+      "degraded": "Capability is degraded"
+    },
+    "reasons": {
+      "not_installed": "Required runtime is not installed",
+      "provider_unsupported": "Provider does not support this capability",
+      "manifest_category_missing": "Runtime did not report this capability"
+    },
+    "areas": {
+      "documents": "Documents",
+      "web": "Web",
+      "artifacts": "Artifacts",
+      "filesystem": "Files",
+      "terminal": "Terminal",
+      "git": "Git",
+      "diff": "Diff",
+      "test": "Tests",
+      "review": "Review",
+      "lsp": "Code navigation",
+      "browser": "Browser",
+      "subagents": "Subagents",
+      "memory": "Memory"
+    }
+  },
   "a2ui": {
     "generating": "Generating A2UI interface...",
     "unavailable": "The interface cannot be displayed right now. Please try again or regenerate the result.",

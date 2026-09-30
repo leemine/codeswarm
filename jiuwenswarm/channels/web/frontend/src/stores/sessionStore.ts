@@ -40,6 +40,7 @@ import {
   normalizeTeamLeaderIdentity,
   type TeamLeaderIdentity,
 } from '../features/teamLeaderIdentity';
+import type { SurfaceCapabilityManifest } from '../features/surfaceCapabilityManifest';
 
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
 const MODEL_STORAGE_KEY = 'jiuwenclaw_selected_model';
@@ -528,6 +529,8 @@ export interface SessionRuntime {
   swarmflowBudget: number | null;
   /** SwarmFlow 工作流运行列表（树视图渲染） */
   workflowRuns: WorkflowRun[];
+  /** Cold-start effective capability snapshot supplied by the Runtime. */
+  surfaceCapabilityManifest: SurfaceCapabilityManifest | null;
 }
 
 function createEmptyRuntime(sessionId?: string): SessionRuntime {
@@ -562,6 +565,7 @@ function createEmptyRuntime(sessionId?: string): SessionRuntime {
     enableSwarmflow: false,
     swarmflowBudget: null,
     workflowRuns: [],
+    surfaceCapabilityManifest: null,
   };
 }
 
@@ -604,6 +608,10 @@ interface SessionState {
   setMode: (sessionId: string, mode: AgentMode) => void;
   setProjectDirectory: (sessionId: string, directory: string | null) => void;
   setPersistSession: (sessionId: string, enabled: boolean) => void;
+  setSurfaceCapabilityManifest: (
+    sessionId: string,
+    manifest: SurfaceCapabilityManifest,
+  ) => void;
   setTeamTaskEvents: (sessionId: string, events: TeamTaskEvent[]) => void;
   addTeamTaskEvent: (sessionId: string, event: TeamTaskEvent) => void;
   setTeamTasks: (sessionId: string, tasks: TeamTask[]) => void;
@@ -881,6 +889,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         runtimes: {
           ...state.runtimes,
           [sessionId]: { ...runtime, persistSession: Boolean(enabled) },
+        },
+      };
+    });
+  },
+
+  setSurfaceCapabilityManifest: (sessionId, manifest) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, surfaceCapabilityManifest: manifest },
         },
       };
     });

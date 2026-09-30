@@ -3350,6 +3350,27 @@ class JiuWenSwarm:
         history_failed = False
         try:
             async for chunk in stream:
+                payload = chunk.payload if isinstance(chunk.payload, dict) else None
+                if payload is not None and payload.get("event_type") == "runtime.accepted":
+                    manifest = getattr(self._adapter, "ui_capability_manifest", None)
+                    if manifest is None:
+                        from openjiuwen.harness_protocol import RuntimeSurface
+
+                        from jiuwenswarm.runtime.harness.ui_capability_manifest import (
+                            compile_native_ui_capability_manifest,
+                        )
+
+                        manifest = compile_native_ui_capability_manifest(
+                            RuntimeSurface.CODE
+                            if self._adapter_mode_for_request(request) == "code"
+                            else RuntimeSurface.WORK
+                        )
+                    chunk.payload = {
+                        **payload,
+                        "session_id": request.session_id,
+                        "surface_capabilities": manifest.record(),
+                        "surface_capabilities_fingerprint": manifest.fingerprint,
+                    }
                 yield chunk
         except Exception:
             history_failed = True
