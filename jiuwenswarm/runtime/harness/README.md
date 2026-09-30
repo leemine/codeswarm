@@ -200,10 +200,28 @@ plugins. OpenCode keeps its sealed runtime root and exact generation permission
 readback. The public layer never writes vendor TOML/JSON. Native retains its
 existing runtime rails and hot-update behavior.
 
-Product capability installation/filtering remains R1-11C, typed output
-projection remains D, and UI/real Provider matrices remain E/F. External Team
-and Work↔Code task conversion are not opened by this slice. Programmatic legacy
-adapters without a product Surface retain their previous context behavior.
+## Effective Tool/subagent catalog (R1-11C)
+
+Each External Provider cycle now compiles one `EffectiveCapabilityCatalog`
+before allocating Provider or child resources. It merges the authoritative
+`ProductToolGateway` namespace, the Codex/OpenCode private configured inventory
+and the product `subagent_runtime` profiles. Work mounts general/research
+delegation; Code mounts general/explore/plan/code delegation; Browser is added
+only when the host admission adapter exists. Reverse-Surface requests and a
+Provider-native tool that shadows an authoritative product tool fail closed.
+
+The catalog is immutable for the cycle, is projected into parent and child
+contexts with one fingerprint, and is rebuilt from admitted configuration and
+mounted adapters on recovery instead of trusting a persisted record. Missing
+required semantics retain a structured `not_installed` or
+`provider_unsupported` explanation; available actions separately record when
+host authorization is still required. These records do not grant permission
+and do not replace the Provider's native Skill/plugin/MCP loader validation.
+
+Typed output projection remains R1-11D, and UI/real Provider matrices remain
+E/F. External Team and Work↔Code task conversion are not opened by this slice.
+Programmatic legacy adapters without a product Surface retain their previous
+context and subagent compatibility behavior.
 
 The IO adapter remains the sole Provider event consumer and the Turn router
 keeps exactly one output owner. Request-owned output uses the shared stream
