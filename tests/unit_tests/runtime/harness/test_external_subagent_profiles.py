@@ -13,6 +13,7 @@ from jiuwenswarm.runtime.harness.external_subagent_profiles import (
     ExternalSubagentProfileUnavailableError,
     render_external_subagent_catalog,
     resolve_external_subagent_profile,
+    surface_external_subagent_profiles,
     validate_external_subagent_request,
 )
 
@@ -24,19 +25,55 @@ def test_catalog_advertises_only_general_purpose_until_browser_is_ready() -> Non
         if profile.advertised
     }
 
-    assert advertised == {GENERAL_PURPOSE_SUBAGENT_TYPE}
+    assert advertised == {
+        GENERAL_PURPOSE_SUBAGENT_TYPE,
+        "research_agent",
+        "explore_agent",
+        "plan_agent",
+        "code_agent",
+    }
     assert (
         EXTERNAL_SUBAGENT_PROFILES[BROWSER_SUBAGENT_TYPE].execution_kind
         is ExternalSubagentExecutionKind.BROWSER
     )
     description = render_external_subagent_catalog()
     assert "general-purpose" in description
+    assert "research_agent" not in description
+    assert "code_agent" not in description
     assert "browser_agent" not in description
     assert "explore_agent" not in description
 
-    admitted_description = render_external_subagent_catalog(browser_available=True)
+    admitted_description = render_external_subagent_catalog(
+        work_mode="code", browser_available=True
+    )
     assert "general-purpose" in admitted_description
     assert "browser_agent" in admitted_description
+    assert "code_agent" in admitted_description
+    assert "research_agent" not in admitted_description
+
+
+def test_surface_catalog_mounts_only_matching_product_profiles() -> None:
+    work = {
+        profile.subagent_type
+        for profile in surface_external_subagent_profiles(
+            "work", browser_available=True
+        )
+    }
+    code = {
+        profile.subagent_type
+        for profile in surface_external_subagent_profiles(
+            "code", browser_available=True
+        )
+    }
+
+    assert work == {"general-purpose", "research_agent", "browser_agent"}
+    assert code == {
+        "general-purpose",
+        "explore_agent",
+        "plan_agent",
+        "code_agent",
+        "browser_agent",
+    }
 
 
 @pytest.mark.parametrize(
@@ -95,6 +132,21 @@ def test_admitted_browser_profile_rejects_unknown_capability() -> None:
             subagent_type=BROWSER_SUBAGENT_TYPE,
             browser_capabilities=("unknown-browser-capability",),
             browser_available=True,
+        )
+
+
+def test_reverse_surface_profile_fails_closed() -> None:
+    with pytest.raises(ExternalSubagentProfileUnavailableError, match="not mounted"):
+        validate_external_subagent_request(
+            subagent_type="research_agent",
+            browser_capabilities=None,
+            work_mode="code",
+        )
+    with pytest.raises(ExternalSubagentProfileUnavailableError, match="not mounted"):
+        validate_external_subagent_request(
+            subagent_type="code_agent",
+            browser_capabilities=None,
+            work_mode="work",
         )
 
 

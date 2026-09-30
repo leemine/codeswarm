@@ -94,6 +94,7 @@ async def test_gateway_delegates_original_tool_under_bound_scope(tmp_path: Path)
     )
 
     assert [item.name for item in definitions] == ["echo"]
+    assert gateway.tool_names == ("echo",)
     assert definitions[0].input_schema["required"] == ("value",)
     assert result.content == "hello"
     assert result.is_error is False
