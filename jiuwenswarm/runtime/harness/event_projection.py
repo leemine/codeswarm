@@ -22,6 +22,7 @@ from openjiuwen.harness_providers.io_adapter import ProjectedOutput
 from openjiuwen.harness_providers.output_buffer import OutputBudget, OutputBudgetExceeded, OutputText
 
 from jiuwenswarm.runtime.host_services import send_runtime_push
+from jiuwenswarm.runtime.harness.surface_projection import SurfaceResultProjection
 from jiuwenswarm.runtime.terminal_outcome import harness_terminal_payload
 from jiuwenswarm.server.runtime.session.history_io import run_history_io
 from jiuwenswarm.server.runtime.session.session_history import (
@@ -39,6 +40,7 @@ from jiuwenswarm.server.utils.stream_utils import parse_stream_chunk
 logger = logging.getLogger(__name__)
 _HISTORY_PERSISTENCE_UNCONFIRMED = "HISTORY_PERSISTENCE_UNCONFIRMED"
 _DELIVERY_UNCONFIRMED = "DETACHED_DELIVERY_UNCONFIRMED"
+_SURFACE_PERSISTENCE_UNCONFIRMED = "SURFACE_PERSISTENCE_UNCONFIRMED"
 _TERMINAL_TOMBSTONES = 1024
 _DURABLE_EVENT_TYPES = frozenset(
     {
@@ -78,6 +80,10 @@ class ExternalEventProjection:
         self, session_id: str, *,
         on_detached_terminal: Callable[[str], Awaitable[None]] | None = None,
         workspace_root: Path | None = None,
+        work_mode: str | None = None,
+        cwd: Path | None = None,
+        outputs_dir: Path | None = None,
+        provider_id: str = "",
     ) -> None:
         self._session_id = session_id
         self._on_detached_terminal = on_detached_terminal
@@ -90,6 +96,24 @@ class ExternalEventProjection:
         self._terminal_cancellations: dict[str, str | None] = {}
         self._terminated_turns: set[str] = set()
         self._terminal_order: deque[str] = deque()
+        self._surface_projection = (
+            SurfaceResultProjection(
+                session_id,
+                work_mode=work_mode,
+                workspace_root=self._workspace_root,
+                cwd=cwd,
+                outputs_dir=outputs_dir,
+                provider_id=provider_id,
+                artifact_sink=self.publish_product_artifact,
+            )
+            if (
+                work_mode in {"work", "code"}
+                and self._workspace_root is not None
+                and cwd is not None
+                and provider_id
+            )
+            else None
+        )
 
     async def observe(self, envelope: HarnessEvent) -> None:
         """Retain normalized terminal failures before IO projection drops them."""
@@ -98,6 +122,8 @@ class ExternalEventProjection:
         event = envelope.event
         if turn_id in self._terminated_turns:
             return
+        if self._surface_projection is not None:
+            await self._surface_projection.observe(envelope)
         if turn_id and isinstance(event, TurnLifecycleEvent) and event.result is not None:
             if len(self._terminal_errors) + len(self._terminal_cancellations) >= self._max_turns:
                 raise OutputBudgetExceeded("terminal detail count budget exhausted")
@@ -143,6 +169,8 @@ class ExternalEventProjection:
                 goal_id=goal_id,
             ),
         )
+        if self._surface_projection is not None:
+            self._surface_projection.register_turn(turn_id)
 
     def owned_payload(self, item: ProjectedOutput) -> dict[str, Any] | None:
         """Parse owned output and retain its prefix for a possible handoff."""
@@ -177,6 +205,7 @@ class ExternalEventProjection:
                 item.chunk,
                 _has_streamed_content=bool(state and state.text),
             )
+            payload = self._with_surface_activity(item, payload)
             if state is not None and state.goal_attempt and payload is not None:
                 if payload.get("event_type") == "chat.error":
                     state.pending_terminal = payload
@@ -198,6 +227,25 @@ class ExternalEventProjection:
                 error_code=self._terminal_error_codes.pop(turn_id, None),
                 cancellation=self._terminal_cancellations.pop(turn_id, None),
             )
+            summary = (
+                self._surface_projection.summary(turn_id)
+                if self._surface_projection is not None
+                else None
+            )
+            if summary is not None:
+                payload = {**payload, "surface_projection": summary.record()}
+                if (
+                    summary.status == "unconfirmed"
+                    and payload.get("event_type") == "chat.final"
+                ):
+                    payload = {
+                        "event_type": "chat.error",
+                        "error": "Surface result persistence could not be confirmed",
+                        "code": _SURFACE_PERSISTENCE_UNCONFIRMED,
+                        "terminal_status": "failed",
+                        "provider_terminal_status": "completed",
+                        "surface_projection": summary.record(),
+                    }
             if state is not None and state.goal_attempt:
                 state.pending_terminal = payload
                 return None
@@ -314,6 +362,8 @@ class ExternalEventProjection:
         self._terminal_cancellations.clear()
         self._terminated_turns.clear()
         self._terminal_order.clear()
+        if self._surface_projection is not None:
+            self._surface_projection.close()
 
     def _remember_terminal(self, turn_id: str) -> None:
         self._terminal_errors.pop(turn_id, None)
@@ -326,6 +376,44 @@ class ExternalEventProjection:
             self._terminated_turns.discard(expired)
         self._terminal_order.append(turn_id)
         self._terminated_turns.add(turn_id)
+        if self._surface_projection is not None:
+            self._surface_projection.forget(turn_id)
+
+    def _with_surface_activity(
+        self,
+        item: ProjectedOutput,
+        payload: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if payload is None or self._surface_projection is None or not item.turn_id:
+            return payload
+        event_type = payload.get("event_type")
+        tool: dict[str, Any] | None = None
+        if event_type == "chat.tool_call":
+            candidate = payload.get("tool_call")
+            tool = candidate if isinstance(candidate, dict) else None
+            item_id = tool.get("tool_call_id") if tool is not None else None
+        elif event_type == "chat.tool_result":
+            item_id = payload.get("tool_call_id")
+        else:
+            return payload
+        if not isinstance(item_id, str) or not item_id:
+            return payload
+        activity = self._surface_projection.activity(item.turn_id, item_id)
+        if activity is None:
+            return payload
+        record = activity.record()
+        if event_type == "chat.tool_call" and tool is not None:
+            return {**payload, "tool_call": {**tool, "surface_projection": record}}
+        payload = {**payload, "surface_projection": record}
+        if activity.status:
+            payload.setdefault("status", activity.status)
+            payload.setdefault(
+                "success", activity.status not in {
+                    "blocked", "declined", "denied", "error", "failed",
+                    "failure", "rejected",
+                },
+            )
+        return payload
 
     async def project_product_chunk(self, chunk: Any) -> None:
         """Reuse the Native subagent parser/history seam for product events."""
@@ -386,7 +474,7 @@ class ExternalEventProjection:
         artifact: Artifact,
         file_path: Path,
     ) -> None:
-        """Deliver one core-projected Browser Artifact through the file service."""
+        """Deliver one host-projected Surface Artifact through the file service."""
 
         workspace = self._workspace_root
         if workspace is None:

@@ -1318,6 +1318,7 @@ function AppContent({
             display_name: n.display_name,
             memberName: n.memberName,
             reviewer: n.reviewer,
+            surfaceProjection: n.surfaceProjection,
           },
           {
             startedAt: item.at,
@@ -1341,6 +1342,7 @@ function AppContent({
             ...(n.timedOut ? { timedOut: true } : {}),
             ...(n.beamSearch ? { beamSearch: n.beamSearch } : {}),
             reviewer: n.reviewer,
+            surfaceProjection: n.surfaceProjection,
           },
           { updatedAt: item.at }
         );
@@ -2286,6 +2288,7 @@ function AppContent({
                 display_name: n.display_name,
                 memberName: n.memberName,
                 reviewer: n.reviewer,
+                surfaceProjection: n.surfaceProjection,
               },
               {
                 startedAt: item.at,
@@ -2309,6 +2312,7 @@ function AppContent({
                 ...(n.timedOut ? { timedOut: true } : {}),
                 ...(n.beamSearch ? { beamSearch: n.beamSearch } : {}),
                 reviewer: n.reviewer,
+                surfaceProjection: n.surfaceProjection,
               },
               { updatedAt: item.at }
             );

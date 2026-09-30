@@ -1,6 +1,7 @@
 import { parseSkillTreePath, type SkillTreePath } from '../../types/skillTree';
 import { parseBeamSearchProgress, type BeamSearchProgress } from '../../types/beamSearch';
 import type { AutoReviewerMetadata } from '../../types';
+import type { SurfaceActivityKind, SurfaceProjection } from '../../types/message';
 import {
   effectiveReviewerStatus,
   normalizeReviewerMetadata,
@@ -58,6 +59,60 @@ function asRecord(value: unknown): UnknownPayload | null {
     return null;
   }
   return value as UnknownPayload;
+}
+
+const SURFACE_ACTIVITY_KINDS = new Set<SurfaceActivityKind>([
+  'artifact',
+  'browser',
+  'code_navigation',
+  'diff',
+  'file_change',
+  'review',
+  'subagent',
+  'terminal',
+  'test',
+  'web',
+]);
+
+function normalizeSurfaceProjection(...values: unknown[]): SurfaceProjection | undefined {
+  for (const value of values) {
+    const record = asRecord(value);
+    const kind = record?.kind;
+    const phase = record?.phase;
+    const surface = record?.surface;
+    const toolName = record?.tool_name;
+    const itemId = record?.item_id;
+    if (
+      record?.schema_version !== 1 ||
+      typeof kind !== 'string' ||
+      !SURFACE_ACTIVITY_KINDS.has(kind as SurfaceActivityKind) ||
+      !['started', 'updated', 'completed'].includes(String(phase)) ||
+      !['work', 'code'].includes(String(surface)) ||
+      typeof toolName !== 'string' ||
+      !toolName ||
+      typeof itemId !== 'string' ||
+      !itemId
+    ) {
+      continue;
+    }
+    const status = typeof record.status === 'string' && record.status
+      ? record.status
+      : undefined;
+    const paths = Array.isArray(record.paths) && record.paths.every(path => typeof path === 'string')
+      ? record.paths as string[]
+      : undefined;
+    return {
+      schemaVersion: 1,
+      kind: kind as SurfaceActivityKind,
+      phase: phase as SurfaceProjection['phase'],
+      surface: surface as SurfaceProjection['surface'],
+      toolName,
+      itemId,
+      ...(status ? { status } : {}),
+      ...(paths?.length ? { paths } : {}),
+    };
+  }
+  return undefined;
 }
 
 function parseArguments(raw: unknown): Record<string, unknown> {
@@ -229,6 +284,7 @@ export interface NormalizedToolCall {
   display_name?: string;
   memberName?: string;
   reviewer?: AutoReviewerMetadata;
+  surfaceProjection?: SurfaceProjection;
 }
 
 export interface NormalizedToolResult {
@@ -246,6 +302,7 @@ export interface NormalizedToolResult {
   /** 仅 symphony_compose_graph 的合法 planned_graph 前端展示投影。 */
   mermaid?: string;
   reviewer?: AutoReviewerMetadata;
+  surfaceProjection?: SurfaceProjection;
 }
 
 export interface NormalizedToolUpdate {
@@ -285,6 +342,10 @@ export function normalizeToolCallPayload(payload: UnknownPayload): NormalizedToo
     display_name,
     memberName,
     reviewer: normalizeReviewerMetadata(payload),
+    surfaceProjection: normalizeSurfaceProjection(
+      toolCallPayload.surface_projection,
+      payload.surface_projection,
+    ),
   };
 }
 
@@ -397,6 +458,10 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
     beamSearch,
     ...(mermaid ? { mermaid } : {}),
     reviewer,
+    surfaceProjection: normalizeSurfaceProjection(
+      toolResultPayload.surface_projection,
+      payload.surface_projection,
+    ),
   };
 }
 

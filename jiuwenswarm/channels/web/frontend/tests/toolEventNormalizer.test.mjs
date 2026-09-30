@@ -187,3 +187,44 @@ test('normalizeToolCallPayload reads call_goal and callGoal without inventing fr
   assert.equal(legacyDisplay.call_goal, undefined);
   assert.equal(legacyDisplay.display_name, '读取 foo.py');
 });
+
+test('normalized tool events preserve valid Surface projection and reject malformed metadata', () => {
+  const projection = {
+    schema_version: 1,
+    kind: 'test',
+    phase: 'started',
+    surface: 'code',
+    tool_name: 'shell',
+    item_id: 'item-1',
+    paths: ['tests/test_app.py'],
+  };
+  const call = normalizeToolCallPayload({
+    tool_call: {
+      name: 'shell',
+      tool_call_id: 'item-1',
+      surface_projection: projection,
+    },
+  });
+  const result = normalizeToolResultPayload({
+    tool_name: 'shell',
+    tool_call_id: 'item-1',
+    result: 'passed',
+    surface_projection: { ...projection, phase: 'completed', status: 'completed' },
+  });
+
+  assert.deepEqual(call.surfaceProjection, {
+    schemaVersion: 1,
+    kind: 'test',
+    phase: 'started',
+    surface: 'code',
+    toolName: 'shell',
+    itemId: 'item-1',
+    paths: ['tests/test_app.py'],
+  });
+  assert.equal(result.surfaceProjection.phase, 'completed');
+  assert.equal(result.surfaceProjection.status, 'completed');
+  assert.equal(normalizeToolCallPayload({
+    name: 'shell',
+    surface_projection: { ...projection, kind: 'provider_private' },
+  }).surfaceProjection, undefined);
+});
