@@ -2975,3 +2975,55 @@ class TestRebindSessionProjectConcurrency:
         assert ch.get("cwd") == "/new/dir"
         # 陈旧快照的非 project 字段 (message_count) 应被保留
         assert after["message_count"] == 1
+
+@pytest.mark.parametrize('mode', ['team.work.normal', 'team.code.normal'])
+def test_external_team_first_assignment_freezes_creation_identity(sessions_dir, mode):
+    from jiuwenswarm.runtime.harness.surface import creation_surface, validate_surface_metadata, SurfaceAdmissionError
+    from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata, update_session_metadata
+    metadata = dict(session_id='external-team', channel_id='web', user_id='alice',
+                    mode=mode, work_mode=mode.split('.')[1], execution_profile_id='codex')
+    init_session_metadata(**metadata, surface_creation=creation_surface(metadata))
+    update_session_metadata(session_id='external-team', team_name='first', sync_write=True)
+    path = sessions_dir/'external-team/metadata.json'
+    stored = _read_json(path)
+    assert stored['team_name'] == stored['surface_creation']['team_name'] == 'first'
+    assert validate_surface_metadata(stored) == mode
+    with pytest.raises(SurfaceAdmissionError, match='immutable'):
+        update_session_metadata(session_id='external-team', team_name='second', sync_write=True)
+    assert _read_json(path) == stored
+
+
+def test_external_team_assignment_after_execution_is_rejected(sessions_dir):
+    from jiuwenswarm.runtime.harness.surface import creation_surface, SurfaceAdmissionError
+    from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata, update_session_metadata
+    metadata = dict(session_id='external-team', channel_id='web', user_id='alice',
+                    mode='team.code.normal', work_mode='code', execution_profile_id='codex')
+    init_session_metadata(**metadata, surface_creation=creation_surface(metadata))
+    (sessions_dir/'external-team/execution-recovery.json').write_text('{}')
+    with pytest.raises(SurfaceAdmissionError, match='immutable'):
+        update_session_metadata(session_id='external-team', team_name='late', sync_write=True)
+    assert not _read_json(sessions_dir/'external-team/metadata.json')['team_name']
+
+
+@pytest.mark.parametrize("legacy,canonical", [
+    ("team", "team.code.normal"),
+    ("agent", "agent.code.normal"),
+    ("agent.plan", "agent.code.plan"),
+])
+def test_legacy_web_mode_migration_preserves_code_surface(sessions_dir, legacy, canonical):
+    from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata, _METADATA_QUEUE
+    path = sessions_dir / "legacy-code" / "metadata.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"session_id": "legacy-code", "channel_id": "web",
+                                "mode": legacy, "work_mode": "code"}))
+    assert get_session_metadata("legacy-code", cache_bust=True)["mode"] == canonical
+    _METADATA_QUEUE.join()
+    assert _read_json(path)["mode"] == canonical
+
+
+def test_canonical_work_mode_conflict_is_not_silently_repaired(sessions_dir):
+    from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+    path = sessions_dir / "conflict" / "metadata.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"mode": "team.work.normal", "work_mode": "code"}))
+    assert get_session_metadata("conflict", cache_bust=True)["mode"] == "team.work.normal"

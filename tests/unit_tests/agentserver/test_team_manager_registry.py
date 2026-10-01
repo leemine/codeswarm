@@ -2382,3 +2382,42 @@ async def test_team_running_window_follows_round_not_transport(
     manager.begin_request(session_id, "request-2")
     manager.end_request(session_id, "request-2")
     assert not team_manager_module.is_team_session_running(session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('operation', ['stop_session_runtime', 'cancel_session_runtime'])
+@pytest.mark.parametrize('failure', ['error', 'cancelled'])
+async def test_strict_external_exit_keeps_runtime_owned_until_retry(monkeypatch, operation, failure):
+    from unittest.mock import AsyncMock
+    manager = _TeamManagerHarness()
+    manager.set_active_runtime_for_test('sess-1', 'demo-team')
+    manager.set_active_runtime_for_test('sess-2', 'other-team')
+    cleanup = AsyncMock()
+    monkeypatch.setattr(manager, '_cleanup_runtime_locals', cleanup)
+    error = RuntimeError('Provider exit unconfirmed') if failure == 'error' else asyncio.CancelledError()
+    stop = AsyncMock(side_effect=[error, True])
+    monkeypatch.setattr('jiuwenswarm.agents.harness.team.team_manager.Runner.stop_agent_team', stop)
+    with pytest.raises(type(error)):
+        await getattr(manager, operation)('sess-1', require_exit_confirmation=True)
+    assert manager.is_runtime_active('sess-1')
+    assert manager.get_active_team_name('sess-2') == 'other-team'
+    cleanup.assert_not_awaited()
+    assert await getattr(manager, operation)('sess-1', require_exit_confirmation=True)
+    assert not manager.is_runtime_active('sess-1')
+    assert stop.await_count == 2
+    assert cleanup.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('operation', ['stop_session_runtime', 'cancel_session_runtime'])
+async def test_strict_exit_queries_runner_when_local_markers_already_cleared(monkeypatch, operation):
+    from unittest.mock import AsyncMock
+    manager = _TeamManagerHarness()
+    monkeypatch.setattr(manager, 'has_resumable_runtime', AsyncMock(return_value=True))
+    monkeypatch.setattr(manager, '_resolve_session_team_name', lambda _: 'demo-team')
+    monkeypatch.setattr(manager, '_cleanup_runtime_locals', AsyncMock())
+    stop = AsyncMock(side_effect=RuntimeError('Provider still running'))
+    monkeypatch.setattr('jiuwenswarm.agents.harness.team.team_manager.Runner.stop_agent_team', stop)
+    with pytest.raises(RuntimeError, match='still running'):
+        await getattr(manager, operation)('sess-1', require_exit_confirmation=True)
+    stop.assert_awaited_once_with(team_name='demo-team', session_id='sess-1')

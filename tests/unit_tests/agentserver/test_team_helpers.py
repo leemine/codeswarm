@@ -7034,3 +7034,13 @@ def test_team_tool_result_truncation_covers_rendered_result():
     assert trimmed["rendered_result"] == "x" * limit
     assert trimmed["result"] == "r" * 10
     assert trimmed["truncated"] is True
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('provider', ['codex', 'opencode'])
+async def test_external_empty_skill_selection_needs_no_native_rail(provider):
+    spec = SimpleNamespace(execution_provider=provider)
+    await team_helpers._apply_team_skill_selection(
+        team_manager=None, session_id='test', team_spec=spec, skill_names=[])
+    with pytest.raises(ValueError, match='Skill selection is not integrated'):
+        await team_helpers._apply_team_skill_selection(
+            team_manager=None, session_id='test', team_spec=spec, skill_names=['example'])

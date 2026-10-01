@@ -209,3 +209,38 @@ test('plan toggle waits for both cards and preserves a failed answer', async () 
   }
   assert.deepEqual(observed.results, [false, true, true]);
 }));
+
+for (const source of ['confirm_interrupt', 'ask_user_interrupt']) {
+  test(`Team ${source}: Gateway res cannot consume pending; Runtime error retains retry`, async () =>
+    mounted(async ({ socket, observed }) => {
+      const value = { ...payload(), request_id: 'team-interaction:opaque-address', source };
+      await deliver(socket, value);
+      await act(async () => document.querySelector('[data-variant="allow-once"]').click());
+      const first = socket.requests.at(-1);
+      await respond(socket, first);
+      await runtimeAck(socket, 'foreign');
+      assert.deepEqual(observed.results, []);
+      assert.ok(prompt());
+      await act(async () =>
+        socket.receive({
+          type: 'event',
+          event: 'chat.error',
+          payload: {
+            request_id: first.id,
+            session_id: sessionId,
+            error: 'fixture delivery failed',
+          },
+        }),
+      );
+      assert.deepEqual(observed.results, [false]);
+      assert.ok(prompt());
+      await act(async () => document.querySelector('[data-variant="allow-once"]').click());
+      const retry = socket.requests.at(-1);
+      assert.notEqual(retry.id, first.id);
+      await respond(socket, retry);
+      assert.deepEqual(observed.results, [false]);
+      await runtimeAck(socket, retry.id);
+      assert.deepEqual(observed.results, [false, true]);
+      assert.equal(prompt(), null);
+    }));
+}

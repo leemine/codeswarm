@@ -968,3 +968,32 @@ def test_is_team_chat_send_recognizes_all_team_modes(mode: str, expected: bool) 
     _is_team_chat_send = getattr(MessageHandler, "_is_team_chat_send")
     msg = _chat_send_message(channel_id="web", session_id="sess", mode=mode)
     assert _is_team_chat_send(msg) is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('response_ok,confirmed', [(True, True), (True, False), (False, False)])
+async def test_background_interrupt_waits_for_runtime_confirmation(response_ok, confirmed):
+    from unittest.mock import AsyncMock
+    handler = _TestMessageHandler.create()
+    gate = asyncio.Event()
+
+    async def response(_):
+        await gate.wait()
+        return SimpleNamespace(ok=response_ok, payload={
+            'event_type': 'chat.interrupt_result', 'success': confirmed,
+            'message': 'confirmed' if confirmed else 'unsupported',
+        })
+
+    handler._send_non_stream_agent_request = response
+    handler._send_interrupt_result_notification = AsyncMock()
+    task = asyncio.create_task(handler._send_interrupt_to_agent(
+        SimpleNamespace(channel='web', session_id='session'),
+        result_request_id='control-request', result_intent='pause',
+    ))
+    await asyncio.sleep(0)
+    handler._send_interrupt_result_notification.assert_not_awaited()
+    gate.set()
+    await task
+    call = handler._send_interrupt_result_notification.await_args
+    assert call.args == ('control-request', 'web', 'session', 'pause')
+    assert call.kwargs['success'] is (response_ok and confirmed)

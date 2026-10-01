@@ -1436,3 +1436,56 @@ async def test_answer_and_cancel_compete_on_the_existing_execution_state() -> No
     too_late = await coordinator.cancel_execution("session-a", request_id="root-2")
     assert too_late.matched == 0
     await coordinator.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stream_answer', [True, False])
+async def test_parallel_member_questions_keep_exact_ids_and_wait_for_last_answer(stream_answer):
+    coordinator = RuntimeSessionCoordinator()
+    await _register(coordinator)
+    async def questions():
+        yield 'member-a-question'
+        yield 'member-b-question'
+    assert [item async for item in coordinator.run_stream(
+        'session-a', 'team-request', SessionWorkKind.CHAT_STREAM, questions,
+        suspension_key=lambda value: value,
+    )] == ['member-a-question', 'member-b-question']
+    for key in ('member-a-question', 'member-b-question'):
+        assert coordinator.has_control_target('session-a', key)
+    async def accepted():
+        yield 'accepted'
+    if stream_answer:
+        assert [item async for item in coordinator.deliver_control_stream(
+            'session-a', 'member-a-question', accepted)] == ['accepted']
+    else:
+        assert await coordinator.deliver_control('session-a', 'member-a-question',
+            lambda: asyncio.sleep(0, result='accepted')) == 'accepted'
+    assert not coordinator.has_control_target('session-a', 'member-a-question')
+    assert coordinator.has_control_target('session-a', 'member-b-question')
+    assert await coordinator.deliver_control('session-a', 'member-b-question',
+        lambda: asyncio.sleep(0, result='accepted')) == 'accepted'
+    assert not coordinator.has_control_target('session-a', 'member-b-question')
+    with pytest.raises(RuntimeError):
+        await coordinator.deliver_control('session-a', 'member-a-question',
+            lambda: asyncio.sleep(0, result='must-not-repeat'))
+    await coordinator.close_session('session-a')
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_followup_replaces_only_the_answered_control():
+    coordinator = RuntimeSessionCoordinator()
+    await _register(coordinator)
+    await coordinator.run_unary(
+        'session-a', 'heartbeat-root', SessionWorkKind.HEARTBEAT,
+        lambda: asyncio.sleep(0, result='question'), suspension_key=lambda _: 'first',
+    )
+    await coordinator.deliver_control(
+        'session-a', 'first', lambda: asyncio.sleep(0, result='followup'),
+        suspension_key=lambda _: 'second',
+    )
+    root = next(h for h in coordinator._registry.select(session_id='session-a')
+                if h.request_id == 'heartbeat-root')
+    assert not root.awaits_control('first')
+    assert root.awaits_control('second')
+    assert root.waiting_control_ids == {'second'}
+    await coordinator.close()

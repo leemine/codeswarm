@@ -459,3 +459,23 @@ async def test_surface_activity_budget_fails_closed(
     assert summary.status == "unconfirmed"
     assert summary.activities == 1
     assert summary.errors == ("surface_projection_budget_exhausted",)
+
+
+@pytest.mark.asyncio
+async def test_team_work_artifacts_require_member_tool_attribution(tmp_path):
+    outputs = tmp_path / 'outputs'
+    outputs.mkdir()
+    delivered = []
+    async def sink(artifact, path):
+        delivered.append(path.name)
+    projection = SurfaceResultProjection('member-a', work_mode='work', workspace_root=tmp_path,
+        cwd=tmp_path, outputs_dir=outputs, provider_id='codex', artifact_sink=sink,
+        require_artifact_attribution=True)
+    projection.register_turn('turn-1')
+    (outputs / 'other-member.txt').write_text('not ours')
+    (outputs / 'mine.txt').write_text('ours')
+    await projection.observe(_event(ItemLifecycleEvent(ItemEventKind.COMPLETED, 'tool', {
+        'name': 'write_file', 'arguments': {'path': 'outputs/mine.txt'}, 'status': 'completed',
+    }), sequence=1, item_id='write-1'))
+    await projection.observe(_event(_terminal(TurnEventKind.FINISHED), sequence=2))
+    assert delivered == ['mine.txt']

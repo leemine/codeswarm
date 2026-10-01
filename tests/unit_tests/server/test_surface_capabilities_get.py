@@ -104,7 +104,7 @@ async def test_external_manifest_comes_from_admitted_adapter():
 
 
 @pytest.mark.asyncio
-async def test_missing_and_team_sessions_fail_without_runtime_construction():
+async def test_missing_and_unbound_external_team_do_not_construct_runtime():
     missing = await _call(_request(None))
     assert missing.ok is False
     assert missing.payload["code"] == "BAD_REQUEST"
@@ -112,8 +112,36 @@ async def test_missing_and_team_sessions_fail_without_runtime_construction():
     with patch.object(
         agent_ws_server_module,
         "get_session_metadata",
-        return_value={"mode": "team.work.normal", "work_mode": "work"},
+        return_value={"mode": "team.work.normal", "work_mode": "work", "execution_profile_id": "codex"},
     ):
         team = await _call(_request("team"))
     assert team.ok is False
-    assert team.payload["code"] == "UNSUPPORTED_MODE"
+    assert team.payload["code"] == "NOT_READY"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["team", "team.code.normal"])
+async def test_bound_external_team_manifest_comes_from_existing_adapter(mode):
+    manifest = replace(compile_native_ui_capability_manifest(RuntimeSurface.CODE), provider_id="codex")
+    agent = SimpleNamespace(_adapter=SimpleNamespace(ui_capability_manifest=manifest))
+    with (
+        patch.object(agent_ws_server_module, "get_session_metadata", return_value={
+            "mode": mode, "work_mode": "code",
+            "team_name": "team", "execution_profile_id": "codex",
+        }),
+        patch("jiuwenswarm.runtime.request.prepare_chat_turn", new=AsyncMock(
+            return_value=("team", None, agent))) as prepare,
+    ):
+        response = await _call(_request("external-team"))
+    assert response.ok and response.payload["surface_capabilities"] == manifest.record()
+    assert prepare.await_args.kwargs["sync_metadata"] is False
+    assert prepare.await_args.args[1].params == {"mode": mode, "work_mode": "code"}
+
+
+@pytest.mark.asyncio
+async def test_native_team_manifest_does_not_require_external_binding():
+    with patch.object(agent_ws_server_module, "get_session_metadata", return_value={
+        "mode": "team.work.normal", "work_mode": "work",
+    }):
+        response = await _call(_request("native-team"))
+    assert response.ok and response.payload["surface_capabilities"]["provider_id"] == "native"
