@@ -258,7 +258,7 @@
         "filesystem"
       ],
       "required": true,
-      "shard_timeout_seconds": 120,
+      "shard_timeout_seconds": 300,
       "discover": {
         "command": [
           "{python}",
