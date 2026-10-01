@@ -137,6 +137,9 @@ class ExternalSubagentRuntime:
         browser_admit: BrowserToolAdmission | None = None,
         browser_artifact_sink: BrowserArtifactSink | None = None,
         browser_decision_id_for: BrowserDecisionId | None = None,
+        tool_admit=None,
+        invoke_kwargs: dict[str, Any] | None = None,
+        event_observer_factory=None,
     ) -> None:
         if route.provider_id not in SUPPORTED_SUBAGENT_PROVIDERS:
             raise ValueError(
@@ -197,6 +200,7 @@ class ExternalSubagentRuntime:
             browser_admit=browser_admit,
             browser_artifact_sink=browser_artifact_sink,
             browser_decision_id_for=browser_decision_id_for,
+            **({'event_observer_factory': event_observer_factory} if event_observer_factory is not None else {}),
         )
         self._browser_admit = browser_admit
         tools = build_subagent_tools(
@@ -218,7 +222,8 @@ class ExternalSubagentRuntime:
                 host_session_id=binding.host_session_id,
                 workspace=binding.workspace,
             ),
-            invoke_kwargs={"session": self._parent_session},
+            invoke_kwargs={**(invoke_kwargs or {}), "session": self._parent_session},
+            admit=tool_admit,
         )
         self._closed = False
         self._close_lock = asyncio.Lock()

@@ -617,6 +617,15 @@
       "seconds": "{{seconds}}s"
     },
     "process": {
+      "review": {
+        "output": "审查输出",
+        "title": "审查 · {{member}} · 第 {{round}} 轮",
+        "reviewer": "审查者",
+        "round": "审查轮次",
+        "provider": "执行 Provider",
+        "invocation": "审查标识",
+        "executionStatus": "执行状态"
+      },
       "memberMessage": "成员协作消息",
       "broadcastMessage": "广播消息",
       "p2pMessage": "点对点消息",

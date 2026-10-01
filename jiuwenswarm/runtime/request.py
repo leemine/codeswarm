@@ -367,7 +367,10 @@ async def prepare_chat_turn(
                 )
                 external_surface = True
                 surface_mode = validate_surface_request(raw_metadata, params)
-                validate_external_surface_state(surface_mode, require_policy=False)
+                validate_external_surface_state(
+                    surface_mode, require_policy=False,
+                    topology="team" if surface_mode.startswith("team.") else "single",
+                )
                 if (raw_metadata.get("user_id") and request.user_id
                         and raw_metadata["user_id"] != request.user_id):
                     from jiuwenswarm.runtime.harness.surface import SurfaceAdmissionError

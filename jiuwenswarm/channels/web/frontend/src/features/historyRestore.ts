@@ -1,3 +1,4 @@
+import { isScheduledReviewRecord } from './teamReviewExecution';
 import { Message, MessageRole, UsageSummary, FileDownloadItem, MediaItem, WsEvent, ToolExecution } from '../types';
 import { webClient } from '../services/webClient';
 import { normalizeFinalContent } from '../utils/finalContent';
@@ -1087,6 +1088,7 @@ function parseHistoryTimelineEntry(
   }
 
   const payload = buildEventPayloadForRecord(record);
+  if (isScheduledReviewRecord(record) && ['chat.final', 'chat.tool_call', 'chat.tool_result', 'chat.file'].includes(eventType)) return null;
 
   if (eventType === 'chat.error') {
     const error =

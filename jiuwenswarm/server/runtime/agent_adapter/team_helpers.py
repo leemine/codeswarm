@@ -330,6 +330,12 @@ async def _apply_team_skill_selection(
     """
     if skill_names is None:
         return
+    if getattr(team_spec, "execution_provider", "native") != "native":
+        if skill_names:
+            raise ValueError("External Team Skill selection is not integrated")
+        # The ordinary UI includes an empty explicit selection. No Native
+        # Skill rail or visibility path exists for an External member factory.
+        return
     _validate_installed_team_skills(skill_names)
 
     build_context = getattr(team_spec, "build_context", None)
@@ -1373,8 +1379,9 @@ async def _wait_for_bounded_team_round_events(
     request_id: str,
     channel_id: str | None,
     session_id: str,
+    require_team_terminal: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
-    """Yield events until one Cron or Heartbeat Team round is complete."""
+    """Yield bounded events; Goal cannot settle from a leader-only final."""
     while True:
         try:
             event = await asyncio.wait_for(request_queue.get(), timeout=0.1)
@@ -1423,6 +1430,8 @@ async def _wait_for_bounded_team_round_events(
             and event.get("is_complete") is True
         ):
             break
+        if require_team_terminal:
+            continue
         apply_cron_team_round_event(round_state, event)
         if cron_team_round_should_end(round_state):
             if _cron_solo_harness_end_pending(round_state):
@@ -2351,7 +2360,13 @@ async def _process_team_message_stream(
     request_queue: asyncio.Queue | None = None
     is_heartbeat_request = _is_heartbeat_request(request)
     is_cron_request = _is_cron_request_id(rid)
-    is_bounded_round = is_heartbeat_request or is_cron_request
+    goal_attempt = getattr(request, '_team_goal_attempt', None)
+    if goal_attempt is not None:
+        from jiuwenswarm.runtime.harness.team_goal import ExternalTeamGoalRuntime
+        if not isinstance(goal_attempt, ExternalTeamGoalRuntime):
+            raise ValueError('Invalid internal Team Goal owner')
+    is_goal_round = goal_attempt is not None
+    is_bounded_round = is_heartbeat_request or is_cron_request or is_goal_round
     admission = getattr(heartbeat_service, "admission", None)
     user_admitted = False
     cron_user_admitted = False
@@ -2425,6 +2440,8 @@ async def _process_team_message_stream(
                 # the previous generation cannot release this round.
                 terminal_armed=is_first_request,
             )
+            if is_goal_round:
+                goal_attempt.bind_round(team_manager)
         except BaseException:
             await _complete_user_submission(accepted=False)
             await _release_cron_admission()
@@ -2433,7 +2450,7 @@ async def _process_team_message_stream(
     async def _finish_round_submission(*, accepted: bool) -> None:
         nonlocal round_submitted
         round_submitted = accepted
-        if is_heartbeat_request:
+        if is_heartbeat_request or is_goal_round:
             if not accepted:
                 await team_manager.release_round(session_id, rid)
             return
@@ -2582,6 +2599,8 @@ async def _process_team_message_stream(
             login_model_entry=login_model_entry,
             agent_group_name=agent_group_name,
             swarmflow_config=swarmflow_config,
+            **({"execution_route": request._execution_route}
+               if getattr(request, "_execution_route", None) is not None else {}),
         )
         # 请求携带了会话级配置时持久化（刷新恢复用）
         if (
@@ -2915,6 +2934,7 @@ async def _process_team_message_stream(
                             request_id=rid,
                             channel_id=channel_id,
                             session_id=session_id,
+                            require_team_terminal=is_goal_round,
                         ):
                             _cron_agent_ref, _cron_meta = _build_team_event_chunk_meta(event)
                             yield AgentResponseChunk(
@@ -3027,6 +3047,7 @@ async def _process_team_message_stream(
                     request_id=rid,
                     channel_id=channel_id,
                     session_id=session_id,
+                    require_team_terminal=is_goal_round,
                 ):
                     _cron_agent_ref, _cron_meta = _build_team_event_chunk_meta(event)
                     yield AgentResponseChunk(
@@ -3164,7 +3185,7 @@ async def _process_team_message_stream(
                 team_manager.abort_round(session_id, rid)
             )
             await asyncio.shield(abort_task)
-        elif is_bounded_round or not round_submitted:
+        elif not is_goal_round and (is_bounded_round or not round_submitted):
             await team_manager.release_round(session_id, rid)
         if (
             user_admitted
@@ -3207,6 +3228,11 @@ async def _consume_stream_with_query(
     first_model_output_at: float | None = None
     emitted_ask_user_request_ids: set[str] = set()
     terminal_broadcasted = False
+    projection_unconfirmed = False
+    external_team = getattr(team_spec, "execution_provider", "native") != "native"
+    from jiuwenswarm.runtime.terminal_outcome import unknown_terminal_payload
+    unknown_terminal = unknown_terminal_payload()
+    stream_error_reported = False
     # Members already announced to clients on this stream, so a roster refresh
     # only emits what is new. See _announce_team_roster.
     announced_members: set[str] = set()
@@ -3305,7 +3331,7 @@ async def _consume_stream_with_query(
             # sees leader output. Leader-level control events
             # (team.runtime_ready / team.completed) are kept because
             # _is_leader_output returns True.
-            if _team_hide_teammate_enabled() and not is_leader:
+            if _team_hide_teammate_enabled() and not is_leader and not external_team:
                 continue
             parsed = await run_stream_parser(parse_stream_chunk, chunk)
             if parsed is not None:
@@ -3331,8 +3357,20 @@ async def _consume_stream_with_query(
                 # Skip non-leader __interaction__ (permission ASK) — approval
                 # is routed internally via the leader; only leader
                 # interactions are forwarded to the frontend.
-                if not is_leader and parsed.get("event_type") == "chat.ask_user_question":
+                if not is_leader and parsed.get("event_type") == "chat.ask_user_question" and not external_team:
                     continue
+                if external_team and parsed.get('code') == 'HISTORY_PERSISTENCE_UNCONFIRMED':
+                    projection_unconfirmed = True
+                    evidence = getattr(get_team_manager(channel_id), 'current_goal_attempt_evidence', lambda _: None)(session_id)
+                    if evidence is not None:
+                        evidence.invalidate('HISTORY_PERSISTENCE_UNCONFIRMED')
+                if (external_team and _team_hide_teammate_enabled() and not is_leader
+                        and parsed.get("event_type") not in {"chat.ask_user_question", "chat.error"}):
+                    continue
+                if external_team and parsed.get("event_type") not in {
+                    "team.idle", "team.completed", "team.runtime_ready", "team.member_turn",
+                }:
+                    terminal_broadcasted = False
                 parsed["rid"] = round_id
                 if is_teammate:
                     parsed = _enrich_teammate_event(parsed, chunk)
@@ -3414,6 +3452,8 @@ async def _consume_stream_with_query(
                             "rid": round_id,
                             "is_processing": False,
                             "is_complete": True,
+                            **({'terminal_status': 'unknown', 'code': 'HISTORY_PERSISTENCE_UNCONFIRMED'}
+                               if projection_unconfirmed else {}),
                         },
                     )
                     terminal_broadcasted = True
@@ -3436,6 +3476,8 @@ async def _consume_stream_with_query(
                             "rid": round_id,
                             "is_processing": False,
                             "is_complete": True,
+                            **({'terminal_status': 'unknown', 'code': 'HISTORY_PERSISTENCE_UNCONFIRMED'}
+                               if projection_unconfirmed else {}),
                             "member_count": parsed.get("member_count"),
                             "task_count": parsed.get("task_count"),
                         },
@@ -3487,6 +3529,8 @@ async def _consume_stream_with_query(
                             "rid": round_id,
                             "is_processing": False,
                             "is_complete": True,
+                            **({'terminal_status': 'unknown', 'code': 'HISTORY_PERSISTENCE_UNCONFIRMED'}
+                               if projection_unconfirmed else {}),
                             "member_count": parsed.get("member_count"),
                         },
                     )
@@ -3511,7 +3555,7 @@ async def _consume_stream_with_query(
                     continue
                 elif parsed.get("event_type") == "chat.error":
                     await _broadcast_event(channel_id, session_id, parsed)
-                    if is_leader:
+                    if is_leader or projection_unconfirmed:
                         await _broadcast_event(
                             channel_id,
                             session_id,
@@ -3531,6 +3575,8 @@ async def _consume_stream_with_query(
                                 "rid": round_id,
                                 "is_processing": False,
                                 "is_complete": True,
+                                **({'terminal_status': 'unknown', 'code': 'HISTORY_PERSISTENCE_UNCONFIRMED'}
+                                   if projection_unconfirmed else {}),
                             },
                         )
                         terminal_broadcasted = True
@@ -3549,6 +3595,7 @@ async def _consume_stream_with_query(
 
         # If stream ended without any chunks, broadcast an error event
         if received_chunks == 0:
+            stream_error_reported = True
             logger.warning(
                 "[TeamHelpers] stream ended with no output: channel_id=%s session_id=%s",
                 _resolve_channel_id(channel_id),
@@ -3579,6 +3626,10 @@ async def _consume_stream_with_query(
         )
         raise
     except Exception as exc:
+        stream_error_reported = True
+        evidence = getattr(get_team_manager(channel_id), 'current_goal_attempt_evidence', lambda _: None)(session_id)
+        if evidence is not None:
+            evidence.invalidate('team_goal_stream_failed')
         logger.error(
             "[TeamHelpers] stream failed: channel_id=%s session_id=%s error=%s",
             _resolve_channel_id(channel_id),
@@ -3608,16 +3659,21 @@ async def _consume_stream_with_query(
                 logger.warning(f"TeamStreamLogger flush failed, error is {e}")
         try:
             if not stream_cancelled and not terminal_broadcasted:
-                # Broadcast team.completed so cron round watchers (both the
-                # adapter's bounded round waiter and the cron
-                # scheduler's own round_state) can finalise when the stream
-                # ends normally without a terminal event.  A cancelled stream
-                # must not re-enter bounded waiter backpressure during cleanup.
-                await _broadcast_team_state_snapshot(channel_id, session_id)
-                # Also broadcast chat.processing_status{is_processing:False} so
-                # the frontend gets an explicit terminal signal even when the
-                # agent-core team stream generator silently returns without
-                # emitting team.completed / team.idle.
+                # External EOF is not a Team completion. Keep the original
+                # Native snapshot fallback until its compatibility is audited.
+                if external_team:
+                    if not stream_error_reported:
+                        await _broadcast_event(channel_id, session_id, {
+                            **unknown_terminal,
+                            "error": "External Team stream closed without an authoritative terminal",
+                            "session_id": session_id,
+                            "rid": round_id,
+                        })
+                else:
+                    await _broadcast_team_state_snapshot(channel_id, session_id)
+                # End the original processing indicator while preserving the
+                # unknown outcome. Cancellation must not re-enter bounded
+                # waiter backpressure during cleanup.
                 try:
                     await _broadcast_event(
                         channel_id,
@@ -3628,6 +3684,10 @@ async def _consume_stream_with_query(
                             "rid": round_id,
                             "is_processing": False,
                             "is_complete": True,
+                            **({'terminal_status': 'unknown', 'code': 'HISTORY_PERSISTENCE_UNCONFIRMED'}
+                               if projection_unconfirmed else {}),
+                            **({"terminal_status": unknown_terminal["terminal_status"],
+                                "code": unknown_terminal["code"]} if external_team else {}),
                         },
                     )
                     logger.info(
@@ -3649,7 +3709,10 @@ async def _consume_stream_with_query(
             release_current_round = getattr(
                 team_manager, "release_current_round", None
             )
-            if callable(release_current_round):
+            goal_evidence = getattr(team_manager, 'current_goal_attempt_evidence', lambda _: None)(session_id)
+            # The Goal producer still owns usage/assessment and exit receipts.
+            # EOF retires the stream registry, never that producer's Round.
+            if callable(release_current_round) and goal_evidence is None:
                 await release_current_round(session_id)
             team_manager.clear_pending_runtime(session_id)
             clear_active_runtime = getattr(team_manager, "clear_active_runtime", None)

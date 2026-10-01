@@ -135,6 +135,10 @@ class SessionExecutionHandle:
     terminal_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     retain_owner_task: bool = field(default=False, repr=False)
     retain_after_control: bool = field(default=False, repr=False)
+    waiting_control_ids: set[str] = field(default_factory=set, repr=False)
+
+    def awaits_control(self, control_id: str) -> bool:
+        return control_id == self.waiting_control_id or control_id in self.waiting_control_ids
 
     def snapshot(self) -> SessionExecutionSnapshot:
         return SessionExecutionSnapshot(
@@ -154,6 +158,7 @@ class SessionExecutionHandle:
             submission_state=self.submission_state,
             provider_message_id=self.provider_message_id,
             provider_turn_id=self.provider_turn_id,
+            waiting_control_ids=tuple(sorted(self.waiting_control_ids)),
         )
 
 
@@ -175,6 +180,7 @@ class SessionExecutionSnapshot:
     submission_state: SessionSubmissionState
     provider_message_id: str | None
     provider_turn_id: str | None
+    waiting_control_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

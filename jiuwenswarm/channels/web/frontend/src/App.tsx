@@ -1059,7 +1059,7 @@ function AppContent({
   const settingsRequest = useMemo(() => resolveSettingsRequest(request), [request, resolveSettingsRequest]);
 
   useEffect(() => {
-    if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID || mode === 'team') return;
+    if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID) return;
     let cancelled = false;
     const targetSessionId = sessionId;
     void request<{ surface_capabilities?: unknown }>('surface.capabilities.get', {
@@ -3079,7 +3079,8 @@ function AppContent({
     // 目标是否 active 决定停止按钮要不要顺带把目标转为 paused——约定行为：其它状态
     // （paused/blocked/completed/无目标）下，停止只结束会话，不碰目标本身。
     const isGoalActive = useGoalStore.getState().runtimes[currentSessionId]?.goal?.status === 'active';
-    if (mode === 'team') {
+    const provider = useSessionStore.getState().getRuntime(currentSessionId)?.surfaceCapabilityManifest?.provider_id;
+    if (mode === 'team' && (!provider || provider === 'native')) {
       void pause(currentSessionId);
       if (isGoalActive) void pauseGoal(currentSessionId);
       return;

@@ -100,6 +100,7 @@ async def generate_team_name(
     template_id: str,
     timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+    execution_provider: str = "native",
 ) -> str:
     """Generate a team name, retrying transient failures before local fallback."""
     prompt = str(description or "").strip()
@@ -109,6 +110,11 @@ async def generate_team_name(
         raise ValueError("timeout_seconds must be greater than zero")
     if max_attempts <= 0:
         raise ValueError("max_attempts must be greater than zero")
+
+    # Naming is metadata, not a Team execution. External selections use the
+    # existing deterministic identifier instead of allocating a hidden TinyAgent.
+    if execution_provider != "native":
+        return _fallback_team_name(prompt)
 
     model_name, model_config = _resolve_tiny_model(
         config_base,

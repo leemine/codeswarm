@@ -185,6 +185,7 @@ class SurfaceResultProjection:
         outputs_dir: Path | None,
         provider_id: str,
         artifact_sink: ArtifactSink,
+        require_artifact_attribution: bool = False,
     ) -> None:
         if work_mode not in {"work", "code"}:
             raise ValueError("Surface projection requires work or code mode")
@@ -195,6 +196,7 @@ class SurfaceResultProjection:
         self._outputs_dir = outputs_dir.resolve() if outputs_dir is not None else None
         self._provider_id = provider_id
         self._artifact_sink = artifact_sink
+        self._require_artifact_attribution = require_artifact_attribution
         self._turns: dict[str, _TurnState] = {}
         # Retain the immutable projected activity records until the existing
         # output owner consumes the terminal marker. The Provider event pump
@@ -368,6 +370,18 @@ class SurfaceResultProjection:
         if self._work_mode == "work" and self._outputs_dir is not None:
             try:
                 changed = self._changed_outputs(state.output_snapshot)
+                if self._require_artifact_attribution:
+                    # Team members share the output directory. A directory
+                    # delta alone cannot identify which member produced a file.
+                    attributed = {
+                        self._controlled_path(Path(path))
+                        for activity in state.activities.values()
+                        if activity.phase == ItemEventKind.COMPLETED.value
+                        and activity.kind in {SurfaceActivityKind.FILE_CHANGE, SurfaceActivityKind.ARTIFACT}
+                        and activity.status not in _FAILED_STATUSES
+                        for path in activity.paths
+                    }
+                    changed = tuple(path for path in changed if path in attributed)
                 for path in changed:
                     await self._artifact_sink(
                         _project_output_artifact(

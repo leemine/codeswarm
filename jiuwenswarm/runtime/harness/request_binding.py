@@ -114,6 +114,9 @@ def bind_admitted_request_execution(
     mode = None
     if spec.provider_id != "native":
         mode = validate_surface_request(session_metadata, params or {})
+        if mode.startswith("team.") and not session_metadata.get("team_name"):
+            from jiuwenswarm.runtime.harness.surface import SurfaceAdmissionError
+            raise SurfaceAdmissionError("Team identity is not assigned yet")
     runtime_paths = bind_session_runtime_workspace(
         internal_workspace_dir=get_agent_workspace_dir(),
         project_dir=project_dir,
@@ -140,7 +143,7 @@ def bind_admitted_request_execution(
         surface = EffectiveSurfaceSnapshot(identity, mode)
         # Product context and Provider permissions are compiled by the
         # adapter after the current host policy switches are known.
-        surface.validate_mode(mode, require_policy=False)
+        surface.validate_mode(mode, require_policy=False, topology=identity.topology)
     recovery = SessionExecutionRecovery(
         session_id=session_id,
         execution_profile_id=selected_profile_id,

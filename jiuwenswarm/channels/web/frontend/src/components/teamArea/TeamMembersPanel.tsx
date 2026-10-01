@@ -605,7 +605,7 @@ function MemberTaskDetail({
     () =>
       dedupeFinalEvents(
         teamMemberExecutionEvents.filter(
-          (event) => event.member_id === member.member_id && event.kind === 'final' && event.title !== '成员回复',
+          (event) => !event.review && event.member_id === member.member_id && event.kind === 'final' && event.title !== '成员回复',
         ),
       ).sort((a, b) => a.timestamp - b.timestamp),
     [member.member_id, teamMemberExecutionEvents],

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
 import os
 import time
 from collections import deque
@@ -50,6 +52,7 @@ _DURABLE_EVENT_TYPES = frozenset(
         "chat.tool_result",
         "context.usage",
         "harness.activate_interaction",
+        "team.member_turn",
     }
 )
 
@@ -84,6 +87,9 @@ class ExternalEventProjection:
         cwd: Path | None = None,
         outputs_dir: Path | None = None,
         provider_id: str = "",
+        projection_scope: str | None = None,
+        artifact_sink=None,
+        require_artifact_attribution: bool = False,
     ) -> None:
         self._session_id = session_id
         self._on_detached_terminal = on_detached_terminal
@@ -98,13 +104,14 @@ class ExternalEventProjection:
         self._terminal_order: deque[str] = deque()
         self._surface_projection = (
             SurfaceResultProjection(
-                session_id,
+                projection_scope or session_id,
                 work_mode=work_mode,
                 workspace_root=self._workspace_root,
                 cwd=cwd,
                 outputs_dir=outputs_dir,
                 provider_id=provider_id,
-                artifact_sink=self.publish_product_artifact,
+                artifact_sink=artifact_sink or self.publish_product_artifact,
+                require_artifact_attribution=require_artifact_attribution,
             )
             if (
                 work_mode in {"work", "code"}
@@ -154,7 +161,7 @@ class ExternalEventProjection:
     ) -> None:
         if any(len(value.encode("utf-8")) > 1024 for value in (turn_id, request_id, channel_id, mode)):
             raise OutputBudgetExceeded("projection correlation identifier byte budget exhausted")
-        if turn_id in self._turns:
+        if turn_id in self._turns or turn_id in self._terminated_turns:
             return
         if len(self._turns) >= self._max_turns:
             raise OutputBudgetExceeded("projection Turn count budget exhausted")
@@ -193,6 +200,56 @@ class ExternalEventProjection:
             state.text.close()
             self._remember_terminal(turn_id)
         return payload
+
+    def accepts_turn_output(self, turn_id: str | None) -> bool:
+        return turn_id is None or turn_id not in self._terminated_turns
+
+    async def persist_member_output(self, item: ProjectedOutput, payload: dict[str, Any]) -> bool:
+        """Keep a failed history receipt visible through the original Team stream."""
+        turn_id = item.turn_id or 'product-interaction'
+        state = self._turns.get(turn_id)
+        failed = bool(state and state.delivery_failed)
+        try:
+            await self._persist_member_output(item, payload)
+        except Exception:
+            state = self._turns.get(turn_id)
+            if state is not None:
+                state.delivery_failed = True
+            logger.exception('Team history persistence unconfirmed: session=%s turn=%s',
+                             self._session_id, turn_id)
+            return False
+        return not failed
+
+    async def _persist_member_output(self, item: ProjectedOutput, payload: dict[str, Any]) -> None:
+        """Persist Team-owned output before its original broadcaster sees it.
+
+        Uses this projection's existing text buffer and terminal tombstones.
+        Team owns delivery; this method never sends a second server push.
+        """
+        turn_id = item.turn_id or 'product-interaction'
+        state = self._turns.get(turn_id)
+        if state is None:
+            state = self._fallback_state(turn_id)
+            self._turns[turn_id] = state
+        et = payload.get('event_type')
+        if et == 'chat.delta':
+            self._note_payload(state, payload)
+            return
+        owner = json.dumps({key: payload.get(key) for key in (
+            'member_session_id', 'provider_session_id', 'request_id',
+        )}, sort_keys=True).encode()
+        delivery_id = self._delivery_id(turn_id, item, payload) + ':' + hashlib.sha256(owner).hexdigest()
+        if state.text and et in {'chat.ask_user_question', 'chat.tool_call', 'team.member_turn', 'chat.error'}:
+            await self._publish(state, {**payload, 'event_type': 'chat.final', 'content': state.text.read()},
+                                delivery_id=delivery_id + ':text', push=False)
+            state.text.clear()
+        await self._publish(state, payload, delivery_id=delivery_id, push=False)
+        if et == 'chat.final':
+            state.text.clear()
+        if item.terminal is not None:
+            self._turns.pop(turn_id, None)
+            state.text.close()
+            self._remember_terminal(turn_id)
 
     def payload(
         self,
@@ -610,12 +667,14 @@ class ExternalEventProjection:
         payload: dict[str, Any],
         *,
         delivery_id: str,
+        push: bool = True,
     ) -> None:
         event_type = str(payload.get("event_type") or "")
         if (
             event_type.startswith("chat.")
             or event_type == "context.usage"
             or event_type == "harness.activate_interaction"
+            or event_type == "team.member_turn"
         ):
             extra = {
                 key: value
@@ -648,14 +707,15 @@ class ExternalEventProjection:
                         ) from exc
             else:
                 await run_history_io(append_history_record, **history_kwargs)
-        await send_runtime_push(
-            build_server_push_message(
-                session_id=self._session_id,
-                request_id=state.request_id,
-                payload=payload,
-                fallback_channel_id=state.channel_id,
+        if push:
+            await send_runtime_push(
+                build_server_push_message(
+                    session_id=self._session_id,
+                    request_id=state.request_id,
+                    payload=payload,
+                    fallback_channel_id=state.channel_id,
+                )
             )
-        )
 
     @staticmethod
     def _delivery_id(

@@ -1,3 +1,4 @@
+import { isScheduledReviewRecord, parseTeamReviewExecution } from './teamReviewExecution';
 import { webClient } from '../services/webClient';
 import type { Message } from '../types';
 import type {
@@ -541,6 +542,11 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     const timestamp = recordTimestamp(record);
     const eventType = typeof record.event_type === 'string' ? record.event_type : '';
     const recordSessionId = getRecordSessionId(record);
+    if (isScheduledReviewRecord(record)) {
+      const review = parseTeamReviewExecution(record, sessionId);
+      if (review) executionEvents.set(review.id, review);
+      continue;
+    }
     if (eventType === 'chat.final') {
       const actionPayload = isRecord(record.event_payload)
         ? { ...record, ...record.event_payload }

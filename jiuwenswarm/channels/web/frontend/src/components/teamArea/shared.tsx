@@ -494,13 +494,50 @@ export function buildProcessItems(
     })
     .filter((item): item is ProcessItem => item !== null);
 
+  const reviewItems: ProcessItem[] = executionEvents
+    .filter((event) => event.review && memberTaskIds.has(event.review.task_id))
+    .filter(
+      (event) =>
+        event.kind !== 'tool_result' ||
+        !executionEvents.some(
+          (call) =>
+            call.kind === 'tool_call' &&
+            call.review?.invocation_id === event.review?.invocation_id &&
+            call.review?.task_id === event.review?.task_id &&
+            call.review?.round === event.review?.round &&
+            call.tool_call_id === event.tool_call_id,
+        ),
+    )
+    .map((event) => ({
+      id: `execution-${event.id}`,
+      type: 'execution',
+      timestamp: event.timestamp,
+      title: t('team.process.review.title', { member: event.member_id, round: event.review!.round }),
+      subtitle:
+        event.tool_name || t(event.kind === 'file' ? 'team.process.execution.file' : 'team.process.review.output'),
+      status: 'execution',
+      kind: event.kind,
+      execution: event,
+      linkedResult:
+        event.kind === 'tool_call'
+          ? executionEvents.find(
+              (result) =>
+                result.kind === 'tool_result' &&
+                result.review?.invocation_id === event.review?.invocation_id &&
+                result.review?.task_id === event.review?.task_id &&
+                result.review?.round === event.review?.round &&
+                result.tool_call_id === event.tool_call_id,
+            )
+          : undefined,
+    }));
+
   // 将 tool_call 和 tool_result 配对合并
   const pairedExecutionItems: ProcessItem[] = [];
   const toolResultsByCallId = new Map<string, TeamMemberExecutionEvent>();
 
   // 先收集所有 tool_result，按 tool_call_id 分组
   executionEvents
-    .filter(e => e.kind === 'tool_result' && e.member_id === memberId)
+    .filter(e => !e.review && e.kind === 'tool_result' && e.member_id === memberId)
     .forEach(e => {
       if (e.tool_call_id) {
         toolResultsByCallId.set(e.tool_call_id, e);
@@ -509,7 +546,7 @@ export function buildProcessItems(
 
   // 处理所有 execution 事件
   executionEvents
-    .filter(event => event.member_id === memberId && event.kind !== 'final')
+    .filter(event => !event.review && event.member_id === memberId && event.kind !== 'final')
     .forEach(event => {
       // 如果是 tool_call，尝试关联其 tool_result
       if (event.kind === 'tool_call' && event.tool_call_id) {
@@ -543,7 +580,7 @@ export function buildProcessItems(
       }
     });
 
-  return [...taskItems, ...messageItems, ...pairedExecutionItems].sort((a, b) => a.timestamp - b.timestamp).slice(0, 80);
+  return [...taskItems, ...messageItems, ...pairedExecutionItems, ...reviewItems].sort((a, b) => a.timestamp - b.timestamp).slice(0, 80);
 }
 
 function getExecutionEventTitle(event: TeamMemberExecutionEvent, t: Translate): string {

@@ -2763,12 +2763,46 @@ class AgentRuntime:
         )
 
     def _request_work_kind(self, request: AgentRequest, *, background: bool = False):
-        """Classify External TUI controls from server-owned Session routing facts.
+        """Classify External controls from server-owned Session routing facts.
 
         This only selects the existing Runtime lane; the normal admission path
         must still validate the complete immutable route before execution.
         """
         original = self.session_work_kind(request, background=background)
+        if (original is None and not background and request.session_id
+                and request.req_method == ReqMethod.CHAT_SEND
+                and not self._is_interrupt_resume_request(request)):
+            from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+            from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
+            from jiuwenswarm.common.config import get_config
+            metadata = get_session_metadata(
+                request.session_id, cache_bust=True, enable_writeback=False, infer_defaults=False,
+            )
+            if (isinstance(metadata, dict) and metadata.get("execution_profile_id")
+                    and str(metadata.get("mode", "")).startswith("team.")):
+                catalog = load_execution_catalog(get_config())
+                if catalog is not None:
+                    spec = catalog.source(explicit_profile_id=metadata["execution_profile_id"]).resolve()
+                    if spec.provider_id != "native":
+                        # Classify only: original admission still verifies the
+                        # immutable Surface before any member can execute.
+                        return (SessionWorkKind.CHAT_STREAM if request.is_stream
+                                else SessionWorkKind.CHAT_UNARY)
+        if (original is None and not background and request.session_id
+                and request.req_method in {ReqMethod.CHAT_SEND, ReqMethod.CHAT_ANSWER}
+                and self._is_interrupt_resume_request(request)):
+            # Borrow only an already-bound External Team facade. The original
+            # control ledger still checks generation/id before any handoff;
+            # this must not admit a new Team request or change Native routing.
+            from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
+            lookup = getattr(self._agent_manager, "get_agent_for_session_nowait", None)
+            agent = lookup(request.channel_id, request.session_id) if callable(lookup) else None
+            route = getattr(agent, "_runtime_execution_route", None)
+            if (isinstance(route, AdmittedExecutionRoute) and route.provider_id != 'native'
+                    and route.surface is not None and route.surface.identity.topology == 'team'
+                    and route.channel_id == request.channel_id
+                    and route.bound.binding.host_session_id == request.session_id):
+                return SessionWorkKind.CONTROL_INPUT
         if (background or request.channel_id != "tui" or request.req_method != ReqMethod.CHAT_SEND
                 or original not in {SessionWorkKind.CHAT_STREAM, SessionWorkKind.CHAT_UNARY}):
             return original

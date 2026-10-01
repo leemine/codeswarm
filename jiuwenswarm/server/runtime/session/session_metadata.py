@@ -20,6 +20,7 @@ from jiuwenswarm.common.utils import get_agent_sessions_dir
 from jiuwenswarm.common.mode_matrix import (
     NEW_AGENT_CODE_NORMAL,
     NEW_AGENT_WORK_NORMAL,
+    compose_web_mode,
     deprecate_mode,
     is_new_canonical_mode,
     is_team_mode,
@@ -141,6 +142,15 @@ def _has_valid_work_mode(value: Any) -> bool:
 #   - 批量入口构建一次 project 映射复用,避免 N+1 扫描 project_store。
 #   - 仅写盘"确定性推断"结果;无法消歧的会话仍由运行期兜底返回稳定 schema,
 #     不写盘(避免错误推断被持久化)。
+
+
+def _canonical_metadata_mode(mode: str, work_mode: str | None) -> str:
+    """Preserve the Work/Code half of historical Web mode pairs."""
+    if mode in ("agent", "agent.plan", "team") and work_mode in ("work", "code"):
+        composed = compose_web_mode(mode, work_mode)
+        if composed:
+            return deprecate_mode(composed[2])
+    return deprecate_mode(mode)
 
 
 def _build_project_lookup() -> tuple[
@@ -294,7 +304,7 @@ def _apply_metadata_defaults_with_inference(
     # canonical 的 mode 字段；映射后写盘以避免后续读路径重复迁移。
     existing_mode = metadata.get("mode")
     if existing_mode and not is_new_canonical_mode(existing_mode):
-        new_mode = deprecate_mode(existing_mode)
+        new_mode = _canonical_metadata_mode(existing_mode, metadata.get("work_mode"))
         if new_mode != existing_mode:
             logger.log(logging.INFO if enable_writeback else logging.DEBUG,
                 "session_metadata 惰性迁移: session=%s mode '%s' -> '%s'",
@@ -1051,6 +1061,20 @@ def update_session_metadata(
         if mode is not None:
             metadata["mode"] = mode
         if team_name is not None:
+            creation = metadata.get("surface_creation")
+            if isinstance(creation, dict) and team_name != metadata.get("team_name", ""):
+                from jiuwenswarm.runtime.harness.surface import (
+                    SurfaceAdmissionError, validate_surface_metadata,
+                )
+                validate_surface_metadata(metadata)
+                # The ordinary product flow assigns the Team after session.create
+                # and before execution admission. Freeze that first assignment in
+                # the same metadata write; never rebind an existing execution.
+                if (metadata.get("team_name") or creation.get("team_name")
+                        or not str(creation.get("creation_mode", "")).startswith("team.")
+                        or (get_agent_sessions_dir() / session_id / "execution-recovery.json").exists()):
+                    raise SurfaceAdmissionError("Surface Team is immutable; new Session required")
+                metadata["surface_creation"] = {**creation, "team_name": team_name}
             metadata["team_name"] = team_name
         if team_template_id is not None:
             metadata["team_template_id"] = team_template_id
@@ -1299,7 +1323,7 @@ def sync_session_request_metadata(
         # 未显式携带（如只读 RPC 默认推断）则保持磁盘原值，不腐蚀已锁定的会话 mode。
         # 同时经 deprecate_mode 归一为新三段命名 canonical，旧串静默映射。
         if mode is not None and explicit_mode_provided:
-            new_mode = deprecate_mode(mode)
+            new_mode = _canonical_metadata_mode(mode, metadata.get("work_mode"))
             old_mode = metadata.get("mode")
             if new_mode != old_mode:
                 logger.info(

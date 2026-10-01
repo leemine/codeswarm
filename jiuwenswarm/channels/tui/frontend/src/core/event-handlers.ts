@@ -422,6 +422,8 @@ function formatInterruptResultMessage(language: PreferredLanguage, intent: strin
     "任务中断失败": "Failed to interrupt task",
     "任务暂停失败": "Failed to pause task",
     "任务恢复失败": "Failed to resume task",
+    "External Team 暂不支持暂停或继续活动回合；可使用取消结束当前执行。":
+      "External Team does not support pausing or resuming an active turn; cancel to end the current execution.",
     "任务切换失败": "Failed to switch task",
     "已切换到新任务": "Switched to new task",
   };
@@ -1292,6 +1294,20 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
           // 否则去抖窗口内后续 esc 会被一直抑制，无法重新发起取消。
           delegate.clearInterruptRequested();
         }
+      } else if (payload.success === false) {
+        // A rejected pause/resume leaves the original execution state intact.
+        // In particular, an unavailable External Team control is not an ack
+        // that the Provider was parked or resumed.
+        const uiMessage = formatInterruptResultMessage(delegate.getPreferredLanguage(), intent, false, payload.message);
+        appendEntry(delegate, {
+          kind: "error",
+          id: createId("error"),
+          sessionId: activeSessionId,
+          content: uiMessage,
+          at: new Date().toISOString(),
+        });
+        delegate.setLastError(uiMessage);
+        delegate.clearInterruptRequested();
       } else if (intent === "pause") {
         delegate.setStreamingState(StreamingState.Paused);
       } else {

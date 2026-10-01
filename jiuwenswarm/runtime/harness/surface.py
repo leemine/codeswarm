@@ -218,11 +218,18 @@ def validate_external_surface_state(
     runtime_policy: HarnessRuntimePolicy | None = None,
     *,
     require_policy: bool = True,
+    topology: str = "single",
 ) -> None:
-    if mode.startswith("team."):
+    if topology not in {"single", "team"}:
+        raise SurfaceAdmissionError("Unknown External topology")
+    if mode.startswith("team.") and topology != "team":
         raise SurfaceAdmissionError(
             "External Team Surface requires the Team integration"
         )
+    if topology == "team" and not mode.startswith("team."):
+        raise SurfaceAdmissionError("Team construction requires a Team Surface")
+    if topology == "team" and mode.endswith(".plan"):
+        raise SurfaceAdmissionError("External Team plan integration is not available")
     if require_policy and runtime_policy is None:
         raise SurfaceAdmissionError("External Surface runtime policy is not compiled")
     if runtime_policy is None:
@@ -245,7 +252,7 @@ class EffectiveSurfaceSnapshot:
     capability_catalog: "EffectiveCapabilityCatalog | None" = None
     ui_capability_manifest: "UICapabilityManifest | None" = None
 
-    def validate_mode(self, mode: str, *, require_policy: bool = True) -> None:
+    def validate_mode(self, mode: str, *, require_policy: bool = True, topology: str = "single") -> None:
         canonical = canonical_surface_mode(
             {"mode": mode, "work_mode": self.identity.work_mode}
         )
@@ -257,6 +264,7 @@ class EffectiveSurfaceSnapshot:
             canonical,
             self.runtime_policy,
             require_policy=require_policy,
+            topology=topology,
         )
 
 
@@ -286,13 +294,16 @@ def compile_surface_policy(
     *,
     authorization: ExecutionAuthorization,
     include_personal_context: bool,
+    topology: str = "single",
 ) -> EffectiveSurfaceSnapshot:
     """Compile one cold-start policy without changing Session identity."""
 
     mode = canonical_surface_mode(
         {"mode": snapshot.initial_mode, "work_mode": snapshot.identity.work_mode}
     )
-    validate_external_surface_state(mode, require_policy=False)
+    if snapshot.identity.topology != topology:
+        raise SurfaceAdmissionError("Surface topology differs from construction owner")
+    validate_external_surface_state(mode, require_policy=False, topology=topology)
     state = RuntimeExecutionState(mode.rsplit(".", 1)[1])
     access = (
         WorkspaceAccess.READ_ONLY

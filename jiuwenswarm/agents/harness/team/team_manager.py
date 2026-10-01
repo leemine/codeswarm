@@ -248,6 +248,7 @@ class _ActiveTeamRound:
         default_factory=new_cron_team_round_state
     )
     completion_task: asyncio.Task | None = None
+    goal_evidence: Any = None
 
 
 def _make_team_rail_mount_context(
@@ -728,6 +729,8 @@ class TeamManager:
         current = self._active_rounds.get(session_id)
         if current is None or current.request_id != request_id:
             return False
+        if current.goal_evidence is not None:
+            current.goal_evidence.release()
         self._active_rounds.pop(session_id, None)
         # The round terminal ends the turn's in-flight window as well, so the
         # archive guard stops treating a finished Team Session as running.
@@ -761,6 +764,65 @@ class TeamManager:
     def is_round_active(self, session_id: str) -> bool:
         """Return whether a Team round, rather than its transport, is active."""
         return session_id in self._active_rounds
+
+    def bind_goal_attempt_evidence(self, session_id, request_id, *, identity, runtime):
+        """Attach read-only evidence to an exact original Runtime Goal owner.
+
+        The Goal producer supplies its authoritative attempt identity; this
+        method neither creates Goal state nor claims a second execution lease.
+        """
+        from jiuwenswarm.runtime.harness.team_goal_evidence import TeamGoalAttemptEvidence
+        from jiuwenswarm.runtime.session.model import SessionWorkKind
+        current = self._active_rounds.get(session_id)
+        if current is None or current.request_id != request_id or not current.defer_terminal_release:
+            raise RuntimeError('Team Goal evidence requires its deferred original Round')
+        owner = runtime.external_execution_owner(session_id, request_id)
+        if (owner.session_id != session_id or owner.request_id != request_id
+                or owner.execution_id != identity.execution_id or owner.generation != identity.generation
+                or type(identity.generation) is not int
+                or owner.work_kind not in {SessionWorkKind.GOAL_STREAM, SessionWorkKind.GOAL_ATTACH}
+                or owner.state.terminal or owner.cancellation_requested
+                or not runtime.holds_external_execution(owner)):
+            raise ValueError('Team Goal evidence identity differs from the admitted Runtime owner')
+        if current.goal_evidence is not None:
+            if current.goal_evidence.identity != identity:
+                raise ValueError('Team Round already belongs to another Goal attempt')
+            return current.goal_evidence
+        evidence = TeamGoalAttemptEvidence(identity, session_id=session_id, request_id=request_id,
+            is_current=lambda: (self._active_rounds.get(session_id) is current
+                               and not owner.state.terminal and not owner.cancellation_requested
+                               and runtime.holds_external_execution(owner)))
+        current.goal_evidence = evidence
+        return evidence
+
+    async def confirm_goal_round_exit(self, session_id, request_id, evidence):
+        """Stop original resources and drain their history consumer, retaining the Round."""
+        async with self._get_lifecycle_lock(session_id):
+            current = self._active_rounds.get(session_id)
+            if current is None or current.request_id != request_id or current.goal_evidence is not evidence:
+                raise RuntimeError('Team Goal Round ownership changed before exit confirmation')
+            team_name = self._resolve_session_team_name(session_id)
+            if not team_name:
+                raise RuntimeError('Team Goal shutdown identity is unavailable')
+            stream = self._stream_tasks.get(session_id)
+            await self._stop_runner_team_runtime(session_id, team_name, 'Goal settlement',
+                                                require_exit_confirmation=True)
+            await self._stop_runner_team_agent_transport(session_id)
+            if stream is not None and stream is not asyncio.current_task():
+                # A timeout retains this Round/Runtime permit for cleanup retry;
+                # it must not cancel away an unconfirmed history consumer.
+                async with asyncio.timeout(10):
+                    await asyncio.shield(stream)
+
+    def current_goal_attempt_evidence(self, session_id):
+        """Read only; ordinary Team rounds allocate no Goal evidence."""
+        current = self._active_rounds.get(session_id)
+        return current.goal_evidence if current is not None else None
+
+    def current_round_request_id(self, session_id: str) -> str | None:
+        """Read the existing round owner for durable member attribution."""
+        current = self._active_rounds.get(session_id)
+        return current.request_id if current is not None else None
 
     def is_round_owner(self, session_id: str, request_id: str) -> bool:
         current = self._active_rounds.get(session_id)
@@ -1197,6 +1259,7 @@ class TeamManager:
         login_model_entry: dict[str, Any] | None = None,
         agent_group_name: str | None = None,
         swarmflow_config: dict | None = None,
+        execution_route: Any = None,
     ) -> TeamAgentSpec:
         """Build a team spec via provider-based assembly (no parent DeepAgent).
 
@@ -1224,6 +1287,39 @@ class TeamManager:
         from jiuwenswarm.agents.swarm import enrich_team_spec_for_swarm
 
         config_base = get_config()
+        if execution_route is not None and execution_route.provider_id != "native":
+            from pathlib import Path
+            from jiuwenswarm.runtime.harness.team_execution import (
+                ExternalTeamMemberFactory, attach_external_team_execution,
+            )
+
+            binding = execution_route.bound.binding
+            if (binding.host_session_id != session_id
+                    or (user_id is not None and binding.subject_id != user_id)
+                    or (channel_id is not None and execution_route.channel_id != channel_id)
+                    or (project_dir is not None and str(Path(project_dir).resolve()) != binding.workspace)):
+                raise ValueError("TeamManager request differs from admitted execution")
+            if self._is_distributed_mode(config_base):
+                raise ValueError("External Team distributed bootstrap is not integrated")
+            surface = execution_route.surface
+            if surface is None:
+                raise ValueError("External Team requires an admitted Surface")
+            surface.validate_mode(mode, require_policy=False, topology="team")
+            from jiuwenswarm.runtime.harness.surface import canonical_surface_mode
+            if canonical_surface_mode({"mode": mode, "work_mode": surface.identity.work_mode}) != surface.initial_mode:
+                raise ValueError("External Team execution state differs from admitted execution")
+            # Validate Provider/Surface before PostgreSQL or Native enrichment.
+            ExternalTeamMemberFactory(execution_route, team_name=surface.identity.team_name or "pending")
+            spec, has_binding = self._load_session_team_spec(session_id)
+            if not has_binding:
+                self._apply_session_scoped_team_name(spec, session_id=session_id)
+            if swarmflow_config is not None and swarmflow_config.get("enable_swarmflow"):
+                raise ValueError("External Team Swarmflow integration is not available")
+            if agent_group_name:
+                raise ValueError("External Team AgentGroup capabilities are not integrated")
+            attach_external_team_execution(spec, execution_route)
+            await self._ensure_postgresql_for_leader(config_base)
+            return spec
         self._team_evolution_enabled[session_id] = get_skill_evolution_enabled(config_base)
         await self._ensure_postgresql_for_leader(config_base)
         spec, has_binding = self._load_session_team_spec(
@@ -2439,7 +2535,7 @@ class TeamManager:
         self._clear_team_rail_registries(session_id)
 
     async def _stop_runner_team_runtime(
-        self, session_id: str, team_name: str, caller: str
+        self, session_id: str, team_name: str, caller: str, *, require_exit_confirmation: bool = False,
     ) -> bool:
         """Stop Runner-owned team runtime, with proper cancellation and error handling.
 
@@ -2465,6 +2561,8 @@ class TeamManager:
             )
             return result
         except asyncio.CancelledError:
+            if require_exit_confirmation:
+                raise
             logger.warning(
                 "[TeamManager] %s: Runner stop cancelled: "
                 "session_id=%s team_name=%s",
@@ -2474,6 +2572,8 @@ class TeamManager:
             )
             return False
         except Exception as exc:
+            if require_exit_confirmation:
+                raise
             logger.warning(
                 "[TeamManager] %s: Runner stop failed: "
                 "session_id=%s team_name=%s error=%s",
@@ -2625,6 +2725,7 @@ class TeamManager:
         reason: str = "",
         *,
         workflow_disposition: Literal["stop", "pause"] = "stop",
+        require_exit_confirmation: bool = False,
     ) -> bool:
         """Cancel the current team session runtime, removing it from Runner pool.
 
@@ -2663,7 +2764,8 @@ class TeamManager:
                     session_id, action=workflow_disposition
                 )
                 await self._stop_runner_team_runtime(
-                    session_id, team_name, "cancel: forced"
+                    session_id, team_name, "cancel: forced",
+                    **({"require_exit_confirmation": True} if require_exit_confirmation else {}),
                 )
 
 
@@ -2679,6 +2781,8 @@ class TeamManager:
                 or self.is_runtime_active(session_id)
                 or self.is_runtime_pending(session_id)
             )
+            if require_exit_confirmation and not has_team_runtime:
+                has_team_runtime = await self.has_resumable_runtime(session_id)
             if (
                 not has_stream_task
                 and not has_team_runtime
@@ -2713,7 +2817,8 @@ class TeamManager:
             runner_stopped = False
             if team_name:
                 runner_stopped = await self._stop_runner_team_runtime(
-                    session_id, team_name, "cancel"
+                    session_id, team_name, "cancel",
+                    **({"require_exit_confirmation": True} if require_exit_confirmation else {}),
                 )
                 await self._stop_runner_team_agent_transport(session_id)
 
@@ -2740,6 +2845,7 @@ class TeamManager:
         reason: str = "",
         *,
         stop_runner: bool = True,
+        require_exit_confirmation: bool = False,
     ) -> bool:
         """Stop local runtime resources and, by default, the Runner runtime.
 
@@ -2757,6 +2863,8 @@ class TeamManager:
                 or self.is_runtime_active(session_id)
                 or self.is_runtime_pending(session_id)
             )
+            if require_exit_confirmation and not has_team_runtime:
+                has_team_runtime = await self.has_resumable_runtime(session_id)
             if (
                 not has_stream_task
                 and not has_team_runtime
@@ -2776,16 +2884,27 @@ class TeamManager:
             # cancel — no abort reason, no seal record (same ordering
             # rationale as the cancel path).
             await self._dispatch_swarmflow_controller(session_id, action="stop")
+            # A strict External owner cannot release local handles before the
+            # authoritative Runner confirms shutdown. Its pool retains failed
+            # exits, so propagating the error leaves the same owner retryable.
+            confirmed_runner_stopped = False
+            if require_exit_confirmation and stop_runner:
+                team_name = self._resolve_session_team_name(session_id)
+                if not team_name:
+                    raise RuntimeError("Team shutdown identity is unavailable")
+                confirmed_runner_stopped = await self._stop_runner_team_runtime(
+                    session_id, team_name, "stop", require_exit_confirmation=True,
+                )
             team_agent = self._team_agents.pop(session_id, None) if has_local_team_runtime else None
             await self._cleanup_runtime_locals(session_id)
 
-            stopped = False
+            stopped = confirmed_runner_stopped
             if has_local_team_runtime and team_agent is not None:
                 stopped = await self._stop_local_team_runtime(session_id, team_agent)
 
             team_name = self._resolve_session_team_name(session_id)
 
-            if team_name and stop_runner:
+            if team_name and stop_runner and not require_exit_confirmation:
                 try:
                     runner_stopped = await Runner.stop_agent_team(team_name=team_name, session_id=session_id)
                     stopped = runner_stopped or stopped

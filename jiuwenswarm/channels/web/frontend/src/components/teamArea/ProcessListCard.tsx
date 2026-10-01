@@ -33,6 +33,18 @@ function buildProcessDetailRows(item: ProcessItem, t: Translate): ProcessDetailR
       [t('team.process.fields.tool'), item.execution?.tool_name || '-'],
     ];
 
+    const review = item.execution?.review;
+    if (review) {
+      rows.push(
+        [t('team.process.review.reviewer'), item.execution!.member_id],
+        [t('team.process.fields.taskId'), review.task_id],
+        [t('team.process.review.round'), String(review.round)],
+        [t('team.process.review.provider'), review.provider_id || '-'],
+        [t('team.process.review.invocation'), review.invocation_id],
+      );
+      if (review.terminal_status) rows.push([t('team.process.review.executionStatus'), review.terminal_status]);
+    }
+
     // 如果有配对的结果，显示调用参数和结果
     if (item.linkedResult) {
       if (item.execution?.content) {

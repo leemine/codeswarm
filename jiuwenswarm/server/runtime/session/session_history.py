@@ -816,6 +816,11 @@ def _is_team_relevant(item: dict[str, Any]) -> bool:
     if not isinstance(et, str):
         return False
     if et in _TEAM_RELEVANT_EVENT_TYPES:
+        if (item.get("execution_kind") == "scheduled_review"
+                and item.get("role") == "reviewer" and is_team_mode(item.get("mode"))):
+            # Temporary review output belongs to Team history without becoming
+            # a roster member. Keep its existing invocation/task provenance.
+            return True
         if et == "chat.file":
             role = item.get("role")
             return isinstance(role, str) and role.strip().lower() in {
@@ -882,6 +887,9 @@ def _is_member_relevant(item: dict[str, Any], member_name: str) -> bool:
 
     不含 team.member/team.task 上下文事件（不会发给飞书，避免刷屏）。
     """
+    # A temporary reviewer is not a private roster seat with the same name.
+    if item.get("execution_kind") == "scheduled_review":
+        return False
     et = item.get("event_type")
     if not isinstance(et, str):
         return False
