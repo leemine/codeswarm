@@ -67,6 +67,7 @@ class EngineAgentAdapter:
         self._owns_tool_gateway = tool_gateway is None
         self._heartbeat_bridge = HeartbeatRuntimeBridge()
         self._subagent_runtime: ExternalSubagentRuntime | None = None
+        self._work_research_enabled = False
         self._session: ExecutionSession | None = None
         self._heartbeat_stopped_session: ExecutionSession | None = None
         self._projection = ExternalEventProjection(
@@ -109,9 +110,17 @@ class EngineAgentAdapter:
         mode: str = "agent",
         sub_mode: str | None = None,
     ) -> None:
-        del config, mode, sub_mode
+        del config, sub_mode
+        from jiuwenswarm.common.mode_matrix import deprecate_mode
+
+        # The manager resolves persisted product mode before constructing us.
+        # Freeze once; later requests and child role strings cannot change it.
+        work_research_enabled = deprecate_mode(mode) in {
+            "agent.work.normal", "agent.work.plan",
+        }
         if self._session is not None:
             raise RuntimeError("External execution instance already exists")
+        self._work_research_enabled = work_research_enabled
         self._session = self._build_session()
 
     def _build_session(self) -> ExecutionSession:
@@ -140,6 +149,7 @@ class EngineAgentAdapter:
                 self._route,
                 write_output=self._projection.project_product_chunk,
                 parent_session=self._parent_session,
+                work_research_enabled=self._work_research_enabled,
                 additional_tools=[
                     *self._goal_runtime.tools(),
                     *self._heartbeat_bridge.build_tools(

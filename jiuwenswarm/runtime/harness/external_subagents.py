@@ -99,6 +99,7 @@ class ExternalSubagentRuntime:
         additional_tools: Sequence[ProductTool] = (),
         parent_session: ExternalSubagentParentSession | None = None,
         browser_admit: BrowserToolAdmission | None = None,
+        work_research_enabled: bool = False,
     ) -> None:
         if route.provider_id not in SUPPORTED_SUBAGENT_PROVIDERS:
             raise ValueError(
@@ -122,12 +123,14 @@ class ExternalSubagentRuntime:
         self._factory = ExternalSubagentExecutionFactory(
             route,
             browser_admit=browser_admit,
+            work_research_enabled=work_research_enabled,
         )
         tools = build_subagent_tools(
             self._parent_host,
             language="cn",
             available_agents=render_external_subagent_catalog(
                 browser_available=browser_admit is not None,
+                work_research_enabled=work_research_enabled,
             ),
             execution_factory=self._factory,
         )

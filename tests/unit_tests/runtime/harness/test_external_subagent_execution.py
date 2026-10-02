@@ -626,3 +626,37 @@ def test_unsupported_parent_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="supported, consistent parent"):
         ExternalSubagentExecutionFactory(native_route)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_id", ["codex", "opencode"])
+@pytest.mark.parametrize("work_research_enabled", [True, False])
+async def test_research_policy_is_frozen_to_work_parent_and_keeps_binding(
+    tmp_path, monkeypatch, provider_id, work_research_enabled,
+):
+    from jiuwenswarm.agents.harness.work.research import work_research_instructions
+
+    route = _route(tmp_path, provider_id=provider_id)
+    calls = _install_session_builder(monkeypatch)
+    factory = ExternalSubagentExecutionFactory(
+        route, work_research_enabled=work_research_enabled,
+    )
+    request = dataclasses.replace(_request(), subagent_type="research_agent")
+    execution = await factory.create(request, _context())
+    prompt = calls[0][1].started_context.system_prompt
+    assert (work_research_instructions() in prompt) is work_research_enabled
+    assert execution.binding.provider_id == route.provider_id
+    assert execution.binding.config_revision == route.bound.binding.config_revision
+    assert execution.binding.workspace == route.bound.binding.workspace
+    assert execution.binding.subject_id != route.bound.binding.subject_id
+    await execution.close("research_finished")
+    assert calls[0][1].stopped
+
+
+@pytest.mark.asyncio
+async def test_work_research_does_not_inject_policy_into_general_child(tmp_path, monkeypatch):
+    calls = _install_session_builder(monkeypatch)
+    factory = ExternalSubagentExecutionFactory(_route(tmp_path), work_research_enabled=True)
+    execution = await factory.create(_request(), _context())
+    assert "# Evidence research" not in calls[0][1].started_context.system_prompt
+    await execution.close("finished")

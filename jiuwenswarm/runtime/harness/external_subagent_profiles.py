@@ -10,6 +10,7 @@ from types import MappingProxyType
 
 GENERAL_PURPOSE_SUBAGENT_TYPE = "general-purpose"
 BROWSER_SUBAGENT_TYPE = "browser_agent"
+RESEARCH_SUBAGENT_TYPE = "research_agent"
 
 
 class ExternalSubagentExecutionKind(str, Enum):
@@ -39,7 +40,6 @@ _LEGACY_GENERIC_ALIASES = (
     "explore_agent",
     "mobile_gui_agent",
     "plan_agent",
-    "research_agent",
     "verification_agent",
 )
 
@@ -53,6 +53,15 @@ _profile_catalog = {
             "display_name and role describe the delegated assignment"
         ),
         advertised=True,
+    ),
+    RESEARCH_SUBAGENT_TYPE: ExternalSubagentProfile(
+        subagent_type=RESEARCH_SUBAGENT_TYPE,
+        execution_kind=ExternalSubagentExecutionKind.GENERIC,
+        description=(
+            "Work evidence research using the same Provider and admitted workspace; "
+            "scope, inspect sources, compare evidence and return a cited report"
+        ),
+        compatibility_alias=True,
     ),
     BROWSER_SUBAGENT_TYPE: ExternalSubagentProfile(
         subagent_type=BROWSER_SUBAGENT_TYPE,
@@ -120,13 +129,18 @@ def validate_external_subagent_request(
     return profile
 
 
-def render_external_subagent_catalog(*, browser_available: bool = False) -> str:
+def render_external_subagent_catalog(
+    *,
+    browser_available: bool = False,
+    work_research_enabled: bool = False,
+) -> str:
     """Render only profiles that the current product runtime can construct."""
 
     return "\n".join(
         f"- {profile.subagent_type}: {profile.description}"
         for profile in EXTERNAL_SUBAGENT_PROFILES.values()
         if profile.advertised
+        or (work_research_enabled and profile.subagent_type == RESEARCH_SUBAGENT_TYPE)
         or (
             browser_available
             and profile.execution_kind is ExternalSubagentExecutionKind.BROWSER
@@ -138,6 +152,7 @@ __all__ = [
     "BROWSER_SUBAGENT_TYPE",
     "EXTERNAL_SUBAGENT_PROFILES",
     "GENERAL_PURPOSE_SUBAGENT_TYPE",
+    "RESEARCH_SUBAGENT_TYPE",
     "ExternalSubagentExecutionKind",
     "ExternalSubagentProfile",
     "ExternalSubagentProfileUnavailableError",

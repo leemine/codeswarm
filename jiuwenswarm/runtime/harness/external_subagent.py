@@ -26,6 +26,7 @@ from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
 from jiuwenswarm.runtime.harness.context_bridge import build_external_context
 from jiuwenswarm.runtime.harness.execution_session import ExecutionSession
 from jiuwenswarm.runtime.harness.external_subagent_profiles import (
+    RESEARCH_SUBAGENT_TYPE,
     ExternalSubagentExecutionKind,
     ExternalSubagentProfile,
     validate_external_subagent_request,
@@ -155,6 +156,7 @@ class ExternalSubagentExecutionFactory:
         parent_route: AdmittedExecutionRoute,
         *,
         browser_admit: BrowserToolAdmission | None = None,
+        work_research_enabled: bool = False,
     ) -> None:
         binding = parent_route.bound.binding
         if (
@@ -184,6 +186,7 @@ class ExternalSubagentExecutionFactory:
         self._parent_spec = parent_route.bound.spec
         self._child_source = ExecutionConfigSource(explicit=self._parent_spec)
         self._browser_admit = browser_admit
+        self._work_research_enabled = work_research_enabled
         self._live: dict[str, ExternalSubagentExecution] = {}
         self._cleanup_pending: dict[str, ExecutionSession] = {}
         self._reserved: set[str] = set()
@@ -279,6 +282,15 @@ class ExternalSubagentExecutionFactory:
                 f"Display name: {request.display_name}.\n"
                 f"Role: {request.role}."
             )
+            if (
+                self._work_research_enabled
+                and profile.subagent_type == RESEARCH_SUBAGENT_TYPE
+            ):
+                from jiuwenswarm.agents.harness.work.research import (
+                    work_research_instructions,
+                )
+
+                child_prompt += f"\n{work_research_instructions()}"
             if browser_resources is not None:
                 child_prompt += f"\n{browser_resources.system_prompt}"
             context_value = dataclasses.replace(
