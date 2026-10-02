@@ -29,6 +29,14 @@ class AuthorizationDecision:
     revision: int
     reason: str = ""
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.allowed, bool):
+            raise TypeError("allowed must be a boolean")
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 0:
+            raise ValueError("authorization revision must be a nonnegative integer")
+        if self.action not in {"read", "write", "execute", "admin"}:
+            raise ValueError("unknown project action")
+
 
 class ProjectAuthorizer(Protocol):
     def authorize(
