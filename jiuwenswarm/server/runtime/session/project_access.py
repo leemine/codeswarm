@@ -222,6 +222,7 @@ class ProjectAccessStore:
                 raise ProjectRevisionConflict('project extension already exists')
             if self._record(project_id) is None:
                 raise ValueError('project not found')
+            self._mark_managed({project_id})
             data['projects'][project_id] = {
                 'schema_version': _SCHEMA, 'owner_id': owner_id, 'acl_revision': 1,
                 'acl': {}, 'goal': '', 'extensions': {},

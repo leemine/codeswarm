@@ -52,8 +52,31 @@ def _can_read_project(project_id: str) -> bool:
 
 
 def _visible_sessions() -> list[dict[str, Any]]:
-    return [item for item in collect_all_sessions_metadata()
-            if _can_read_project(str(item.get('project_id') or ''))]
+    # Older Session metadata may contain only a directory. Migrating its
+    # project must not expose those histories through the virtual default.
+    projects = project_store.list_projects(include_hidden=True, cache_bust=True)
+    result = []
+    for item in collect_all_sessions_metadata():
+        if not _can_read_project(str(item.get('project_id') or '')):
+            continue
+        directory = item.get('project_dir')
+        visible = True
+        if isinstance(directory, str) and directory:
+            directory = os.path.realpath(directory)
+            for project in projects:
+                if not project.project_dir:
+                    continue
+                root = os.path.realpath(project.project_dir)
+                try:
+                    overlaps = os.path.commonpath([directory, root]) in {directory, root}
+                except ValueError:
+                    overlaps = False
+                if overlaps and not _can_read_project(project.project_id):
+                    visible = False
+                    break
+        if visible:
+            result.append(item)
+    return result
 
 
 

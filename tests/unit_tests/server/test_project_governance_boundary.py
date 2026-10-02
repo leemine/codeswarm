@@ -142,3 +142,24 @@ def test_orphaned_protected_project_keeps_inventory_closed(protected):
     project_store.delete_project(item.project_id)
     with pytest.raises(ProjectAccessDenied):
         authorize_resource_request(request(ReqMethod.SESSION_LIST), None)
+
+
+@pytest.mark.asyncio
+async def test_project_inventory_filters_legacy_directory_only_history(protected, monkeypatch):
+    from jiuwenswarm.server.runtime.gateway_adapter import project_adapter
+    item, _store = protected
+    monkeypatch.setattr(project_adapter, 'collect_all_sessions_metadata', lambda: [
+        {'session_id': 'legacy-private', 'project_dir': item.project_dir,
+         'channel_id': 'web', 'pinned': True},
+    ])
+    response = await project_adapter.ProjectAdapter().handle(request(ReqMethod.PROJECT_PINNED_SESSIONS))
+    assert response.ok and response.payload['sessions'] == []
+
+
+def test_direct_host_initialization_also_preserves_protection_marker(protected):
+    item, store = protected
+    another = project_store.create_project('new', '/separate')
+    store.initialize(another.project_id, 'owner')
+    store.path.unlink()
+    assert store.is_protected(another.project_id)
+    assert not store.authorize(another.project_id, 'owner', 'read').allowed
