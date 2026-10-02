@@ -242,3 +242,30 @@ async def test_fork_and_switch_recheck_and_abort_on_revocation(env, operation):
         await runtime.commit_session_provision(prepared, timing=timing)
     assert released == [operation]
     runtime._session_provisioner.commit_session_provision.assert_not_awaited()
+
+
+@pytest.mark.parametrize("source", ["cwd", "trusted_dirs"])
+def test_legacy_workspace_fallback_cannot_bypass_protected_project(env, monkeypatch, tmp_path, source):
+    runtime, authority, request, _, _ = env
+    runtime._trusted_identity_resolver = None
+    authority.allowed = False
+    root = tmp_path / "protected"
+    protected = SimpleNamespace(project_id="protected", project_dir=str(root), work_mode="work")
+    request.session_id = None
+    request.params = {source: str(root) if source == "cwd" else [str(root)], "mode": "team", "work_mode": "work"}
+    monkeypatch.setattr("jiuwenswarm.server.runtime.session.project_store.get_project_by_dir_and_mode", lambda *args, **kwargs: protected)
+    monkeypatch.setattr("jiuwenswarm.server.runtime.session.project_store.list_projects", lambda **kwargs: [protected])
+    with pytest.raises(GovernanceError, match="denied"):
+        runtime._governance_owned_request(request)
+
+
+def test_secondary_trusted_directory_cannot_bypass_protected_project(env, monkeypatch, tmp_path):
+    runtime, _, request, _, _ = env
+    root = tmp_path / "protected"
+    protected = SimpleNamespace(project_id="protected", project_dir=str(root), work_mode="work")
+    request.session_id = None
+    request.params = {"trusted_dirs": [str(tmp_path / "public"), str(root)], "mode": "team"}
+    monkeypatch.setattr("jiuwenswarm.server.runtime.session.project_store.get_project_by_dir_and_mode", lambda *args, **kwargs: None)
+    monkeypatch.setattr("jiuwenswarm.server.runtime.session.project_store.list_projects", lambda **kwargs: [protected])
+    with pytest.raises(GovernanceError, match="overlaps"):
+        runtime._governance_owned_request(request)

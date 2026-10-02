@@ -411,6 +411,14 @@ class AgentRuntime:
         metadata = metadata if isinstance(metadata, dict) else {}
         project_id = str(getattr(value, "project_id", "") or params.get("project_id") or metadata.get("project_id") or "").strip()
         project_dir = str(getattr(value, "project_dir", "") or params.get("project_dir") or metadata.get("project_dir") or "").strip()
+        # Legacy/Team preparation accepts cwd/trusted_dirs as its workspace.
+        # Code also uses cwd independently of project identity, so inspect every
+        # declared workspace for protected aliases without making a new project.
+        declared_dirs = [params.get("cwd"), metadata.get("cwd")]
+        trusted_dirs = params.get("trusted_dirs")
+        if isinstance(trusted_dirs, list):
+            declared_dirs.extend(trusted_dirs)
+        declared_dirs = [path.strip() for path in declared_dirs if isinstance(path, str) and path.strip()]
         work_mode = str(getattr(value, "work_mode", "") or params.get("work_mode") or "work")
         session_id = getattr(value, "session_id", None)
         if session_id:
@@ -437,6 +445,8 @@ class AgentRuntime:
                 if project_dir and Path(project_dir).resolve() != Path(registered_dir).resolve():
                     raise GovernanceError("project ID and directory identify different projects")
                 project_dir = registered_dir
+        if not project_dir and declared_dirs:
+            project_dir = declared_dirs[0]
         if project_dir:
             project = get_project_by_dir_and_mode(project_dir, work_mode, cache_bust=True)
             directory_id = str(getattr(project, "project_id", "") or "")
@@ -444,13 +454,13 @@ class AgentRuntime:
                 if project_id and project_id != directory_id:
                     raise GovernanceError("project ID and directory identify different projects")
                 project_id = directory_id
-            selected_path = Path(project_dir).resolve()
+            selected_paths = {Path(path).resolve() for path in [project_dir, *declared_dirs]}
             for candidate in list_projects(include_hidden=True, cache_bust=True):
                 if candidate.project_id == project_id or not candidate.project_dir:
                     continue
                 candidate_path = Path(candidate.project_dir).resolve()
-                if (selected_path == candidate_path or selected_path.is_relative_to(candidate_path)
-                        or candidate_path.is_relative_to(selected_path)):
+                if any(selected_path == candidate_path or selected_path.is_relative_to(candidate_path)
+                       or candidate_path.is_relative_to(selected_path) for selected_path in selected_paths):
                     decision = self._submission_guard.check_access(
                         candidate.project_id, self._governance_identity(value), "execute",
                     )
