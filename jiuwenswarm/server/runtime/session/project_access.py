@@ -124,6 +124,30 @@ class ProjectAccessStore:
         except (ProjectAccessDenied, OSError):
             return AuthorizationDecision(False, project_id, actor_id, action, 0, 'storage_unavailable')
 
+    def protected_ids(self) -> tuple[str, ...]:
+        """Enumerate persisted protection, including deleted registry IDs.
+
+        Unscoped legacy inventories must consider orphaned Session histories,
+        not only projects still present in the registry. Storage corruption
+        raises instead of returning an empty (apparently unprotected) set.
+        """
+        with self._locked():
+            data = self._load()
+            ids = set(data['projects'])
+            path = project_store._projects_file()
+            if path.exists():
+                try:
+                    registry = json.loads(path.read_text(encoding='utf-8'))
+                    records = registry['projects']
+                    if not isinstance(records, list) or any(not isinstance(p, dict) for p in records):
+                        raise ValueError('invalid project registry')
+                    ids.update(p.get('project_id') for p in records if p.get('access_managed'))
+                except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                    raise ProjectAccessDenied('project registry unavailable') from exc
+            if any(not isinstance(pid, str) or not pid.strip() for pid in ids):
+                raise ProjectAccessDenied('invalid protected project identity')
+            return tuple(sorted(pid for pid in ids if not is_default_project_id(pid)))
+
     def is_protected(self, project_id: str) -> bool:
         """Persisted ACL or a creation marker; corruption is also protected."""
         if not project_id or is_default_project_id(project_id):

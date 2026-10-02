@@ -187,3 +187,27 @@ async def test_trusted_create_cannot_add_protected_alias_to_legacy_workspace(sto
     response = await api.handle(request(ReqMethod.PROJECT_CREATE, name='New', project_dir=str(directory), work_mode='code'))
     assert not response.ok and response.payload['code'] == 'FORBIDDEN'
     assert len(project_store.list_projects(cache_bust=True)) == 1
+
+
+def test_protected_ids_include_deleted_registry_history(store):
+    item = project(store)
+    project_store.delete_project(item.project_id)
+    assert store.protected_ids() == (item.project_id,)
+    assert not store.authorize(item.project_id, 'owner', 'read').allowed
+
+
+def test_protected_ids_include_marker_when_sidecar_is_missing(store):
+    item = project(store)
+    store.path.unlink()
+    assert store.protected_ids() == (item.project_id,)
+    legacy = project_store.create_project('Legacy', '/legacy')
+    assert legacy.project_id not in store.protected_ids()
+
+
+@pytest.mark.parametrize('file', ['registry', 'sidecar'])
+def test_protected_ids_storage_corruption_fails_closed(store, file):
+    project(store)
+    path = store.path if file == 'sidecar' else project_store._projects_file()
+    path.write_text('{broken')
+    with pytest.raises(ProjectAccessDenied):
+        store.protected_ids()
