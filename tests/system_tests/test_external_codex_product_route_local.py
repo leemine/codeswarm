@@ -8,6 +8,8 @@ import dataclasses
 import json
 import os
 import shlex
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -17,7 +19,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from openjiuwen.harness_protocol import AgentExecutionSpec, ExecutionAuthorization
+from openjiuwen.harness_protocol import (
+    AgentExecutionSpec,
+    ExecutionAuthorization,
+)
 from openjiuwen.core.foundation.tool.schema import ToolOutput
 from openjiuwen.harness.subagent_runtime import (
     ParentExecutionContext,
@@ -163,6 +168,124 @@ def _route(root, spec: AgentExecutionSpec) -> AdmittedExecutionRoute:
         project_root=root,
     )
     return AdmittedExecutionRoute("web", source, bindings, bound, paths)
+
+
+async def _codex_hooks(sdk, *, env: dict[str, str], cwd: Path) -> list[dict]:
+    binary = str(sdk.client._resolve_codex_bin(sdk.CodexConfig()))
+    process = await asyncio.create_subprocess_exec(
+        binary,
+        "-c",
+        "features.plugins=true",
+        "app-server",
+        "--listen",
+        "stdio://",
+        cwd=str(cwd),
+        env=env,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    requests = (
+        {
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {"name": "c2_test", "title": "C2 test", "version": "1"},
+                "capabilities": {"experimentalApi": True},
+            },
+        },
+        {"method": "initialized"},
+        {"id": 2, "method": "hooks/list", "params": {"cwds": [str(cwd)]}},
+    )
+    assert process.stdin is not None and process.stdout is not None
+    for request in requests:
+        process.stdin.write((json.dumps(request) + "\n").encode())
+    await process.stdin.drain()
+    result = None
+    try:
+        while result is None:
+            line = await asyncio.wait_for(process.stdout.readline(), 20)
+            assert line, "Codex app-server closed before hooks/list responded"
+            response = json.loads(line)
+            if response.get("id") == 2:
+                result = response["result"]
+    finally:
+        process.terminate()
+        await asyncio.wait_for(process.wait(), 5)
+    assert len(result["data"]) == 1
+    return result["data"][0]["hooks"]
+
+
+def _trust_codex_hooks_with_tui(binary: str, *, env: dict[str, str], cwd: Path) -> None:
+    """Exercise the supported interactive trust flow; never use the bypass flag."""
+    tmux = shutil.which("tmux")
+    if tmux is None:
+        pytest.skip("Codex TUI trust fixture requires tmux")
+    project_override = (
+        f'projects={{{json.dumps(str(cwd))}={{trust_level="untrusted"}}}}'
+    )
+    session = f"r1-c2-hooks-{os.getpid()}-{time.time_ns()}"
+    command = shlex.join(
+        [
+            binary,
+            "--no-alt-screen",
+            "-C",
+            str(cwd),
+            "-c",
+            "features.plugins=true",
+            "-c",
+            project_override,
+        ]
+    )
+    subprocess.run(
+        [tmux, "new-session", "-d", "-s", session, "-x", "120", "-y", "40", command],
+        cwd=cwd,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    output = ""
+    trusted = False
+    deadline = time.monotonic() + 20
+    try:
+        while time.monotonic() < deadline:
+            captured = subprocess.run(
+                [tmux, "capture-pane", "-p", "-t", session],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            output = captured.stdout
+            if not trusted and "Trust all and continue" in output:
+                subprocess.run(
+                    [tmux, "send-keys", "-t", session, "Down", "Enter"],
+                    check=True,
+                    capture_output=True,
+                    timeout=2,
+                )
+                trusted = True
+                time.sleep(1)
+                subprocess.run(
+                    [tmux, "send-keys", "-t", session, "C-c", "C-c"],
+                    check=False,
+                    capture_output=True,
+                    timeout=2,
+                )
+            if trusted:
+                break
+            time.sleep(0.2)
+        if not trusted:
+            raise AssertionError(output[-8000:])
+    finally:
+        subprocess.run(
+            [tmux, "kill-session", "-t", session],
+            check=False,
+            capture_output=True,
+            timeout=2,
+        )
 
 
 @pytest.mark.asyncio
@@ -1103,6 +1226,229 @@ async def test_real_codex_tool_approval_roundtrips_through_product_adapter(
 
 
 @pytest.mark.asyncio
+async def test_real_codex_native_hook_requires_interactive_trust_and_runs(tmp_path):
+    if os.name != "posix":
+        pytest.skip("Codex TUI trust fixture requires a POSIX PTY")
+    sdk = pytest.importorskip(
+        "openai_codex", reason="optional Codex SDK and bundled CLI required"
+    )
+    root = (tmp_path / "project").resolve()
+    home = (tmp_path / "home").resolve()
+    codex_home = (tmp_path / "codex-home").resolve()
+    market = (tmp_path / "market").resolve()
+    plugin = market / "plugins" / "c2-hook"
+    marker = root / "c2-hook-called.txt"
+    for path in (
+        root,
+        home,
+        codex_home,
+        market / ".agents/plugins",
+        plugin / ".codex-plugin",
+        plugin / "hooks",
+    ):
+        path.mkdir(parents=True)
+    (market / ".agents/plugins/marketplace.json").write_text(
+        json.dumps(
+            {
+                "name": "c2-local",
+                "plugins": [
+                    {
+                        "name": "c2-hook",
+                        "source": {"source": "local", "path": "./plugins/c2-hook"},
+                        "policy": {
+                            "installation": "AVAILABLE",
+                            "authentication": "ON_INSTALL",
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    hook_command = f'{sys.executable} "${{PLUGIN_ROOT}}/hooks/record.py"'
+    (plugin / ".codex-plugin/plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "c2-hook",
+                "version": "1.0.0",
+                "hooks": "./hooks/hooks.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (plugin / "hooks/hooks.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "UserPromptSubmit": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": hook_command,
+                                    "timeout": 5,
+                                    "statusMessage": "Running C2 hook",
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (plugin / "hooks/record.py").write_text(
+        "import json\nfrom pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('C2-HOOK-OK', encoding='utf-8')\n"
+        "print(json.dumps({'additionalContext': 'C2-HOOK-CONTEXT'}))\n",
+        encoding="utf-8",
+    )
+    env = {
+        "HOME": str(home),
+        "CODEX_HOME": str(codex_home),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "TERM": "xterm-256color",
+        "OPENJIUWEN_CODEX_API_KEY": "local-only",
+    }
+    binary = str(sdk.client._resolve_codex_bin(sdk.CodexConfig()))
+    for args in (
+        ("plugin", "marketplace", "add", str(market)),
+        ("plugin", "add", "c2-hook@c2-local"),
+    ):
+        process = await asyncio.create_subprocess_exec(
+            binary,
+            *args,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), 20)
+        assert process.returncode == 0, (stdout, stderr)
+
+    config_path = codex_home / "config.toml"
+    installed_config = config_path.read_text(encoding="utf-8")
+    readable = {
+        ":minimal": "read",
+        str(root): "write",
+        str(codex_home): "read",
+        str(Path(binary).parent): "read",
+        str(Path(sys.executable).parent): "read",
+    }
+    permission_config = (
+        'default_permissions = "c2-product"\n'
+        'model = "gpt-5.6-sol"\n'
+        'model_provider = "r1_c2_trust_fixture"\n'
+        "[model_providers.r1_c2_trust_fixture]\n"
+        'name = "r1_c2_trust_fixture"\n'
+        'base_url = "http://127.0.0.1:9/v1"\n'
+        'env_key = "OPENJIUWEN_CODEX_API_KEY"\n'
+        'wire_api = "responses"\n'
+        "[permissions.c2-product.filesystem]\n"
+    )
+    permission_config += "\n".join(
+        f"{json.dumps(path)} = {json.dumps(access)}"
+        for path, access in readable.items()
+    )
+    permission_config += "\n[permissions.c2-product.network]\nenabled=false\n"
+    config_path.write_text(permission_config + installed_config, encoding="utf-8")
+
+    hooks = await _codex_hooks(sdk, env=env, cwd=root)
+    assert len(hooks) == 1
+    hook = hooks[0]
+    assert hook["trustStatus"] == "untrusted"
+    installed_plugin = codex_home / "plugins/cache/c2-local/c2-hook/1.0.0"
+    plugin_snapshot = {
+        "plugin_id": "c2-hook@c2-local",
+        "source_type": "local",
+        "source_locator": str(plugin),
+        "version": "1.0.0",
+        "content_sha256": native_plugin_content_digest(installed_plugin),
+        "enabled": True,
+        "required_components": ["hooks"],
+        "mcp_server_names": [],
+        "hooks": [
+            {
+                "key": hook["key"],
+                "event_name": "userPromptSubmit",
+                "current_hash": hook["currentHash"],
+                "command": hook_command,
+                "matcher": None,
+                "async_mode": False,
+                "timeout_s": 5,
+                "status_message": "Running C2 hook",
+                "additional_context_limit": 2500,
+            }
+        ],
+    }
+    provider_config = {
+        "inherit_process_env": False,
+        "env": env,
+        "startup_source_roots": [
+            str(root),
+            str(codex_home / "plugins"),
+            str(codex_home / "skills"),
+            str(market),
+        ],
+        "native_plugins": [plugin_snapshot],
+    }
+    assert hook["isManaged"] is False
+    assert hook["enabled"] is True
+    assert not marker.exists()
+
+    # pty.fork must run on the process main thread; forking from an executor
+    # worker can strand the asyncio future even after the child exits.
+    _trust_codex_hooks_with_tui(binary, env=env, cwd=root)
+    # The first TUI launch also records an unrelated one-time model banner.
+    # Keep this restricted-startup fixture scoped to the hook trust mutation.
+    trusted_config, separator, _ = config_path.read_text(encoding="utf-8").partition(
+        "\n[tui.model_availability_nux]\n"
+    )
+    if separator:
+        config_path.write_text(trusted_config + "\n", encoding="utf-8")
+    hooks = await _codex_hooks(sdk, env=env, cwd=root)
+    assert hooks[0]["currentHash"] == hook["currentHash"]
+    assert hooks[0]["trustStatus"] == "trusted"
+
+    with _ResponsesFixture() as responses:
+        provider_config["model"] = {
+            "model": "gpt-5.6-sol",
+            "provider": "r1_c2_fixture",
+            "api_base": responses.base_url,
+            "api_key": "local-only",
+        }
+        route = _route(
+            root,
+            AgentExecutionSpec(
+                "codex", "r1-c2-hook-local", provider_config=provider_config
+            ),
+        )
+        adapter = EngineAgentAdapter(route)
+        request = AgentRequest(
+            request_id="r1-c2-hook-request",
+            channel_id="web",
+            session_id="r1-a2-session",
+            params={"mode": "code", "query": "Run the trusted C2 hook."},
+            is_stream=True,
+        )
+        request._execution_route = route
+        chunks = []
+        try:
+            await adapter.create_instance(mode="code")
+            adapter.select_execution_for_request(request)
+            async for chunk in adapter.process_message_stream_impl(
+                request, {"query": "Run the trusted C2 hook."}
+            ):
+                chunks.append(chunk)
+        finally:
+            await adapter.cleanup()
+
+    assert marker.read_text(encoding="utf-8") == "C2-HOOK-OK"
+    assert any(
+        (chunk.payload or {}).get("event_type") == "chat.final" for chunk in chunks
+    )
+
+
+@pytest.mark.asyncio
 async def test_real_codex_native_plugin_runs_through_product_adapter(tmp_path):
     sdk = pytest.importorskip(
         "openai_codex", reason="optional Codex SDK and bundled CLI required"
@@ -1331,13 +1677,21 @@ async def test_real_codex_native_plugin_runs_through_product_adapter(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_real_codex_heartbeat_tool_creates_job_and_scheduler_reuses_session(tmp_path, monkeypatch):
+async def test_real_codex_heartbeat_tool_creates_job_and_scheduler_reuses_session(
+    tmp_path, monkeypatch
+):
     """Real CLI/MCP plus original Scheduler/Runtime; model responses stay local."""
     from unittest.mock import AsyncMock, Mock
 
-    from jiuwenswarm.agents.harness.code.rails.heartbeat import runtime as heartbeat_module
-    from jiuwenswarm.agents.harness.code.rails.heartbeat.runtime import HeartbeatRailRuntime
-    from jiuwenswarm.agents.harness.code.rails.heartbeat.session_resolver import SessionSummary
+    from jiuwenswarm.agents.harness.code.rails.heartbeat import (
+        runtime as heartbeat_module,
+    )
+    from jiuwenswarm.agents.harness.code.rails.heartbeat.runtime import (
+        HeartbeatRailRuntime,
+    )
+    from jiuwenswarm.agents.harness.code.rails.heartbeat.session_resolver import (
+        SessionSummary,
+    )
     from jiuwenswarm.common.schema.message import ReqMethod
     from jiuwenswarm.runtime import AgentRuntime
     from jiuwenswarm.runtime.plan import PlanStateResult
@@ -1345,12 +1699,22 @@ async def test_real_codex_heartbeat_tool_creates_job_and_scheduler_reuses_sessio
     from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
     from jiuwenswarm.server.runtime.session import session_metadata
 
-    pytest.importorskip("openai_codex", reason="optional Codex SDK and bundled CLI required")
-    root, home, codex_home = (tmp_path / name for name in ("project", "home", "codex-home"))
+    pytest.importorskip(
+        "openai_codex", reason="optional Codex SDK and bundled CLI required"
+    )
+    root, home, codex_home = (
+        tmp_path / name for name in ("project", "home", "codex-home")
+    )
     for path in (root, home, codex_home, codex_home / "skills"):
         path.mkdir()
-    monkeypatch.setattr(heartbeat_module, "get_heartbeat_jobs_path", lambda: tmp_path / "heartbeat.json")
-    monkeypatch.setattr(session_metadata, "get_session_metadata", lambda *args, **kwargs: {"user_id": "local-test"})
+    monkeypatch.setattr(
+        heartbeat_module, "get_heartbeat_jobs_path", lambda: tmp_path / "heartbeat.json"
+    )
+    monkeypatch.setattr(
+        session_metadata,
+        "get_session_metadata",
+        lambda *args, **kwargs: {"user_id": "local-test"},
+    )
     finished = asyncio.Event()
     calls = []
     adapter = None
@@ -1360,22 +1724,29 @@ async def test_real_codex_heartbeat_tool_creates_job_and_scheduler_reuses_sessio
             calls.append(request)
             request._execution_route = route
             adapter.select_execution_for_request(request)
-            async for chunk in adapter.process_message_stream_impl(request, {"query": (request.params or {}).get("content", "continue")}):
+            async for chunk in adapter.process_message_stream_impl(
+                request, {"query": (request.params or {}).get("content", "continue")}
+            ):
                 yield chunk
 
     facade = Facade()
     manager = SimpleNamespace(
-        begin_foreground_chat=AsyncMock(), end_foreground_chat=AsyncMock(),
-        cleanup=AsyncMock(), cancel_all_inflight_work=AsyncMock(),
+        begin_foreground_chat=AsyncMock(),
+        end_foreground_chat=AsyncMock(),
+        cleanup=AsyncMock(),
+        cancel_all_inflight_work=AsyncMock(),
         cleanup_session_runtime=AsyncMock(return_value=True),
-        pin_agent=Mock(), unpin_agent=Mock(),
+        pin_agent=Mock(),
+        unpin_agent=Mock(),
         get_agent_for_session_nowait=Mock(return_value=facade),
     )
     runtime = AgentRuntime(
-        agent_manager=manager, initializer=AsyncMock(),
+        agent_manager=manager,
+        initializer=AsyncMock(),
         plan_controller=SimpleNamespace(
             ensure_state=AsyncMock(return_value=PlanStateResult()),
-            check_post_process_exit=AsyncMock(return_value=[]), reset_session=Mock(),
+            check_post_process_exit=AsyncMock(return_value=[]),
+            reset_session=Mock(),
         ),
     )
 
@@ -1392,7 +1763,9 @@ async def test_real_codex_heartbeat_tool_creates_job_and_scheduler_reuses_sessio
     runtime.set_admission_controller(heartbeat.admission)
     runtime.set_session_delete_lifecycle(heartbeat)
     heartbeat.scheduler._session_resolver = SimpleNamespace(
-        resolve=lambda channel_id, session_id: SessionSummary(session_id=session_id, channel_id=channel_id)
+        resolve=lambda channel_id, session_id: SessionSummary(
+            session_id=session_id, channel_id=channel_id
+        )
     )
     # Drive the clock explicitly; no scheduler sleep or remote model is involved.
     heartbeat._available = True
@@ -1404,15 +1777,40 @@ async def test_real_codex_heartbeat_tool_creates_job_and_scheduler_reuses_sessio
     heartbeat.execution.set_completion_hook(completed)
     with _ResponsesFixture() as responses:
         responses.items = [
-            {"type": "function_call", "namespace": "mcp__jiuwenswarm_product_tools", "name": "heartbeat_create_job", "id": "fc_hb", "call_id": "call_hb", "arguments": json.dumps({"name": "followup", "prompt": "Return R1-08-AUTO-OK", "schedule": {"type": "interval", "interval_seconds": 60}, "max_runs": 1})},
+            {
+                "type": "function_call",
+                "namespace": "mcp__jiuwenswarm_product_tools",
+                "name": "heartbeat_create_job",
+                "id": "fc_hb",
+                "call_id": "call_hb",
+                "arguments": json.dumps(
+                    {
+                        "name": "followup",
+                        "prompt": "Return R1-08-AUTO-OK",
+                        "schedule": {"type": "interval", "interval_seconds": 60},
+                        "max_runs": 1,
+                    }
+                ),
+            },
         ]
         spec = AgentExecutionSpec(
-            "codex", "r1-08-local", authorization=ExecutionAuthorization(full_access=True),
+            "codex",
+            "r1-08-local",
+            authorization=ExecutionAuthorization(full_access=True),
             provider_config={
                 "inherit_process_env": False,
-                "env": {"HOME": str(home), "CODEX_HOME": str(codex_home), "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+                "env": {
+                    "HOME": str(home),
+                    "CODEX_HOME": str(codex_home),
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                },
                 "mcp_required": True,
-                "model": {"model": "gpt-5.6-sol", "provider": "r1_08_fixture", "api_base": responses.base_url, "api_key": "local-only"},
+                "model": {
+                    "model": "gpt-5.6-sol",
+                    "provider": "r1_08_fixture",
+                    "api_base": responses.base_url,
+                    "api_key": "local-only",
+                },
             },
         )
         route = _route(root, spec)
@@ -1421,9 +1819,22 @@ async def test_real_codex_heartbeat_tool_creates_job_and_scheduler_reuses_sessio
         transport = None
         try:
             await adapter.create_instance()
-            request = AgentRequest(request_id="r1-08-create", channel_id="web", session_id="r1-a2-session", req_method=ReqMethod.CHAT_SEND, params={"mode": "agent.code.normal", "content": "Create the prescribed follow-up."}, is_stream=True, user_id="local-test")
+            request = AgentRequest(
+                request_id="r1-08-create",
+                channel_id="web",
+                session_id="r1-a2-session",
+                req_method=ReqMethod.CHAT_SEND,
+                params={
+                    "mode": "agent.code.normal",
+                    "content": "Create the prescribed follow-up.",
+                },
+                is_stream=True,
+                user_id="local-test",
+            )
             async with asyncio.timeout(45):
-                initial = [event async for event in runtime.stream(request, trigger_hook=False)]
+                initial = [
+                    event async for event in runtime.stream(request, trigger_hook=False)
+                ]
                 assert any(event.event_type == "chat.final" for event in initial)
                 jobs = await heartbeat.store.list_jobs()
                 assert len(jobs) == 1
@@ -1443,9 +1854,18 @@ async def test_real_codex_heartbeat_tool_creates_job_and_scheduler_reuses_sessio
             assert calls[1].metadata["automation"]["kind"] == "heartbeat"
             assert calls[1].session_id == request.session_id
             snapshot = runtime._session_coordinator.snapshot_session(request.session_id)
-            assert sum(item.work_kind is SessionWorkKind.HEARTBEAT and item.state.value == "succeeded" for item in snapshot.executions) == 1
+            assert (
+                sum(
+                    item.work_kind is SessionWorkKind.HEARTBEAT
+                    and item.state.value == "succeeded"
+                    for item in snapshot.executions
+                )
+                == 1
+            )
             pushes = [call.args[0] for call in server.send_push.await_args_list]
-            assert any(item["payload"].get("event_type") == "chat.final" for item in pushes)
+            assert any(
+                item["payload"].get("event_type") == "chat.final" for item in pushes
+            )
             assert pushes[-1]["payload"]["is_processing"] is False
             assert heartbeat._pinned_agents == {}
             assert not heartbeat.execution.active_session_ids()

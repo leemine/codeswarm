@@ -18,7 +18,7 @@ from openjiuwen.harness_protocol import (
 
 from jiuwenswarm.runtime.harness.surface import EffectiveSurfaceSnapshot
 
-_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}")
+_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}")
 
 
 class CapabilityKind(str, Enum):

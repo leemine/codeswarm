@@ -66,6 +66,27 @@ def _catalog(tmp_path, *, work_mode="code", browser=False, authorization=None):
     )
 
 
+def test_catalog_admits_canonical_native_plugin_identity(tmp_path) -> None:
+    surface = _compiled(tmp_path, work_mode="code")
+    catalog = compile_capability_catalog(
+        surface,
+        provider_inventory=_inventory(
+            ProviderCapability(
+                "native-plugin@local-market",
+                ProviderCapabilityKind.PLUGIN,
+                source="native_plugin",
+            )
+        ),
+        product_tool_names=(),
+        product_subagent_types=(),
+        authorization=ExecutionAuthorization(),
+    )
+
+    assert "native-plugin@local-market" in {
+        item.name for item in catalog.available(CapabilityKind.PLUGIN)
+    }
+
+
 def test_work_and_code_mount_distinct_subagents_and_explain_missing_categories(
     tmp_path,
 ) -> None:

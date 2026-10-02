@@ -582,6 +582,30 @@ test('normalizers accept the live Web payloads and real activity kinds', () => {
   }), null);
 });
 
+test('Codex internal subagents stay visibly distinct and expose no native controls', () => {
+  const normalized = normalizeSubagentStatusEvent({
+    event_type: 'chat.subtask_update',
+    session_id: sessionId,
+    subagent_id: 'codex:native-child',
+    parent_session_id: sessionId,
+    subagent_type: 'codex_internal',
+    display_name: 'Codex agent native-child',
+    role: 'Codex internal subagent',
+    task_description: 'Inspect the repository',
+    status: 'running',
+    lifecycle: 'live',
+    can_send_input: false,
+    needs_resume: false,
+    created_at: 1000,
+    updated_at: 1100,
+    revision: 1,
+  });
+  assert.equal(normalized?.subagent.subagent_type, 'codex_internal');
+  assert.equal(normalized?.subagent.role, 'Codex internal subagent');
+  assert.equal(normalized?.subagent.can_send_input, false);
+  assert.equal(normalized?.subagent.needs_resume, false);
+});
+
 test('live subagent runtimes stay isolated and retain activity that arrives before status', () => {
   let runtimeA = createEmptySubagentRuntime('session-a');
   const runtimeB = createEmptySubagentRuntime('session-b');
