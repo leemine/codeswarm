@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse
-from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.governance.contracts import TrustedIdentity
 from jiuwenswarm.governance.preparation import GovernanceError
 from jiuwenswarm.runtime.service import AgentRuntime
