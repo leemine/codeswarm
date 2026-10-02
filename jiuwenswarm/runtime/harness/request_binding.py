@@ -125,6 +125,12 @@ def bind_admitted_request_execution(
         host_session_id=session_id,
         workspace=str(runtime_paths.runtime_workspace_root),
     )
+    # A live Session remains authoritative even if its recovery file vanished.
+    # Reject a changed scope before creating an archive or inserting a binding.
+    remembered = getattr(agent_manager, "_session_execution_bindings", None)
+    current = remembered.get((channel_id, session_id)) if isinstance(remembered, dict) else None
+    if current is not None and current.cache_key != prospective_binding.cache_key:
+        raise ExecutionRecoveryUnavailableError("execution Binding changed")
     recovery = SessionExecutionRecovery(
         session_id=session_id,
         execution_profile_id=selected_profile_id,
