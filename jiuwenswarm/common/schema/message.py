@@ -105,6 +105,9 @@ class ReqMethod(Enum):
 
     # Project domain (Phase 3).  The Gateway routes these calls but all
     # project-store and session-metadata access happens in AgentServer.
+    PROJECT_EXTENSIONS_GET = "project.extensions.get"
+    PROJECT_EXTENSIONS_UPDATE = "project.extensions.update"
+    PROJECT_ACL_UPDATE = "project.acl.update"
     PROJECT_INFO = "project.info"
     PROJECT_PINNED_SESSIONS = "project.pinned_sessions"
     PROJECT_GET_SESSIONS = "project.get_sessions"

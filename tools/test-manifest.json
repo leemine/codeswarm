@@ -49,7 +49,8 @@
         "codeswarm.python.sdd",
         "codeswarm.browser.unit",
         "codeswarm.tui.contract",
-        "codeswarm.python.goal-heartbeat-lifecycle"
+        "codeswarm.python.goal-heartbeat-lifecycle",
+        "codeswarm.python.governance-projects"
       ],
       "retention_days": 30
     },
@@ -313,6 +314,55 @@
         "-o",
         "addopts=",
         "--asyncio-mode=auto",
+        "-p",
+        "no:cacheprovider",
+        "--timeout=30",
+        "--timeout-method=signal",
+        "--junitxml={junit}"
+      ]
+    },
+    {
+      "id": "codeswarm.python.governance-projects",
+      "owner": "runtime",
+      "tier": "unit",
+      "runner": "pytest",
+      "workdir": ".",
+      "writable_workdir": true,
+      "capabilities": [
+        "filesystem"
+      ],
+      "required": true,
+      "shard_timeout_seconds": 180,
+      "discover": {
+        "command": [
+          "{python}",
+          "-m",
+          "pytest",
+          "tests/unit_tests/governance",
+          "tests/unit_tests/server/test_project_access.py",
+          "tests/unit_tests/server/test_project_governance_boundary.py",
+          "--collect-only",
+          "-q",
+          "-o",
+          "addopts=",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "parser": "pytest",
+        "timeout_seconds": 60
+      },
+      "command": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/unit_tests/governance",
+        "tests/unit_tests/server/test_project_access.py",
+        "tests/unit_tests/server/test_project_governance_boundary.py",
+        "-q",
+        "-o",
+        "addopts=",
+        "-o",
+        "asyncio_mode=auto",
         "-p",
         "no:cacheprovider",
         "--timeout=30",

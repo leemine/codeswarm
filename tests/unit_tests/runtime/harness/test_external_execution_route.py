@@ -81,8 +81,9 @@ def _route(
     return AdmittedExecutionRoute("web", source, bindings, bound, paths)
 
 
+@pytest.mark.parametrize("trusted_subject", [None, "trusted-worker"])
 def test_admission_reuses_runtime_workspace_and_freezes_route(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trusted_subject: str | None
 ) -> None:
     from jiuwenswarm.runtime.harness import recovery_store
 
@@ -145,9 +146,25 @@ def test_admission_reuses_runtime_workspace_and_freezes_route(
         request,
         str(project),
         session_metadata=metadata,
+        trusted_subject_id=trusted_subject,
     )
 
-    assert route is request._execution_route
+    assert route.bound.binding.subject_id == (trusted_subject or "alice")
+    if trusted_subject:
+        request.user_id = "forged-route-owner"
+        same = bind_admitted_request_execution(
+            manager, request, str(project), session_metadata=metadata,
+            trusted_subject_id=trusted_subject,
+        )
+        assert same.bound.binding is route.bound.binding
+        with pytest.raises(ExecutionRecoveryUnavailableError, match="Binding changed"):
+            bind_admitted_request_execution(
+                manager, request, str(project), session_metadata=metadata,
+                trusted_subject_id="different-worker",
+            )
+        remembered.pop()  # The legitimate repeated bind was separately checked.
+
+    assert route.bound is request._execution_route.bound
     assert route.runtime_paths.runtime_workspace_root == project
     assert route.runtime_paths.cwd == project
     assert route.bound.binding.workspace == str(project)

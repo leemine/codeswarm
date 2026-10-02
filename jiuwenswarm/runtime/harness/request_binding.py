@@ -50,6 +50,7 @@ def bind_admitted_request_execution(
     project_dir: str | None,
     *,
     session_metadata: dict[str, Any] | None = None,
+    trusted_subject_id: str | None = None,
 ) -> AdmittedExecutionRoute | None:
     """Pin the server-owned selection before an Agent or MCP child is built.
 
@@ -113,7 +114,8 @@ def bind_admitted_request_execution(
     )
     channel_id = str(getattr(request, "channel_id", "") or "").strip() or "default"
     subject = str(
-        getattr(request, "user_id", "")
+        trusted_subject_id
+        or getattr(request, "user_id", "")
         or session_metadata.get("user_id")
         or f"{channel_id}:{session_id}"
     ).strip()
