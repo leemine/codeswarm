@@ -527,6 +527,7 @@ class ExternalEventProjection:
         subagent_id = f"codex:{native_id}"
         now_ms = time.time() * 1000
         current = self._codex_internal_subagents.get(subagent_id)
+        created = current is None
         if current is None:
             if len(self._codex_internal_subagents) >= self._max_turns:
                 raise OutputBudgetExceeded(
@@ -575,6 +576,29 @@ class ExternalEventProjection:
             return
 
         activity_kind = str(payload.get("activity_kind") or "activity")
+        if created:
+            agent_path = str(payload.get("agent_path") or "").strip()
+            current.update(
+                {
+                    **_codex_internal_status("running", None),
+                    "task_description": agent_path or current["task_description"],
+                    "closed_at": None,
+                    "updated_at": now_ms,
+                    "revision": 1,
+                    "can_send_input": False,
+                    "needs_resume": False,
+                    "controllable": False,
+                    "provider": "codex",
+                    "native_thread_id": native_id,
+                }
+            )
+            await self.project_product_chunk(
+                OutputSchema(
+                    type=SUBAGENT_UPDATED_EVENT_TYPE,
+                    index=self._next_codex_internal_index(),
+                    payload={"subagent_updated": dict(current)},
+                )
+            )
         seq = self._next_codex_internal_index()
         await self.project_product_chunk(
             OutputSchema(

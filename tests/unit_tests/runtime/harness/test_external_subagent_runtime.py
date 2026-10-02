@@ -581,6 +581,55 @@ async def test_codex_internal_subagents_reuse_read_only_product_projection(
 
 
 @pytest.mark.asyncio
+async def test_codex_internal_activity_first_creates_read_only_roster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.runtime.harness import event_projection as module
+
+    chunks: list[OutputSchema] = []
+    projection = module.ExternalEventProjection("parent-a")
+
+    async def project(chunk: OutputSchema) -> None:
+        chunks.append(chunk)
+
+    monkeypatch.setattr(projection, "project_product_chunk", project)
+    await projection.observe(
+        SimpleNamespace(
+            turn_id="turn-1",
+            event=ProviderEvent(
+                provider="codex",
+                event_type="internal_subagent/activity",
+                schema_version="1",
+                payload={
+                    "subagent_id": "native-child",
+                    "activity_id": "activity-1",
+                    "activity_kind": "started",
+                    "agent_path": "/root/reviewer",
+                    "controllable": False,
+                },
+            ),
+        )
+    )
+
+    assert [chunk.type for chunk in chunks] == [
+        "subagent_updated",
+        "subagent_activity",
+    ]
+    roster = chunks[0].payload["subagent_updated"]
+    assert roster["subagent_id"] == "codex:native-child"
+    assert roster["subagent_type"] == "codex_internal"
+    assert roster["task_description"] == "/root/reviewer"
+    assert roster["status"] == "running"
+    assert roster["turn_outcome"] is None
+    assert roster["can_send_input"] is False
+    assert roster["needs_resume"] is False
+    assert roster["controllable"] is False
+    activity = chunks[1].payload["subagent_activity"]
+    assert activity["subagent_id"] == "codex:native-child"
+    assert activity["summary"] == "Codex internal agent started"
+
+
+@pytest.mark.asyncio
 async def test_product_interaction_reuses_durable_projection_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
