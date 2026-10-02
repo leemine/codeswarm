@@ -7,6 +7,7 @@ import asyncio
 import copy
 import dataclasses
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -14,7 +15,11 @@ import pytest
 from openjiuwen.core.session.stream.base import OutputSchema
 from openjiuwen.core.single_agent.schema.agent_result import Artifact, Part
 from openjiuwen.harness.subagent_runtime import SubagentTurnResult
-from openjiuwen.harness_protocol import AgentExecutionSpec, ToolInvocation
+from openjiuwen.harness_protocol import (
+    AgentExecutionSpec,
+    ProviderEvent,
+    ToolInvocation,
+)
 
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
 from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
@@ -146,7 +151,9 @@ async def test_code_surface_mounts_code_profiles_and_rejects_work_profile(
     # Recovery input may carry an older audit record, but each provider cycle
     # rebuilds the effective catalog from the admitted spec and mounted tools.
     assert runtime.surface.capability_catalog is not persisted_catalog
-    assert runtime.surface.capability_catalog.fingerprint != persisted_catalog.fingerprint
+    assert (
+        runtime.surface.capability_catalog.fingerprint != persisted_catalog.fingerprint
+    )
     subagents = {
         entry.name
         for entry in runtime.surface.capability_catalog.entries
@@ -509,6 +516,68 @@ async def test_product_chunks_reuse_history_parser_and_runtime_push(
     assert len(pushes) == 1
     assert pushes[0]["payload"]["event_type"] == "chat.subtask_update"
     assert pushes[0]["session_id"] == "parent-a"
+
+
+@pytest.mark.asyncio
+async def test_codex_internal_subagents_reuse_read_only_product_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.runtime.harness import event_projection as module
+
+    chunks: list[OutputSchema] = []
+    projection = module.ExternalEventProjection("parent-a")
+
+    async def project(chunk: OutputSchema) -> None:
+        chunks.append(chunk)
+
+    monkeypatch.setattr(projection, "project_product_chunk", project)
+    await projection.observe(
+        SimpleNamespace(
+            turn_id="turn-1",
+            event=ProviderEvent(
+                provider="codex",
+                event_type="internal_subagent/status",
+                schema_version="1",
+                payload={
+                    "subagent_id": "native-child",
+                    "status": "running",
+                    "prompt": "Inspect the repository",
+                    "controllable": False,
+                },
+            ),
+        )
+    )
+    await projection.observe(
+        SimpleNamespace(
+            turn_id="turn-1",
+            event=ProviderEvent(
+                provider="codex",
+                event_type="internal_subagent/activity",
+                schema_version="1",
+                payload={
+                    "subagent_id": "native-child",
+                    "activity_id": "activity-1",
+                    "activity_kind": "interacted",
+                    "controllable": False,
+                },
+            ),
+        )
+    )
+
+    roster = chunks[0].payload["subagent_updated"]
+    assert chunks[0].type == "subagent_updated"
+    assert roster["subagent_id"] == "codex:native-child"
+    assert roster["subagent_type"] == "codex_internal"
+    assert roster["role"] == "Codex internal subagent"
+    assert roster["task_description"] == "Inspect the repository"
+    assert roster["can_send_input"] is False
+    assert roster["needs_resume"] is False
+    assert roster["controllable"] is False
+    activity = chunks[1].payload["subagent_activity"]
+    assert chunks[1].type == "subagent_activity"
+    assert activity["subagent_id"] == "codex:native-child"
+    assert activity["kind"] == "thinking"
+    assert activity["summary"] == "Codex internal agent interacted"
 
 
 @pytest.mark.asyncio

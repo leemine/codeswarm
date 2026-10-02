@@ -257,7 +257,7 @@ packaged default configuration or existing user config files. Team selection
 remains on its original route; Product sub-Agent inheritance and persistent
 cold recovery are later R1-03B and R1-04 scopes.
 
-## Codex native plugins (R1-03C1)
+## Codex native plugins and extensions (R1-03C1/C2)
 
 Native plugins are selected only inside the server-owned Codex profile's
 `provider_config.native_plugins`. The frozen profile records the prepared local
@@ -272,8 +272,27 @@ approval routing, checkpoint binding and process cleanup. Swarm supplies the
 authorized isolated HOME/CODEX_HOME and source roots, then reuses the existing
 interaction/history/UI path for plugin tool events. C1 does not install or
 update packages, add a plugin UI, expose hooks/commands/agents/apps, or route
-product ToolGateway calls; deployment, C2 and the B1 product-tool path remain
+product ToolGateway calls; deployment and the B1 product-tool path remain
 separate concerns.
+
+C2 additionally admits package-snapshotted command hooks. The server profile
+must freeze each hook's native key, event, command definition, timeout, current
+hash and related settings. Codex remains the sole trust owner: enabling a
+plugin is insufficient, the user must review the exact hash in the native
+hooks UI, and startup fails closed for untrusted, modified, missing or extra
+hooks. The host never writes trust state and never uses the dangerous bypass
+flag. Prompt/agent handlers, `commands/`, `agents/`, `apps` and
+`appTemplates` remain unsupported; command/agent content is supplied as
+portable Skills where appropriate.
+
+Hook lifecycle notifications stay Provider-private and bounded; hook stdout is
+not copied into chat history. Codex internal subagent notifications reuse the
+existing single event consumer and product activity/history projection, with a
+`codex:` identity namespace and `codex_internal` type. They do not create a
+product subagent Binding or registry entry. Locked Codex 0.144.4 exposes no
+host-callable internal-agent control RPC, so these rows are explicitly
+read-only (`can_send_input=false`, `needs_resume=false`, `controllable=false`).
+The existing six product subagent tools, lifecycle and controls are unchanged.
 
 ## Product ToolGateway and managed MCP (R1-03B1)
 

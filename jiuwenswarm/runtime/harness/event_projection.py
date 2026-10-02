@@ -16,12 +16,22 @@ from typing import Any
 
 from openjiuwen.harness_protocol import (
     HarnessEvent,
+    ProviderEvent,
     TurnEventKind,
     TurnLifecycleEvent,
 )
+from openjiuwen.core.session.stream.base import OutputSchema
 from openjiuwen.core.single_agent.schema.agent_result import Artifact
+from openjiuwen.harness.subagent_runtime import (
+    SUBAGENT_ACTIVITY_EVENT_TYPE,
+    SUBAGENT_UPDATED_EVENT_TYPE,
+)
 from openjiuwen.harness_providers.io_adapter import ProjectedOutput
-from openjiuwen.harness_providers.output_buffer import OutputBudget, OutputBudgetExceeded, OutputText
+from openjiuwen.harness_providers.output_buffer import (
+    OutputBudget,
+    OutputBudgetExceeded,
+    OutputText,
+)
 
 from jiuwenswarm.runtime.host_services import send_runtime_push
 from jiuwenswarm.runtime.harness.surface_projection import SurfaceResultProjection
@@ -76,11 +86,44 @@ class _HistoryPersistenceUnconfirmed(RuntimeError):
     pass
 
 
+def _codex_internal_status(value: Any, message: Any) -> dict[str, Any]:
+    native = str(getattr(value, "value", value) or "").strip()
+    error_message = str(message or "").strip()
+    if native in {"pendingInit", "inProgress", "running"}:
+        status, outcome, lifecycle, reason = "running", None, "live", None
+    elif native == "completed":
+        status, outcome, lifecycle, reason = "idle", "completed", "live", None
+    elif native in {"interrupted", "cancelled", "canceled"}:
+        status, outcome, lifecycle, reason = "idle", "cancelled", "live", None
+    elif native in {"shutdown"}:
+        status, outcome, lifecycle, reason = "closed", "completed", "closed", "manual"
+    elif native in {"notFound"}:
+        status, outcome, lifecycle, reason = "closed", "failed", "closed", "failed"
+    else:
+        status, outcome, lifecycle, reason = "idle", "failed", "live", None
+    error = None
+    if outcome == "failed":
+        error = {
+            "code": "CODEX_INTERNAL_SUBAGENT_FAILED",
+            "message": error_message
+            or f"Codex internal subagent status: {native or 'unknown'}",
+        }
+    return {
+        "status": status,
+        "turn_outcome": outcome,
+        "lifecycle": lifecycle,
+        "closed_reason": reason,
+        "error": error,
+    }
+
+
 class ExternalEventProjection:
     """Track owned output and persist/push only after request ownership ends."""
 
     def __init__(
-        self, session_id: str, *,
+        self,
+        session_id: str,
+        *,
         on_detached_terminal: Callable[[str], Awaitable[None]] | None = None,
         workspace_root: Path | None = None,
         work_mode: str | None = None,
@@ -102,6 +145,8 @@ class ExternalEventProjection:
         self._terminal_cancellations: dict[str, str | None] = {}
         self._terminated_turns: set[str] = set()
         self._terminal_order: deque[str] = deque()
+        self._codex_internal_subagents: dict[str, dict[str, Any]] = {}
+        self._codex_internal_event_index = 0
         self._surface_projection = (
             SurfaceResultProjection(
                 projection_scope or session_id,
@@ -131,8 +176,21 @@ class ExternalEventProjection:
             return
         if self._surface_projection is not None:
             await self._surface_projection.observe(envelope)
-        if turn_id and isinstance(event, TurnLifecycleEvent) and event.result is not None:
-            if len(self._terminal_errors) + len(self._terminal_cancellations) >= self._max_turns:
+        if (
+            isinstance(event, ProviderEvent)
+            and event.provider == "codex"
+            and event.event_type.startswith("internal_subagent/")
+        ):
+            await self._project_codex_internal_subagent(event)
+        if (
+            turn_id
+            and isinstance(event, TurnLifecycleEvent)
+            and event.result is not None
+        ):
+            if (
+                len(self._terminal_errors) + len(self._terminal_cancellations)
+                >= self._max_turns
+            ):
                 raise OutputBudgetExceeded("terminal detail count budget exhausted")
             detail = event.result.error or event.result.termination
             if detail is not None and len(str(detail).encode("utf-8")) > 64 * 1024:
@@ -145,9 +203,7 @@ class ExternalEventProjection:
                 event.kind is TurnEventKind.ABORTED
                 and event.result.termination is not None
             ):
-                self._terminal_cancellations[turn_id] = (
-                    event.result.termination.message
-                )
+                self._terminal_cancellations[turn_id] = event.result.termination.message
 
     def register_turn(
         self,
@@ -159,8 +215,13 @@ class ExternalEventProjection:
         goal_attempt: bool = False,
         goal_id: str | None = None,
     ) -> None:
-        if any(len(value.encode("utf-8")) > 1024 for value in (turn_id, request_id, channel_id, mode)):
-            raise OutputBudgetExceeded("projection correlation identifier byte budget exhausted")
+        if any(
+            len(value.encode("utf-8")) > 1024
+            for value in (turn_id, request_id, channel_id, mode)
+        ):
+            raise OutputBudgetExceeded(
+                "projection correlation identifier byte budget exhausted"
+            )
         if turn_id in self._turns or turn_id in self._terminated_turns:
             return
         if len(self._turns) >= self._max_turns:
@@ -204,9 +265,11 @@ class ExternalEventProjection:
     def accepts_turn_output(self, turn_id: str | None) -> bool:
         return turn_id is None or turn_id not in self._terminated_turns
 
-    async def persist_member_output(self, item: ProjectedOutput, payload: dict[str, Any]) -> bool:
+    async def persist_member_output(
+        self, item: ProjectedOutput, payload: dict[str, Any]
+    ) -> bool:
         """Keep a failed history receipt visible through the original Team stream."""
-        turn_id = item.turn_id or 'product-interaction'
+        turn_id = item.turn_id or "product-interaction"
         state = self._turns.get(turn_id)
         failed = bool(state and state.delivery_failed)
         try:
@@ -215,36 +278,62 @@ class ExternalEventProjection:
             state = self._turns.get(turn_id)
             if state is not None:
                 state.delivery_failed = True
-            logger.exception('Team history persistence unconfirmed: session=%s turn=%s',
-                             self._session_id, turn_id)
+            logger.exception(
+                "Team history persistence unconfirmed: session=%s turn=%s",
+                self._session_id,
+                turn_id,
+            )
             return False
         return not failed
 
-    async def _persist_member_output(self, item: ProjectedOutput, payload: dict[str, Any]) -> None:
+    async def _persist_member_output(
+        self, item: ProjectedOutput, payload: dict[str, Any]
+    ) -> None:
         """Persist Team-owned output before its original broadcaster sees it.
 
         Uses this projection's existing text buffer and terminal tombstones.
         Team owns delivery; this method never sends a second server push.
         """
-        turn_id = item.turn_id or 'product-interaction'
+        turn_id = item.turn_id or "product-interaction"
         state = self._turns.get(turn_id)
         if state is None:
             state = self._fallback_state(turn_id)
             self._turns[turn_id] = state
-        et = payload.get('event_type')
-        if et == 'chat.delta':
+        et = payload.get("event_type")
+        if et == "chat.delta":
             self._note_payload(state, payload)
             return
-        owner = json.dumps({key: payload.get(key) for key in (
-            'member_session_id', 'provider_session_id', 'request_id',
-        )}, sort_keys=True).encode()
-        delivery_id = self._delivery_id(turn_id, item, payload) + ':' + hashlib.sha256(owner).hexdigest()
-        if state.text and et in {'chat.ask_user_question', 'chat.tool_call', 'team.member_turn', 'chat.error'}:
-            await self._publish(state, {**payload, 'event_type': 'chat.final', 'content': state.text.read()},
-                                delivery_id=delivery_id + ':text', push=False)
+        owner = json.dumps(
+            {
+                key: payload.get(key)
+                for key in (
+                    "member_session_id",
+                    "provider_session_id",
+                    "request_id",
+                )
+            },
+            sort_keys=True,
+        ).encode()
+        delivery_id = (
+            self._delivery_id(turn_id, item, payload)
+            + ":"
+            + hashlib.sha256(owner).hexdigest()
+        )
+        if state.text and et in {
+            "chat.ask_user_question",
+            "chat.tool_call",
+            "team.member_turn",
+            "chat.error",
+        }:
+            await self._publish(
+                state,
+                {**payload, "event_type": "chat.final", "content": state.text.read()},
+                delivery_id=delivery_id + ":text",
+                push=False,
+            )
             state.text.clear()
         await self._publish(state, payload, delivery_id=delivery_id, push=False)
-        if et == 'chat.final':
+        if et == "chat.final":
             state.text.clear()
         if item.terminal is not None:
             self._turns.pop(turn_id, None)
@@ -273,8 +362,14 @@ class ExternalEventProjection:
                     content = str(payload.get("content") or "")
                     prefix = state.text.read()
                     if prefix:
-                        content = content[len(prefix):] if content.startswith(prefix) else ""
-                    return {"event_type": "chat.delta", "content": content} if content else None
+                        content = (
+                            content[len(prefix) :] if content.startswith(prefix) else ""
+                        )
+                    return (
+                        {"event_type": "chat.delta", "content": content}
+                        if content
+                        else None
+                    )
             return payload
         if item.terminal is not None:
             turn_id = item.turn_id or ""
@@ -397,7 +492,8 @@ class ExternalEventProjection:
             if payload.get("event_type") == "chat.final" and not payload.get("content"):
                 payload["content"] = state.text.read()
             await self._publish(
-                state, payload,
+                state,
+                payload,
                 delivery_id=f"harness:{turn_id}:goal-root-terminal",
             )
         self._turns.pop(turn_id, None)
@@ -419,8 +515,91 @@ class ExternalEventProjection:
         self._terminal_cancellations.clear()
         self._terminated_turns.clear()
         self._terminal_order.clear()
+        self._codex_internal_subagents.clear()
         if self._surface_projection is not None:
             self._surface_projection.close()
+
+    async def _project_codex_internal_subagent(self, event: ProviderEvent) -> None:
+        payload = dict(event.payload)
+        native_id = str(payload.get("subagent_id") or "").strip()
+        if not native_id:
+            return
+        subagent_id = f"codex:{native_id}"
+        now_ms = time.time() * 1000
+        current = self._codex_internal_subagents.get(subagent_id)
+        if current is None:
+            if len(self._codex_internal_subagents) >= self._max_turns:
+                raise OutputBudgetExceeded(
+                    "Codex internal subagent count budget exhausted"
+                )
+            current = {
+                "subagent_id": subagent_id,
+                "sub_session_id": subagent_id,
+                "parent_session_id": self._session_id,
+                "subagent_type": "codex_internal",
+                "display_name": f"Codex agent {native_id[:12]}",
+                "role": "Codex internal subagent",
+                "task_description": "Codex internal task",
+                "created_at": now_ms,
+                "revision": 0,
+            }
+            self._codex_internal_subagents[subagent_id] = current
+
+        if event.event_type == "internal_subagent/status":
+            prompt = str(payload.get("prompt") or "").strip()
+            if prompt:
+                current["task_description"] = prompt
+            status = _codex_internal_status(
+                payload.get("status"), payload.get("message")
+            )
+            status["closed_at"] = now_ms if status["lifecycle"] == "closed" else None
+            current.update(
+                {
+                    **status,
+                    "updated_at": now_ms,
+                    "revision": int(current["revision"]) + 1,
+                    "can_send_input": False,
+                    "needs_resume": False,
+                    "controllable": False,
+                    "provider": "codex",
+                    "native_thread_id": native_id,
+                }
+            )
+            await self.project_product_chunk(
+                OutputSchema(
+                    type=SUBAGENT_UPDATED_EVENT_TYPE,
+                    index=self._next_codex_internal_index(),
+                    payload={"subagent_updated": dict(current)},
+                )
+            )
+            return
+
+        activity_kind = str(payload.get("activity_kind") or "activity")
+        seq = self._next_codex_internal_index()
+        await self.project_product_chunk(
+            OutputSchema(
+                type=SUBAGENT_ACTIVITY_EVENT_TYPE,
+                index=seq,
+                payload={
+                    "subagent_activity": {
+                        "activity_id": str(
+                            payload.get("activity_id") or f"{subagent_id}:{seq}"
+                        ),
+                        "subagent_id": subagent_id,
+                        "parent_session_id": self._session_id,
+                        "task_id": str(payload.get("activity_id") or "codex-internal"),
+                        "seq": seq,
+                        "kind": "thinking",
+                        "summary": f"Codex internal agent {activity_kind}",
+                        "at_ms": now_ms,
+                    }
+                },
+            )
+        )
+
+    def _next_codex_internal_index(self) -> int:
+        self._codex_internal_event_index += 1
+        return self._codex_internal_event_index
 
     def _remember_terminal(self, turn_id: str) -> None:
         self._terminal_errors.pop(turn_id, None)
@@ -465,9 +644,16 @@ class ExternalEventProjection:
         if activity.status:
             payload.setdefault("status", activity.status)
             payload.setdefault(
-                "success", activity.status not in {
-                    "blocked", "declined", "denied", "error", "failed",
-                    "failure", "rejected",
+                "success",
+                activity.status
+                not in {
+                    "blocked",
+                    "declined",
+                    "denied",
+                    "error",
+                    "failed",
+                    "failure",
+                    "rejected",
                 },
             )
         return payload
@@ -520,10 +706,14 @@ class ExternalEventProjection:
         payload = dict(payload)
         runtime = get_current_runtime()
         if runtime is not None:
-            await runtime.register_host_interaction(RuntimeEvent.control(
-                request_id=state.request_id, channel_id=state.channel_id,
-                session_id=self._session_id, payload=payload,
-            ))
+            await runtime.register_host_interaction(
+                RuntimeEvent.control(
+                    request_id=state.request_id,
+                    channel_id=state.channel_id,
+                    session_id=self._session_id,
+                    payload=payload,
+                )
+            )
         await self._publish(state, payload, delivery_id=delivery_id)
 
     async def publish_product_artifact(
@@ -560,9 +750,7 @@ class ExternalEventProjection:
         if state is None:
             state = self._fallback_state("product-artifact")
         delivery = get_session_delivery_context(self._session_id) or {}
-        metadata = get_session_metadata(
-            self._session_id, enable_writeback=False
-        ) or {}
+        metadata = get_session_metadata(self._session_id, enable_writeback=False) or {}
         route_metadata = delivery.get("route_metadata")
         from jiuwenswarm.agents.harness.common.tools.send_file_to_user import (
             SendFileToolkit,
@@ -583,7 +771,9 @@ class ExternalEventProjection:
 
     async def replay_product_artifacts(self) -> None:
         """Schedule history recovery without coupling it to Browser admission."""
-        from jiuwenswarm.agents.harness.common.tools.send_file_to_user import SendFileToolkit
+        from jiuwenswarm.agents.harness.common.tools.send_file_to_user import (
+            SendFileToolkit,
+        )
         from jiuwenswarm.runtime.host_services import enqueue_artifact_retry
 
         if enqueue_artifact_retry(self._session_id):
@@ -592,7 +782,8 @@ class ExternalEventProjection:
         delivery = get_session_delivery_context(self._session_id) or {}
         route_metadata = delivery.get("route_metadata")
         await SendFileToolkit(
-            request_id=state.request_id, session_id=self._session_id,
+            request_id=state.request_id,
+            session_id=self._session_id,
             channel_id=state.channel_id,
             metadata=route_metadata if isinstance(route_metadata, dict) else None,
         ).replay_projected_artifacts(require_origin=True)
@@ -607,8 +798,9 @@ class ExternalEventProjection:
 
         try:
             code = (
-                error.code if isinstance(error, OutputBudgetExceeded) else
-                _HISTORY_PERSISTENCE_UNCONFIRMED
+                error.code
+                if isinstance(error, OutputBudgetExceeded)
+                else _HISTORY_PERSISTENCE_UNCONFIRMED
                 if isinstance(error, _HistoryPersistenceUnconfirmed)
                 else _DELIVERY_UNCONFIRMED
             )
@@ -649,9 +841,7 @@ class ExternalEventProjection:
 
     def _fallback_state(self, turn_id: str) -> _TurnProjection:
         delivery = get_session_delivery_context(self._session_id) or {}
-        metadata = get_session_metadata(
-            self._session_id, enable_writeback=False
-        ) or {}
+        metadata = get_session_metadata(self._session_id, enable_writeback=False) or {}
         return _TurnProjection(
             request_id=f"external-turn-{turn_id}",
             channel_id=str(
@@ -728,9 +918,7 @@ class ExternalEventProjection:
             chunk_type = getattr(item.chunk, "type", "unknown")
             chunk_type = getattr(chunk_type, "value", chunk_type)
             chunk_index = getattr(item.chunk, "index", "unknown")
-            return (
-                f"harness:{turn_id}:chunk:{chunk_type}:{chunk_index}:{event_type}"
-            )
+            return f"harness:{turn_id}:chunk:{chunk_type}:{chunk_index}:{event_type}"
         terminal = getattr(item.terminal, "value", item.terminal)
         return f"harness:{turn_id}:terminal:{terminal}:{event_type}"
 
