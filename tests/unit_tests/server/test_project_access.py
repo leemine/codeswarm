@@ -193,7 +193,7 @@ def test_protected_ids_include_deleted_registry_history(store):
     item = project(store)
     project_store.delete_project(item.project_id)
     assert store.protected_ids() == (item.project_id,)
-    assert not store.authorize(item.project_id, 'owner', 'read').allowed
+    assert store.authorize(item.project_id, 'owner', 'read').allowed
 
 
 def test_protected_ids_include_marker_when_sidecar_is_missing(store):
@@ -211,3 +211,32 @@ def test_protected_ids_storage_corruption_fails_closed(store, file):
     path.write_text('{broken')
     with pytest.raises(ProjectAccessDenied):
         store.protected_ids()
+
+
+def test_deleted_project_preserves_only_owner_history_and_cleanup(store):
+    item = project(store)
+    store.replace_acl(item.project_id, 'owner', acl={'member': ['read', 'write', 'admin', 'execute']}, expected_revision=1)
+    project_store.delete_project(item.project_id)
+    for action in ('read', 'write', 'admin'):
+        assert store.authorize(item.project_id, 'owner', action).allowed
+        assert not store.authorize(item.project_id, 'member', action).allowed
+        assert not store.authorize(item.project_id, '', action).allowed
+    assert not store.authorize(item.project_id, 'owner', 'execute').allowed
+    assert not store.authorize(item.project_id, 'member', 'execute').allowed
+    assert project_store.get_project_by_id(item.project_id, cache_bust=True) is None
+
+
+@pytest.mark.asyncio
+async def test_deleted_project_owner_inventory_and_detail_not_found(store, monkeypatch):
+    item = project(store)
+    project_store.delete_project(item.project_id)
+    monkeypatch.setattr(project_adapter, 'collect_all_sessions_metadata', lambda: [])
+    owner = project_adapter.ProjectAdapter(lambda _: TrustedIdentity('owner', 'owner', 'host'))
+    result = await owner.handle(request(ReqMethod.PROJECT_LIST))
+    assert result.ok
+    assert all(p['project_id'] != item.project_id for p in result.payload['projects'])
+    result = await owner.handle(request(ReqMethod.PROJECT_INFO, project_id=item.project_id))
+    assert not result.ok and result.payload['code'] == 'NOT_FOUND'
+    anonymous = project_adapter.ProjectAdapter()
+    result = await anonymous.handle(request(ReqMethod.PROJECT_INFO, project_id=item.project_id))
+    assert not result.ok and result.payload['code'] == 'FORBIDDEN'

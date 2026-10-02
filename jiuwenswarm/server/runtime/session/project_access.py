@@ -94,10 +94,10 @@ class ProjectAccessStore:
         if not project_id or is_default_project_id(project_id):
             return result(True, reason='legacy_default')
         record = self._record(project_id)
-        if record is None:
-            return result(False, reason='project_unavailable')
         ext = data['projects'].get(project_id)
         if ext is None:
+            if record is None:
+                return result(False, reason='project_unavailable')
             return result(not record.get('access_managed', False), reason='legacy_unmanaged' if not record.get('access_managed') else 'extension_missing')
         if not isinstance(ext, dict) or ext.get('schema_version') != _SCHEMA:
             return result(False, reason='extension_invalid')
@@ -109,6 +109,12 @@ class ProjectAccessStore:
             return result(False, revision, 'owner_unknown')
         if not actor_id:
             return result(False, revision, 'identity_required')
+        if record is None:
+            # Deleting a registry entry does not publish its remaining history.
+            # Only the retained owner may read/clean it; stale member grants
+            # cannot survive deletion and no actor may execute a missing project.
+            allowed = actor_id == owner and action in {'read', 'write', 'admin'}
+            return result(allowed, revision, 'orphan_owner' if allowed else 'project_unavailable')
         if actor_id == owner:
             return result(True, revision, 'owner')
         acl = ext.get('acl', {})
