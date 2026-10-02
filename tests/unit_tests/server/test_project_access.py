@@ -1,5 +1,4 @@
 """Real temporary-file ACL, legacy API and cross-process revision coverage."""
-import asyncio
 import json
 import os
 import subprocess
