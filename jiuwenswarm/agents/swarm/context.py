@@ -123,6 +123,7 @@ class SwarmBuildContext(BuildContext):
     heartbeat_job_service: Any = None
     config: dict[str, Any] | None = None
     skill_retrieval_toolkit: Any = None
+    external_team_execution: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         """Bridge the cron signal into the SDK's ``BuildContext.extras`` slot.
@@ -224,6 +225,8 @@ class SwarmBuildContext(BuildContext):
             "team_outputs_dir": self.team_outputs_dir,
             "team_skill_visibility_path": self.team_skill_visibility_path,
             "global_skills_dir": self.global_skills_dir,
+            **({"external_team_execution": self.external_team_execution}
+               if self.external_team_execution is not None else {}),
         }
 
     @classmethod
@@ -245,7 +248,7 @@ class SwarmBuildContext(BuildContext):
             A ``SwarmBuildContext`` with the seed fields restored and the
             non-serializable handles sourced from the receiving process.
         """
-        return cls(
+        context = cls(
             session_id=seed.get("session_id", ""),
             request_id=seed.get("request_id"),
             user_id=seed.get("user_id"),
@@ -267,7 +270,22 @@ class SwarmBuildContext(BuildContext):
             trajectory_span_processor=trajectory_span_processor,
             heartbeat_job_service=get_heartbeat_job_service(),
             config=config,
+            external_team_execution=seed.get("external_team_execution"),
         )
+        if context.external_team_execution is not None:
+            from openjiuwen.agent_teams import TEAM_MEMBER_RUNTIME_FACTORY
+            from jiuwenswarm.runtime.harness.team_execution import ExternalTeamMemberFactory
+
+            factory = ExternalTeamMemberFactory.from_seed(context.external_team_execution, config=config)
+            identity = factory.to_seed()
+            if (context.session_id != identity["binding"]["host_session_id"]
+                    or context.team_id != identity["team_name"]
+                    or context.user_id != identity["binding"]["subject_id"]
+                    or context.channel_id != identity["surface"]["channel_id"]
+                    or context.project_dir != identity["binding"]["workspace"]):
+                raise ValueError("Team BuildContext identity differs from execution seed")
+            context.extras[TEAM_MEMBER_RUNTIME_FACTORY] = factory
+        return context
 
 
 __all__ = [

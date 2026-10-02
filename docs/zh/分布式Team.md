@@ -484,3 +484,22 @@ npm run dev -- --host 0.0.0.0 --port 5173
 
 - [返回文档首页](../README.md)
 - [返回项目首页](../../README_CN.md)
+## R1-11F 验收边界与退出失败（2026-10-02）
+
+当前分布式模板用于 Native Team 联调；Codex/OpenCode 的 External Team 仍仅允许
+normal/inprocess。远端工厂身份重建、审批的执行端确认、输出回传与 workspace 映射
+尚未完成集成，不能通过修改模板或删除准入检查宣称 External Cluster 可用。
+
+部署前在两端设置同一个 `JIUWEN_TEAM_POSTGRES_URL`（asyncpg PostgreSQL URL），
+通过本地环境或凭据管理器提供，不提交真实凭据。teammate 模板现在明确配置
+distributed/teammate、pyzmq、常驻 bootstrap 端口和共享 workspace；原模板误设为
+local/leader 的问题已修复。多机时仍须修改两层 transport 地址，并独立部署 A2X
+注册中心及共同可见的 workspace。现有 transport ACK 只表示收包，不表示审批执行。
+
+远端停止或 Team 销毁失败时，保留原运行句柄和注册占用供重试；不因超时把成员
+数据库状态提升为 SHUTDOWN。上一会话未确认退出时禁止同频道接管新会话。
+调用方应处理明确的失败/超时，不把消息已发送当成节点已回收。
+
+真实双机验收必须另行记录两端 SHA/锁安装来源、PostgreSQL/A2X/transport 连通、
+任务/审查/产物和原 UI 历史，以及审批、取消、断链与重启的执行结果。
+本机多个进程或本地故障单测均不能替代该验收。

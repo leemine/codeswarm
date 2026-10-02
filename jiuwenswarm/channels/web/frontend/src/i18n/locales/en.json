@@ -626,6 +626,15 @@
       "seconds": "{{seconds}}s"
     },
     "process": {
+      "review": {
+        "output": "Review output",
+        "title": "Review · {{member}} · Round {{round}}",
+        "reviewer": "Reviewer",
+        "round": "Review round",
+        "provider": "Execution provider",
+        "invocation": "Review invocation",
+        "executionStatus": "Execution status"
+      },
       "memberMessage": "Member collaboration message",
       "broadcastMessage": "Broadcast message",
       "p2pMessage": "Direct message",

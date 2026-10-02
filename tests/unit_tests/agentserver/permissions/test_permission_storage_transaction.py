@@ -59,7 +59,7 @@ def _effective():
     )
 
 
-def _run_writer(root, operation, ready, release, result, started=None):
+def _run_writer(root, operation, ready, release, result, started=None, begin=None):
     """A spawned worker uses the same storage owner and waits inside its mutation."""
     _configure(root)
     if started is not None:
@@ -72,6 +72,8 @@ def _run_writer(root, operation, ready, release, result, started=None):
                 raise TimeoutError("test writer was not released")
 
     try:
+        if begin is not None and not begin.wait(30):
+            raise TimeoutError("second test writer was not started")
         if operation == "exact":
             dump = layers._dump_yaml_dict
 
@@ -109,19 +111,22 @@ def test_cooperating_writers_serialize_both_commit_orders(storage, deny_layer, f
     ctx = multiprocessing.get_context("spawn")
     event = ctx.Event if worker_kind == "process" else threading.Event
     worker = ctx.Process if worker_kind == "process" else threading.Thread
-    ready, release, started = event(), event(), event()
+    ready, release, started, begin = event(), event(), event(), event()
     results = ctx.Queue() if worker_kind == "process" else queue.Queue()
     before = "exact" if first == "exact" else deny_layer
     after = deny_layer if first == "exact" else "exact"
     processes = [
         worker(target=_run_writer, args=(storage, before, ready, release, results)),
-        worker(target=_run_writer, args=(storage, after, None, release, results, started)),
+        worker(target=_run_writer, args=(storage, after, None, release, results, started, begin)),
     ]
     try:
         processes[0].start()
-        assert ready.wait(30), "first process did not reach locked mutation"
+        # Spawn imports are expensive. Start both interpreters together, but
+        # let the second writer proceed only after the first holds the lock.
         processes[1].start()
-        assert started.wait(30)
+        assert ready.wait(30), "first process did not reach locked mutation"
+        assert started.wait(30), "second process did not finish initialization"
+        begin.set()
         release.set()
         for process in processes:
             process.join(30)
@@ -134,6 +139,7 @@ def test_cooperating_writers_serialize_both_commit_orders(storage, deny_layer, f
         assert layers.load_user_permissions()["custom"] == "user-kept"
         assert evaluate_tiered_policy(_effective(), "bash", {"command": "git status"})[0] == PermissionLevel.DENY
     finally:
+        begin.set()
         release.set()
         for process in processes:
             if worker_kind == "process" and process.pid and process.is_alive():

@@ -758,10 +758,11 @@ extensions:
 
 
 team:
-  # 默认：单机 local + inprocess。双机 pyzmq 示例见 tmp/team-leader.yaml、tmp/team-teammate.yaml（与 .tmp/leader_home、.tmp/teammate_home 内 config 同步）。
+  # Native 分布式 teammate；多机时将回环地址替换为节点可达地址。
   runtime:
-    mode: local
-    role: leader
+    mode: distributed
+    role: teammate
+    member_name: teammate_1
 
   team_name: jiuwen_team
   lifecycle: persistent
@@ -787,12 +788,24 @@ team:
 
   workspace:
     enabled: true
+    root_path: ${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenswarm/shared_workspace/jiuwen_team}
+    version_control: false
 
   transport:
-    type: inprocess
+    type: pyzmq
+    params:
+      request_timeout: 20
+      direct_addr: tcp://127.0.0.1:28600
+      bootstrap_direct_addr: tcp://127.0.0.1:28610
+      pubsub_publish_addr: tcp://127.0.0.1:28556
+      pubsub_subscribe_addr: tcp://127.0.0.1:28557
+      metadata:
+        pubsub_bind: false
 
   storage:
-    type: sqlite
+    type: postgresql
+    params:
+      connection_string: ${JIUWEN_TEAM_POSTGRES_URL}
 
 mcp:
   servers: []
@@ -868,9 +881,20 @@ modes:
 
       workspace:
         enabled: true
+        root_path: ${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenswarm/shared_workspace/jiuwen_team}
+        version_control: false
 
       transport:
-        type: inprocess
+        type: pyzmq
+        params:
+          request_timeout: 20
+          direct_addr: tcp://127.0.0.1:28600
+          pubsub_publish_addr: tcp://127.0.0.1:28556
+          pubsub_subscribe_addr: tcp://127.0.0.1:28557
+          metadata:
+            pubsub_bind: false
 
       storage:
-        type: sqlite
+        type: postgresql
+        params:
+          connection_string: ${JIUWEN_TEAM_POSTGRES_URL}

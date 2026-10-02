@@ -148,6 +148,10 @@ def create_adapter(
         RuntimeError: If SDK is unknown.
     """
     if execution_route is not None and execution_route.provider_id != "native":
+        if execution_route.surface is not None and execution_route.surface.identity.topology == "team":
+            from jiuwenswarm.server.runtime.agent_adapter.team_engine_adapter import ExternalTeamAgentAdapter
+
+            return ExternalTeamAgentAdapter(execution_route)
         from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import (
             EngineAgentAdapter,
         )

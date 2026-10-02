@@ -1458,7 +1458,7 @@ async def _ensure_remote_teammates_shutdown_before_clean_team(
     *,
     timeout: float = _REMOTE_SHUTDOWN_TIMEOUT_SEC,
 ) -> None:
-    """Best-effort: remote teammates must reach SHUTDOWN before openjiuwen clean_team."""
+    """Require confirmed remote SHUTDOWN before openjiuwen clean_team."""
     from openjiuwen.agent_teams.schema.status import MemberStatus
 
     import time
@@ -1495,7 +1495,7 @@ async def _ensure_remote_teammates_shutdown_before_clean_team(
 
     await _notify_stuck()
     deadline = time.monotonic() + max(0.0, timeout)
-    while time.monotonic() < deadline:
+    while True:
         members = await list_members()
         stuck: list[Any] = []
         for member in members:
@@ -1507,27 +1507,14 @@ async def _ensure_remote_teammates_shutdown_before_clean_team(
                 stuck.append(member)
         if not stuck:
             return
+        if time.monotonic() >= deadline:
+            break
         await _notify_stuck()
         await asyncio.sleep(_REMOTE_SHUTDOWN_POLL_SEC)
 
-    team_name = _team_name_for_agent(team_agent)
-    db = getattr(tb, "db", None) if tb is not None else None
-    update = _resolve_member_status_updater(db)
-    if not callable(update) or not team_name:
-        return
-    for member in stuck:
-        name = str(getattr(member, "member_name", "") or "").strip()
-        status = str(getattr(member, "status", "") or "").strip().lower()
-        if status != MemberStatus.SHUTDOWN_REQUESTED.value:
-            continue
-        logger.warning(
-            "[RemoteMemberBootstrap] promoting stuck remote member to SHUTDOWN before clean_team "
-            "session_id=%s member=%s",
-            sid,
-            name,
-        )
-        with contextlib.suppress(Exception):
-            await update(name, team_name, MemberStatus.SHUTDOWN.value)
+    # A sent shutdown request or expired deadline cannot establish remote exit.
+    # Retain the DB rows and registry ownership so cleanup can retry.
+    raise TimeoutError("Remote member shutdown was not confirmed before clean_team")
 
 
 async def _all_teammates_shutdown_requested_or_done(team_agent: Any) -> bool:
@@ -2162,17 +2149,25 @@ async def _stop_team_agent_runtime(
 ) -> bool:
     """Stop a TeamAgent-like runtime without deleting team database state."""
     stopped = False
+    failures = []
     messager = _team_agent_messager(agent)
-    stop_coordination = getattr(agent, "_stop_coordination", None)
+    stop_coordination = getattr(agent, "stop_coordination", None)
+    if not callable(stop_coordination):
+        stop_coordination = getattr(agent, "_stop_coordination", None)
     if callable(stop_coordination):
-        with contextlib.suppress(Exception):
+        try:
             await stop_coordination()
             stopped = True
+        except Exception as exc:
+            failures.append(exc)
     stop_messager = getattr(messager, "stop", None)
     if callable(stop_messager):
-        with contextlib.suppress(Exception):
+        try:
             await stop_messager()
-            stopped = True
+        except Exception as exc:
+            failures.append(exc)
+    if failures:
+        raise ExceptionGroup("Remote member owned exit unconfirmed", failures)
     return stopped
 
 
@@ -2183,14 +2178,16 @@ async def _discard_auxiliary_team_agent(
 ) -> None:
     """Remove the bootstrap helper TeamAgent from TeamManager without cleaning DB rows."""
     agents = getattr(team_manager, "_team_agents", None)
-    if isinstance(agents, dict) and agents.get(session_id) is team_agent:
-        agents.pop(session_id, None)
-    await _stop_team_agent_runtime(
+    stopped = await _stop_team_agent_runtime(
         team_agent,
         session_id=session_id,
         member_name=str(getattr(team_agent, "member_name", None) or "bootstrap-helper"),
         source="bootstrap-helper",
     )
+    if not stopped:
+        raise RuntimeError("Bootstrap helper owned exit unconfirmed")
+    if isinstance(agents, dict) and agents.get(session_id) is team_agent:
+        agents.pop(session_id, None)
 
 
 def _cleanup_auxiliary_leader_workspace(team_name: str, leader_member_name: str) -> None:
@@ -2242,22 +2239,34 @@ async def _stop_dynamic_member_agent(session_id: str, member_name: str) -> bool:
     if not sid or not member:
         return False
     key = (sid, member)
-    task = _DYNAMIC_MEMBER_INVOKE_TASKS.pop(key, None)
+    task = _DYNAMIC_MEMBER_INVOKE_TASKS.get(key)
+    agent = _DYNAMIC_MEMBER_AGENTS.get(key)
     current_task = asyncio.current_task()
     if task is not None and task is not current_task and not task.done():
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+        # The invoke loop's finally may already have confirmed this exact
+        # owner's exit. Never stop its replacement or dispose it twice.
+        if agent is not None and _DYNAMIC_MEMBER_AGENTS.get(key) is not agent:
+            return True
 
-    agent = _DYNAMIC_MEMBER_AGENTS.pop(key, None)
     if agent is None:
+        if task is not None and _DYNAMIC_MEMBER_INVOKE_TASKS.get(key) is task:
+            _DYNAMIC_MEMBER_INVOKE_TASKS.pop(key, None)
         return task is not None
-    await _stop_team_agent_runtime(
+    stopped = await _stop_team_agent_runtime(
         agent,
         session_id=sid,
         member_name=member,
         source="dynamic-member",
     )
+    if not stopped:
+        raise RuntimeError("Remote member owned exit unconfirmed")
+    if _DYNAMIC_MEMBER_AGENTS.get(key) is agent:
+        _DYNAMIC_MEMBER_AGENTS.pop(key, None)
+    if _DYNAMIC_MEMBER_INVOKE_TASKS.get(key) is task:
+        _DYNAMIC_MEMBER_INVOKE_TASKS.pop(key, None)
     return True
 
 
@@ -2582,7 +2591,7 @@ async def _ensure_dynamic_member_execution_loop(
                     exc_info=True,
                 )
             finally:
-                if (sid, member) in _DYNAMIC_MEMBER_AGENTS:
+                if _DYNAMIC_MEMBER_AGENTS.get((sid, member)) is teammate_agent:
                     await _stop_dynamic_member_agent(sid, member)
 
         invoke_task = asyncio.create_task(
@@ -2887,7 +2896,10 @@ async def apply_team_destroy_envelope_from_control_plane(
     try:
         from jiuwenswarm.agents.harness.team.team_manager import get_team_manager
 
-        await get_team_manager("default").destroy_team(envelope_session_id)
+        manager = get_team_manager("default")
+        await manager.destroy_team(envelope_session_id)
+        if manager.get_team_agent(envelope_session_id) is not None:
+            raise RuntimeError("Remote team destroy remains unconfirmed")
         logger.info(
             "[RemoteMemberBootstrap] teammate destroyed dynamic team runtime "
             "team=%s session_id=%s member=%s source_id=%s",
@@ -2906,6 +2918,7 @@ async def apply_team_destroy_envelope_from_control_plane(
             source_id,
             exc,
         )
+        raise
 
     registry = envelope.get("registry") if isinstance(envelope.get("registry"), dict) else {}
     try:
@@ -3105,4 +3118,3 @@ async def run_teammate_bootstrap_daemon(
         with contextlib.suppress(asyncio.CancelledError):
             await task
     logger.info("[RemoteMemberBootstrap] teammate bootstrap daemon stopped")
-

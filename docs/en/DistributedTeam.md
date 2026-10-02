@@ -350,3 +350,25 @@ If any step fails, output FAILED_AT_STEP=<n> and the error.
 | Config | Local `team` block suffices | Needs `runtime` + `transport` + shared storage agreement |
 
 For deeper topology evolution, maintain a separate design note alongside this guide; day-to-day work follows **sections 2–7**.
+
+## R1-11F acceptance boundary and failed cleanup (2026-10-02)
+
+Distributed templates are for Native Team integration. External Codex/OpenCode
+Teams remain limited to normal/inprocess execution: remote factory reconstruction,
+execution-confirmed interaction routing, output forwarding and workspace mapping
+are not yet integrated. Changing a template does not enable External Cluster.
+
+Set the same `JIUWEN_TEAM_POSTGRES_URL` on both nodes using local environment or
+credential management. The teammate template now selects distributed/teammate,
+pyzmq, a persistent bootstrap endpoint and shared workspace; it previously selected
+local/leader incorrectly. Replace loopback addresses in both transport sections for
+a multi-machine deployment, and provide the separate A2X registry and shared storage.
+Transport ACK is only delivery acknowledgement, not interaction execution.
+
+Failed remote stop or Team destruction retains the runtime handle and reservation
+for retry. A timeout never promotes a member to SHUTDOWN. An unconfirmed previous
+session blocks a new bootstrap in that channel. Callers must handle failure/timeout.
+
+Real two-node acceptance must record exact locked sources, connectivity, original
+UI history, tasks/reviews/artifacts, approvals, cancellation, disconnection and
+restart results. Local processes and deterministic tests do not replace it.

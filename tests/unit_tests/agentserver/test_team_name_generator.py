@@ -380,3 +380,14 @@ async def test_generate_team_name_uses_fallback_after_repeated_run_failures(
 
     assert result.startswith("task-")
     assert calls == 2
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('provider', ['codex', 'opencode'])
+async def test_external_team_name_does_not_allocate_native(monkeypatch, provider):
+    def forbidden(*args, **kwargs):
+        raise AssertionError('External naming allocated a Native model')
+    monkeypatch.setattr(team_name_generator, 'create_tiny_agent', forbidden)
+    monkeypatch.setattr(team_name_generator, '_resolve_tiny_model', forbidden)
+    result = await team_name_generator.generate_team_name(
+        'isolated acceptance', config_base={}, template_id='test', execution_provider=provider)
+    assert result == team_name_generator._fallback_team_name('isolated acceptance')

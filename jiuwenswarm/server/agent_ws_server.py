@@ -4712,6 +4712,7 @@ class AgentWebSocketServer:
                 session_id,
                 cache_bust=True,
                 enable_writeback=False,
+                infer_defaults=False,
             )
             if not isinstance(metadata, dict) or not metadata:
                 response = AgentResponse(
@@ -4723,14 +4724,15 @@ class AgentWebSocketServer:
                 )
             else:
                 mode = str(metadata.get("mode") or "agent.work.normal").strip()
-                if mode.startswith("team.") or mode == "team":
+                if ((mode.startswith("team.") or mode == "team")
+                        and metadata.get("execution_profile_id") and not metadata.get("team_name")):
                     response = AgentResponse(
                         request_id=request.request_id,
                         channel_id=request.channel_id,
                         ok=False,
                         payload={
-                            "error": "Team Surface capabilities require R1-11F",
-                            "code": "UNSUPPORTED_MODE",
+                            "error": "Team identity is assigned on the first request",
+                            "code": "NOT_READY",
                         },
                         metadata=request.metadata,
                     )
@@ -4743,7 +4745,7 @@ class AgentWebSocketServer:
                             channel_id=request.channel_id,
                             session_id=session_id,
                             req_method=ReqMethod.SURFACE_CAPABILITIES_GET,
-                            params={"mode": mode},
+                            params={"mode": mode, "work_mode": metadata.get("work_mode", "work")},
                             user_id=str(getattr(request, "user_id", "") or ""),
                         )
                         from jiuwenswarm.runtime.request import prepare_chat_turn
@@ -4911,6 +4913,7 @@ class AgentWebSocketServer:
         *,
         description: str,
         config_base: dict[str, Any],
+        execution_provider: str = "native",
     ) -> tuple[Any, dict[str, Any]]:
         """Generate a unique team name and persist its binding and entity."""
         from jiuwenswarm.agents.harness.team import (
@@ -4935,6 +4938,7 @@ class AgentWebSocketServer:
             normalized_description,
             config_base=config_base,
             template_id=template_id,
+            **({"execution_provider": execution_provider} if execution_provider != "native" else {}),
         )
 
         for candidate_index in range(100):
@@ -5060,9 +5064,19 @@ class AgentWebSocketServer:
                         identity_exc,
                     )
 
+            config_base = get_config()
+            naming_options = {}
+            if metadata.get("execution_profile_id"):
+                from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
+                catalog = load_execution_catalog(config_base)
+                if catalog is not None:
+                    naming_options["execution_provider"] = catalog.source(
+                        explicit_profile_id=metadata["execution_profile_id"],
+                    ).resolve().provider_id
             binding, _template = await self._create_generated_team_binding(
                 description=query,
-                config_base=get_config(),
+                config_base=config_base,
+                **naming_options,
             )
             binding_store = get_team_binding_store()
             entity_store = get_team_entity_store()

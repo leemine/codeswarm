@@ -503,20 +503,23 @@ class RuntimeSessionCoordinator:
             control_id = suspension_key(value) if suspension_key is not None else None
             heartbeat_root = self._heartbeat_root(parent)
             if control_id and heartbeat_root is not None:
+                self._registry.resolve_control(parent, request_id)
                 self._registry.mark_awaiting_control(heartbeat_root, control_id)
                 self._registry.mark_waiting(heartbeat_root)
                 self._registry.mark_terminal(handle, SessionExecutionState.SUCCEEDED)
             else:
                 parent_finished_while_delivering = (
                     parent.state is SessionExecutionState.WAITING_FOR_CONTROL
-                    and parent.waiting_control_id == request_id
+                    and parent.awaits_control(request_id)
                 )
-                if (parent_was_waiting or parent_finished_while_delivering) and not parent.retain_after_control:
+                self._registry.resolve_control(parent, request_id)
+                if ((parent_was_waiting or parent_finished_while_delivering)
+                        and not parent.retain_after_control and not parent.waiting_control_id):
                     self._registry.mark_terminal(
                         parent, SessionExecutionState.SUCCEEDED
                     )
-                elif parent.waiting_control_id == request_id:
-                    parent.waiting_control_id = None
+                elif parent_was_waiting and parent.waiting_control_id:
+                    self._registry.mark_waiting(parent)
             if control_id and heartbeat_root is None:
                 self._registry.mark_awaiting_control(handle, control_id)
                 self._registry.mark_waiting(handle)
@@ -620,12 +623,11 @@ class RuntimeSessionCoordinator:
         else:
             handle.submission_state = SessionSubmissionState.PROVIDER_ACCEPTED
             handle.control_delivered = True
-            if parent_was_waiting and not parent.retain_after_control:
+            self._registry.resolve_control(parent, request_id)
+            if parent_was_waiting and not parent.retain_after_control and not parent.waiting_control_id:
                 self._registry.mark_terminal(parent, SessionExecutionState.SUCCEEDED)
-            elif parent.waiting_control_id == request_id:
-                # The original producer may already have published another
-                # question. Do not erase that newer control locator.
-                parent.waiting_control_id = None
+            elif parent_was_waiting and parent.waiting_control_id:
+                self._registry.mark_waiting(parent)
             if handle.waiting_control_id:
                 self._registry.mark_waiting(handle)
             else:
@@ -649,7 +651,7 @@ class RuntimeSessionCoordinator:
             active_only=True,
         )
         for handle in active:
-            if handle.waiting_control_id != request_id:
+            if not handle.awaits_control(request_id):
                 continue
             if handle.state in {
                 SessionExecutionState.RUNNING,
@@ -1146,7 +1148,7 @@ class RuntimeSessionCoordinator:
             generation=record.generation,
             active_only=True,
         ):
-            if handle.waiting_control_id != request_id:
+            if not handle.awaits_control(request_id):
                 continue
             if handle.state not in deliverable:
                 continue

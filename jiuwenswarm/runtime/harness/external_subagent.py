@@ -172,6 +172,7 @@ class ExternalSubagentExecutionFactory:
         browser_admit: BrowserToolAdmission | None = None,
         browser_artifact_sink: BrowserArtifactSink | None = None,
         browser_decision_id_for: BrowserDecisionId | None = None,
+        event_observer_factory=None,
     ) -> None:
         binding = parent_route.bound.binding
         if (
@@ -206,6 +207,9 @@ class ExternalSubagentExecutionFactory:
                 "External parent cwd is outside the admitted workspace"
             ) from exc
         binding.validate_spec(parent_route.bound.spec)
+        if event_observer_factory is not None and not callable(event_observer_factory):
+            raise TypeError('child event observer factory must be callable')
+        self._event_observer_factory = event_observer_factory
         self._parent_route = parent_route
         self._parent_binding = binding
         self._parent_spec = parent_route.bound.spec
@@ -304,6 +308,8 @@ class ExternalSubagentExecutionFactory:
                     browser_resources.gateway if browser_resources is not None else None
                 ),
                 recovery=child_recovery,
+                **({'event_observer': self._event_observer_factory(request.subagent_id, child_subject_id)}
+                   if self._event_observer_factory is not None else {}),
                 runtime_policy=(
                     self._parent_route.surface.runtime_policy
                     if self._parent_route.surface is not None

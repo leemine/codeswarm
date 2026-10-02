@@ -511,3 +511,304 @@ metadata/冷归档严格拒绝恢复；应使用新 profile 与新 Session。归
 
 本地源码集成需要包含公共授权接口的 core；正式发布必须先合入 core，再更新声明和锁，
 经干净安装验证。本次联合开发不把 editable 测试当作锁定版本验收。
+# R1-11F Team integration candidate
+
+The Team construction port receives the original member backend and role. The
+member tool gateway must use core's `create_team_tools` and the existing product
+gateway/transport: Task, Review and message operations remain owned by Team.
+Member identity comes from the host construction request, never MCP arguments.
+Every call requires a host admission callback; role filtering does not replace
+runtime authorization. Native-only async/fork/Swarmflow tools stay unavailable
+until their execution paths have an explicit External implementation.
+
+This construction component does not admit product Team sessions. The existing
+External Team Surface rejection remains until product controls, capabilities and
+history/UI projection are connected and verified. Local source tests
+are not locked-dependency or real Provider E2E acceptance.
+
+The construction candidate attaches an External member factory in TeamManager
+only when it receives an admitted Team route. It uses the root's exact execution
+snapshot and workspace, derives a stable member Binding, and returns the core
+member runtime with one Provider and one managed product MCP transport. It never
+constructs a Single ExecutionSession or consumes a second event cursor. Transport
+creation is deferred until start and its exit is confirmed after Provider exit.
+
+The existing BuildContext seed carries only the profile, binding fingerprint,
+Surface identity and paths; rehydration resolves the selected profile from local
+host configuration and compares authoritative Session metadata. Changed config,
+identity, workspace or missing metadata fails closed. Ordinary tool calls also
+check the current host profile against the frozen binding. This slice accepts
+normal Team execution only; plan, worktree relocation and distributed bootstrap
+remain explicit errors pending their own integration evidence. Product routing
+stays gated until capabilities and control/history/UI projection are connected.
+
+The selected profile must be explicit; a missing profile must not pick up a new
+default. Native capability declarations (tools, rails, subagents, MCP, skills,
+agent templates) are rejected until their Team adapter is implemented.
+
+Local verification: core 308 passed; host/Surface/Team regression 585 passed and
+2 existing skips. Real Codex and OpenCode CLIs each run leader and teammate
+Turns, call original view_task through authenticated MCP, restore the leader
+checkpoint and confirm owned transport cleanup. Model endpoints are test-owned
+loopback fixtures. This is not remote-model Team six-cell or UI acceptance.
+
+## F3 Team product adapter candidate
+
+A dedicated External Team adapter delegates streaming to the existing
+`process_team_message_stream` and keeps TeamManager/Runner as the sole owner.
+It does not construct DeepAgent or the Single execution session. The facade
+validates the frozen External Team binding before using its existing Team
+pause/cancel path, including controls whose params omit the mode. UI capability
+fallback must not label an External Team as Native; unfinished product areas
+remain unavailable until their real Team catalog is connected. This candidate
+does not remove the global Team admission gate. Unary execution, Goal and other unconnected operations fail explicitly.
+Scoped member answers now delegate to original Runner interaction futures;
+remote-provider and channel acceptance is still required before opening admission.
+
+
+The F3 candidate also requires confirmed Runner exit before releasing External
+Team local registrations, and propagates stop failures/cancellation for retry.
+The facade retains its External adapter when cleanup fails. EOF without a Team
+terminal is the existing unknown_terminal_payload outcome; it cannot synthesize a
+Team completion snapshot. Native's historical fallback is unchanged.
+
+Active iteration pause remains unavailable for these Team Providers. The facade
+returns a negative interrupt result before the legacy pause fallback can swallow
+the unsupported operation. Disconnect uses the original cancel path with paused
+workflow disposition and strict exit confirmation; it does not claim to park an
+active Provider iteration. Normal/plan mismatches, including request metadata,
+are rejected before Team construction. Goal remains explicitly unavailable;
+member answers require the exact live scoped address. Admission remains closed.
+
+## R1-11F F3 成员交互与产品投影续作（2026-09-30；先设计后实现）
+
+成员审批使用原 IOAdapter pending 与 Runner interact；产品地址携带成员和周期，回答必须精确匹配。External 非 leader 的问题不可再过滤，隐藏成员输出也不能隐藏待答卡。仅先准入 inprocess，process/Cluster 需另补跨进程确认。
+
+能力由原 provider inventory、Team 工具和产品 subagent 目录编译；Browser 仅在原开关启用且权限接通时可用。产品子 Agent 与成员身份分开，持久状态依托原成员 Session；根 Goal/Heartbeat 不派生给每个成员。typed 事件在原单消费者投影中关联成员 Session/Turn/tool/Artifact，沿原 Team 历史与 UI 消费链。活动暂停不支持。
+
+并发成员问题不能覆盖原 Runtime handle 的单个 waiting_control_id：在现有 handle 内维护有界待答 ID 集合，保留旧主 ID/snapshot 兼容字段；精确回复仅清除对应 ID，最后一个回复后才允许结束等待，generation/claim/取消仍由原 coordinator 管理。不会增加第二个交互存储或审批决策者。
+
+
+候选已接通原 ExternalSubagentRuntime、BrowserAdmission 和 Artifact 投影，逐次工具调用重新校验冻结 scope/开关，成员 Session 保留产品状态。原 Runtime execution handle 保留多个并发待答 ID；连续 Heartbeat 审批清掉已回答 ID，根调度所有权不变。根 Goal driver 的 Team 产品接入仍不支持。
+
+生产者持久化后经原 Team stream/UI 消费，不再由 facade 重写历史。工具及 typed item ID 带成员 Session/Provider Session/Turn；Work 输出只认 typed 路径归属。历史写入失败沿原流报告 HISTORY_PERSISTENCE_UNCONFIRMED，后续成员终态及 Team idle 不能覆盖为成功。无第二 Provider cursor。
+
+恢复限制：未确认交互/产品活动的成员 checkpoint 明确拒绝冷恢复，标记仅在 Provider + 子 Agent/Browser + MCP 确认退出后清除。活动产品恢复、远端模型六格、真实 Web/CLI 渠道与跨进程/跨机器验收仍待完成；活动暂停不支持。最终 core 437 / swarm 830 / 真实 CLI 本地模型 2 passed，具体环境与告警见管理仓 R1_11F_TEAM_CLUSTER_E2E 第 9 节。
+
+
+## R1-11F 根 Goal/Team 控制接缝（2026-10-01，编码前）
+
+源码事实：现有 ExternalGoalRuntime 的一个 attempt 绑定单 ExecutionSession/Turn，GoalAttemptEvidence 只统计该来源。原 Team 流跨多个成员/Turn 且 idle 后还可再唤醒；原 TeamManager 没有根 Goal attempt 端口。不能直接继承 Single adapter、将 leader Turn 或 Team idle 当根 Goal 成功，也不能复制一套 GoalManager/调度器给每个成员。
+
+本批先收紧原控制契约：External Team pause/resume 均返回 interrupt_result.success=false，取消仍走严格退出确认；原 Native resume ack 保持兼容。结构化 Goal 结果提供原 facade 读取的 error_code，保持既有 code 别名；所有 Goal 操作显式拒绝，不写目标记录、不调用 Team/Single Provider，也不伪造目标已暂停/恢复。活动暂停与停止未来 Goal attempt 是不同语义。
+
+后续完整根 Goal 的最小接入顺序：先在原 Team Round 所有者中固定 root Session/generation/request/goal revision/attempt 对应；经现有单消费者汇总该 Round 内所有成员及产品子 Agent 的 Turn 身份、usage 和终态，重复/迟到不得重复计量，缺 usage 明确阻塞。再由原 Runtime GOAL_STREAM producer 驱动同一 GoalAttemptDriver/GoalManager，沿原 Team 调度执行并由独立 assessor 结算；观察器不推进执行。取消/替换须等所有自有资源退出，未知状态持久拒绝重放。完成这些前继续拒绝根 Goal，不以本批拒绝响应测试冒充 Goal 执行验收。
+
+
+## Team 根 Goal 证据接缝（2026-10-01，编码前）
+
+在原 _ActiveTeamRound 上可选挂载一个 TeamGoalAttemptEvidence；绑定必须精确匹配原 Runtime GOAL_STREAM/GOAL_ATTACH handle 的 Session/request/execution/generation，持有原执行许可且该 Round 延迟释放。它只观察并复用 GoalAttemptEvidence 的单 Turn 计量，不创建 GoalRecord、队列、future 或执行任务。
+
+每个成员和产品子 Agent 沿原唯一事件消费者接入一个周期固定的观察器，按 host Session/agent/Provider Session/Turn 关联，在 STARTED 时捕获所属 Round，后续不重新指派给新目标。序号去重、周期隔离与有界已见 Turn 保证旧事件不能计入新 attempt。结束/释放原 Round 封闭其观察能力，不从 EOF/idle/全部当前 Turn 结束自动推断 Goal 成功。只有未来原 producer 确认团队回合边界并显式 seal 后才可取一次完整用量；缺 usage、失败/未结束 Turn、归属异常或预算超限均不可通过成功评估门槛。
+
+完整根 Goal 执行仍拒绝：此批是运行时已接线、可注入验证的只读前置端口；GoalManager 单写者、GoalAttemptDriver、独立 assessor、状态持久化及实际团队回合结束仲裁在后续接入。不得将证据收集测试算作目标执行完成。
+
+候选实现已接线：原 TeamManager 的 Round 可绑定精确 GOAL_STREAM/GOAL_ATTACH 所有者；许可释放、generation 变化、取消或 Round 替换使其不再接受新 Turn。成员与原产品子 Agent 分来源/周期计量，重放不重复记账，取消中的旧 Turn 终态仍可归属旧 attempt，释放后不再收集。所有已观察 Turn 完成仍需 producer 显式 seal，缺输入/输出 usage、归属异常、失败/取消或超限不可进入成功评估。计量只取一次，不写 GoalManager。
+
+本轮受影响 Python 975 passed，真实 Codex/OpenCode CLI＋本机模型 2 passed；成员＋产品子 Agent 的双 Provider 组合使用脚本化 Provider 和真实原 Runtime/Session/事件泵，不能算远端模型 Goal E2E。两仓 Ruff/diff 通过，core 本轮源码未变；完整 Goal producer/评估/持久化、真实 UI/远端六格和 Cluster 仍待验证，全局准入与活动暂停/继续未开放。详情见管理仓 R1_11F_TEAM_CLUSTER_E2E 第 11 节。
+
+## 根 Team Goal producer 接入（2026-10-01，编码前）
+
+复用 ExternalGoalRuntime 的原 GoalManager/SessionGoalStore、控制口和记账方法，Team 子类只提供原 Runtime producer 内的团队 attempt 执行，不增加任务/队列/Provider cursor。原 Team helper 的 bounded Round 增加内部 Goal 所有者接缝，在任何提交前绑定证据并保留 Round 直到 producer 结算。结束信号仅为候选边界；经原 Runner 确认所有自有资源退出、检查各 Turn 终态及完整用量后 seal，独立无工具 assessor 由宿主授权模型构建。失败/取消保留已花用量，写入失败/缺计量/退出未确认保留原恢复标记，不自动重放。必须有原根 Session 恢复档案才装配该候选；无持久档案继续显式拒绝。全局准入未开放。
+
+本轮候选已实现根 Team Goal producer：仅有原 root recovery 档案时装配，继承既有 ExternalGoalRuntime 的 Manager/控制/记账端口而覆盖 Single 执行循环。原 Team helper 在提交前绑定 Goal Round；leader final 不结束 Goal waiter，Team 边界之后经原 Runner 退出确认并等待原历史消费者排空，Round 保留到评估/持久化完成。每次回合复用原 Team 构造/任务/Review/成员恢复链；不构造 Single adapter，也不创建另一个调度器。
+
+每 attempt 使用独立、宿主授权、无工具的 transcript assessor，Provider 与 assessor 用量仅各记一次；沿原 GoalAttemptDriver/GoalManager 写入同一加密根档案。成员不新增 GoalManager 或报告工具。取消/断连先停止原资源；缺用量、评估取消且费用不明、退出或写入未确认保留恢复拒绝。历史回执前保留原执行许可。Goal pause 表示不继续下一次尝试，允许当前回合正常评估；活动 Provider pause/resume 仍不可用。Goal owner 活动时普通 Team steer 与第二个 Goal stream 显式返回 goal_owner_busy，避免另一来源混入当前证据；需先取消当前 Goal。
+
+最终影响面 1178 passed、真实 CLI＋本机模型 2 passed。根 Goal 原 helper/Runner 的单/多回合实际组合使用脚本化 Provider；CLI 项验证原成员/工具/恢复，不是根 Goal 真模型验收。初始真实接缝失败（流退出提前释放 Round）、无档案时 assessor 预检兼容失败，以及测试 DB 未关闭造成的线程 setup error 均保留并修复。全局 External Team 准入未开放，真实根 Goal Provider/渠道/UI、多成员任务与 Review 跨回合、远端六格、活动产品恢复、Cluster/跨机器仍须验收。两候选未提交，未升级锁。管理仓第 12 节记录准确命令和源哈希。
+
+## 根 Goal 本机 CLI 与跨回合验证（2026-10-01）
+
+新增根 Goal 系统用例使用真实 Codex/OpenCode CLI、原 Runtime/Team helper/Runner 和加密档案；模型端点与无工具 assessor 受控。两次 attempt 各调用原 view_task，验证用量只结算一次、历史 objective/completed 各一条、历史回执前保留 owner，以及退出和冷读取。最终与既有成员恢复回归合计 4 passed。
+
+原 Runner 三成员组合使用脚本化 Provider/checkpoint 和 assessor，在原 SQLite TaskManager 中预置 reviewer，再走真实成员工具完成 claim/submit/verify；同一 Task/Review 和三条 roster 在下一 Goal attempt 保留，禁止作者伪造 reviewer；有 checkpoint 继续，无 checkpoint 明确阻塞且不重做任务。它不覆盖 scheduled dispatcher 分配 reviewer，也不是三成员真实 CLI 联合验收。受影响 Python 398 passed，生产代码/core/锁未修改；初始 fixture 隔离、Session 上下文、checkpoint 和 DAO 格式断言失败保留。远端模型/原渠道 UI/Cluster、活动产品恢复仍待验证，全局准入与活动 Provider pause/resume 仍关闭。详见管理仓第 13 节。
+
+
+## 三成员真实 CLI 与 scheduled 准入边界（2026-10-01）
+
+根 Goal 的真实 Codex/OpenCode CLI 本机模型测试新增三成员 Task/Review 双 attempt。原 TaskManager 预置 reviewer，原 backend 自动启动成员，实际 MCP claim/complete/verify/view_task；第二 attempt 从真实 Provider checkpoint 恢复三个成员并保留任务、review_round、roster，结算含全部模型请求和 assessor 用量，目标历史不重复。该正向用例不注入活动消息抢占；此前带额外 send_message 的 Codex 组合出现成员中断、根 Goal 保守阻塞，原日志和复现 fixture 保留，并发抢占仍待闭合。
+
+源码与真实 CLI 验证确认：原 scheduled scheduler 的 `_spawn_temp_reviewer` 直接使用 `TeamHarness.build`/`run_once`，绕过已选择的成员 Provider。External factory 现明确拒绝 `dispatch_mode=scheduled`，覆盖 attach、build、冷恢复 spec 和启动前漂移，且在资源分配前失败；即使 verification flag 关闭也拒绝，避免历史待评审任务进入这条分支。Native 路径不变。该拒绝是当前能力边界，不代表 scheduled 已适配；后续需复用原 scheduler 完成 reviewer Provider 构造、用量/事件归属与退出管理，不能临时降级 Native。
+
+最终结果及初始失败见管理仓 R1_11F_TEAM_CLUSTER_E2E 第 14 节。全局准入、活动 Provider 暂停/继续仍关闭；scheduled/pending review/消息抢占、远端模型/渠道 UI/Cluster 仍待验收。
+
+
+### F3 活动消息回执修复（2026-10-01）
+
+Codex 早到 steer 改为等待原生接受；仅精确“无活动回合、未接受”的拒绝委托原队列
+投递 FOLLOW_UP，并返回新 Turn 回执。原 Turn 不被错误中断，根 Goal 的成功/用量
+要求不变；未知错误禁止自动重发。真实 Codex/OpenCode CLI＋本机模型重新加入两条
+成员消息，最终 8 passed；core 581 passed / 1 既有 DSH timing skip，swarm 408 passed。
+第 14 节所记录的接受竞态已有修复和对应验证，历史失败保留。全局准入、scheduled、
+活动 Provider pause/resume 仍不开放；远端模型/渠道 UI/Cluster/干净锁安装未验收。
+详见 R1-11F 验证第 15 节；唯一状态源仍为任务跟踪表。
+
+
+## scheduled 临时 reviewer 宿主候选（2026-10-01）
+
+team_review 通过同一个成员工厂承接 core F_116 端口。独立 invocation Binding 复用原
+ExternalHarnessMemberRuntime/IO/TeamMemberProjection，原 Verify/View MCP 与授权核验；
+verify 调用须匹配 task/review_round/IN_REVIEW。审批从原 Runner/scheduler owner 精确定位，
+不加名册、交互 registry、事件消费者或第二套前端。root Goal 标注 reviewer 来源并汇总
+原 typed 事件用量；历史/产物沿原投影。
+
+原 Team Session 在派发前 commit pending，成功终态/完整用量/历史/MCP 与 Provider 退出
+全部确认后 commit closed；未知/取消保留 blocked，leader 冷恢复及同轮再派发拒绝重放。
+清理失败保留同一 runtime 和 transport 重试；不把流关闭当成功。
+
+两真实 CLI 的本机模型 scheduled 正向通过：原调度交给 worker，member_complete_task
+提交评审，临时 reviewer Verify 投票，退出后原 CAS 结算；两次 Goal attempt 只评审一次，
+名册不包含临时 reviewer，用量/历史/冷读状态与资源退出均核对。系统测试专用覆盖
+scheduled guard；产品 scheduled/global guard 保留，活动 Provider pause/resume 不支持。
+在途 pending review 冷恢复、部分票据跨 attempt、真实 CLI 失败/交互、远端渠道/Cluster
+与干净锁安装仍待验收。完整初始失败与最终结果见管理仓验证第 17 节。
+
+
+### F3 评审持久恢复与部分票据候选（2026-10-01）
+
+leader 启动在 Provider/MCP 前检查原评审记录，不依赖 history_restored；非法空值拒绝，
+closed 提交失败/取消回滚内存 pending 并保留清理重试。原 SQLite Checkpointer 的
+pending/blocked 在独立进程冷读时拒绝重放，closed 才允许；原 scheduler/票据 SQLite
+关闭重建后只补缺票，已投票者不重跑。部分票据保持 IN_REVIEW，不自动推进 Goal attempt。
+
+新增恢复组件 26 passed，Swarm 受影响回归 460 passed，真实 Codex/OpenCode CLI＋本机
+模型 10 passed（scheduled 已用持久 Checkpointer）；core 本轮未改未重跑。恢复故障用例
+使用脚本 Provider；部分票据重建为同进程新对象，不冒充真实 CLI 崩溃恢复。生产准入和
+活动 Provider pause/resume 仍关闭，真实 CLI 故障/交互/进程重启、远端渠道/Cluster/锁安装
+继续待验。详见 R1-11F 验证第 18 节；唯一任务状态源仍为任务跟踪表。
+
+
+### F3 真实 reviewer CLI 故障验证与候选恢复（2026-10-01）
+
+原临时工作树缺失后，已将 core 41＋swarm 38 个变化文件逐字节恢复到持久
+artifacts/r1-11f-recovery/{core,swarm}，与第 18 节哈希及变化集合一致，并备份完整
+变化文件。恢复后 Swarm 回归 460 passed，真实 CLI Team/Goal 正向 10 passed；新增
+Codex/OpenCode reviewer 的模型拒绝、活动取消共 4 passed，验证原终态、资源退出、
+SQLite pending/blocked 的独立进程冷读拒绝、新 invocation 不发起模型重放。
+
+本轮无生产行为改动；这是 reviewer 宿主故障验收，完整 Runner/Goal 故障结算、真实
+审批/迟到回答、部分票据跨宿主进程重启仍待验证。生产 scheduled/global guard 与
+活动 Provider pause/resume 限制保留，远端模型/渠道 UI/Cluster/锁安装未验。详见
+R1-11F 验证第 19 节；任务状态仍只以任务跟踪表为准。
+
+
+### F3 reviewer 审批与跨宿主进程恢复（2026-10-01）
+
+真实 Codex/OpenCode CLI＋本机受控模型新增 6 项审批/迟到回答、2 项跨进程恢复通过；
+与既有 Team/Goal/故障用例合并运行 22 passed。批准、拒绝、审批中取消及错 team/member/
+root/cycle、重复/退出后回答均核对。OpenCode 拒绝沿原 interaction_declined 失败终态，
+记录 blocked；不把用户拒绝记成评审成功。
+
+两个独立 Python 宿主进程共用原 SQLite board/Checkpointer：已完成 Turn 的 leader 保持
+原 Provider Session；A 已投票、B 无票时保持 IN_REVIEW，第二进程只补 B，原 CAS 完成。
+这是正常退出后的 reviewer scheduler 重建；消息总线/owner 使用测试夹具，不代表完整
+Runner/Goal 进程恢复、强杀恢复或原渠道审批验收。Codex 首次并发启动 SQLite 失败和
+未执行 Turn 的空线程无法 resume 已留档，不能按本轮正常恢复结果宣称这些边界已修复。
+本轮仅增加测试/说明，无生产行为修改；scheduled/global guard 与活动 Provider 暂停继续
+限制保留，远端模型/渠道 UI/Cluster/干净锁安装仍待验。详见 R1-11F 验证第 20 节。
+
+
+### F3 原 Runtime/Runner 评审审批与根 Goal 取消（2026-10-01）
+
+在持久候选修复已绑定 External Team 的回答分类、CHAT_SEND/CHAT_ANSWER 控制路由和
+路由复用；回答仍先过原 generation/interaction ledger。原 scheduler 为临时 reviewer
+绑定当轮 Team 输出队列和 Session，宿主使用既有 TeamOutputSchema，拒绝换轮后输出；
+仅写 Session stream 无法进入原 Runner 消费链。没有新增队列、审批 registry 或事件 reader。
+
+新增真实 Codex/OpenCode CLI＋本机受控模型允许/取消 4 passed，原 Runtime.stream 经
+facade→TeamManager→Runner→scheduler owner；错 generation/owner、重复/迟到回答核对。
+取消后根 Goal PAUSED、退出/历史释放、持久状态冷读和未知 reviewer 重放拒绝通过。
+原 22 项 CLI 回归、core 52 项、Swarm/Runtime/Single 712 项组合均通过，无失败/错误/跳过。
+隔离测试修复数据路径缓存污染，原始失败保留，无白名单扩张。
+
+仍是候选配置/受控 root admission 与 assessor；未验 Web/TUI 传输、远端模型、Cluster、
+完整 Runner 进程崩溃恢复或干净锁安装。F3/F4 待验证，生产 scheduled/global guard 和
+活动 Provider pause/resume 限制保持。证据见 R1-11F 验证第 21 节。
+
+
+### F3 Web 授权/历史与根 Goal 故障结算（2026-10-01）
+
+持久候选修复 reviewer 失败后根 Goal 等待 IN_REVIEW 不结束：收到明确失败后关闭本轮
+等待器，仍经原 Runner 退出确认、用量核算和 Goal driver 结算，缺用量保持 BLOCKED/
+禁止恢复。补 Team 历史筛选的 scheduled reviewer 工具结果/结束文本，保留 invocation/
+task/round/Provider 归属；临时 reviewer 不进入同名普通成员私有历史，不加入 roster。
+
+真实 Codex/OpenCode CLI＋本机模型新增根 Goal 故障 2 passed、Web 授权 DOM/历史 2 passed；
+原 CLI 26 passed，Swarm/Runtime/Single 720 passed，历史过滤/分页 52 passed，无最终
+失败/错误/跳过。Web 测试复用原 WebChannel/WebSocket、React 授权控件/hook 和历史解析器；
+Gateway→AgentServer 为进程内桥接，root admission/registry/assessor 为受控夹具。
+不等同完整浏览器展示或真实远端部署。临时 reviewer 详情的 UI 展示仍未验证。
+
+core 本轮未改未重跑。F3/F4 仍待验证，scheduled/global guard 与活动 Provider pause/resume
+限制保留。独立 Gateway/浏览器、远端模型、Cluster、完整崩溃恢复与干净锁安装待验。
+用户 checkout/锁未动，无提交/推送/CI/发布；证据见 R1-11F 第 22 节。
+
+
+### F3 Gateway 早回执与真实浏览器审批（2026-10-01）
+
+ExternalTeam 审批沿用原 webClient 的 awaitRuntimeAccepted：Gateway 接收回执不消费
+pending，Runtime 原控制通道确认后才关闭授权卡；回执补外层 request_id 与本次回答
+关联，交互地址和 generation 仍由 Runtime 校验。匹配失败保留原卡供重试，无新审批
+注册表或控件。真实 Codex/OpenCode CLI＋本机模型，经独立 Gateway/app_web 进程与
+Chrome 146 的原授权控件测试页各完成五次审批，2 passed；原 Runtime 4 passed、
+Web DOM/历史 2 passed、前端回执 12 passed、Swarm/Runtime/Single 720 passed，构建通过。
+
+AgentServer 使用原 E2A handler，但服务 owner/root admission/registry 仍由测试夹具
+装配；测试页不是完整应用。reviewer 三类历史事件及来源均读回，现有成员解析器只
+恢复 worker，reviewer 详情展示/恢复尚未实现，不能算 UI 验收完成。后续应按任务/
+review invocation 关联到现有详情视图，不把临时 reviewer 加入 roster 或混入同名成员。
+F3/F4 待验证，生产 scheduled/global guard 与活动 Provider pause/resume 限制不变；
+用户 checkout/锁未动，无提交/推送/CI/发布。完整证据见 R1-11F 第 23 节。
+
+
+### F3 reviewer 任务详情与浏览器恢复（2026-10-01）
+
+临时 reviewer 的工具调用/结果、输出/终态和文件沿用原 teamMemberExecutionEvents，
+携带 task/round/invocation/Provider 来源；不增加 roster 成员或第二套审批/执行状态。
+实时投影可能使用 teammate 角色，按 execution_kind 与审查来源分流；历史与实时使用
+相同 ID，迟到空终态不覆盖已有正文。按被审查任务关联到原成员任务 ProcessListCard，
+展开显示审查者、轮次、Provider、标识及结果；同名成员和不同 invocation 不混合。
+
+真实 Codex/OpenCode CLI＋本机模型，经独立 Gateway/app_web 与 Chrome 原成员面板
+测试页的详情展开、实时/历史对应和页面刷新恢复 2 passed。前端影响面 61 passed，
+生产 tsc/Vite 构建通过。历史顶层消息 ID 误作工具 ID 的配对问题已修复并补回归。
+core/Python 生产代码本轮未变，不重复引用旧 720 项结果冒充新验证。AgentServer owner/
+root admission/registry/assessor 和浏览器外壳仍为夹具，完整产品部署、独立 AgentServer、
+远端模型、Cluster/完整进程崩溃恢复/干净锁安装待验。F3/F4 不关闭，生产 guard 与
+活动 Provider pause/resume 限制保留；用户 checkout/锁未动。证据见 R1-11F 第 24 节。
+
+## 完整产品候选入口（2026-10-01）
+
+本候选已接通原 App、独立 Gateway 和独立 AgentServer 的同 Provider inprocess Team
+normal 路径。首次 Team 名称只允许在执行绑定前冻结；External 命名不分配 Native TinyAgent。
+空 Skills 选择为无操作，非空选择仍拒绝。scheduled reviewer 复用原调度/任务管理器与
+所选 Provider；活动 Provider pause/resume、process/distributed spawn、worktree、HITT、
+Swarmflow 与 Native 专属声明仍明确拒绝，不表示跨机器已实现或验收。
+
+普通 External Team 请求现在进入原 Runtime CHAT_STREAM/CHAT_UNARY 所有权登记，审批继续
+使用原 generation/interaction ledger；控制复用已冻结 route，Gateway 只在执行端确认后
+推送成功回执。原停止按钮通过实际能力清单识别 Provider：Native Team 保持暂停，External
+Team 使用取消。能力查询携带已保存 Work/Code 上下文，首次 runtime_ready 与刷新均加载。
+
+成员通过现有 product MCP 的 send_file_to_user 显式交付工作区内文件，复用 Surface Artifact
+与 SendFileToolkit 下载/历史通道，保留成员/Turn 来源与稳定交付 ID。禁止相对路径、越界
+和符号链接；批量调用在发送前校验所有文件。Shell 目录变化不用于推断成员归属。
+
+本轮真实模型/故障记录见管理仓验证文档第 25 节。源码联合运行与正式锁定安装分开记录；
+跨机器部署及正式配对未闭合时，整个 R1-11F 保持待验证，不以本候选声明生产发布。
+
+旧 Web `team`/`agent` 模式迁移需与已保存 `work_mode` 合并，不能把 Code 历史改成 Work；
+能力探测读取持久事实且不回写默认值。已是三段 canonical 的冲突仍由准入拒绝。
+远端验收同时检查 Leader 实际输出及刷新后的原回复气泡，用户提示词中的标记不算结果。
+OpenCode 验收配置显式使用 `context_window=131072`、`max_output_tokens=16384`，避免默认
+小预算只产生推理而截断；运行时仍由 Provider 报告真实截断失败，不静默重放。

@@ -107,6 +107,26 @@ def test_has_persistable_assistant_payload_tool_result_with_tool_call_id():
     ) is True
 
 
+@pytest.mark.parametrize('event_type', ['chat.tool_call', 'chat.tool_result', 'chat.final', 'chat.file'])
+def test_scheduled_review_history_retains_output_without_private_member_fanout(
+    tmp_path, monkeypatch, event_type
+):
+    monkeypatch.setattr(session_history, 'get_agent_sessions_dir', lambda: tmp_path)
+    record = {
+        'event_type': event_type, 'role': 'reviewer', 'mode': 'team.code.normal',
+        'execution_kind': 'scheduled_review', 'member_name': 'reviewer',
+        'review_task_id': 'task', 'review_round': 1, 'review_invocation_id': 'invocation',
+        'content': 'review output',
+    }
+    monkeypatch.setattr(session_history, 'load_history_records', lambda _: [record])
+    assert session_history.read_team_history_records('review-history') == [record]
+    assert session_history.read_member_history_records('review-history', 'reviewer') == []
+    if event_type in {'chat.final', 'chat.tool_result'}:
+        assert not session_history._is_team_relevant({**record, 'execution_kind': 'other'})
+        assert not session_history._is_team_relevant({**record, 'mode': 'agent.code.normal'})
+        assert session_history._is_team_relevant({**record, 'role': 'teammate'})
+
+
 def test_has_persistable_assistant_payload_tool_result_with_nested_tool_result():
     assert session_history._has_persistable_assistant_payload(
         content_text="",

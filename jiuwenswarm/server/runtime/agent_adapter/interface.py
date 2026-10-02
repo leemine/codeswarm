@@ -1399,6 +1399,7 @@ class JiuWenSwarm:
         if (
             isinstance(route, AdmittedExecutionRoute)
             and route.provider_id != "native"
+            and getattr(adapter, "supports_goal_execution", True)
             and (starts_goal or (callable(needs_assessor) and needs_assessor(request)))
         ):
             setter = getattr(adapter, "set_goal_assessor_factory", None)
@@ -2783,6 +2784,33 @@ class JiuWenSwarm:
         session_id = self._session_manager.get_session_id(request.session_id)
         is_team_mode = is_team_params(request.params if isinstance(request.params, dict) else None)
 
+        route = getattr(self, "_runtime_execution_route", None) or getattr(request, "_execution_route", None)
+        if (isinstance(route, AdmittedExecutionRoute) and route.provider_id != "native"
+                and route.surface is not None and route.surface.identity.topology == "team"):
+            adapter = self._ensure_adapter(execution_route=route)
+            # Controls reuse the already admitted immutable route. Selection
+            # below still verifies session/channel/subject and requested mode.
+            if getattr(request, "_execution_route", None) is None:
+                request._execution_route = route
+            adapter.select_execution_for_request(request)
+            # Control requests may omit mode. The frozen Surface owns topology.
+            is_team_mode = True
+            if intent in {"pause", "resume"}:
+                # Neither parking nor resuming an active Provider iteration is
+                # supported. The legacy Team resume acknowledgement cannot
+                # stand in for a successful Provider control operation.
+                response = self._build_interrupt_result_response(
+                    request, intent=intent, success=False,
+                    message="External Team 暂不支持暂停或继续活动回合；可使用取消结束当前执行。",
+                )
+                response.payload["code"] = "EXTERNAL_TEAM_OPERATION_UNAVAILABLE"
+                return response
+            cancel_goal = getattr(adapter, 'cancel_active_goal', None)
+            if intent == 'cancel' and callable(cancel_goal) and await cancel_goal():
+                return self._build_interrupt_result_response(
+                    request, intent=intent, success=True, message='团队 Goal 当前执行已取消。',
+                )
+
         if is_team_mode:
             return await self._process_team_interrupt(
                 request=request,
@@ -2892,7 +2920,11 @@ class JiuWenSwarm:
                     else "stop"
                 )
                 cancelled = await team_manager.cancel_session_runtime(
-                    session_id, reason=reason, workflow_disposition=workflow_disposition
+                    session_id, reason=reason, workflow_disposition=workflow_disposition,
+                    **({"require_exit_confirmation": True} if (
+                        getattr(self, "_runtime_execution_route", None) is not None
+                        and self._runtime_execution_route.provider_id != "native"
+                    ) else {}),
                 )
                 await self._session_manager.cancel_session_task(
                     session_id,
@@ -3300,6 +3332,24 @@ class JiuWenSwarm:
     ) -> AsyncIterator[AgentResponseChunk]:
         """Inject an interaction answer into this Session's active execution."""
         params = request.params if isinstance(request.params, dict) else {}
+        route = getattr(self, '_runtime_execution_route', None)
+        if (route is not None and route.provider_id != 'native'
+                and route.surface.identity.topology == 'team'
+                and (request.req_method == ReqMethod.CHAT_ANSWER
+                     or (request.req_method == ReqMethod.CHAT_SEND and is_interrupt_resume_payload(params)))):
+            adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+            adapter.bind_route(route)
+            response = await adapter.handle_user_answer(request)
+            if not response.ok or response.payload.get('resolved') is not True:
+                raise ValueError('Team interaction answer is stale or unknown')
+            yield AgentResponseChunk(
+                request_id=request.request_id, channel_id=request.channel_id,
+                payload={'event_type': 'runtime.accepted', 'accepted': True, 'resolved': True,
+                         'request_id': request.request_id,
+                         'interaction_id': params.get('request_id'), 'session_id': request.session_id},
+                metadata=request.metadata or {},
+            )
+            return
         if request.req_method == ReqMethod.CHAT_ANSWER and params.get("source") == "browser_permission":
             # The Browser awaits a host future, not a suspended Provider Turn.
             # Runtime has already claimed the exact execution/generation.
@@ -3942,6 +3992,18 @@ class JiuWenSwarm:
                         _yielded_from_queue, rid, _et, event_type,
                     )
 
+                if (event_type == 'chunk' and isinstance(data, AgentResponseChunk)
+                        and isinstance(data.payload, dict) and data.payload.get('_team_history_owned')
+                        and getattr(request, '_execution_route', None) is not None
+                        and request._execution_route.provider_id != 'native'
+                        and request._execution_route.surface.identity.topology == 'team'):
+                    # The original Team producer has durably written this
+                    # member output even when no request consumer was attached.
+                    payload = dict(data.payload)
+                    payload.pop('_team_history_owned', None)
+                    data.payload = payload
+                    yield data
+                    continue
                 if event_type == "error":
                     if isinstance(data, asyncio.CancelledError):
                         logger.info("[JiuWenSwarm] 流式处理被中断: request_id=%s", rid)
@@ -4956,6 +5018,11 @@ class JiuWenSwarm:
                     await self._adapter.cleanup()
             except Exception as e:
                 logger.warning("[JiuWenSwarm] Adapter cleanup failed: %s", e)
+                route = getattr(self, "_runtime_execution_route", None)
+                if route is not None and route.provider_id != "native":
+                    # Keep the owner reachable until Provider/Team exit is
+                    # confirmed; a later cleanup retries the same resources.
+                    raise
             self._adapter = None
             self._runtime_execution_route = None
 

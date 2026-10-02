@@ -105,3 +105,30 @@ def test_default_ttse_config_is_disabled():
     assert embedding["api_key"] == "${EMBED_API_KEY}"
     assert embedding["base_url"] == "${EMBED_API_BASE}"
     assert embedding["model"] == "${EMBED_MODEL}"
+
+
+def test_distributed_templates_select_distinct_roles_and_shared_transport():
+    from jiuwenswarm.agents.harness.team.distributed_runtime import (
+        is_distributed_mode, normalize_distributed_transport_fields, runtime_role,
+    )
+
+    root = Path(__file__).resolve().parents[2] / 'jiuwenswarm' / 'resources'
+    configs = {role: yaml.safe_load((root / f'config.team.distributed.{role}.yaml').read_text())
+               for role in ('leader', 'teammate')}
+    for role, config in configs.items():
+        assert is_distributed_mode(config)
+        assert runtime_role(config) == role
+        for team in (config['team'], config['modes']['team']['jiuwen_team']):
+            normalized = normalize_distributed_transport_fields(config, team)
+            assert normalized['transport']['type'] == 'pyzmq'
+            assert normalized['transport']['params']['metadata']['pubsub_bind'] is (role == 'leader')
+            assert normalized['storage']['type'] == 'postgresql'
+            assert normalized['storage']['params']['connection_string'] == '${JIUWEN_TEAM_POSTGRES_URL}'
+    leader = configs['leader']['team']
+    teammate = configs['teammate']['team']
+    assert leader['workspace']['root_path'] == teammate['workspace']['root_path']
+    assert teammate['runtime']['member_name']
+    params = teammate['transport']['params']
+    assert params['bootstrap_direct_addr'] != params['direct_addr']
+    for key in ('pubsub_publish_addr', 'pubsub_subscribe_addr'):
+        assert params[key] == leader['transport']['params'][key]

@@ -308,6 +308,7 @@ function isDuplicateFinalExecutionEvent(
   existing: TeamMemberExecutionEvent,
   next: TeamMemberExecutionEvent
 ): boolean {
+  if (existing.review || next.review) return existing.id === next.id;
   if (existing.kind !== 'final' || next.kind !== 'final') {
     return false;
   }
@@ -333,6 +334,10 @@ function dedupeTeamMemberExecutionEvents(
       deduped[duplicateIndex] = {
         ...deduped[duplicateIndex],
         ...event,
+        ...(event.review ? {
+          content: event.content || deduped[duplicateIndex].content,
+          review: { ...deduped[duplicateIndex].review, ...event.review },
+        } : {}),
         id: deduped[duplicateIndex].id,
         timestamp: Math.min(deduped[duplicateIndex].timestamp || event.timestamp, event.timestamp),
       };
@@ -463,6 +468,15 @@ export type TeamMemberExecutionEventKind =
   | 'file';
 
 export interface TeamMemberExecutionEvent {
+  /** Scheduled review provenance; never a roster membership. */
+  review?: {
+    task_id: string;
+    round: number;
+    invocation_id: string;
+    provider_id: string;
+    member_session_id: string;
+    terminal_status?: string;
+  };
   id: string;
   member_id: string;
   kind: TeamMemberExecutionEventKind;
@@ -1691,6 +1705,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const eventPatch = Object.fromEntries(
         Object.entries(event).filter(([, value]) => value !== undefined)
       ) as TeamMemberExecutionEvent;
+      const existingReview = eventPatch.review
+        ? runtime.teamMemberExecutionEvents.find(item => item.id === eventPatch.id)
+        : undefined;
+      if (existingReview?.review && eventPatch.review) {
+        eventPatch.review = { ...existingReview.review, ...eventPatch.review };
+        if (!eventPatch.content) eventPatch.content = existingReview.content;
+      }
       const duplicateIndex = runtime.teamMemberExecutionEvents.findIndex(
         (item) => isDuplicateFinalExecutionEvent(item, eventPatch)
       );

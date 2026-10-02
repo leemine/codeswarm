@@ -802,7 +802,7 @@ team:
   storage:
     type: postgresql
     params:
-      connection_string: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/jiuwen_team
+      connection_string: ${JIUWEN_TEAM_POSTGRES_URL}
 
 mcp:
   servers: []
@@ -898,7 +898,7 @@ modes:
       storage:
         type: postgresql
         params:
-          connection_string: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/jiuwen_team
+          connection_string: ${JIUWEN_TEAM_POSTGRES_URL}
 
       # ============================================================
       # Team 级共享记忆（TeamMemoryConfig）

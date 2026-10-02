@@ -48,7 +48,18 @@ class SessionExecutionRegistry:
         handle: SessionExecutionHandle, control_id: str
     ) -> None:
         if not handle.state.terminal:
+            if handle.waiting_control_id:
+                handle.waiting_control_ids.add(handle.waiting_control_id)
+            if control_id not in handle.waiting_control_ids and len(handle.waiting_control_ids) >= 1024:
+                raise RuntimeError('execution pending interaction budget exhausted')
+            handle.waiting_control_ids.add(control_id)
             handle.waiting_control_id = control_id
+
+    @staticmethod
+    def resolve_control(handle: SessionExecutionHandle, control_id: str) -> None:
+        handle.waiting_control_ids.discard(control_id)
+        if handle.waiting_control_id == control_id:
+            handle.waiting_control_id = next(iter(handle.waiting_control_ids), None)
 
     @staticmethod
     def mark_waiting(handle: SessionExecutionHandle) -> None:
@@ -77,6 +88,7 @@ class SessionExecutionRegistry:
             return
         handle.state = state
         handle.waiting_control_id = None
+        handle.waiting_control_ids.clear()
         handle.finished_at = time.monotonic()
         if error is not None:
             handle.error = str(error)

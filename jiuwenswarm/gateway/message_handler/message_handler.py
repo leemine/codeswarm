@@ -1363,6 +1363,8 @@ class MessageHandler(ABC):
                     channel_id=msg.channel_id,
                     session_id=sid_for_agent,
                     metadata=cancel_metadata or None,
+                    result_request_id=msg.id if publish_interrupt_result else None,
+                    result_intent="cancel",
                 )
             )
             self._fire_and_forget_tasks.add(task)
@@ -1371,14 +1373,6 @@ class MessageHandler(ABC):
                 "[MessageHandler] 已 fire-and-forget 发送 AgentServer 中断: session_id=%s",
                 sid_for_agent,
             )
-            if publish_interrupt_result:
-                await self._send_interrupt_result_notification(
-                    msg.id,
-                    msg.channel_id,
-                    sid_for_agent,
-                    "cancel",
-                    success=True,
-                )
             return True
 
         try:
@@ -4547,19 +4541,12 @@ class MessageHandler(ABC):
                                     else str(pr_state.mode)
                                 )
                         env_interrupt = self.message_to_e2a(agent_msg)
-                        asyncio.create_task(self._send_interrupt_to_agent(env_interrupt))
-                        # 检查当前 session 是否有活跃的流式任务
-                        current_sid = msg.session_id
-                        has_active_task = False
-                        for rid, task in list(self._stream_tasks.items()):
-                            if self._stream_sessions.get(rid) == current_sid and not task.done():
-                                has_active_task = True
-                                break
-                        # 通知前端状态变更（事件）
-                        await self._send_interrupt_result_notification(
-                            msg.id, msg.channel_id, msg.session_id, intent,
-                            has_active_task=has_active_task,
-                        )
+                        task = asyncio.create_task(self._send_interrupt_to_agent(
+                            env_interrupt, channel_id=msg.channel_id, session_id=msg.session_id,
+                            metadata=msg.metadata, result_request_id=msg.id, result_intent=intent,
+                        ))
+                        self._fire_and_forget_tasks.add(task)
+                        task.add_done_callback(self._fire_and_forget_tasks.discard)
 
                     continue
 
@@ -5119,26 +5106,30 @@ class MessageHandler(ABC):
         channel_id: str | None = None,
         session_id: str | None = None,
         metadata: dict | None = None,
+        result_request_id: str | None = None,
+        result_intent: str = "cancel",
     ) -> None:
-        """Fire-and-forget: 发送中断到 AgentServer，不阻塞转发循环.
-
-        ``interrupt_result`` 已由调用方提前推送；此处仍要把响应里的
-        ``cancelled_tools`` 转成 ``chat.tool_result``，否则前端 tool 卡片会一直转圈，
-        直到刷新历史才看到 ``[Interrupted]``.
-        """
+        """Forward controls without blocking dispatch; acknowledge actual results."""
+        ch = (channel_id or getattr(env, "channel", None) or "").strip()
+        sid = (session_id or getattr(env, "session_id", None) or "").strip()
+        success = False
+        message = "执行端未确认控制结果"
         try:
             resp = await self._send_non_stream_agent_request(env)
-            logger.info(
-                "[MessageHandler] AgentServer 中断响应: request_id=%s ok=%s",
-                resp.request_id, resp.ok,
-            )
             payload = resp.payload if isinstance(resp.payload, dict) else {}
-            ch = (channel_id or getattr(env, "channel", None) or "").strip()
-            sid = (session_id or getattr(env, "session_id", None) or "").strip()
+            success = bool(resp.ok and payload.get("event_type") == "chat.interrupt_result"
+                           and payload.get("success") is True)
+            message = payload.get("message") or payload.get("error") or message
             if ch and sid and payload.get("cancelled_tools"):
                 await self._send_cancelled_tool_results(ch, sid, payload, metadata)
-        except Exception as e:
-            logger.warning("[MessageHandler] AgentServer 中断请求失败(忽略): %s", e)
+        except Exception as exc:
+            logger.warning("[MessageHandler] AgentServer 中断请求失败: %s", exc)
+            message = str(exc)
+        if result_request_id:
+            await self._send_interrupt_result_notification(
+                result_request_id, ch, sid, result_intent,
+                message=message, success=success,
+            )
 
     async def _send_interrupt_result_notification(
         self,

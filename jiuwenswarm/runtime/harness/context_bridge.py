@@ -92,7 +92,10 @@ def build_external_context(
     surface_prompt = _surface_system_prompt(surface) if surface is not None else ""
     context_blocks = _render_context_blocks(context_snapshot)
     system_prompt = (
-        "You are the execution engine for a JiuwenSwarm Single-Agent session.\n"
+        ("You are a member execution engine for a JiuwenSwarm Team session.\n"
+         if surface is not None and surface.identity.topology == "team"
+         else "You are the execution engine for a JiuwenSwarm Single-Agent session.\n")
+        +
         f"Provider: {provider_id}. Channel: {channel_id}.\n"
         f"Project root: {paths.project_root}.\n"
         f"Current working directory: {paths.cwd}.\n"

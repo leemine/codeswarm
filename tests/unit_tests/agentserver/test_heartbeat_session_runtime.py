@@ -2175,6 +2175,8 @@ async def test_external_heartbeat_parent_exit_precedes_child_cleanup_and_retry(
         assert chain.adapter.execution_session.closed
         if child_cleanup_calls == 1:
             raise RuntimeError("child exit unconfirmed")
+        # Successful cleanup can exceed the deliberately short first timeout.
+        await asyncio.sleep(0.1)
         await factory_close()
 
     monkeypatch.setattr(subagents._factory, "close_pending", close_child)
@@ -2195,6 +2197,8 @@ async def test_external_heartbeat_parent_exit_precedes_child_cleanup_and_retry(
         assert chain.adapter._tool_gateway is gateway
         assert len(chain.providers) == 1
         assert SESSION in chain.heartbeat.execution.active_session_ids()
+        # The first timeout probes retained ownership; retry waits for cleanup.
+        chain.heartbeat.execution._cancel_timeout_seconds = 2
         assert await chain.heartbeat.execution.cancel(run_id)
         assert child_cleanup_calls == 2
         assert subagents._closed

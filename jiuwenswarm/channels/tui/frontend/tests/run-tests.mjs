@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { StreamingState } from "../dist/core/types.js";
 import { parseHistoryFrame } from "../dist/core/history-parser.js";
 
 import {
@@ -2103,3 +2104,51 @@ assert.equal(normalizeToClientMode("agent.work.normal"), "agent.work.normal");
 assert.equal(normalizeToClientMode("team.code.plan"), "team.code.plan");
 assert.equal(normalizeToClientMode("unknown_mode"), undefined);
 assert.equal(normalizeToClientMode(""), undefined);
+
+
+// Rejected controls cannot move the TUI into a fabricated Provider state.
+for (const intent of ["pause", "resume"]) {
+  for (const success of [false, true, undefined]) {
+    for (const language of ["zh", "en"]) {
+      const initial = intent === "pause" ? StreamingState.Responding : StreamingState.Paused;
+      let state = initial;
+      let entries = [];
+      let lastError;
+      let cleared = 0;
+      const delegate = new Proxy({}, {
+        get: (_target, property) => {
+          if (property === "getSessionId") return () => "root-session";
+          if (property === "getPreferredLanguage") return () => language;
+          if (property === "getEntries") return () => entries;
+          if (property === "setEntries") return (value) => { entries = value; };
+          if (property === "setStreamingState") return (value) => { state = value; };
+          if (property === "setLastError") return (value) => { lastError = value; };
+          if (property === "clearInterruptRequested") return () => { cleared += 1; };
+          return () => undefined;
+        },
+      });
+      const message = "External Team 暂不支持暂停或继续活动回合；可使用取消结束当前执行。";
+      handleIncomingFrame(delegate, {event: "chat.interrupt_result", payload: {
+        session_id: "other-session", intent, success, message,
+      }});
+      assert.equal(state, initial);
+      assert.equal(entries.length, 0, "a different Session cannot update this control state");
+      handleIncomingFrame(delegate, {event: "chat.interrupt_result", payload: {
+        session_id: "root-session", intent, success, message,
+      }});
+      if (success === false) {
+        assert.equal(state, initial);
+        assert.equal(entries.length, 1);
+        assert.equal(entries[0].kind, "error");
+        assert.equal(entries[0].content, lastError);
+        assert.ok(lastError.includes(language === "en" ? "does not support" : "不支持"));
+        assert.equal(cleared, 1);
+      } else {
+        assert.equal(state, intent === "pause" ? StreamingState.Paused : StreamingState.Responding);
+        assert.equal(entries.length, 0);
+        assert.equal(lastError, undefined);
+      }
+    }
+  }
+}
+console.log("PASS: pause/resume rejection state, Session isolation and legacy acknowledgements (12 cases)");

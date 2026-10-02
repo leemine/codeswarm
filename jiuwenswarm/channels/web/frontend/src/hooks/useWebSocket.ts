@@ -1,3 +1,4 @@
+import { isScheduledReviewRecord, parseTeamReviewExecution } from '../features/teamReviewExecution';
 /**
  * WebSocket Hook
  *
@@ -2273,7 +2274,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               // Resume must preserve the extension snapshot selected for this session.
               ...buildExtensionSendPayload(sessionId),
             },
-            effectiveSource === 'permission_interrupt' && permissionAnswers[0]?.card_id
+            // Team addresses select acknowledgement timing only; Runtime
+            // still validates the pending owner and generation.
+            (pendingMatches && requestId.startsWith('team-interaction:')) ||
+            (effectiveSource === 'permission_interrupt' && permissionAnswers[0]?.card_id)
               ? { awaitRuntimeAccepted: true }
               : undefined,
           );
@@ -2492,6 +2496,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   );
 
   useEffect(() => {
+    const consumeReviewExecution = (payload: Record<string, unknown>, eventType: string): boolean => {
+      if (!isScheduledReviewRecord(payload)) return false;
+      const sessionId = resolveEventSessionId(payload);
+      if (sessionId) {
+        const event = parseTeamReviewExecution(payload, sessionId, eventType);
+        if (event) useSessionStore.getState().addTeamMemberExecutionEvent(sessionId, event);
+      }
+      return true;
+    };
+
     const applyTeamMemberShutdown = (memberId: string, sessionId?: string) => {
       const normalizedMemberId = memberId.trim();
       if (!normalizedMemberId) {
@@ -2618,9 +2632,18 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('hello', ({ payload }) => {
         handleConnectionAck(payload);
       }),
+      webClient.on('team.member_turn', ({ payload }) => {
+        consumeReviewExecution(payload, 'team.member_turn');
+      }),
       webClient.on('team.runtime_ready', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
+        void request<{ surface_capabilities?: unknown }>('surface.capabilities.get', {
+          session_id: sessionId,
+        }).then(result => {
+          const manifest = parseSurfaceCapabilityManifest(result?.surface_capabilities);
+          if (manifest) useSessionStore.getState().setSurfaceCapabilityManifest(sessionId, manifest);
+        }).catch(error => console.warn('Failed to load Team capabilities:', error));
         const identity = normalizeTeamLeaderIdentity(payload.team_leader_identity);
         if (!identity) return;
 
@@ -2633,6 +2656,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         useSessionStore.getState().setTeamLeaderIdentity(sessionId, identity);
       }),
       webClient.on('chat.delta', ({ payload }) => {
+        if (consumeReviewExecution(payload, 'chat.delta')) return;
           const sessionId = resolveEventSessionId(payload);
           if (!sessionId) return;
 
@@ -2832,6 +2856,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
       }),
       webClient.on('chat.final', ({ payload }) => {
+        if (consumeReviewExecution(payload, 'chat.final')) return;
         if (shouldDropDuplicatedEvent('chat.final', payload)) return;
 
         const cronMeta = payload.cron as Record<string, unknown> | undefined;
@@ -3518,6 +3543,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
       }),
       webClient.on('chat.file', ({ payload }) => {
+        if (consumeReviewExecution(payload, 'chat.file')) return;
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
         const files = (payload.files ?? []) as FileDownloadItem[];
@@ -3588,6 +3614,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         });
       }),
       webClient.on('chat.tool_call', ({ payload }) => {
+        if (consumeReviewExecution(payload, 'chat.tool_call')) return;
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
         if (shouldDropDuplicatedEvent('chat.tool_call', payload)) return;
@@ -3686,6 +3713,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         applyToolUpdatePayload(sessionId, payload);
       }),
       webClient.on('chat.tool_result', ({ payload }) => {
+        if (consumeReviewExecution(payload, 'chat.tool_result')) return;
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
         if (shouldDropDuplicatedEvent('chat.tool_result', payload)) return;
