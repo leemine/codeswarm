@@ -13,6 +13,7 @@ import os
 import time
 from typing import Any, Callable
 from contextvars import ContextVar
+from contextlib import ExitStack, contextmanager
 
 from jiuwenswarm.governance.contracts import TrustedIdentity
 from jiuwenswarm.server.runtime.session.project_access import (
@@ -46,34 +47,75 @@ _actor: ContextVar[str] = ContextVar('project_api_actor', default='')
 _scope: ContextVar[tuple[str, str] | None] = ContextVar('project_api_scope', default=None)
 
 
+def _paths_overlap(left: str, right: str) -> bool:
+    left, right = os.path.realpath(left), os.path.realpath(right)
+    try:
+        return os.path.commonpath([left, right]) in {left, right}
+    except ValueError:
+        return False
+
+
+@contextmanager
+def _project_access_guard(project_id: str, action: str):
+    """Authorize the ID and every protected workspace it aliases, under IO lock."""
+    store = ProjectAccessStore()
+    with store._locked():
+        ids = {project_id}
+        record = store._record(project_id) if project_id else None
+        directory = record.get('project_dir') if record else None
+        if directory:
+            for project in project_store.list_projects(include_hidden=True, cache_bust=True):
+                if (project.project_dir and _paths_overlap(directory, project.project_dir)
+                        and store.is_protected(project.project_id)):
+                    ids.add(project.project_id)
+        with ExitStack() as guards:
+            for pid in sorted(ids):
+                guards.enter_context(store.guard(pid, _actor.get(), action))
+            yield
+
+
+def _call_project_scoped(project_id: str, action: str, fn: Any, *args: Any, **kwargs: Any):
+    with _project_access_guard(project_id, action):
+        return fn(*args, **kwargs)
+
+
 def _can_read_project(project_id: str) -> bool:
     store = ProjectAccessStore()
-    return not store.is_protected(project_id) or store.authorize(project_id, _actor.get(), 'read').allowed
+    # An unregistered legacy ID retains its previous default-project projection.
+    # Persisted orphan ACLs still participate in authorization.
+    if not store.is_protected(project_id) and not store._record(project_id):
+        return True
+    try:
+        with _project_access_guard(project_id, 'read'):
+            return True
+    except ProjectAccessDenied:
+        return False
 
 
 def _visible_sessions() -> list[dict[str, Any]]:
-    # Older Session metadata may contain only a directory. Migrating its
-    # project must not expose those histories through the virtual default.
+    # Directory-only legacy metadata must not become public after its registry
+    # entry is deleted. With ambiguous provenance, use the retained protected
+    # IDs conservatively; do not invent a permanent directory ACL.
     projects = project_store.list_projects(include_hidden=True, cache_bust=True)
+    store = ProjectAccessStore()
+    unreadable_history = any(
+        not store.authorize(pid, _actor.get(), 'read').allowed
+        for pid in store.protected_ids()
+    )
     result = []
     for item in collect_all_sessions_metadata():
-        if not _can_read_project(str(item.get('project_id') or '')):
+        project_id = str(item.get('project_id') or '')
+        if not _can_read_project(project_id):
             continue
         directory = item.get('project_dir')
         visible = True
         if isinstance(directory, str) and directory:
-            directory = os.path.realpath(directory)
-            for project in projects:
-                if not project.project_dir:
-                    continue
-                root = os.path.realpath(project.project_dir)
-                try:
-                    overlaps = os.path.commonpath([directory, root]) in {directory, root}
-                except ValueError:
-                    overlaps = False
-                if overlaps and not _can_read_project(project.project_id):
-                    visible = False
-                    break
+            matches = [p for p in projects if p.project_dir and _paths_overlap(directory, p.project_dir)]
+            if any(not _can_read_project(p.project_id) for p in matches):
+                visible = False
+            elif (unreadable_history and not store.is_protected(project_id)
+                  and not any(store.is_protected(p.project_id) for p in matches)):
+                visible = False
         if visible:
             result.append(item)
     return result
@@ -1333,9 +1375,10 @@ async def _run_threaded(
             scope = _scope.get()
             if scope:
                 project_id, action = scope
-                with ProjectAccessStore().guard(project_id, _actor.get(), action):
-                    return fn(*args, **fn_kwargs)
-            return fn(*args, **fn_kwargs)
+                return _call_project_scoped(project_id, action, fn, *args, **fn_kwargs)
+            # Keep inventory filtering stable with concurrent ACL revocations.
+            with ProjectAccessStore()._locked():
+                return fn(*args, **fn_kwargs)
         result = await asyncio.to_thread(invoke)
     except ProjectAccessDenied:
         return build_error_response(request, "project permission required", code="FORBIDDEN")
@@ -1432,11 +1475,11 @@ class ProjectAdapter(GatewayAdapter):
                     return build_error_response(request, "registered project_id required", code="BAD_REQUEST")
                 try:
                     if method == 'project.extensions.get':
-                        payload = await asyncio.to_thread(store.get, project_id, actor)
+                        payload = await asyncio.to_thread(_call_project_scoped, project_id, 'read', store.get, project_id, actor)
                     elif method == 'project.extensions.update':
-                        payload = await asyncio.to_thread(store.update, project_id, actor, goal=params.get('goal'), extensions=params.get('extensions'))
+                        payload = await asyncio.to_thread(_call_project_scoped, project_id, 'write', store.update, project_id, actor, goal=params.get('goal'), extensions=params.get('extensions'))
                     else:
-                        revision = await asyncio.to_thread(store.replace_acl, project_id, actor, acl=params.get('acl'), expected_revision=params.get('expected_revision'))
+                        revision = await asyncio.to_thread(_call_project_scoped, project_id, 'admin', store.replace_acl, project_id, actor, acl=params.get('acl'), expected_revision=params.get('expected_revision'))
                         payload = {'acl_revision': revision}
                     return _ok_response(request, payload)
                 except ProjectAccessDenied:
@@ -1460,7 +1503,10 @@ class ProjectAdapter(GatewayAdapter):
                 # Missing projects retain the original NOT_FOUND response; a
                 # persisted extension keeps deleted project history protected.
                 if store.is_protected(project_id) or store._record(project_id):
-                    if not store.authorize(project_id, actor, action).allowed:
+                    try:
+                        with _project_access_guard(project_id, action):
+                            pass
+                    except ProjectAccessDenied:
                         return build_error_response(request, f"project {action} permission required", code="FORBIDDEN")
                     _scope.set((project_id, action))
             return await self._handle(request)

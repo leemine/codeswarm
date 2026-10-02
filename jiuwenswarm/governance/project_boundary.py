@@ -25,6 +25,7 @@ _READ_METHODS = frozenset({
     "project.lifecycle", "team.snapshot", "team.members.get", "team.history.get",
     "team.bindings.list", "command.context", "command.recap", "command.status",
     "command.diff", "command.session", "memory.list", "memory.open", "memory.status",
+    "memory.edit",  # Existing handler returns a read-only file content preview.
 })
 _EXECUTION_PREFIXES = ("chat.", "command.", "heartbeat.", "team.")
 _RESOURCE_PREFIXES = (
