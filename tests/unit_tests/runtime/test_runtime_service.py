@@ -1212,7 +1212,7 @@ async def test_cancel_resolves_same_composed_mode_and_project_as_execution() -> 
 
 
 @pytest.mark.asyncio
-async def test_cancel_resolves_project_id_inside_target_runtime(monkeypatch) -> None:
+async def test_cancel_resolves_project_id_inside_target_runtime(monkeypatch, tmp_path) -> None:
     class RecordingManager(FakeAgentManager):
         def __init__(self) -> None:
             super().__init__()
@@ -1226,11 +1226,11 @@ async def test_cancel_resolves_project_id_inside_target_runtime(monkeypatch) -> 
         "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
         lambda *_args, **_kwargs: {},
     )
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.project_store.get_project_dir_by_id",
-        lambda project_id: (
-            "D:/workspace/project-from-id" if project_id == "project-a" else ""
-        ),
+    from jiuwenswarm.server.runtime.session import project_store
+
+    monkeypatch.setattr(project_store, "_projects_file", lambda: tmp_path / "projects.json")
+    project = project_store.create_project(
+        "Legacy cancel", "D:/workspace/project-from-id", "code",
     )
     manager = RecordingManager()
     runtime = AgentRuntime(agent_manager=manager, initializer=AsyncMock())
@@ -1243,7 +1243,7 @@ async def test_cancel_resolves_project_id_inside_target_runtime(monkeypatch) -> 
             "intent": "cancel",
             "mode": "agent",
             "work_mode": "code",
-            "project_id": "project-a",
+            "project_id": project.project_id,
         },
     )
 

@@ -102,7 +102,7 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
-        lambda _sid: dict(metadata),
+        lambda _sid, **_kwargs: dict(metadata),
     )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.session_metadata.remove_session_metadata_cache",

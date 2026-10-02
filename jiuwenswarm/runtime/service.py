@@ -15,6 +15,7 @@ import hashlib
 import inspect
 import json
 import logging
+import os
 import uuid
 from contextlib import aclosing
 from dataclasses import asdict, replace
@@ -22,7 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from jiuwenswarm.governance.contracts import ProjectAuthorizer, TrustedIdentity
+from jiuwenswarm.governance.contracts import ProjectAction, ProjectAuthorizer, TrustedIdentity
 from jiuwenswarm.governance.preparation import (
     GovernanceError, PreparedRequest, SubmissionGuard, compensate_owned,
 )
@@ -404,7 +405,7 @@ class AgentRuntime:
             raise GovernanceError("host identity resolver returned an invalid identity")
         return identity
 
-    def _governance_project(self, value: object) -> str:
+    def _governance_project(self, value: object, *, action: ProjectAction = "execute") -> str:
         params = getattr(value, "params", None)
         params = params if isinstance(params, dict) else {}
         metadata = getattr(value, "metadata", None)
@@ -462,11 +463,27 @@ class AgentRuntime:
                 if any(selected_path == candidate_path or selected_path.is_relative_to(candidate_path)
                        or candidate_path.is_relative_to(selected_path) for selected_path in selected_paths):
                     decision = self._submission_guard.check_access(
-                        candidate.project_id, self._governance_identity(value), "execute",
+                        candidate.project_id, self._governance_identity(value), action,
                     )
                     if decision is not None and decision.revision > 0:
                         raise GovernanceError("directory overlaps a different protected project")
         return project_id
+
+    def _authorize_session_mutation(self, session_id: str, channel_id: str) -> None:
+        from jiuwenswarm.common.schema.agent import AgentRequest
+        from jiuwenswarm.server.runtime.session.session_history import is_valid_session_id
+
+        normalized = str(session_id or "").strip()
+        # Preserve the Provisioner's established BAD_REQUEST result for invalid
+        # IDs before any resource can be addressed.
+        if not normalized or not is_valid_session_id(normalized):
+            return
+        request = AgentRequest(
+            request_id="", session_id=normalized, channel_id=channel_id,
+            req_method=ReqMethod.SESSION_DELETE,
+        )
+        project_id = self._governance_project(request, action="write")
+        self._submission_guard.check_access(project_id, self._governance_identity(request), "write")
 
     def _governance_generation(self, session_id: str) -> int | None:
         snapshot = self._session_coordinator.snapshot_session(session_id) if session_id else None
@@ -508,10 +525,19 @@ class AgentRuntime:
         session_id = str(getattr(provision_input, "source_session_id", "")
                          or getattr(provision_input, "target_session_id", "")
                          or getattr(provision_input, "requested_session_id", "") or "").strip()
+        from jiuwenswarm.server.runtime.session.work_mode import default_work_mode_for_channel
+        work_mode = getattr(provision_input, "work_mode", None) or default_work_mode_for_channel(
+            getattr(provision_input, "channel_id", "") or "web"
+        )
+        inputs = asdict(provision_input)
+        for name in ("cwd", "project_dir"):
+            if isinstance(inputs.get(name), os.PathLike):
+                inputs[name] = os.fsdecode(inputs[name])
         resource = SimpleNamespace(
             session_id=session_id, project_id=getattr(provision_input, "project_id", ""),
             project_dir=getattr(provision_input, "project_dir", ""),
-            work_mode=getattr(provision_input, "work_mode", ""),
+            work_mode=work_mode,
+            params={"cwd": inputs.get("cwd", "")},
         )
         project_id = self._governance_project(resource)
         if not project_id and identity is None:
@@ -520,7 +546,7 @@ class AgentRuntime:
             request_id=getattr(provision_input, "create_token", "") or uuid.uuid4().hex,
             identity=identity, project_id=project_id, action="execute",
             session_id=session_id, generation=self._governance_generation(session_id),
-            inputs=asdict(provision_input),
+            inputs=inputs,
         )
 
     def _owns_new_preparation_scope(self, request: AgentRequest, governed: PreparedRequest | None) -> bool:
@@ -1364,6 +1390,7 @@ class AgentRuntime:
             raise RuntimeStateError("runtime is already closed")
         from jiuwenswarm.runtime.request import cancel_request
 
+        request = self._governance_owned_request(request)
         response = await cancel_request(
             self._agent_manager,
             request,
@@ -2698,6 +2725,7 @@ class AgentRuntime:
         """Delete one persisted Session through the shared Runtime boundary."""
         if self._closed:
             raise RuntimeStateError("runtime is already closed")
+        self._authorize_session_mutation(session_id, channel_id)
         result = await self._session_provisioner.delete_session(
             channel_id=channel_id,
             session_id=session_id,
@@ -2715,6 +2743,21 @@ class AgentRuntime:
         """Delete a Team exclusively through the Runtime business boundary."""
         if self._closed:
             raise RuntimeStateError("runtime is already closed")
+        from jiuwenswarm.server.runtime.team_binding_store import (
+            TeamBindingStoreError, get_team_binding_store, validate_team_name,
+        )
+        try:
+            normalized = validate_team_name(team_name)
+        except TeamBindingStoreError:
+            # Keep the existing typed invalid-name response.
+            normalized = ""
+        if normalized:
+            binding = get_team_binding_store().get(normalized)
+            session_ids = self._session_provisioner._inventory_team_session_ids(
+                normalized, binding_session_ids=binding.session_ids if binding else (),
+            )
+            for session_id in session_ids:
+                self._authorize_session_mutation(session_id, channel_id)
         return await self._session_provisioner.delete_team(
             team_name=team_name,
             channel_id=channel_id,
