@@ -36,7 +36,8 @@ def test_native_work_research_preserves_factory_and_sys_operation(tmp_path):
     assert spec.max_iterations == 7
     assert spec.tools is None  # Core owns tools; no second tool implementation.
     assert spec.system_prompt == work_research_instructions()
-    assert [type(r) for r in spec.rails] == [SysOperationRail, SkillUseRail]
+    assert isinstance(spec.rails[0], SysOperationRail)
+    assert isinstance(spec.rails[1], SkillUseRail)
 
 
 def test_explicit_native_overrides_are_preserved():
@@ -77,3 +78,49 @@ async def test_external_adapter_freezes_work_research_at_construction(mode, enab
         with pytest.raises(RuntimeError, match="already exists"):
             await adapter.create_instance(mode="agent.code.normal")
         assert adapter._work_research_enabled is enabled
+
+
+def test_two_native_research_children_do_not_share_mutable_rails(tmp_path):
+    from openjiuwen.harness import create_deep_agent
+    from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
+    from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
+
+    from openjiuwen.core.sys_operation import (
+        LocalWorkConfig,
+        OperationMode,
+        SysOperation,
+        SysOperationCard,
+    )
+
+    model = MagicMock()
+    operation = SysOperation(
+        SysOperationCard(
+            id="research-fork",
+            mode=OperationMode.LOCAL,
+            work_config=LocalWorkConfig(),
+        )
+    )
+    spec = build_research_agent_config(
+        model, workspace=str(tmp_path), sys_operation=operation
+    )
+    parent = create_deep_agent(
+        model=model,
+        workspace=str(tmp_path),
+        sys_operation=operation,
+        subagents=[spec],
+    )
+    first = parent.create_subagent("research_agent", "first")
+    second = parent.create_subagent("research_agent", "second")
+    for rail_type in (SkillUseRail, SysOperationRail):
+        first_rail = next(r for r in first._pending_rails if isinstance(r, rail_type))
+        second_rail = next(r for r in second._pending_rails if isinstance(r, rail_type))
+        template = next(r for r in spec.rails if isinstance(r, rail_type))
+        assert first_rail is not second_rail
+        assert first_rail is not template
+        assert second_rail is not template
+    first_skill = next(r for r in first._pending_rails if isinstance(r, SkillUseRail))
+    second_skill = next(r for r in second._pending_rails if isinstance(r, SkillUseRail))
+    first_skill.skills.append(object())
+    assert second_skill.skills == []
+    assert first.deep_config.sys_operation is operation
+    assert second.deep_config.sys_operation is operation

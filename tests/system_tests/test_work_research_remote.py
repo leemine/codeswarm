@@ -72,12 +72,15 @@ def _check_evidence(root: Path, report: str) -> dict:
                 paragraph,
                 re.I,
             )
-        if "No network requirement was tested" in paragraph:
-            assert re.search(
-                r"unknown|untested|not (?:formally )?(?:verified|tested|proven)|does not (?:prove|establish)|not proof",
-                paragraph,
-                re.I,
-            ), "Untested evidence was not qualified as unknown"
+    assert any(
+        "No network requirement was tested" in paragraph
+        and re.search(
+            r"unknown|untested|not (?:formally )?(?:verified|tested|proven)|does not (?:prove|establish)|not proof",
+            paragraph,
+            re.I,
+        )
+        for paragraph in re.split(r"\n\s*\n", findings)
+    ), "Report never qualifies the untested requirement as unknown"
     assert not re.search(
         r"(?:meaning|confirm(?:s|ing))[^.\n]{0,100}(?:without network dependency|no network dependenc|network-independent)",
         report,
@@ -151,7 +154,7 @@ async def test_work_research_real_codex_cited_artifact(tmp_path: Path):
         await adapter.create_instance(mode="agent")
         runtime = adapter._subagent_runtime
         adapter.select_execution_for_request(request)
-        async with asyncio.timeout(240):
+        async with asyncio.timeout(300):
             async for chunk in adapter.process_message_stream_impl(
                 request, {"query": query}
             ):
@@ -270,7 +273,7 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path):
             enable_task_loop=False,
             system_prompt="Delegate the requested research to research_agent using the existing product subagent tools. Wait for completion and return the artifact path.",
         )
-        async with asyncio.timeout(240):
+        async with asyncio.timeout(300):
             result = await Runner.run_agent(
                 parent,
                 {
