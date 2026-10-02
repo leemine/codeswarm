@@ -1567,3 +1567,115 @@ async def test_shutdown_member_wrapper_notifies_remote_finalize_for_temporary(mo
 
     assert notified == [("sid-temp", "calc-expert", True)]
     assert wait_polls == ["calc-expert"]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_member_stop_failure_retains_owner_for_exact_retry(monkeypatch):
+    key = ('retained-session', 'worker')
+    stop = AsyncMock(side_effect=[RuntimeError('provider still alive'), None])
+    transport_stop = AsyncMock()
+    agent = SimpleNamespace(stop_coordination=stop, infra=SimpleNamespace(
+        messager=SimpleNamespace(stop=transport_stop)))
+    monkeypatch.setattr(_mod, '_DYNAMIC_MEMBER_AGENTS', {key: agent})
+    monkeypatch.setattr(_mod, '_DYNAMIC_MEMBER_INVOKE_TASKS', {})
+    with pytest.raises(ExceptionGroup, match='owned exit unconfirmed'):
+        await _mod._stop_dynamic_member_agent(*key)
+    assert _mod._DYNAMIC_MEMBER_AGENTS[key] is agent
+    transport_stop.assert_awaited_once()
+    assert await _mod._stop_dynamic_member_agent(*key)
+    assert key not in _mod._DYNAMIC_MEMBER_AGENTS
+    assert stop.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_auxiliary_helper_stop_failure_does_not_drop_cache():
+    helper = SimpleNamespace(_stop_coordination=AsyncMock(side_effect=RuntimeError('still owned')))
+    manager = SimpleNamespace(_team_agents={'sid': helper})
+    with pytest.raises(ExceptionGroup, match='owned exit unconfirmed'):
+        await _mod._discard_auxiliary_team_agent(manager, 'sid', helper)
+    assert manager._team_agents['sid'] is helper
+
+
+@pytest.mark.asyncio
+async def test_remote_shutdown_timeout_never_promotes_database_status(monkeypatch):
+    from openjiuwen.agent_teams.schema.status import MemberStatus
+
+    update = AsyncMock()
+    member = SimpleNamespace(member_name='worker', status=MemberStatus.SHUTDOWN_REQUESTED.value)
+    agent = SimpleNamespace(spec=SimpleNamespace(leader=SimpleNamespace(member_name='leader')),
+                            team_backend=SimpleNamespace(list_members=AsyncMock(return_value=[member]),
+                                                         db=SimpleNamespace(update_member_status=update)))
+    monkeypatch.setattr(_mod, 'notify_remote_member_shutdown_finalize', AsyncMock(return_value=False))
+    with pytest.raises(TimeoutError, match='shutdown was not confirmed'):
+        await _mod._ensure_remote_teammates_shutdown_before_clean_team(agent, 'sid', timeout=0)
+    update.assert_not_awaited()
+    member.status = MemberStatus.SHUTDOWN.value
+    await _mod._ensure_remote_teammates_shutdown_before_clean_team(agent, 'sid', timeout=0)
+
+
+@pytest.mark.asyncio
+async def test_failed_remote_stop_cannot_finalize_shutdown(monkeypatch):
+    stop = AsyncMock(side_effect=RuntimeError('exit unconfirmed'))
+    update = AsyncMock()
+    monkeypatch.setattr(_mod, '_stop_dynamic_member_agent', stop)
+    monkeypatch.setattr(_mod, '_update_member_status_for_session', update)
+    with pytest.raises(RuntimeError, match='exit unconfirmed'):
+        await _mod.finalize_remote_member_shutdown_on_teammate('sid', 'worker', force=True)
+    update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_destroy_failure_cannot_restore_blank_registry(monkeypatch):
+    manager = SimpleNamespace(destroy_team=AsyncMock(return_value=False),
+                              get_team_agent=lambda sid: object())
+    restore = AsyncMock()
+    monkeypatch.setattr(_mod, '_stop_dynamic_member_agents_for_session', AsyncMock())
+    monkeypatch.setattr('jiuwenswarm.agents.harness.team.team_manager.get_team_manager', lambda channel: manager)
+    monkeypatch.setattr('jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime.restore_teammate_blank_agent_on_destroy', restore)
+    with pytest.raises(RuntimeError, match='destroy remains unconfirmed'):
+        await _mod.apply_team_destroy_envelope_from_control_plane(
+            loop_kicked_members=set(), kickoff_tasks=set(), adopted_member='worker',
+            local_member='blank', envelope={'team_name': 'team', 'session_id': 'sid', 'member_name': 'worker'},
+            source_id='leader',
+        )
+    restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_completion_cannot_remove_replacement_owner(monkeypatch):
+    key = ('sid', 'worker')
+    replacement = SimpleNamespace()
+
+    async def stop():
+        _mod._DYNAMIC_MEMBER_AGENTS[key] = replacement
+
+    old = SimpleNamespace(stop_coordination=stop)
+    monkeypatch.setattr(_mod, '_DYNAMIC_MEMBER_AGENTS', {key: old})
+    monkeypatch.setattr(_mod, '_DYNAMIC_MEMBER_INVOKE_TASKS', {})
+    assert await _mod._stop_dynamic_member_agent(*key)
+    assert _mod._DYNAMIC_MEMBER_AGENTS[key] is replacement
+
+
+@pytest.mark.asyncio
+async def test_cancelled_invoke_finalizer_stops_exact_owner_once(monkeypatch):
+    key = ('sid', 'worker')
+    stop = AsyncMock()
+    agent = SimpleNamespace(stop_coordination=stop)
+    monkeypatch.setattr(_mod, '_DYNAMIC_MEMBER_AGENTS', {key: agent})
+    monkeypatch.setattr(_mod, '_DYNAMIC_MEMBER_INVOKE_TASKS', {})
+    started = asyncio.Event()
+
+    async def invoke():
+        try:
+            started.set()
+            await asyncio.Event().wait()
+        finally:
+            await _mod._stop_dynamic_member_agent(*key)
+
+    task = asyncio.create_task(invoke())
+    _mod._DYNAMIC_MEMBER_INVOKE_TASKS[key] = task
+    await started.wait()
+    assert await _mod._stop_dynamic_member_agent(*key)
+    stop.assert_awaited_once()
+    assert key not in _mod._DYNAMIC_MEMBER_AGENTS
+    assert key not in _mod._DYNAMIC_MEMBER_INVOKE_TASKS

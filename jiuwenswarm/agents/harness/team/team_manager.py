@@ -293,7 +293,9 @@ def _make_team_rail_mount_context(
     )
 
 
-async def _stop_team_messager(team_agent: Any, *, session_id: str) -> None:
+async def _stop_team_messager(
+    team_agent: Any, *, session_id: str, require_exit_confirmation: bool = False,
+) -> None:
     """Stop a team's mailbox transport so per-team ZMQ sockets release their ports."""
     infra = getattr(team_agent, "infra", None)
     messager = getattr(infra, "messager", None) if infra is not None else None
@@ -304,6 +306,8 @@ async def _stop_team_messager(team_agent: Any, *, session_id: str) -> None:
         await stop()
         logger.info("[TeamManager] team messager stopped: session_id=%s", session_id)
     except Exception as exc:
+        if require_exit_confirmation:
+            raise
         logger.warning("[TeamManager] team messager stop failed: session_id=%s error=%s", session_id, exc)
 
 
@@ -2179,46 +2183,57 @@ class TeamManager:
                 stale_session_ids.append(sid)
         for stale_session_id in stale_session_ids:
             await self._destroy_team(stale_session_id)
+            if stale_session_id in self._team_agents:
+                raise RuntimeError("Previous distributed Team exit remains unconfirmed")
 
     async def _destroy_team(self, session_id: str) -> bool:
-        await self._cleanup_runtime_locals(session_id)
+        team_agent = self._team_agents.get(session_id)
+        if team_agent is None:
+            await self._cleanup_runtime_locals(session_id)
+            logger.info("[TeamManager] no in-memory team for session_id=%s", session_id)
+            return False
 
-        team_agent = self._team_agents.pop(session_id, None)
-        cleaned = False
+        token = set_session_id(session_id)
         try:
-            if team_agent is None:
-                logger.info("[TeamManager] no in-memory team for session_id=%s", session_id)
-                return False
-
-            token = set_session_id(session_id)
-            try:
-                try:
-                    cleaned = await team_agent.destroy_team(force=True)
-                finally:
-                    await release_a2x_reservations_for_session(session_id, team_agent=team_agent)
-                    await _stop_team_messager(team_agent, session_id=session_id)
-            finally:
-                reset_session_id(token)
-
-            logger.info(
-                "[TeamManager] Team cleaned via core API: session_id=%s cleaned=%s",
-                session_id,
-                cleaned,
+            # The legacy core destroy API logs some stop failures. Confirm the
+            # owned runtime first, before it can delete DB rows or pool entries.
+            stop = getattr(team_agent, "stop_coordination", None) or getattr(
+                team_agent, "_stop_coordination", None,
             )
+            if callable(stop):
+                await stop()
+            # Coordination releases its session context. Restore the explicit
+            # teardown target for the core pool and session-table cleanup.
+            set_session_id(session_id)
+            cleaned = await team_agent.destroy_team(force=True)
+            if not cleaned:
+                return False
+            await _stop_team_messager(
+                team_agent, session_id=session_id, require_exit_confirmation=True,
+            )
+            await release_a2x_reservations_for_session(session_id, team_agent=team_agent)
+            await self._cleanup_runtime_locals(session_id)
+            if self._team_agents.get(session_id) is team_agent:
+                self._team_agents.pop(session_id, None)
+            logger.info("[TeamManager] Team cleaned via core API: session_id=%s", session_id)
+            return True
         except Exception as exc:
             logger.error(
-                "[TeamManager] destroy team failed: session_id=%s error=%s",
+                "[TeamManager] destroy team failed; ownership retained: session_id=%s error=%s",
                 session_id,
                 exc,
             )
-
-        return cleaned
+            return False
+        finally:
+            reset_session_id(token)
 
     async def cleanup_all(self) -> None:
         async with self._bootstrap_lock:
             session_ids = list(self._team_agents.keys())
             for session_id in session_ids:
                 await self._destroy_team(session_id)
+            if any(session_id in self._team_agents for session_id in session_ids):
+                raise RuntimeError("Distributed Team cleanup remains unconfirmed")
             logger.info("[TeamManager] all teams cleaned")
 
     def get_team_agent(self, session_id: str) -> TeamAgent | None:

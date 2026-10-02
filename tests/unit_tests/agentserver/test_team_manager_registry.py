@@ -2421,3 +2421,79 @@ async def test_strict_exit_queries_runner_when_local_markers_already_cleared(mon
     with pytest.raises(RuntimeError, match='still running'):
         await getattr(manager, operation)('sess-1', require_exit_confirmation=True)
     stop.assert_awaited_once_with(team_name='demo-team', session_id='sess-1')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['stop', 'destroy', 'transport'])
+async def test_destroy_failure_retains_owner_and_reservation(monkeypatch, failure):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    manager = TeamManager()
+    agent = SimpleNamespace(
+        stop_coordination=AsyncMock(), destroy_team=AsyncMock(return_value=True),
+        infra=SimpleNamespace(messager=SimpleNamespace(stop=AsyncMock())),
+    )
+    if failure == 'stop':
+        agent.stop_coordination.side_effect = RuntimeError('exit unconfirmed')
+    elif failure == 'destroy':
+        agent.destroy_team.return_value = False
+    else:
+        agent.infra.messager.stop.side_effect = RuntimeError('transport still alive')
+    release = AsyncMock()
+    monkeypatch.setattr('jiuwenswarm.agents.harness.team.team_manager.release_a2x_reservations_for_session', release)
+    manager._team_agents['sid'] = agent
+    assert await manager.destroy_team('sid') is False
+    assert manager.get_team_agent('sid') is agent
+    release.assert_not_awaited()
+    if failure == 'stop':
+        agent.destroy_team.assert_not_awaited()
+    agent.stop_coordination.side_effect = None
+    agent.destroy_team.return_value = True
+    agent.infra.messager.stop.side_effect = None
+    assert await manager.destroy_team('sid') is True
+    assert manager.get_team_agent('sid') is None
+    release.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_destroy_restores_target_session_after_coordination_release(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from openjiuwen.agent_teams.context import get_session_id, set_session_id, reset_session_id
+
+    manager = TeamManager()
+    observed = []
+
+    async def stop():
+        set_session_id('')
+
+    async def destroy(*, force):
+        observed.append(get_session_id())
+        return True
+
+    manager._team_agents['target'] = SimpleNamespace(stop_coordination=stop, destroy_team=destroy)
+    monkeypatch.setattr('jiuwenswarm.agents.harness.team.team_manager.release_a2x_reservations_for_session', AsyncMock())
+    token = set_session_id('caller')
+    try:
+        assert await manager.destroy_team('target')
+        assert observed == ['target']
+        assert get_session_id() == 'caller'
+    finally:
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_stale_team_blocks_new_bootstrap(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    manager = TeamManager()
+    old = SimpleNamespace(channel_id='web', stop_coordination=AsyncMock(side_effect=RuntimeError('alive')))
+    manager._team_agents['old'] = old
+    create = AsyncMock()
+    monkeypatch.setattr(manager, 'create_team', create)
+    with pytest.raises(RuntimeError, match='exit remains unconfirmed'):
+        await manager.get_or_create_team('new', None, channel_id='web')
+    create.assert_not_awaited()
+    assert manager.get_team_agent('old') is old
