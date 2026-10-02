@@ -17,7 +17,7 @@ dependencies = [
     "ruamel.yaml>=0.18.0,<0.20",
     "lark-oapi>=1.5.3,<2",
     "loguru>=0.7.3,<0.8",
-    "openjiuwen @ git+https://github.com/leemine/code-core.git@60c627ece09c288701e4aea50718b2a9fb66d90e",
+    "openjiuwen @ git+https://github.com/leemine/code-core.git@7c09622bde755dc1c184ed4138911186025b1627",
     "pgvector>=0.4.2,<0.5",
     "portalocker>=3.2.0,<4",
     "prompt-toolkit>=3.0,<4.0",
@@ -71,7 +71,7 @@ harmony = [
     "ruamel.yaml>=0.18.0",
     "lark-oapi>=1.5.3",
     "loguru>=0.7.3",
-    "openjiuwen @ git+https://github.com/leemine/code-core.git@60c627ece09c288701e4aea50718b2a9fb66d90e",
+    "openjiuwen @ git+https://github.com/leemine/code-core.git@7c09622bde755dc1c184ed4138911186025b1627",
     "pgvector>=0.4.2",
     "portalocker>=3.2.0",
     "aiosqlite>=0.22.1",
@@ -191,7 +191,7 @@ default-groups = ['dev']
 
 [tool.uv.sources]
 workswarm-tui = { path = "./packages/jiuwenswarm-tui" }  # build-config: tui-source
-openjiuwen = { git = "https://github.com/leemine/code-core.git", rev = "60c627ece09c288701e4aea50718b2a9fb66d90e" }
+openjiuwen = { git = "https://github.com/leemine/code-core.git", rev = "7c09622bde755dc1c184ed4138911186025b1627" }
 
 [dependency-groups]
 # Testing (keep in sync with optional-dependencies.test)
