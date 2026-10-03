@@ -48,6 +48,7 @@ def _configure(data: Path, provider: str, base_url: str, cli: str) -> None:
                 "inherit_process_env": False,
                 "env": {"HOME": str(home), "CODEX_HOME": str(codex_home),
                         "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+                "startup_source_roots": [str(data / "project"), str(codex_home / "skills")],
                 "mcp_required": True,
             })
         else:

@@ -121,3 +121,92 @@ def test_no_trusted_subject_still_rejects_routing_subject_change(admission):
     request.user_id = "other-routing-user"
     with pytest.raises(SurfaceAdmissionError, match="Surface subject changed"):
         bind()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored_user", ["", "routing-user"])
+async def test_prepare_chat_preserves_frozen_user_through_real_metadata_sync_and_binding(
+    admission, tmp_path, monkeypatch, stored_user,
+):
+    from unittest.mock import AsyncMock
+
+    from jiuwenswarm.common.schema.agent import AgentRequest
+    from jiuwenswarm.common.schema.message import ReqMethod
+    from jiuwenswarm.runtime.request import prepare_chat_turn
+    from jiuwenswarm.server.runtime.session import lifecycle, session_metadata
+
+    _, manager, _, metadata = admission
+    sessions = tmp_path / "sessions"
+    monkeypatch.setattr(session_metadata, "get_agent_sessions_dir", lambda: sessions)
+    monkeypatch.setattr(lifecycle, "get_agent_sessions_dir", lambda: sessions)
+    metadata["user_id"] = stored_user
+    metadata["surface_creation"] = creation_surface(metadata)
+    frozen_creation = deepcopy(metadata["surface_creation"])
+    session_metadata.init_session_metadata(**metadata)
+    manager.wait_for_session_prewarm = AsyncMock()
+    allocated = object()
+    routes = []
+
+    async def get_agent_for_request(request, *, admit_request, on_admitted, **_kwargs):
+        routes.append(on_admitted(admit_request()))
+        return allocated
+
+    manager.get_agent_for_request = get_agent_for_request
+    request = AgentRequest(
+        "trusted-first", session_id=metadata["session_id"], channel_id="web",
+        req_method=ReqMethod.CHAT_SEND, user_id="forged-wire-user",
+        params={"mode": metadata["mode"], "work_mode": "work", "project_dir": metadata["project_dir"]},
+    )
+    try:
+        _, _, agent = await prepare_chat_turn(manager, request, "web", trusted_subject_id="host-worker")
+        assert agent is allocated
+        assert routes[-1].bound.binding.subject_id == "host-worker"
+        assert session_metadata.flush_pending_writes()
+        stored = session_metadata.get_session_metadata(
+            metadata["session_id"], cache_bust=True, enable_writeback=False, infer_defaults=False,
+        )
+        assert stored["user_id"] == stored_user
+        assert stored["surface_creation"] == frozen_creation
+        assert request.user_id == "forged-wire-user"
+        request.user_id = "another-wire-user"
+        await prepare_chat_turn(manager, request, "web", trusted_subject_id="host-worker")
+        assert routes[1].bound.binding is routes[0].bound.binding
+        with pytest.raises(ExecutionRecoveryUnavailableError, match="Binding changed"):
+            await prepare_chat_turn(manager, request, "web", trusted_subject_id="other-host-worker")
+    finally:
+        assert session_metadata.flush_pending_writes()
+        session_metadata.remove_session_metadata_cache(metadata["session_id"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["persisted-user-drift", "untrusted-wire-user"])
+async def test_prepare_chat_rejects_identity_drift_before_metadata_sync(admission, monkeypatch, failure):
+    from unittest.mock import AsyncMock, Mock
+
+    from jiuwenswarm.common.schema.agent import AgentRequest
+    from jiuwenswarm.common.schema.message import ReqMethod
+    from jiuwenswarm.runtime.request import prepare_chat_turn
+
+    _, manager, _, metadata = admission
+    if failure == "persisted-user-drift":
+        metadata["user_id"] = "changed-after-creation"
+    before = deepcopy(metadata)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        lambda *_args, **_kwargs: deepcopy(metadata),
+    )
+    manager.wait_for_session_prewarm = AsyncMock()
+    sync = Mock()
+    request = AgentRequest(
+        "rejected", session_id=metadata["session_id"], channel_id="web", req_method=ReqMethod.CHAT_SEND,
+        user_id="forged-wire-user", params={"mode": metadata["mode"], "work_mode": "work"},
+    )
+    with pytest.raises(SurfaceAdmissionError, match="Surface (creation identity|subject) changed"):
+        await prepare_chat_turn(
+            manager, request, "web", metadata_sync=sync,
+            trusted_subject_id="host-worker" if failure == "persisted-user-drift" else None,
+        )
+    sync.assert_not_called()
+    manager.wait_for_session_prewarm.assert_not_awaited()
+    assert metadata == before
+    assert not manager.execution_bindings._bindings

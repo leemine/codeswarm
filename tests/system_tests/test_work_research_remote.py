@@ -335,6 +335,7 @@ async def test_work_research_real_external_cited_artifact(
                 "CODEX_HOME": str(codex_home),
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             },
+            "startup_source_roots": [str(root), str(codex_home / "skills")],
             "mcp_required": True,
             "model": model,
             # Do not silently retry a stalled turn and multiply the test budget.
