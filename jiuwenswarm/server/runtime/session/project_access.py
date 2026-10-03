@@ -10,11 +10,17 @@ import copy
 import json
 import os
 import threading
+import time
+from pathlib import Path
 from contextlib import contextmanager
 from typing import Any, Iterator, Mapping
 
 from jiuwenswarm.common.work_mode import is_default_project_id
-from jiuwenswarm.governance.contracts import AuthorizationDecision, ProjectAction
+from jiuwenswarm.governance.contracts import AuthorizationDecision, ProjectAction, TrustedIdentity
+from jiuwenswarm.governance.resources import (
+    ResourceAccessDenied, ResourceDefinition, ResourceDecision, ResourceRequest,
+    _ACTIONS as RESOURCE_ACTIONS, normalized, valid_expiry,
+)
 from jiuwenswarm.server.runtime.session import project_store
 
 _ACTIONS = frozenset({'read', 'write', 'execute', 'admin'})
@@ -237,6 +243,9 @@ class ProjectAccessStore:
                 return None
             # Member lists are admin-only even when contents are readable.
             result = copy.deepcopy(record)
+            # Resource references have independent visibility; even project read
+            # and admin do not authorize disclosing another subject's credentials.
+            result.pop('resource_access', None)
             if not self._decision(self._load(), project_id, actor_id, 'admin').allowed:
                 result.pop('acl', None)
             return result
@@ -273,3 +282,289 @@ class ProjectAccessStore:
             record['acl_revision'] += 1
             self._save(data)
             return record['acl_revision']
+
+    @staticmethod
+    def _resource_state(record: dict) -> dict:
+        state = record.get('resource_access')
+        if state is None:
+            return {'schema_version': 1, 'revision': 0, 'catalog': {}, 'grants': {}}
+        if (not isinstance(state, dict) or state.get('schema_version') != 1
+                or type(state.get('revision')) is not int or state['revision'] < 1
+                or not isinstance(state.get('catalog'), dict) or not isinstance(state.get('grants'), dict)):
+            raise ResourceAccessDenied('resource authorization storage unavailable')
+        return state
+
+    def _resource_record(self, data: dict, project_id: str) -> dict:
+        record = data['projects'].get(project_id)
+        if (self._record(project_id) is None or not isinstance(record, dict)
+                or record.get('schema_version') != _SCHEMA or not record.get('owner_id')):
+            raise ResourceAccessDenied('managed project required for resource authorization')
+        return record
+
+    @staticmethod
+    def _resource_definition(state: dict, resource_id: str) -> ResourceDefinition:
+        value = state['catalog'].get(resource_id)
+        if not isinstance(value, dict):
+            raise ResourceAccessDenied('resource unavailable')
+        return ResourceDefinition(resource_id, value['kind'], value['reference'])
+
+    @staticmethod
+    def _scope(definition: ResourceDefinition, scope: str | None) -> str | None:
+        if definition.kind != 'workspace':
+            if scope is not None:
+                raise ValueError('only workspace resources accept path scopes')
+            return None
+        scope = definition.reference if scope is None else scope
+        if not isinstance(scope, str) or not Path(scope).is_absolute():
+            raise ValueError('workspace grant scope must be absolute')
+        resolved = Path(scope).resolve()
+        if not resolved.is_relative_to(Path(definition.reference)):
+            raise ResourceAccessDenied('workspace grant exceeds resource scope')
+        return str(resolved)
+
+    @staticmethod
+    def _within(child: str | None, parent: str | None) -> bool:
+        return child is None and parent is None or (
+            child is not None and parent is not None and Path(child).is_relative_to(Path(parent))
+        )
+
+    def _active_resource_grant(self, state: dict, definition: ResourceDefinition, subject_id: str, now: float) -> dict:
+        grants = state['grants'].get(definition.resource_id, {})
+        if not isinstance(grants, dict):
+            raise ResourceAccessDenied('invalid resource grants')
+        seen = set()
+        child = None
+        selected = None
+        # Delegations are a bounded parent chain, never an unbounded authority graph.
+        for _ in range(16):
+            if subject_id in seen:
+                raise ResourceAccessDenied('cyclic resource delegation')
+            seen.add(subject_id)
+            grant = grants.get(subject_id)
+            if not isinstance(grant, dict):
+                raise ResourceAccessDenied('resource grant missing')
+            actions = grant.get('actions')
+            if (not isinstance(actions, list) or not actions
+                    or any(not isinstance(action, str) or action not in RESOURCE_ACTIONS[definition.kind] for action in actions)
+                    or type(grant.get('delegable')) is not bool
+                    or type(grant.get('revision')) is not int or not 1 <= grant['revision'] <= state['revision']
+                    or not valid_expiry(grant.get('expires_at'))):
+                raise ResourceAccessDenied('invalid resource grant')
+            scope = self._scope(definition, grant.get('scope'))
+            if scope != grant.get('scope'):
+                raise ResourceAccessDenied('resource scope changed')
+            expiry = grant.get('expires_at')
+            if expiry is not None and expiry <= now:
+                raise ResourceAccessDenied('resource grant expired')
+            if child is not None:
+                if (type(child.get('parent_revision')) is not int or child.get('parent_revision') != grant['revision'] or not grant['delegable']
+                        or not set(child['actions']) <= set(actions)
+                        or not self._within(child['scope'], scope)
+                        or expiry is not None and (child['expires_at'] is None or child['expires_at'] > expiry)):
+                    raise ResourceAccessDenied('resource delegation no longer valid')
+            if selected is None:
+                selected = grant
+            parent = grant.get('parent')
+            if parent is None:
+                if (subject_id != state['catalog'][definition.resource_id].get('owner_subject_id')
+                        or grant.get('parent_revision') is not None):
+                    raise ResourceAccessDenied('resource root grant invalid')
+                return selected
+            normalized(parent, 'parent')
+            child, subject_id = grant, parent
+        raise ResourceAccessDenied('resource delegation depth exceeded')
+
+    @staticmethod
+    def _resource_actions(definition: ResourceDefinition, actions) -> list[str]:
+        if not isinstance(actions, (list, tuple)) or not actions or any(
+            not isinstance(action, str) or action not in RESOURCE_ACTIONS[definition.kind] for action in actions
+        ):
+            raise ValueError('invalid resource actions')
+        return sorted(set(actions))
+
+    @staticmethod
+    def _resource_revision(state: dict, expected_revision: int) -> None:
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError('expected resource revision is required')
+        if state['revision'] != expected_revision:
+            raise ProjectRevisionConflict('resource authorization revision changed')
+
+    def register_resource(self, project_id: str, definition: ResourceDefinition, *, owner_subject_id: str,
+                          actions: tuple[str, ...], expected_revision: int,
+                          delegable: bool = False, expires_at: float | None = None) -> int:
+        """Host-only resource provisioning; never bind this to caller-owned wire data.
+
+        Project ownership cannot manufacture resource ownership. The host confirms
+        the resource and its explicit owner before calling this entry point. It
+        may reissue that same root grant after revocation; children stay invalid.
+        """
+        if not isinstance(definition, ResourceDefinition):
+            raise ValueError('resource definition required')
+        normalized(owner_subject_id, 'owner_subject_id')
+        actions = self._resource_actions(definition, actions)
+        if type(delegable) is not bool or not valid_expiry(expires_at) or expires_at is not None and expires_at <= time.time():
+            raise ValueError('invalid resource lifetime or delegation')
+        with self._locked():
+            data = self._load()
+            record = self._resource_record(data, project_id)
+            state = self._resource_state(record)
+            self._resource_revision(state, expected_revision)
+            definition_data = {'kind': definition.kind, 'reference': definition.reference, 'owner_subject_id': owner_subject_id}
+            prior = state['catalog'].get(definition.resource_id)
+            if prior is not None and prior != definition_data:
+                raise ProjectRevisionConflict('resource definition or owner cannot be replaced')
+            state['revision'] += 1
+            state['catalog'][definition.resource_id] = definition_data
+            state['grants'].setdefault(definition.resource_id, {})[owner_subject_id] = {
+                'actions': actions, 'scope': self._scope(definition, None),
+                'delegable': delegable, 'expires_at': expires_at,
+                'parent': None, 'parent_revision': None, 'revision': state['revision'],
+            }
+            record['resource_access'] = state
+            self._save(data)
+            return state['revision']
+
+    def grant_resource(self, project_id: str, identity: TrustedIdentity, resource_id: str, *,
+                       subject_id: str, actions: tuple[str, ...], expected_revision: int,
+                       scope: str | None = None, delegable: bool = False,
+                       expires_at: float | None = None) -> int:
+        if not isinstance(identity, TrustedIdentity) or identity.actor_id != identity.subject_id:
+            raise ResourceAccessDenied('resource delegation requires the authenticated subject')
+        normalized(subject_id, 'subject_id')
+        if subject_id == identity.actor_id:
+            raise ResourceAccessDenied('self delegation is not allowed')
+        if type(delegable) is not bool or not valid_expiry(expires_at) or expires_at is not None and expires_at <= time.time():
+            raise ValueError('invalid resource lifetime or delegation')
+        with self.guard(project_id, identity.actor_id, 'execute'):
+            data = self._load()
+            record = self._resource_record(data, project_id)
+            state = self._resource_state(record)
+            self._resource_revision(state, expected_revision)
+            definition = self._resource_definition(state, resource_id)
+            source = self._active_resource_grant(state, definition, identity.actor_id, time.time())
+            actions = self._resource_actions(definition, actions)
+            scope = self._scope(definition, source['scope'] if scope is None else scope)
+            # Omitted expiry inherits the granting subject's upper lifetime bound.
+            expires_at = source['expires_at'] if expires_at is None else expires_at
+            if (not source['delegable'] or not set(actions) <= set(source['actions'])
+                    or not self._within(scope, source['scope'])
+                    or source['expires_at'] is not None and (expires_at is None or expires_at > source['expires_at'])):
+                raise ResourceAccessDenied('resource grant exceeds delegable authority')
+            # Prevent replacing an ancestor (including the host root) with a child.
+            cursor = identity.actor_id
+            grants = state['grants'][resource_id]
+            for _ in range(16):
+                if cursor == subject_id:
+                    raise ResourceAccessDenied('cyclic resource delegation')
+                cursor = grants[cursor].get('parent')
+                if cursor is None:
+                    break
+            state['revision'] += 1
+            grants[subject_id] = {
+                'actions': actions, 'scope': scope, 'delegable': delegable,
+                'expires_at': expires_at, 'parent': identity.actor_id,
+                'parent_revision': source['revision'], 'revision': state['revision'],
+            }
+            self._active_resource_grant(state, definition, subject_id, time.time())
+            self._save(data)
+            return state['revision']
+
+    def revoke_resource(self, project_id: str, identity: TrustedIdentity, resource_id: str, *,
+                        subject_id: str, expected_revision: int) -> int:
+        if not isinstance(identity, TrustedIdentity):
+            raise ResourceAccessDenied('trusted resource identity required')
+        normalized(subject_id, 'subject_id')
+        with self._locked():
+            data = self._load()
+            record = self._resource_record(data, project_id)
+            state = self._resource_state(record)
+            self._resource_revision(state, expected_revision)
+            self._resource_definition(state, resource_id)
+            grants = state['grants'].get(resource_id, {})
+            grant = grants.get(subject_id)
+            if not isinstance(grant, dict):
+                raise ResourceAccessDenied('resource grant unavailable')
+            # Project admins can remove grants, but this does not let them create one.
+            if (identity.actor_id not in {subject_id, grant.get('parent')}
+                    and not self._decision(data, project_id, identity.actor_id, 'admin').allowed):
+                raise ResourceAccessDenied('resource revocation denied')
+            del grants[subject_id]
+            state['revision'] += 1
+            self._save(data)
+            return state['revision']
+
+    def authorize_resource(self, project_id: str, identity: TrustedIdentity, request: ResourceRequest) -> ResourceDecision:
+        actor_id = identity.actor_id if isinstance(identity, TrustedIdentity) else ''
+        subject_id = identity.subject_id if isinstance(identity, TrustedIdentity) else ''
+        acl_revision = resource_revision = 0
+        try:
+            if not actor_id or not isinstance(request, ResourceRequest):
+                raise ResourceAccessDenied('trusted identity and resource request required')
+            with self._locked():
+                data = self._load()
+                decision = self._decision(data, project_id, actor_id, 'execute')
+                acl_revision = decision.revision
+                if not decision.allowed:
+                    raise ResourceAccessDenied('project execution denied')
+                record = self._resource_record(data, project_id)
+                state = self._resource_state(record)
+                resource_revision = state['revision']
+                definition = self._resource_definition(state, request.resource_id)
+                if request.action not in RESOURCE_ACTIONS[definition.kind]:
+                    raise ResourceAccessDenied('resource action unavailable')
+                scopes, expiries = [], []
+                for subject in {actor_id, subject_id}:
+                    grant = self._active_resource_grant(state, definition, subject, time.time())
+                    if request.action not in grant['actions']:
+                        raise ResourceAccessDenied('resource operation denied')
+                    if definition.kind == 'workspace':
+                        if request.path is None or not self._within(str(Path(request.path).resolve()), grant['scope']):
+                            raise ResourceAccessDenied('resource path outside scope')
+                        scopes.append(grant['scope'])
+                    elif request.path is not None:
+                        raise ResourceAccessDenied('path scope is not a process sandbox')
+                    if grant['expires_at'] is not None:
+                        expiries.append(grant['expires_at'])
+                return ResourceDecision(True, project_id, actor_id, subject_id, request, acl_revision,
+                                        resource_revision, 'grant', definition.reference,
+                                        max(scopes, key=len) if scopes else None,
+                                        min(expiries) if expiries else None)
+        except (ProjectAccessDenied, ResourceAccessDenied, OSError, ValueError, TypeError, KeyError, AttributeError):
+            return ResourceDecision(False, project_id, actor_id, subject_id, request,
+                                    acl_revision, resource_revision, 'resource_permission_denied')
+
+    @contextmanager
+    def guard_resource(self, project_id: str, identity: TrustedIdentity, request: ResourceRequest) -> Iterator[ResourceDecision]:
+        """Hold the existing sidecar lock across a short synchronous resource IO.
+
+        Hosts must still use safe file primitives for path/symlink TOCTOU. This
+        lock is not a shell sandbox and must not be held across an async process.
+        """
+        with self._locked():
+            decision = self.authorize_resource(project_id, identity, request)
+            if not decision.allowed:
+                raise ResourceAccessDenied('resource operation denied')
+            yield decision
+
+    def resource_grants(self, project_id: str, identity: TrustedIdentity) -> dict:
+        """Return only the caller's currently usable reference metadata."""
+        if not isinstance(identity, TrustedIdentity):
+            raise ResourceAccessDenied('trusted resource identity required')
+        with self.guard(project_id, identity.actor_id, 'execute'):
+            record = self._resource_record(self._load(), project_id)
+            state = self._resource_state(record)
+            visible = []
+            for resource_id in state['catalog']:
+                try:
+                    definition = self._resource_definition(state, resource_id)
+                    grant = self._active_resource_grant(state, definition, identity.subject_id, time.time())
+                    for action in grant['actions']:
+                        request = ResourceRequest(resource_id, action, grant['scope'])
+                        decision = self.authorize_resource(project_id, identity, request)
+                        if decision.allowed:
+                            visible.append({'resource_id': resource_id, 'kind': definition.kind,
+                                            'reference': decision.reference, 'action': action,
+                                            'scope': decision.scope, 'expires_at': decision.expires_at})
+                except (ResourceAccessDenied, ValueError, TypeError, KeyError):
+                    continue
+            return {'resource_revision': state['revision'], 'resources': visible}
