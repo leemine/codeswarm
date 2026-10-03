@@ -77,7 +77,7 @@ def test_runtime_factory_denies_mismatched_or_missing_metadata(monkeypatch, chan
     if change == 'endpoint':
         client.api_base = 'https://other.example/v1'
     elif change == 'model':
-        request.model = 'other'
+        request = ModelRequestConfig(model='other')
     elif change == 'headers':
         client.custom_headers = {'Authorization': 'Bearer other'}
     else:

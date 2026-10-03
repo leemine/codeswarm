@@ -63,6 +63,50 @@ class _Tool:
         return str(output.data["content"])
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['none', 'token', 'host', 'generation', 'method',
+                                     'stopped', 'handler_error', 'bad_response', 'late_stop'])
+async def test_private_preflight_is_bound_to_live_transport(tmp_path, monkeypatch, failure):
+    transport = ManagedProductToolTransport(
+        ProductToolGateway([_Tool()], scope=_scope(tmp_path)), host_session_id='parent')
+    # In-memory ASGI peer: no listener or process is created by this test.
+    monkeypatch.setattr(ManagedProductToolTransport, 'started', property(lambda _: True))
+    transport._port = 19001
+    calls = []
+
+    async def authorize(payload):
+        calls.append(payload)
+        if failure == 'handler_error':
+            raise ValueError('synthetic-private-diagnostic')
+        if failure == 'late_stop':
+            transport._accepting_preflight = False
+        return {'allowed': True, 'nonce': 'other' if failure == 'bad_response' else payload['nonce']}
+
+    config = transport.bind_native_preflight(authorize)
+    with pytest.raises(RuntimeError):
+        transport.bind_native_preflight(authorize)
+    app, _ = transport._build_app(19001)
+    payload = {'generation': config['generation'], 'nonce': 'unique-call'}
+    headers = {'Authorization': 'Bearer ' + config['token']}
+    if failure == 'token':
+        headers['Authorization'] = 'Bearer invalid'
+    if failure == 'host':
+        headers['Host'] = 'other.invalid'
+    if failure == 'generation':
+        payload['generation'] = 'previous-generation'
+    if failure == 'stopped':
+        transport._accepting_preflight = False
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+        response = await client.request('GET' if failure == 'method' else 'POST',
+                                        config['url'], headers=headers, json=payload)
+    if failure == 'none':
+        assert response.status_code == 200
+        assert response.json() == {'allowed': True, 'nonce': 'unique-call'}
+    else:
+        assert response.status_code in {401, 403}
+        assert 'synthetic-private-diagnostic' not in response.text
+    assert bool(calls) is (failure in {'none', 'handler_error', 'bad_response', 'late_stop'})
+
 def _scope(tmp_path: Path, *, session_id: str = "parent-1") -> ProductToolScope:
     return ProductToolScope(
         subject_id="alice",

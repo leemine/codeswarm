@@ -65,7 +65,7 @@ def runtime_model_kwargs(model_client_config, model_config=None, *, binding_conf
                       credential_encoding=authority.binding.credential_encoding)
         if ModelCredentialBinding.from_config(actual) != authority.binding:
             raise ResourceAccessDenied('model factory binding mismatch')
-        configured_name = getattr(model_config, 'model', None)
+        configured_name = getattr(model_config, 'model_name', None)
         if configured_name is not None and configured_name != authority.binding.model:
             raise ResourceAccessDenied('model factory model mismatch')
         result['model_client_config'] = model_client_config.model_copy(

@@ -27,6 +27,7 @@ from openjiuwen.harness_protocol import (
 
 PRODUCT_MCP_SERVER_NAME = "jiuwenswarm_product_tools"
 PRODUCT_MCP_PATH = "/mcp"
+_NATIVE_PREFLIGHT_PATH = "/native-preflight"
 _MAX_REQUEST_BODY_BYTES = 1024 * 1024
 _START_TIMEOUT_S = 10.0
 _STOP_TIMEOUT_S = 10.0
@@ -57,6 +58,9 @@ class ManagedProductToolTransport:
         self._host_session_id = host_session_id
         self._server_name = server_name
         self._token = secrets.token_urlsafe(32)
+        self._preflight_generation = secrets.token_urlsafe(32)
+        self._preflight_handler = None
+        self._accepting_preflight = False
         self._port: int | None = None
         self._socket: socket.socket | None = None
         self._uvicorn: uvicorn.Server | None = None
@@ -130,7 +134,21 @@ class ManagedProductToolTransport:
         async with self._lifecycle_lock:
             await self._stop_locked()
 
+    def bind_native_preflight(self, handler) -> dict[str, str]:
+        """Bind one private Provider handler to this existing owned listener.
+
+        These credentials are host-only constructor inputs, never MCP tool
+        definitions, request fields, persisted configuration, or UI payloads.
+        """
+        if not self.started or self._preflight_handler is not None or not callable(handler):
+            raise RuntimeError('native preflight requires one live transport binding')
+        self._preflight_handler = handler
+        self._accepting_preflight = True
+        return {'url': f'http://127.0.0.1:{self._port}{_NATIVE_PREFLIGHT_PATH}',
+                'token': self._token, 'generation': self._preflight_generation}
+
     async def _stop_locked(self) -> None:
+        self._accepting_preflight = False
         server = self._uvicorn
         task = self._serve_task
         listener = self._socket
@@ -166,6 +184,47 @@ class ManagedProductToolTransport:
         self._uvicorn = None
         self._socket = None
         self._port = None
+
+    async def _handle_native_preflight(self, scope, receive, send, headers, port):
+        async def respond(status, payload):
+            body = json.dumps(payload, separators=(',', ':')).encode()
+            await send({'type': 'http.response.start', 'status': status,
+                        'headers': [(b'content-type', b'application/json'),
+                                    (b'content-length', str(len(body)).encode('ascii'))]})
+            await send({'type': 'http.response.body', 'body': body})
+
+        handler = self._preflight_handler
+        if (scope.get('method') != 'POST' or headers.get('host') != f'127.0.0.1:{port}'
+                or not self._accepting_preflight or not self.started or handler is None):
+            await respond(403, {'allowed': False})
+            return
+        try:
+            async with asyncio.timeout(10):
+                body = bytearray()
+                while True:
+                    message = await receive()
+                    if message.get('type') != 'http.request':
+                        raise ValueError('request disconnected')
+                    body.extend(message.get('body', b''))
+                    if len(body) > _MAX_REQUEST_BODY_BYTES:
+                        raise ValueError('request too large')
+                    if not message.get('more_body', False):
+                        break
+                payload = json.loads(body)
+                if (not isinstance(payload, dict)
+                        or payload.get('generation') != self._preflight_generation):
+                    raise ValueError('request generation unavailable')
+                result = await handler(payload)
+                if (not self._accepting_preflight or not self.started
+                        or self._preflight_handler is not handler
+                        or not isinstance(result, dict) or set(result) != {'allowed', 'nonce'}
+                        or type(result['allowed']) is not bool
+                        or not isinstance(result['nonce'], str)
+                        or result['nonce'] != payload.get('nonce')):
+                    raise ValueError('request authorization unavailable')
+            await respond(200, result)
+        except Exception:
+            await respond(403, {'allowed': False})
 
     @staticmethod
     async def _serve(
@@ -228,7 +287,7 @@ class ManagedProductToolTransport:
                 for key, value in scope.get("headers", ())
             }
             supplied = headers.get("authorization", "")
-            if scope.get("path") != PRODUCT_MCP_PATH or not hmac.compare_digest(
+            if scope.get("path") not in {PRODUCT_MCP_PATH, _NATIVE_PREFLIGHT_PATH} or not hmac.compare_digest(
                 supplied,
                 f"Bearer {self._token}",
             ):
@@ -244,6 +303,9 @@ class ManagedProductToolTransport:
                     }
                 )
                 await send({"type": "http.response.body", "body": body})
+                return
+            if scope.get('path') == _NATIVE_PREFLIGHT_PATH:
+                await self._handle_native_preflight(scope, receive, send, headers, port)
                 return
             await manager.handle_request(scope, receive, send)
 
