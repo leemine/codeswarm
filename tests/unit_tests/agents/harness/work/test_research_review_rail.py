@@ -8,7 +8,10 @@ from jiuwenswarm.agents.harness.work.research import (
     _ResearchReviewRail,
     build_research_agent_config,
 )
-from jiuwenswarm.agents.harness.work.research_review import build_research_review_tool
+from jiuwenswarm.agents.harness.work.research_review import (
+    build_research_review_tool,
+    review_research_report,
+)
 
 
 def test_default_research_adds_forkable_owned_review_without_replacing_core_tools():
@@ -54,3 +57,24 @@ async def test_real_local_function_invocation_preserves_data_and_returns_cited_r
     assert output["structural_valid"] is True
     assert "Measured 4 items (source.txt:1)." in output["rendered_markdown"]
     assert output["input_fingerprint"]
+
+
+@pytest.mark.parametrize("text, valid", [
+    ("Date: 2026-09-01.", True),
+    ("Date: 2026-09-01. Another fact follows.", False),
+    ("Date: 2026-09-01! Another fact follows.", False),
+    ("事实一。事实二。", False),
+    ("Compare 42 s vs. 31 s.", True),
+])
+def test_atomic_claim_citation_precedes_sentence_ending(text, valid):
+    result = review_research_report(
+        [{"id": "source.txt", "text": "Date: 2026-09-01.", "start_line": 1, "complete": True}],
+        [{"id": "date", "section": "Scope", "kind": "fact", "text": text,
+          "refs": [{"source_id": "source.txt", "start_line": 1, "end_line": 1, "quote": "Date: 2026-09-01."}]}],
+    )
+    assert result["structural_valid"] is valid
+    if valid:
+        assert f"{text.rstrip('.!?')} (source.txt:1)." in result["rendered_markdown"]
+    else:
+        assert result["rendered_markdown"] is None
+        assert any(item["code"] == "INVALID_CLAIM" for item in result["issues"])

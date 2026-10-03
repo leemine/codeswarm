@@ -26,6 +26,19 @@ def _plain(value: str) -> str:
     return re.sub(r"([\\`*_\[\]#])", r"\\\1", value)
 
 
+def _multiple_sentences(text: str) -> bool:
+    # Fail with actionable feedback instead of silently attaching one trailing
+    # citation to independent sentences. Common within-sentence abbreviations
+    # are not treated as sentence boundaries; this is not semantic parsing.
+    for boundary in re.finditer(r'[.!?](?:["\'”’)]*)\s+(?=\S)|[。！？](?=\s*\S)', text):
+        if boundary[0].startswith(".") and re.search(
+            r"\b(?:vs|e\.g|i\.e|Mr|Mrs|Dr|Prof)$", text[:boundary.start()], re.I,
+        ):
+            continue
+        return True
+    return False
+
+
 def review_research_report(sources, claims, question=None) -> dict[str, Any]:
     """Check supplied spans/quotes and attach adjacent references deterministically."""
     issues: list[dict[str, Any]] = []
@@ -134,6 +147,9 @@ def review_research_report(sources, claims, question=None) -> dict[str, Any]:
             continue
         if len(text) > 2000:
             issue("LIMIT_EXCEEDED", "Claim text exceeds 2000 characters", claim_id=cid)
+            continue
+        if _multiple_sentences(text):
+            issue("INVALID_CLAIM", "Use one atomic sentence per claim; split independent sentences and cite each", claim_id=cid)
             continue
         refs = claim["refs"]
         if not isinstance(refs, list) or not refs:
