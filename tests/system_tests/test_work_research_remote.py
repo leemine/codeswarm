@@ -116,6 +116,50 @@ def _check_absent_dependency_claims(findings: str) -> None:
         assert negated, "Untested evidence was converted into an absent dependency"
 
 
+def _check_exclusive_network_claims(report: str) -> None:
+    """Unknown Pilot A cannot be excluded by saying only Pilot B needs a network."""
+    findings = report.split("## Sources", 1)[0]
+    for claim in re.finditer(
+        r"\bonly\s+(?:pilot\s+b|source-b(?:\.md)?)\s+"
+        r"(?:requires?|required|needs?|needed)\b[^.!?\n]*\bnetwork\b",
+        findings,
+        re.I,
+    ):
+        negated = re.search(
+            r"\b(?:does not (?:prove|establish|show|mean)|"
+            r"(?:cannot|can't) (?:conclude|infer)|not (?:evidence|proof))\s+that\s+$",
+            findings[:claim.start()],
+            re.I,
+        )
+        assert negated, (
+            "Unknown Pilot A cannot support an exclusive network requirement for Pilot B"
+        )
+
+
+def _check_single_record_citations(report: str) -> None:
+    """The observation on line 3 supports what each log records, not total runs."""
+    findings = report.split("## Sources", 1)[0]
+    record_claim = re.compile(
+        r"(?P<subject>each (?:log|source)|both (?:logs|sources)|"
+        r"(?:pilot|source|log)[ -][ab](?:\.md)?)\s+"
+        r"(?:records?|recorded|reports?|reported)\s+"
+        r"(?:a single|single|one)\s+(?:primary\s+)?(?:run|observation)\b",
+        re.I,
+    )
+    for sentence in re.split(r"(?<=[.!?])\s+|\n\s*\n", findings):
+        for claim in record_claim.finditer(sentence):
+            subject = claim["subject"].lower()
+            letters = ("a", "b") if subject.startswith(("each", "both")) else (
+                re.search(r"[ -]([ab])(?:\.md)?$", subject)[1],
+            )
+            for letter in letters:
+                source = f"source-{letter}.md"
+                assert any(
+                    1 <= first <= 3 <= last <= 4
+                    for first, last in _source_citation_ranges(sentence, source)
+                ), f"Single-record fact lacks adjacent {source} observation citation"
+
+
 def _source_citation_ranges(text: str, source: str) -> list[tuple[int, int]]:
     return [
         (int(match[1]), int(match[2] or match[1]))
@@ -352,6 +396,8 @@ def _check_report(root: Path):
     report = (root / "research-report.md").read_text()
     _check_evidence(root, report)
     _check_report_citation_coverage(root, report)
+    _check_single_record_citations(report)
+    _check_exclusive_network_claims(report)
     for fragment in ("42", "31", "source-a.md", "source-b.md"):
         assert fragment in report, f"Missing evidence {fragment}"
     assert any(

@@ -6,6 +6,8 @@ import pytest
 
 from tests.system_tests.test_work_research_remote import (
     _check_absent_dependency_claims,
+    _check_exclusive_network_claims,
+    _check_single_record_citations,
     _check_report_citation_coverage,
     _write_sources,
 )
@@ -78,3 +80,61 @@ def test_dates_allow_supported_covering_locators_without_borrowing(tmp_path, loc
     _check_report_citation_coverage(root, f"Date 2026-09-01 ({locator}).")
     with pytest.raises(AssertionError, match="Date"):
         _check_report_citation_coverage(root, f"Date 2026-09-01. Another fact ({locator}).")
+
+
+@pytest.mark.parametrize("verb", ["required", "requires", "needed", "needs"])
+def test_unknown_cannot_be_excluded_by_an_exclusive_network_claim(verb):
+    with pytest.raises(AssertionError, match="exclusive network"):
+        _check_exclusive_network_claims(f"Only Pilot B {verb} a network connection. Pilot A is unknown.")
+
+
+@pytest.mark.parametrize("claim", [
+    "Only Pilot B documented a required network connection.",
+    "Only Pilot B reported a required network connection.",
+    "Only Pilot B is documented as requiring a network connection.",
+    "Pilot B required a network connection; Pilot A is unknown.",
+    "It does not establish that only Pilot B required a network connection.",
+    "We cannot conclude that only Pilot B required a network connection.",
+])
+def test_documented_requirement_is_not_exclusive_real_world_requirement(claim):
+    _check_exclusive_network_claims(claim)
+
+
+def test_actual_exclusive_report_fails_despite_correct_unknown_disclaimer():
+    report = (Path(__file__).parent / "fixtures/opencode-unsupported-exclusivity.md").read_text()
+    assert "dependency is unknown, not absent" in report
+    with pytest.raises(AssertionError, match="exclusive network"):
+        _check_exclusive_network_claims(report)
+    _check_exclusive_network_claims(report.replace(
+        "only Pilot B required a network connection", "only Pilot B documented a required network connection"
+    ))
+
+
+def test_actual_single_record_fact_requires_both_adjacent_sources():
+    report = (Path(__file__).parent / "fixtures/codex-single-record-uncited.md").read_text()
+    with pytest.raises(AssertionError, match="Single-record fact"):
+        _check_single_record_citations(report)
+    _check_single_record_citations(report.replace(
+        "Each log records a single run;", "Each log records a single run (source-a.md:3; source-b.md:3);"
+    ))
+
+
+@pytest.mark.parametrize("claim", [
+    "Each log records a single primary observation (source-a.md:3, source-b.md:3).",
+    "Both sources record one run (source-a.md:L1-L4; source-b.md, L3).",
+    "Pilot A records one run (source-a.md:3). Pilot B records one run (source-b.md:3).",
+    "Source A records one observation (source-a.md:3); Source B records one observation (source-b.md:3).",
+])
+def test_single_record_facts_allow_combined_or_separate_cited_sentences(claim):
+    _check_single_record_citations(claim)
+
+
+@pytest.mark.parametrize("claim", [
+    "Each log records a single run (source-a.md:3).",
+    "Each log records a single run. Sources: source-a.md:1-4, source-b.md:1-4.",
+    "Pilot A records one run. Pilot B records one run (source-a.md:3, source-b.md:3).",
+    "Each log records a single run (source-a.md:2, source-b.md:3).",
+])
+def test_single_record_facts_cannot_borrow_other_sentence_or_wrong_line(claim):
+    with pytest.raises(AssertionError, match="Single-record fact"):
+        _check_single_record_citations(claim)

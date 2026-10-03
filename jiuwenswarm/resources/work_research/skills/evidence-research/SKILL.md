@@ -24,6 +24,10 @@ an evidence policy, not a new scheduler or an authorization grant.
    architecture-wide independence. "Not tested" means unknown, never "no
    dependency", "zero", or "not required". Label extrapolations as inferences,
    not facts. A requirement in one observed run is not proof about every mode.
+   An exclusive claim ("only", "sole", "unique") needs evidence that the other
+   alternatives lack the property; an unknown alternative cannot be excluded.
+   When only one source reports a requirement, say "only this source documents
+   the requirement", not "only this alternative requires it".
    Missing information in a source is not evidence that an experiment, control,
    repetition, system feature or dependency does not exist. Say "the inspected
    sources do not report it" rather than asserting absence. A single recorded
@@ -45,7 +49,10 @@ an evidence policy, not a new scheduler or an authorization grant.
    quotation that the reader can check. Use line numbers only after reading the
    original numbered lines and verifying the cited sentence is on those lines;
    cite compound facts separately or use a range covering every supporting line;
-   never estimate or invent line numbers. When a file is requested and writes are permitted,
+   never estimate or invent line numbers. This includes factual clauses in
+   Limitations, such as what each log records: cite those clauses immediately.
+   A final Sources list cannot substitute for an adjacent factual citation.
+   When a file is requested and writes are permitted,
    save it in the admitted outputs directory (or an explicit authorized path),
    read it back and return its path through the existing output/history channel.
    Otherwise return the report inline; do not bypass Plan mode or write policy.
@@ -53,7 +60,9 @@ an evidence policy, not a new scheduler or an authorization grant.
 
 Before finishing, read back the report and audit each material claim against the
 original source. Check each locator and quotation, not just whether a source ID
-exists. Correct unsupported claims and wrong locators in the report before
+exists. Cross-check every comparison and summary against the evidence record;
+correct disclaimers elsewhere do not cancel an unsupported or contradictory
+assertion. Correct unsupported claims and wrong locators in the report before
 returning it. If a claim cannot be checked, mark it unverified or unknown; do not
 present it as a finding. Check that conflicting evidence is represented and the
 report matches the question. Research output is a candidate result: do not publish, share, grant
