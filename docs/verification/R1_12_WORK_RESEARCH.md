@@ -54,3 +54,13 @@ OpenCode 最小真实同引擎场景也通过：1 passed / 2 deselected，68.34 
 Native 成功调用时与最终源码均为 wait 240000ms；曾在编辑期间短暂改为 60000ms，但未以此启动 Native live，随后恢复，避免把未运行配置冒充成功。Codex/OpenCode 为 60000ms。后续测试改动仅为 OpenCode 私有目录 setup、非秘密异常错误码记录与说明；Native/Codex 成功路径不变。主集成树的最终受影响回归仍应按新的集成 SHA 留证，不把本分支结果冒称另一 SHA 的成功。
 
 本轮闭合的是三种已运行 Provider 的代表性研究流程与受限 Native Skill 文件访问边界；不是 Claude Code/DSH、完整渠道/UI 恢复矩阵或任意研究内容的普遍语义正确性保证。旧轮已知质量失败保留；当前三份报告的断言与人工核对均通过。没有推送、远端合并或依赖升级。
+
+### 最终集成复验的失败与窄修（覆盖上文的完成结论）
+
+集成 `07b035c2` 的 Native live 失败（162.28 秒）；不得把前一分支成功沿用为该 SHA 成功。日志第 276 行显示 child 第 3 次模型调用 `content_len=0, tool_call_count=0, output_tokens=4096`，恰好耗尽测试配置的 token cap；没有 write_file。core 将无工具的空响应结束为 completed，父收到空 result 后调用 glob/list_files，最后用 bash `find /` 寻找产物，父 6 次迭代耗尽。直接根因是模型预算耗尽后的空交付与过宽的测试工具/文件权限；不是 child 达到 12 次迭代，也不是缺少远端条件。这次真实失败保留在 `/tmp/r1-closure/research-integrated/native/run.log`，旧成功不能覆盖它。
+
+仅收紧本次 Native canary：父沿用原六项 subagent 工具，移除其 SysOperationRail；真实运行到模型调用前的工具清单断言确认为六项，没有 bash/read_file/glob。child 与 parent 共享真实 SysOperation，其 fs roots 明确限定本次 workspace 与打包 Skill，restrict_to_sandbox=True。锁 core 的空 shell_allowlist 实际表示不限制，第一轮拒绝负例因此失败；已改用既有 host dangerous_patterns hook 拒绝所有非空 shell，并以无害 printf 的真实拒绝结果验证，不修改公共权限实现。root 路径准入不等于只读授权。测试监控检查 child wait 的真实结构：failed/cancelled、空 completed 或缺产物均记录 canary failure，并用既有 rail 终止接缝结束父模型循环；这不是修改生产错误码或补造成功结果。最终还必须断言父 result_type=answer、真实产物和质量 gate。模型 cap 改为有界 8192，保留 360 秒总预算/90 秒单模型请求预算，并记录实际 output_tokens/finish_reason；是否能完成须由后续最终集成 live 判定，本增量未调用远端。
+
+同时撤销此前“OpenCode 原报告全部引用人工核对正确/三份报告质量均通过”的结论。旧 OpenCode 报告 Findings 首段把“all indexed locally”连同检索耗时引用为 `[source-a.md:3]`，本地索引事实实际在第 4 行；旧 gate 只检查 network ledger，漏过该复合事实。原报告不改写；新增 canary 检查本地索引断言的相邻定位必须包含第 4 行，原始真实报告作为固定反例，L3-L4 引用作为正例。原执行/父终结/清理成功仍成立，质量验收追溯改记失败。新增 `test_research_canary_guards.py` 覆盖真实误引、失败/空结果/缺产物、实际父工具表面、真实 shell 与 fs 拒绝。未来报告仍须人工核对；此夹具检查不是通用语义评测器，不以手工更正旧报告替代新 live。
+
+该窄修定向回归结果：60 passed / 3 skipped（远端未启用）/ 1 既有弃用警告，5.43 秒；日志与 XML 为 `/tmp/r1-12-closure/guards-final.{log,xml}`。第一轮空 allowlist 拒绝负例为 1 failed / 4 passed，14.74 秒，保留 `/tmp/r1-12-closure/guards.{log,xml}`；这是测试配置预期与既有 API 语义不符，不在本轮宣称或修复 core 缺陷。最终远端验证由主集成树运行；本增量目前状态为待真实验证。

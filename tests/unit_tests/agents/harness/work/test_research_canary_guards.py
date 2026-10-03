@@ -1,0 +1,110 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Regression guards for actual live research failures, without model calls."""
+
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+from tests.system_tests.test_work_research_remote import (
+    _check_local_index_locator,
+    _native_research_parent,
+    _native_research_work_config,
+    _native_wait_problem,
+)
+
+
+def test_actual_opencode_report_rejects_compound_claim_wrong_line():
+    report = (
+        Path(__file__).parent / "fixtures/opencode-mislocated-indexing.md"
+    ).read_text()
+    with pytest.raises(AssertionError, match="line 4"):
+        _check_local_index_locator(report)
+    # Positive range covers both the measured retrieval and the local-indexing fact.
+    _check_local_index_locator(report.replace("[source-a.md:3]", "[source-a.md:3-4]"))
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+def test_failed_child_cannot_become_a_successful_delivery(tmp_path, status):
+    assert _native_wait_problem({"statuses": {"child": status}}, tmp_path)
+
+
+def test_empty_completed_and_missing_artifacts_fail_without_search(tmp_path):
+    result = {"statuses": {"child": "completed"}, "results": {"child": ""}}
+    assert (
+        _native_wait_problem(result, tmp_path) == "completed child returned no result"
+    )
+    result["results"]["child"] = "research-report.md research-evidence.json"
+    assert "did not create" in _native_wait_problem(result, tmp_path)
+    for name in ("research-report.md", "research-evidence.json"):
+        (tmp_path / name).write_text("fixture")
+    assert _native_wait_problem(result, tmp_path) is None
+    assert _native_wait_problem({"statuses": {"child": "running"}}, tmp_path) is None
+
+
+@pytest.mark.asyncio
+async def test_native_canary_parent_exposes_only_subagent_tools(tmp_path):
+    from openjiuwen.core.runner import Runner
+    from openjiuwen.core.single_agent.rail.base import AgentRail
+    from openjiuwen.core.sys_operation import SysOperationCard, OperationMode
+    from openjiuwen.core.sys_operation.cwd import init_cwd
+    from jiuwenswarm.agents.harness.work.research import build_research_agent_config
+
+    seen = []
+
+    class StopBeforeModel(AgentRail):
+        async def before_model_call(self, ctx):
+            seen.extend(tool.name for tool in ctx.inputs.tools or [])
+            ctx.request_force_finish(
+                {"result_type": "answer", "output": "tools inspected"}
+            )
+
+    card = SysOperationCard(
+        id="research-guard-tools",
+        mode=OperationMode.LOCAL,
+        work_config=_native_research_work_config(tmp_path),
+    )
+    parent = None
+    await Runner.start()
+    try:
+        Runner.resource_mgr.add_sys_operation(card)
+        operation = Runner.resource_mgr.get_sys_operation(card.id)
+        init_cwd(str(tmp_path), workspace=str(tmp_path), project_root=str(tmp_path))
+        model = MagicMock()
+        spec = build_research_agent_config(
+            model, workspace=str(tmp_path), sys_operation=operation
+        )
+        parent = _native_research_parent(
+            model, tmp_path, operation, spec, StopBeforeModel()
+        )
+        result = await Runner.run_agent(
+            parent,
+            {"query": "Inspect registered tools only"},
+            session="research-guard-tools",
+        )
+        assert result["result_type"] == "answer"
+        assert set(seen) == {
+            "subagent_spawn",
+            "subagent_wait",
+            "subagent_list",
+            "subagent_send_input",
+            "subagent_close",
+            "subagent_resume",
+        }
+        denied = await operation.shell().execute_cmd(
+            "printf canary-shell-must-be-denied"
+        )
+        assert denied.code != 0
+        outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
+        outside.write_text("outside fixture")
+        try:
+            assert (
+                await operation.fs().read_file(str(outside), only_read=True)
+            ).code != 0
+        finally:
+            outside.unlink()
+    finally:
+        if parent is not None:
+            await parent.stop()
+        Runner.resource_mgr.remove_sys_operation(sys_operation_id=card.id)
+        await Runner.stop()

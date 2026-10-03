@@ -88,7 +88,81 @@ def _check_evidence(root: Path, report: str) -> dict:
         report,
         re.I,
     ), "Untested evidence was converted into independence"
+    _check_local_index_locator(report)
     return ledger
+
+
+def _check_local_index_locator(report: str) -> None:
+    """Check the concrete compound-claim citation missed in the OpenCode run."""
+    findings = report.split("## Sources", 1)[0]
+    for match in re.finditer(r"indexed locally", findings, re.I):
+        adjacent = findings[match.end() :].split("\n", 1)[0]
+        citation = re.search(
+            r"source-a\.md[`*]?\s*(?::|L|lines?\s+)([34])(?:\s*[-–]\s*L?([34]))?",
+            adjacent,
+            re.I,
+        )
+        assert citation is not None, (
+            "Local indexing claim lacks an adjacent source-a line locator"
+        )
+        first, last = int(citation[1]), int(citation[2] or citation[1])
+        assert first <= 4 <= last, (
+            "Local indexing claim is on source-a.md line 4, not line 3"
+        )
+
+
+def _native_wait_problem(result, root: Path) -> str | None:
+    """Canary guard only: a completed empty child is not a research delivery."""
+    data = getattr(result, "data", result)
+    if not isinstance(data, dict) or not isinstance(data.get("statuses"), dict):
+        return "unrecognized child wait result"
+    for child_id, status in data["statuses"].items():
+        if status in {"running", "pending"}:
+            continue
+        if status != "completed":
+            return f"child ended with {status}"
+        if not data.get("results", {}).get(child_id):
+            return "completed child returned no result"
+        if not all(
+            (root / name).is_file()
+            for name in ("research-report.md", "research-evidence.json")
+        ):
+            return "completed child did not create both requested artifacts"
+    return None
+
+
+def _native_research_work_config(root: Path):
+    from openjiuwen.core.sys_operation import LocalWorkConfig
+    from jiuwenswarm.agents.harness.work.research import _RESEARCH_SKILLS
+
+    return LocalWorkConfig(
+        restrict_to_sandbox=True,
+        sandbox_root=[str(root), str(_RESEARCH_SKILLS)],
+        # Empty allowlists mean unrestricted in the locked core. Use its explicit host deny hook.
+        shell_allowlist=[],
+        dangerous_patterns=[r"[\s\S]"],
+    )
+
+
+def _native_research_parent(model, root, operation, spec, trace_rail):
+    from openjiuwen.harness import create_deep_agent
+
+    return create_deep_agent(
+        model=model,
+        workspace=str(root),
+        sys_operation=operation,
+        subagents=[spec],
+        rails=[trace_rail],
+        enable_subagent_runtime=True,
+        max_iterations=6,
+        enable_task_loop=False,
+        enable_read_image_multimodal=False,
+        system_prompt=(
+            "Delegate the complete assignment once to research_agent. Use only subagent_spawn "
+            "and subagent_wait. If the child fails or returns no result, report failure immediately; "
+            "never search for missing files. After successful child completion return only its artifact paths."
+        ),
+    )
 
 
 _RUN_BUDGET_S = 360
@@ -362,17 +436,15 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path):
     from openjiuwen.core.sys_operation import (
         SysOperationCard,
         OperationMode,
-        LocalWorkConfig,
     )
     from openjiuwen.core.sys_operation.cwd import init_cwd
-    from openjiuwen.harness import create_deep_agent
-    from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
     from jiuwenswarm.agents.harness.work.research import build_research_agent_config
 
     root = tmp_path / "workspace"
     _write_sources(root)
     trace = _ResearchTrace("native", root)
     calls = []
+    child_failures = []
 
     class Trace(AgentRail):
         def __init__(self, scope):
@@ -382,13 +454,34 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path):
             return type(self)(self.scope)
 
         async def before_model_call(self, ctx):
+            if self.scope == "parent":
+                names = {tool.name for tool in ctx.inputs.tools or []}
+                assert names and all(name.startswith("subagent_") for name in names), (
+                    names
+                )
+                trace.mark("parent_tools_checked", tools=sorted(names))
+                if child_failures:
+                    ctx.request_force_finish(
+                        {
+                            "result_type": "error",
+                            "output": "Research canary child failed",
+                        }
+                    )
             trace.mark(
                 "model_start", scope=self.scope, iteration=ctx.inputs.react_iteration
             )
 
         async def after_model_call(self, ctx):
             trace.mark(
-                "model_end", scope=self.scope, iteration=ctx.inputs.react_iteration
+                "model_end",
+                scope=self.scope,
+                iteration=ctx.inputs.react_iteration,
+                finish_reason=getattr(ctx.inputs.response, "finish_reason", None),
+                output_tokens=getattr(
+                    getattr(ctx.inputs.response, "usage_metadata", None),
+                    "output_tokens",
+                    None,
+                ),
             )
 
         async def before_tool_call(self, ctx):
@@ -397,6 +490,11 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path):
 
         async def after_tool_call(self, ctx):
             trace.mark("tool_end", scope=self.scope, tool=ctx.inputs.tool_name)
+            if self.scope == "parent" and ctx.inputs.tool_name == "subagent_wait":
+                problem = _native_wait_problem(ctx.inputs.tool_result, root)
+                if problem:
+                    child_failures.append(problem)
+                    trace.mark("child_delivery_failed", reason=problem)
 
     model = Model(
         model_client_config=ModelClientConfig(
@@ -408,11 +506,13 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path):
         model_config=ModelRequestConfig(
             model=os.environ.get("WORK_RESEARCH_MODEL", "glm-5.2"),
             temperature=0.1,
-            max_tokens=4096,
+            max_tokens=8192,
         ),
     )
     card = SysOperationCard(
-        id="r1-12-native", mode=OperationMode.LOCAL, work_config=LocalWorkConfig()
+        id="r1-12-native",
+        mode=OperationMode.LOCAL,
+        work_config=_native_research_work_config(root),
     )
     parent = None
     watcher = asyncio.create_task(trace.watch())
@@ -431,19 +531,8 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path):
         )
         spec.enable_read_image_multimodal = False
         spec.rails.append(Trace("child"))
-        parent = create_deep_agent(
-            model=model,
-            workspace=str(root),
-            sys_operation=operation,
-            subagents=[spec],
-            rails=[SysOperationRail(), Trace("parent")],
-            enable_subagent_runtime=True,
-            max_iterations=6,
-            enable_task_loop=False,
-            enable_read_image_multimodal=False,
-            system_prompt="Delegate the complete assignment once to research_agent. Only use subagent_spawn and subagent_wait; do not read source files yourself. After child completion return only the artifact paths.",
-        )
-        trace.mark("execution_start", model_max_tokens=4096)
+        parent = _native_research_parent(model, root, operation, spec, Trace("parent"))
+        trace.mark("execution_start", model_max_tokens=8192)
         async with asyncio.timeout(_RUN_BUDGET_S):
             result = await Runner.run_agent(
                 parent,
@@ -459,6 +548,10 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path):
                 session="r1-12-native-session",
             )
         trace.mark("parent_terminal")
+        assert not child_failures, child_failures
+        assert isinstance(result, dict) and result.get("result_type") == "answer", (
+            result
+        )
         assert "research-report.md" in str(result)
         _check_report(root)
         for name in (
