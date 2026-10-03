@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from contextlib import AsyncExitStack
+import inspect
 import logging
 import os
 import shutil
@@ -523,6 +524,100 @@ class SessionDeleteLifecycle(Protocol):
         ...
 
 
+class SessionOwnerLifecycle(Protocol):
+    """Host-owned synchronous authority check before persistent publication.
+
+    The host obtains identity from its trusted task scope, never ``user_id``.
+    New reservations must atomically register owner/source and return a sync,
+    CAS-scoped rollback receipt. Existing Sessions are verified, never claimed,
+    and return None. Failure must raise before public metadata/history writes.
+    This is ordered publication, not a cross-file atomic transaction: rollback
+    leaves any already-created files incomplete and inaccessible to nonowners.
+    """
+
+    def before_publish(
+        self, session_id: str, project_id: str, created: bool,
+    ) -> Callable[[], None] | None:
+        ...
+
+
+def _check_owner_publication(
+    lifecycle: SessionOwnerLifecycle | None,
+    session_id: str,
+    project_id: str,
+    *,
+    created: bool,
+) -> Callable[[], None] | None:
+    if lifecycle is None:
+        return None
+    receipt = lifecycle.before_publish(session_id, project_id, created)
+    if inspect.isawaitable(receipt):
+        if inspect.iscoroutine(receipt):
+            receipt.close()
+        raise TypeError("Session owner before_publish must be synchronous")
+    if not created:
+        if receipt is not None:
+            raise TypeError("Existing Session owner verification must return None")
+        return None
+    if (
+        not callable(receipt)
+        or inspect.iscoroutinefunction(receipt)
+        or inspect.iscoroutinefunction(getattr(receipt, "__call__", None))
+    ):
+        raise TypeError("New Session owner requires a synchronous rollback receipt")
+    return receipt
+
+
+class _OwnerPublication:
+    """One reservation; compensation never deletes Session files."""
+
+    def __init__(self, lifecycle: SessionOwnerLifecycle | None) -> None:
+        self.lifecycle = lifecycle
+        self.session_id = ""
+        self.project_id = ""
+        self.receipt: Callable[[], None] | None = None
+
+    def prepare(self, session_id: str, project_id: str, *, created: bool) -> None:
+        self.session_id = session_id
+        self.project_id = project_id
+        self.receipt = _check_owner_publication(
+            self.lifecycle, session_id, project_id, created=created,
+        )
+
+    def verify(self) -> None:
+        _check_owner_publication(
+            self.lifecycle, self.session_id, self.project_id, created=False,
+        )
+
+    def rollback(self) -> None:
+        if self.receipt is None:
+            return
+        result = self.receipt()
+        if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
+            raise TypeError("Session owner rollback receipt must be synchronous")
+        if result is not None:
+            raise TypeError("Session owner rollback receipt must return None")
+        self.receipt = None
+        logger.warning(
+            "Session owner reservation aborted: session_id=%s; any published "
+            "files remain incomplete and require host recovery", self.session_id,
+        )
+
+    def compensate(self, primary_error: BaseException) -> None:
+        try:
+            self.rollback()
+        except BaseException as cleanup_error:
+            logger.warning(
+                "Session owner compensation incomplete while preserving %s: "
+                "session_id=%s error=%s",
+                type(primary_error).__name__, self.session_id, cleanup_error,
+                exc_info=(type(cleanup_error), cleanup_error,
+                          cleanup_error.__traceback__),
+            )
+
+
 class RuntimeSessionProvisioner:
     """Coordinate transport-neutral Session lifecycle work for one Runtime."""
 
@@ -538,6 +633,7 @@ class RuntimeSessionProvisioner:
         self._agent_manager = agent_manager
         self._plan_controller = plan_controller
         self._delete_lifecycle = delete_lifecycle
+        self._owner_lifecycle: SessionOwnerLifecycle | None = None
         self._participant_registry = (
             participant_registry or RuntimeParticipantRegistry()
         )
@@ -554,6 +650,10 @@ class RuntimeSessionProvisioner:
     ) -> None:
         """Replace the optional lifecycle participant owned by the host."""
         self._delete_lifecycle = lifecycle
+
+    def set_owner_lifecycle(self, lifecycle: SessionOwnerLifecycle | None) -> None:
+        """Set the trusted host hook; each preparation captures one participant."""
+        self._owner_lifecycle = lifecycle
 
     async def prepare_session_create(
         self,
@@ -579,6 +679,7 @@ class RuntimeSessionProvisioner:
         external_lock: asyncio.Lock | None = None
         external_lock_acquired = False
         claimed_session_id: str | None = None
+        owner_publication = _OwnerPublication(self._owner_lifecycle)
         try:
             from jiuwenswarm.server.runtime.session.session_history import (
                 is_valid_session_id,
@@ -828,6 +929,9 @@ class RuntimeSessionProvisioner:
             metadata_exists = (
                 get_agent_sessions_dir() / session_id / "metadata.json"
             ).is_file()
+            owner_publication.prepare(
+                session_id, project_id, created=not metadata_exists,
+            )
             if metadata_exists and not explicit_tui_session:
                 stored = get_session_metadata(session_id)
                 if (
@@ -879,6 +983,7 @@ class RuntimeSessionProvisioner:
                     result,
                     claimed_session_id=claimed_session_id,
                     external_lock=external_lock,
+                    owner_publication=owner_publication,
                 )
 
             session_created = not metadata_exists
@@ -934,6 +1039,7 @@ class RuntimeSessionProvisioner:
                 previous_session_id=previous_session_id,
                 params={**params, "mode": canonical_mode},
             )
+            owner_publication.verify()
             result = SessionCreateResult(
                 channel_id=channel_id,
                 session_id=session_id,
@@ -954,8 +1060,10 @@ class RuntimeSessionProvisioner:
                 switch_context=switch_context,
                 dispatch_signals=dispatch_signals,
                 previous_session_id=previous_session_id,
+                owner_publication=owner_publication,
             )
         except BaseException as primary_error:
+            owner_publication.compensate(primary_error)
             try:
                 if claimed_session_id is not None:
                     await self._agent_manager.release_session_prewarm_claim(
@@ -988,19 +1096,45 @@ class RuntimeSessionProvisioner:
         switch_context: SessionLifecycleTarget | None = None,
         dispatch_signals: SessionLifecycleTarget | None = None,
         previous_session_id: str = "",
+        owner_publication: _OwnerPublication | None = None,
     ) -> PreparedSessionProvision[SessionCreateResult]:
         finalized = False
+        claim_released = False
 
         async def release_resources() -> None:
-            nonlocal finalized
+            nonlocal finalized, claim_released
             if finalized:
                 return
-            if claimed_session_id is not None:
-                await self._agent_manager.release_session_prewarm_claim(
-                    claimed_session_id
+            primary_error: BaseException | None = None
+            try:
+                if owner_publication is not None:
+                    owner_publication.rollback()
+            except BaseException as error:
+                primary_error = error
+                logger.warning(
+                    "Session owner abort incomplete: session_id=%s error=%s",
+                    result.session_id, error, exc_info=True,
                 )
-            if external_lock is not None and external_lock.locked():
-                external_lock.release()
+            try:
+                if claimed_session_id is not None and not claim_released:
+                    await self._agent_manager.release_session_prewarm_claim(
+                        claimed_session_id
+                    )
+                    claim_released = True
+            except BaseException as error:
+                if primary_error is None:
+                    primary_error = error
+                else:
+                    logger.warning(
+                        "Session claim cleanup failed during owner abort: "
+                        "session_id=%s error=%s", result.session_id, error,
+                        exc_info=True,
+                    )
+            finally:
+                if external_lock is not None and external_lock.locked():
+                    external_lock.release()
+            if primary_error is not None:
+                raise primary_error
             finalized = True
 
         async def commit_create(
@@ -1301,6 +1435,7 @@ class RuntimeSessionProvisioner:
         The returned lease commits before result delivery and has no deferred
         transport-side work.
         """
+        owner_publication = _OwnerPublication(self._owner_lifecycle)
         source_session_id = str(provision_input.source_session_id or "").strip()
         target_session_id = str(provision_input.target_session_id or "").strip()
         channel_id = provision_input.channel_id or "default"
@@ -1337,6 +1472,18 @@ class RuntimeSessionProvisioner:
             cache_bust=True,
             enable_writeback=False,
         )
+        source_project_id = (
+            str(source_metadata.get("project_id") or "")
+            if isinstance(source_metadata, dict) else ""
+        )
+
+        def verify_source() -> None:
+            _check_owner_publication(
+                owner_publication.lifecycle, source_session_id,
+                source_project_id, created=False,
+            )
+
+        verify_source()
         profile_id = (
             source_metadata.get("execution_profile_id")
             if isinstance(source_metadata, dict)
@@ -1399,6 +1546,15 @@ class RuntimeSessionProvisioner:
                         "cutoff_timestamp": cutoff_timestamp,
                     }
                 )
+            if owner_publication.lifecycle is not None:
+                from jiuwenswarm.common.utils import get_agent_sessions_dir
+
+                target_exists = (get_agent_sessions_dir() / target_session_id).exists()
+                # No sidecar/lifecycle lock spans fork's queued-history drain.
+                verify_source()
+                owner_publication.prepare(
+                    target_session_id, source_project_id, created=not target_exists,
+                )
             fork_result = fork_session(
                 **fork_kwargs,
             )
@@ -1407,6 +1563,8 @@ class RuntimeSessionProvisioner:
             deep_agent = None
             if agent is not None:
                 deep_agent = await agent.ensure_instance()
+                verify_source()
+                owner_publication.verify()
                 if has_message_cutoff:
                     await copy_session_context(
                         deep_agent,
@@ -1438,6 +1596,8 @@ class RuntimeSessionProvisioner:
             from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
             if not has_message_cutoff and not side_conversation:
+                verify_source()
+                owner_publication.verify()
                 await copy_session_state(
                     source_session_id=source_session_id,
                     target_session_id=target_session_id,
@@ -1448,24 +1608,51 @@ class RuntimeSessionProvisioner:
                     ),
                     deep_agent=deep_agent,
                 )
-        except ValueError as error:
-            raise SessionProvisionError(
-                str(error),
-                code=_session_fork_error_code(error),
-            ) from error
+            verify_source()
+            owner_publication.verify()
+            result = SessionForkResult(
+                channel_id=channel_id,
+                source_session_id=str(
+                    fork_result.get("source_session_id") or source_session_id
+                ),
+                session_id=str(fork_result.get("session_id") or target_session_id),
+                title=str(fork_result.get("title") or ""),
+                ephemeral=bool(fork_result.get("ephemeral")),
+            )
+        except BaseException as error:
+            owner_publication.compensate(error)
+            if isinstance(error, ValueError):
+                raise SessionProvisionError(
+                    str(error),
+                    code=_session_fork_error_code(error),
+                ) from error
+            raise
 
-        result = SessionForkResult(
-            channel_id=channel_id,
-            source_session_id=str(
-                fork_result.get("source_session_id") or source_session_id
-            ),
-            session_id=str(fork_result.get("session_id") or target_session_id),
-            title=str(fork_result.get("title") or ""),
-            ephemeral=bool(fork_result.get("ephemeral")),
-        )
+        commit_error: BaseException | None = None
+
+        async def abort_fork() -> None:
+            owner_publication.rollback()
+
+        async def commit_fork(_context: SessionProvisionCommitContext) -> None:
+            nonlocal commit_error
+            if commit_error is not None:
+                owner_publication.compensate(commit_error)
+                raise commit_error
+            try:
+                verify_source()
+                owner_publication.verify()
+            except BaseException as error:
+                commit_error = error
+                # The existing lease cannot abort after COMMITTING. Keep its
+                # failed state but revoke this reservation before propagating.
+                owner_publication.compensate(error)
+                raise
+
         return self._stage_session_provision(
             result,
             commit_timing=SessionProvisionCommitTiming.BEFORE_RESULT_DELIVERY,
+            commit_hook=commit_fork,
+            abort_hook=abort_fork,
         )
 
     def _stage_session_provision(
@@ -2445,6 +2632,7 @@ __all__ = [
     "SessionDescriptor",
     "SessionForkInput",
     "SessionForkResult",
+    "SessionOwnerLifecycle",
     "SessionProvisionCommitContext",
     "SessionProvisionCommitTiming",
     "SessionProvisionError",
