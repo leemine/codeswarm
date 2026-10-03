@@ -2739,8 +2739,6 @@ async def test_agentos_extension_is_selected_independently(
             },
         }
     }
-    monkeypatch.setattr(agentos_router_impl, "get_config", lambda: config)
-    monkeypatch.setattr(plain_extension, "get_config", lambda: config)
 
     class Registry:
         registered = None
@@ -2753,6 +2751,8 @@ async def test_agentos_extension_is_selected_independently(
             self.third_agent = extension
 
     registry = Registry()
+    from jiuwenswarm.extensions.types import ExtensionConfig
+    registry.config = ExtensionConfig(config=config, logger=None)
     assert await plain_extension.register_extensions(registry) == []
     registered = await agentos_extension.register_extensions(registry)
 

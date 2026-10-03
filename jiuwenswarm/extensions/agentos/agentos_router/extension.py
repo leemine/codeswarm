@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from jiuwenswarm.common.config import get_config
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import AgentManager
 from jiuwenswarm.extensions.agentos.agentos_router.agentos_authenticator import AgentOSAuthenticator
 from jiuwenswarm.extensions.agentos.agentos_router.config import (
@@ -100,7 +99,7 @@ class AgentOSRouter(AgentServerClientExtension, ThirdAgentExtension):
 
 
 async def register_extensions(registry):
-    config = get_config()
+    config = registry.config.config
     if not agentos_router_selected(config):
         return []
     extension = AgentOSRouter(load_router_config(config))

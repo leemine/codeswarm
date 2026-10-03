@@ -6,6 +6,7 @@ from importlib import import_module
 from typing import Any
 
 _EXPORTS = {
+    "ExtensionCapabilityError": ("jiuwenswarm.extensions.registry", "ExtensionCapabilityError"),
     "ExtensionLoader": ("jiuwenswarm.extensions.loader", "ExtensionLoader"),
     "ExtensionManager": ("jiuwenswarm.extensions.manager", "ExtensionManager"),
     "ExtensionRegistry": ("jiuwenswarm.extensions.registry", "ExtensionRegistry"),

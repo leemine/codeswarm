@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-from jiuwenswarm.common.config import get_config
 from jiuwenswarm.extensions.sdk import AgentServerClientExtension
 from jiuwenswarm.extensions.yuanrong_frontend_client import YuanrongFrontendAgentClient
 
@@ -28,7 +27,7 @@ async def register_extensions(registry):
     根据 gateway.agent_client.type 配置决定是否注册。
     如果 type 为 "yuanrong"，则创建并注册 YuanrongAgentServerClientExtension。
     """
-    cfg = get_config()
+    cfg = registry.config.config
     gateway = cfg.get("gateway") if isinstance(cfg, dict) else {}
     agent_client = gateway.get("agent_client") if isinstance(gateway, dict) else {}
     if not isinstance(agent_client, dict):

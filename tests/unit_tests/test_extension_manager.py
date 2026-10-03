@@ -1,6 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 from pathlib import Path
+from unittest.mock import MagicMock
 from typing import get_type_hints
 
 import pytest
@@ -75,6 +76,10 @@ async def test_transport_manifest_flag_requires_a_real_boolean() -> None:
 
     class FakeLoader:
         @staticmethod
+        def _check_lifecycle_idle() -> None:
+            pass
+
+        @staticmethod
         def discover_extension_roots() -> list[Path]:
             return list(manifests)
 
@@ -88,6 +93,8 @@ async def test_transport_manifest_flag_requires_a_real_boolean() -> None:
 
     manager = object.__new__(ExtensionManager)
     manager.loader = FakeLoader()
+    manager._registry = MagicMock()
+    manager.required_capabilities = {}
     manager._loaded_extensions = []
 
     await manager.load_all_extensions(include_transport_extensions=False)
@@ -96,6 +103,8 @@ async def test_transport_manifest_flag_requires_a_real_boolean() -> None:
 
     remote_manager = object.__new__(ExtensionManager)
     remote_manager.loader = FakeLoader()
+    remote_manager._registry = MagicMock()
+    remote_manager.required_capabilities = {}
     remote_manager._loaded_extensions = []
 
     await remote_manager.load_all_extensions(include_transport_extensions=True)

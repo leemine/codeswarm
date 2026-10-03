@@ -226,9 +226,10 @@ async def _acquire_process_runtime_extensions() -> bool:
         try:
             registry = ExtensionRegistry.get_instance()
         except RuntimeError:
+            from jiuwenswarm.common.config import get_config
             registry = ExtensionRegistry.create_instance(
                 callback_framework=Runner.callback_framework,
-                config={},
+                config=get_config(),
                 logger=logger,
             )
             manager: ExtensionManager | None = None
@@ -336,13 +337,32 @@ class AgentRuntime:
         team_execution_controller: object | None = None,
         trusted_identity_resolver: Callable[[object], TrustedIdentity | None] | None = None,
         project_authorizer: ProjectAuthorizer | None = None,
+        extension_registry: Any | None = None,
+        extension_manager: Any | None = None,
+        required_capabilities: Mapping[str, str] | None = None,
     ) -> None:
+        # Explicit registries are borrowed. An explicit manager transfers its
+        # load/shutdown lifecycle to this Runtime; its registry is authoritative.
+        if extension_registry is not None and extension_manager is not None:
+            raise ValueError("pass either extension_registry or extension_manager")
+        self._extension_manager = extension_manager
+        self._uses_default_extensions = extension_manager is None and extension_registry is None
+        self._extension_registry = (
+            extension_manager.registry if extension_manager is not None else extension_registry
+        )
+        self._required_capabilities = dict(required_capabilities or {})
+        self._owned_extensions_attempted = False
+        self._explicit_identity_resolver = trusted_identity_resolver
+        self._explicit_project_authorizer = project_authorizer
         self._trusted_identity_resolver = trusted_identity_resolver
         self._submission_guard = SubmissionGuard(project_authorizer or _StoredProjectAuthority())
         self._governed_provisions: dict[PreparedSessionProvision[Any], PreparedRequest] = {}
         self._agent_manager = agent_manager or AgentManager()
         self._initializer = initializer or _initialize_runtime_dependencies
-        self._initialize_extensions = initializer is None
+        self._initialize_extensions = (
+            initializer is None or self._extension_registry is not None
+            or bool(self._required_capabilities)
+        )
         self._manage_runner = initializer is None
         self._runner_started = False
         self._checkpointer_started = False
@@ -404,6 +424,11 @@ class AgentRuntime:
         if identity is not None and not isinstance(identity, TrustedIdentity):
             raise GovernanceError("host identity resolver returned an invalid identity")
         return identity
+
+    @property
+    def extension_registry(self) -> Any | None:
+        """The registry selected for this Runtime; never another instance's default."""
+        return self._extension_registry
 
     def _governance_project(self, value: object, *, action: ProjectAction = "execute") -> str:
         params = getattr(value, "params", None)
@@ -2878,6 +2903,13 @@ class AgentRuntime:
                     cleanup_errors.append(exc)
                 finally:
                     self._shared_extensions_acquired = False
+            if self._owned_extensions_attempted:
+                try:
+                    await self._extension_manager.shutdown_all_extensions()
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+                finally:
+                    self._owned_extensions_attempted = False
             if self._shared_dependencies_acquired:
                 try:
                     await _release_process_runtime_dependencies()
@@ -3466,11 +3498,48 @@ class AgentRuntime:
         return agent
 
     async def _ensure_extensions(self) -> None:
-        self._shared_extensions_acquired = await _acquire_process_runtime_extensions()
+        if self._extension_manager is not None:
+            self._owned_extensions_attempted = True
+            await self._extension_manager.load_all_extensions(include_transport_extensions=False)
+        elif self._uses_default_extensions:
+            self._shared_extensions_acquired = await _acquire_process_runtime_extensions()
+            from jiuwenswarm.extensions.registry import ExtensionRegistry
+            self._extension_registry = ExtensionRegistry.get_instance()
+        registry = self._extension_registry
+        if self._required_capabilities:
+            registry.require_capabilities(self._required_capabilities)
+        # Resolve optional capabilities only from the selected instance. Explicit
+        # constructor policies cannot silently be replaced by an extension.
+        get_capability = getattr(registry, "get_capability", None)
+        if not callable(get_capability):
+            return
+        identity = get_capability("governance.identity")
+        projects = get_capability("governance.projects")
+        if identity is not None:
+            if not callable(identity):
+                raise GovernanceError("governance.identity must be a callable resolver")
+            if self._explicit_identity_resolver is not None and identity is not self._explicit_identity_resolver:
+                raise GovernanceError("conflicting Runtime identity policies")
+        if projects is not None:
+            if not callable(getattr(projects, "authorize", None)):
+                raise GovernanceError("governance.projects must be a project authorizer")
+            if self._explicit_project_authorizer is not None and projects is not self._explicit_project_authorizer:
+                raise GovernanceError("conflicting Runtime project policies")
+        self._trusted_identity_resolver = identity or self._explicit_identity_resolver
+        self._submission_guard = SubmissionGuard(
+            projects or self._explicit_project_authorizer or _StoredProjectAuthority()
+        )
 
     async def _rollback_start(self) -> None:
         """Undo partially initialized owned dependencies after start failure."""
         cleanup_errors: list[BaseException] = []
+        if self._owned_extensions_attempted:
+            try:
+                await self._extension_manager.shutdown_all_extensions()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+            finally:
+                self._owned_extensions_attempted = False
         if self._shared_extensions_acquired:
             try:
                 await _release_process_runtime_extensions()

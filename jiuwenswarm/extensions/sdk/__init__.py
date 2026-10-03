@@ -8,6 +8,7 @@ from typing import Any
 _APPLICATION_PLUGIN_MODULE = "jiuwenswarm.extensions.sdk.application_plugin"
 
 _EXPORTS = {
+    "ExtensionCapabilityError": ("jiuwenswarm.extensions.registry", "ExtensionCapabilityError"),
     "AgentServerClientExtension": (
         "jiuwenswarm.extensions.sdk.agent_server_client",
         "AgentServerClientExtension",

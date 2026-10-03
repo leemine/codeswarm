@@ -180,6 +180,62 @@ def test_gateway_rejects_duplicate_catalog_and_relative_scope(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_gateway_rechecks_authorization_after_waiting_for_tool_lock(tmp_path: Path) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    queued_admitted = asyncio.Event()
+    allowed = True
+
+    class BlockingTool(_Tool):
+        async def invoke(self, inputs, **kwargs):
+            if inputs["value"] == "first":
+                entered.set()
+                await release.wait()
+            return await super().invoke(inputs, **kwargs)
+
+    tool = BlockingTool(parallel_safe=False)
+
+    def admit(_scope, invocation):
+        if invocation.call_id == "second":
+            queued_admitted.set()
+        return allowed
+
+    gateway = ProductToolGateway([tool], scope=_scope(tmp_path), admit=admit)
+    first = asyncio.create_task(gateway.invoke(ToolInvocation("first", "echo", {"value": "first"})))
+    second = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        second = asyncio.create_task(gateway.invoke(ToolInvocation("second", "echo", {"value": "second"})))
+        await asyncio.wait_for(queued_admitted.wait(), 2)
+        allowed = False
+        release.set()
+        results = await asyncio.wait_for(asyncio.gather(first, second), 2)
+        assert not results[0].is_error
+        assert results[1].is_error
+        assert tool.calls == [({"value": "first"}, {})]
+    finally:
+        release.set()
+        for task in (first, second):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*(task for task in (first, second) if task is not None), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_gateway_admission_failure_returns_error_without_executing(tmp_path: Path) -> None:
+    tool = _Tool()
+
+    async def unavailable(_scope, _invocation):
+        raise RuntimeError("authority unavailable")
+
+    gateway = ProductToolGateway([tool], scope=_scope(tmp_path), admit=unavailable)
+    result = await gateway.invoke(ToolInvocation("call", "echo", {"value": "secret"}))
+    assert result.is_error
+    assert "authority unavailable" not in result.content
+    assert not tool.calls
+
+
+@pytest.mark.asyncio
 async def test_managed_transport_requires_token_and_delegates_mcp(
     tmp_path: Path,
 ) -> None:
