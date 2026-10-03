@@ -237,6 +237,18 @@ def _check_local_index_locator(report: str) -> None:
         )
 
 
+def _check_condition_comparison_citations(report: str) -> None:
+    """A comparison caveat alone cannot locate both specific observed modes."""
+    for paragraph in re.split(r"\n\s*\n", report.split("## Sources", 1)[0]):
+        if not re.search(r"\boffline\s+(?:vs\.?|versus|and)\s+connected\b", paragraph, re.I):
+            continue
+        for source in ("source-a.md", "source-b.md"):
+            assert any(
+                first <= 3 <= last <= 4
+                for first, last in _source_citation_ranges(paragraph, source)
+            ), f"Specific run-condition comparison lacks {source} observation citation"
+
+
 def _native_wait_problem(result, root: Path) -> str | None:
     """Canary guard only: a completed empty child is not a research delivery."""
     data = getattr(result, "data", result)
@@ -272,21 +284,23 @@ def _native_research_work_config(root: Path):
 
 def _native_research_parent(model, root, operation, spec, trace_rail):
     from openjiuwen.harness import create_deep_agent
+    from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
+    from jiuwenswarm.agents.harness.work.research_parent import WorkResearchTaskPromptRail
 
     return create_deep_agent(
         model=model,
         workspace=str(root),
         sys_operation=operation,
         subagents=[spec],
-        rails=[trace_rail],
+        rails=[SysOperationRail(), WorkResearchTaskPromptRail(enable_subagent_runtime=True), trace_rail],
         enable_subagent_runtime=True,
-        max_iterations=6,
+        max_iterations=12,
         enable_task_loop=False,
         enable_read_image_multimodal=False,
         system_prompt=(
-            "Delegate the complete assignment once to research_agent. Use only subagent_spawn "
-            "and subagent_wait. If the child fails or returns no result, report failure immediately; "
-            "never search for missing files. After successful child completion return only its artifact paths."
+            "Fulfill the user's research request using the available research_agent. "
+            "Honor the loaded Work research acceptance policy and the admitted filesystem scope. "
+            "If the child fails or returns no result, report the failure; never search outside the workspace."
         ),
     )
 
@@ -305,6 +319,8 @@ _RESEARCH_TASK = (
     "A later sentence's citation does not locate an earlier claim. Read the original "
     "numbered lines to determine every locator; do not guess. "
     + _EVIDENCE_REQUEST
+    + " Preserve research-review-input.json with the final sources/claims/question tool input "
+    "and research-audit.json with checked_claim_ids, input_fingerprint and unresolved_issues. "
     + " Read back and verify both outputs. Use only these sources, no web searches. "
     "Do not restate the complete report in your final reply: return paths and verification "
     "in at most 40 words. Batch independent source reads when supported."
@@ -337,6 +353,25 @@ class _ResearchTrace:
         self.outcome = "running"
         self.child_providers = []
         self.reviews = []
+        self.parent_source_reads = set()
+        self.parent_report_reads = []
+        self.parent_revision_count = 0
+
+    def observe_parent_read(self, tool, arguments, result):
+        name = tool.rsplit(".", 1)[-1].lower()
+        if name not in {"read_file", "read", "exec_command", "bash", "shell"}:
+            return
+        args = json.dumps(arguments, default=str)
+        output = json.dumps(result, default=str)
+        for source in ("source-a.md", "source-b.md"):
+            original = (self.root / source).read_text().splitlines()
+            if source in args and all(line in output for line in original[2:]):
+                self.parent_source_reads.add(source)
+                self.mark("parent_source_read", source=source, tool=tool)
+        if "research-report.md" in args and "## Sources" in output:
+            elapsed = round(time.monotonic() - self.started, 3)
+            self.parent_report_reads.append(elapsed)
+            self.mark("parent_report_read", tool=tool)
 
     def mark(self, stage: str, **details):
         self.events.append(
@@ -374,6 +409,8 @@ class _ResearchTrace:
             "source-b.md",
             "research-report.md",
             "research-evidence.json",
+            "research-review-input.json",
+            "research-audit.json",
         ):
             path = self.root / name
             if path.is_file():
@@ -388,6 +425,9 @@ class _ResearchTrace:
                     "report_word_budget": 300,
                     "child_reply_word_budget": 40,
                     "child_providers": self.child_providers,
+                    "parent_source_reads": sorted(self.parent_source_reads),
+                    "parent_report_reads": self.parent_report_reads,
+                    "parent_revision_count": self.parent_revision_count,
                     "events": self.events,
                 },
                 indent=2,
@@ -418,9 +458,9 @@ def _observe_reviews(monkeypatch, trace):
     monkeypatch.setattr(research_review, "review_research_report", observed)
 
 
-def _check_review_delivery(root, report, reviews):
+def _check_review_delivery(root, report, reviews, max_reviews=3):
     """Bind the final artifact to actual review calls and original fixture bytes."""
-    assert 1 <= len(reviews) <= 3, "Expected initial review and at most two revisions"
+    assert 1 <= len(reviews) <= max_reviews, "Review calls exceeded the bounded delivery budget"
     final = reviews[-1]
     assert final["result"]["structural_valid"] is True
     assert report == final["result"]["rendered_markdown"], (
@@ -444,12 +484,33 @@ def _check_review_delivery(root, report, reviews):
     assert seen == {"source-a.md", "source-b.md"}
 
 
+def _check_parent_acceptance(trace):
+    assert trace.parent_revision_count <= 1, "Parent exceeded one same-child revision"
+    assert trace.parent_source_reads == {"source-a.md", "source-b.md"}, (
+        "Parent did not independently read both original source files"
+    )
+    last_review = max(e["seconds"] for e in trace.events if e["stage"] == "research_review")
+    assert trace.parent_report_reads and trace.parent_report_reads[-1] >= last_review, (
+        "Parent did not read the final reviewed report"
+    )
+    final = trace.reviews[-1]
+    saved = json.loads((trace.root / "research-review-input.json").read_text())
+    assert saved["sources"] == final["sources"]
+    assert saved["claims"] == final["claims"]
+    assert saved.get("question") == final.get("question")
+    audit = json.loads((trace.root / "research-audit.json").read_text())
+    assert set(audit["checked_claim_ids"]) == {c["id"] for c in final["claims"]}
+    assert audit["input_fingerprint"] == final["result"]["input_fingerprint"]
+    assert audit["unresolved_issues"] == []
+
+
 def _check_report(root: Path):
     report = (root / "research-report.md").read_text()
     _check_evidence(root, report)
     _check_report_citation_coverage(root, report)
     _check_single_record_citations(report)
     _check_exclusive_network_claims(report)
+    _check_condition_comparison_citations(report)
     for fragment in ("42", "31", "source-a.md", "source-b.md"):
         assert fragment in report, f"Missing evidence {fragment}"
     assert any(
@@ -530,16 +591,7 @@ async def test_work_research_real_external_cited_artifact(
     )
     route = _route(root, spec)
     adapter = EngineAgentAdapter(route)
-    # OpenCode MCP requests have a 60s deadline; leave room for the reply.
-    wait_ms = 45000 if provider == "opencode" else 60000
-    query = (
-        "Use product subagent_spawn exactly once with subagent_type research_agent and pass "
-        "the entire assignment below. Your role is only to delegate and wait. "
-        f"Then use subagent_wait with the exact returned ID and timeout_ms={wait_ms}; "
-        "if still running wait again. When completed, return ONLY the two artifact paths, "
-        "without opening files yourself or repeating the report. Assignment: "
-        + _RESEARCH_TASK
-    )
+    query = "Use the research agent for this assignment: " + _RESEARCH_TASK
     request = AgentRequest(
         request_id="r1-12-research",
         channel_id="web",
@@ -552,6 +604,7 @@ async def test_work_research_real_external_cited_artifact(
     watcher = None
     terminal = None
     parent_text = []
+    parent_calls = {}
     try:
         trace.mark("construction_start")
         await adapter.create_instance(mode="agent")
@@ -566,12 +619,21 @@ async def test_work_research_real_external_cited_artifact(
                 payload = chunk.payload or {}
                 event = payload.get("event_type")
                 if event == "chat.tool_call":
+                    call = payload.get("tool_call") or {}
+                    parent_calls[call.get("tool_call_id")] = call
+                    if call.get("name", "").endswith("subagent_send_input"):
+                        trace.parent_revision_count += 1
                     trace.mark(
                         "parent_tool_start",
                         tool=(payload.get("tool_call") or {}).get("name", ""),
                     )
                 elif event == "chat.tool_result":
                     trace.mark("parent_tool_end", tool=payload.get("tool_name", ""))
+                    call = parent_calls.get(payload.get("tool_call_id"), {})
+                    trace.observe_parent_read(
+                        payload.get("tool_name", ""), call.get("arguments", call.get("args")),
+                        payload.get("result"),
+                    )
                 elif event == "chat.delta":
                     parent_text.append(payload.get("content", ""))
                 elif event == "chat.final":
@@ -585,7 +647,8 @@ async def test_work_research_real_external_cited_artifact(
             "Research child did not use the parent's Provider"
         )
         report = _check_report(root)
-        _check_review_delivery(root, report, trace.reviews)
+        _check_review_delivery(root, report, trace.reviews, max_reviews=6)
+        _check_parent_acceptance(trace)
         trace.mark("quality_gate_passed")
         trace.outcome = "passed"
     except BaseException as exc:
@@ -648,9 +711,7 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path, monkeypa
         async def before_model_call(self, ctx):
             if self.scope == "parent":
                 names = {tool.name for tool in ctx.inputs.tools or []}
-                assert names and all(name.startswith("subagent_") for name in names), (
-                    names
-                )
+                assert {"subagent_spawn", "subagent_send_input", "read_file"} <= names
                 trace.mark("parent_tools_checked", tools=sorted(names))
                 if child_failures:
                     ctx.request_force_finish(
@@ -678,10 +739,14 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path, monkeypa
 
         async def before_tool_call(self, ctx):
             calls.append(ctx.inputs.tool_name)
+            if self.scope == "parent" and ctx.inputs.tool_name == "subagent_send_input":
+                trace.parent_revision_count += 1
             trace.mark("tool_start", scope=self.scope, tool=ctx.inputs.tool_name)
 
         async def after_tool_call(self, ctx):
             trace.mark("tool_end", scope=self.scope, tool=ctx.inputs.tool_name)
+            if self.scope == "parent":
+                trace.observe_parent_read(ctx.inputs.tool_name, ctx.inputs.tool_args, ctx.inputs.tool_result)
             if self.scope == "parent" and ctx.inputs.tool_name == "subagent_wait":
                 problem = _native_wait_problem(ctx.inputs.tool_result, root)
                 if problem:
@@ -730,11 +795,7 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path, monkeypa
                 parent,
                 {
                     "query": (
-                        "Spawn one research_agent with this complete assignment: "
-                        "Use list_skill to inspect evidence-research and read its instructions, then "
-                        + _RESEARCH_TASK
-                        + " Parent: wait for the exact child ID with timeout_ms=240000, "
-                        "wait again if running, then return only the two paths."
+                        _RESEARCH_TASK
                     )
                 },
                 session="r1-12-native-session",
@@ -746,11 +807,11 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path, monkeypa
         )
         assert "research-report.md" in str(result)
         report = _check_report(root)
-        _check_review_delivery(root, report, trace.reviews)
+        _check_review_delivery(root, report, trace.reviews, max_reviews=6)
+        _check_parent_acceptance(trace)
         for name in (
             "subagent_spawn",
             "subagent_wait",
-            "list_skill",
             "read_file",
             "write_file",
             "review_research_report",

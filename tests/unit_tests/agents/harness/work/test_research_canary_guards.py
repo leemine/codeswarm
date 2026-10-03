@@ -114,7 +114,7 @@ def test_empty_completed_and_missing_artifacts_fail_without_search(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_native_canary_parent_exposes_only_subagent_tools(tmp_path):
+async def test_native_canary_parent_can_review_files_without_widening_permissions(tmp_path):
     from openjiuwen.core.runner import Runner
     from openjiuwen.core.single_agent.rail.base import AgentRail
     from openjiuwen.core.sys_operation import SysOperationCard, OperationMode
@@ -154,14 +154,15 @@ async def test_native_canary_parent_exposes_only_subagent_tools(tmp_path):
             session="research-guard-tools",
         )
         assert result["result_type"] == "answer"
-        assert set(seen) == {
+        assert {
             "subagent_spawn",
             "subagent_wait",
             "subagent_list",
             "subagent_send_input",
             "subagent_close",
             "subagent_resume",
-        }
+            "read_file",
+        } <= set(seen)
         denied = await operation.shell().execute_cmd(
             "printf canary-shell-must-be-denied"
         )

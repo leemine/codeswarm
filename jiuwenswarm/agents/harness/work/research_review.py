@@ -268,7 +268,7 @@ def build_research_review_tool():
                             "required": ["id", "section", "kind", "text", "refs"],
                         },
                     },
-                    "question": {"type": ["string", "null"], "maxLength": 2000},
+                    "question": {"type": "string", "maxLength": 2000},
                 },
                 "required": ["sources", "claims"],
             },

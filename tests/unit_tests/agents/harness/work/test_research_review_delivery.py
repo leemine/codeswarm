@@ -7,6 +7,7 @@ import pytest
 
 from tests.system_tests.test_work_research_remote import (
     _check_review_delivery,
+    _check_condition_comparison_citations,
     _write_sources,
 )
 
@@ -48,3 +49,12 @@ def test_review_delivery_rejects_bypasses(reviewed, problem):
         records[-1]["sources"][0]["text"] = "# Pilot A field log\n"
     with pytest.raises(AssertionError):
         _check_review_delivery(root, report, records)
+
+
+def test_comparison_needs_both_condition_observations_not_just_caveat():
+    claim = "The runs used different conditions (offline vs connected), so they are not a controlled benchmark"
+    with pytest.raises(AssertionError, match="source-a.md observation"):
+        _check_condition_comparison_citations(claim + " (source-b.md:4).")
+    with pytest.raises(AssertionError, match="source-b.md observation"):
+        _check_condition_comparison_citations(claim + " (source-a.md:3; source-b.md:4).")
+    _check_condition_comparison_citations(claim + " (source-a.md:3; source-b.md:3-4).")

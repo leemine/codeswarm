@@ -39,7 +39,7 @@ candidate delivery, not accepted research.
    rewrite/read back the artifacts. Never subagent_spawn a replacement or rewrite
    the child's report yourself to conceal a failed delivery. Use subagent_resume
    only if the existing tool status explicitly requires it for that same child.
-Use timeout_ms <= 45000 for each subagent_wait so the response fits the
+   Use timeout_ms <= 45000 for each subagent_wait so the response fits the
    existing transport deadline; repeated waits while still running are not
    additional revisions. A failed child without artifacts is a failure to report,
    not a reason for blind send_input restarts.
