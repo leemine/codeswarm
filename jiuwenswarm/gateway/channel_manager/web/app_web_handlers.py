@@ -6958,6 +6958,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         ProjectMethod.PROJECT_ACL_UPDATE,
         ProjectMethod.PROJECT_CONTENT_GET,
         ProjectMethod.PROJECT_CONTENT_UPDATE,
+        ProjectMethod.SESSION_SHARE_LIST,
+        ProjectMethod.SESSION_SHARE_CREATE,
+        ProjectMethod.SESSION_SHARE_UPDATE,
+        ProjectMethod.SESSION_SHARE_REVOKE,
     ):
         channel.register_method(method.value, _project_extension_handler(method))
     channel.register_method("project.list", _project_list)
