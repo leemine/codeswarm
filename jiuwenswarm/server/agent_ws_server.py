@@ -1128,6 +1128,8 @@ class AgentWebSocketServer:
             if trusted_identity_resolver is not None
             else lambda _request: local_identity
         )
+        from jiuwenswarm.governance.session_boundary import organization_sharing_host
+        self._organization_session_host = organization_sharing_host()
         self._server: Any = None
         # 当前 Gateway 连接，用于 send_push 主动推送
         self._current_ws: Any = None
@@ -1164,6 +1166,7 @@ class AgentWebSocketServer:
             ConfigAdapter(),
         ):
             self._adapter_registry.register(adapter)
+        self._install_sharing_adapters()
         # AgentServer-side tokenizer cache/download service. The Gateway only
         # persists model profiles and notifies this process to refresh them.
         self._tokenizer_service = TokenizerService()
@@ -1983,6 +1986,7 @@ class AgentWebSocketServer:
                     ConfigAdapter(),
                 ):
                     self._adapter_registry.register(adapter)
+                self._install_sharing_adapters()
 
         browser_close_error: BaseException | None = None
         if runtime_close_completed or closing_runtime.closed:
@@ -2103,17 +2107,20 @@ class AgentWebSocketServer:
 
         # 发送 connection.ack 事件，通知 Gateway 服务端已就绪
         try:
-            ack_frame = {
-                "type": "event",
-                "event": "connection.ack",
-                "payload": {
-                    "status": "ready",
-                    "heartbeat_job_owner": "agentserver",
-                    "heartbeat_job_protocol": self._heartbeat_runtime.protocol_version,
-                    "heartbeat_job_ready": self._heartbeat_runtime.is_available,
-                },
-            }
-            await send_wire_payload(ws, ack_frame)
+            if getattr(self, "_organization_session_host", None) is not None:
+                from jiuwenswarm.server.ws_send import send_service_ready
+                await send_service_ready(
+                    ws, heartbeat_protocol=self._heartbeat_runtime.protocol_version,
+                    heartbeat_ready=self._heartbeat_runtime.is_available,
+                )
+            else:
+                await send_wire_payload(ws, {
+                    "type": "event", "event": "connection.ack", "payload": {
+                        "status": "ready", "heartbeat_job_owner": "agentserver",
+                        "heartbeat_job_protocol": self._heartbeat_runtime.protocol_version,
+                        "heartbeat_job_ready": self._heartbeat_runtime.is_available,
+                    },
+                })
             if session_message_service is not None:
                 await session_message_service.set_available(True)
             logger.info("[AgentWebSocketServer] 已发送 connection.ack: %s", remote)
@@ -2186,6 +2193,20 @@ class AgentWebSocketServer:
             if owns_current_connection:
                 self._session_stream_tasks.clear()
 
+    def _install_sharing_adapters(self):
+        host = getattr(self, "_organization_session_host", None)
+        if host is None:
+            return
+        from jiuwenswarm.server.runtime.gateway_adapter.session_sharing_adapter import SessionSharingAdapter
+        from jiuwenswarm.server.runtime.gateway_adapter.shared_history_adapter import SharedHistoryAdapter
+        self._adapter_registry.register(SessionSharingAdapter(
+            host.store, identity_resolver=self._resolve_trusted_identity,
+            target_resolver=host.target_resolver, compile_history=host.compile_history,
+        ))
+        self._adapter_registry.register(SharedHistoryAdapter(
+            host.store, identity_resolver=self._resolve_trusted_identity,
+        ))
+
     async def _dispatch_gateway_adapter_request(
         self,
         ws: Any,
@@ -2207,6 +2228,16 @@ class AgentWebSocketServer:
         if adapter is None:
             return False
         try:
+            host = getattr(self, "_organization_session_host", None)
+            if host is not None and request.req_method.value in {
+                "session.share.list", "session.share.create", "session.share.update", "session.share.revoke",
+            }:
+                params = request.params if isinstance(request.params, dict) else {}
+                sid = params.get("session_id")
+                identity = self._resolve_trusted_identity(request)
+                if sid and host.owner_current(sid, identity, "manage"):
+                    from jiuwenswarm.server.runtime.session.history_io import run_history_io
+                    await run_history_io(host.prepare_source, sid, identity)
             response = await adapter.handle(request)
         except Exception as exc:  # noqa: BLE001
             logger.exception(
@@ -2223,8 +2254,15 @@ class AgentWebSocketServer:
             )
         if getattr(response, "agent_ref", None) is None:
             response.agent_ref = request.agent_ref
-        wire = encode_agent_response_for_wire(response, response_id=request.request_id)
         async with send_lock:
+            guard = getattr(response, "_delivery_guard", None)
+            if callable(guard):
+                try:
+                    guard()
+                except Exception:
+                    response = AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
+                        ok=False, payload={"code": "FORBIDDEN", "error": "Session authorization changed."})
+            wire = encode_agent_response_for_wire(response, response_id=request.request_id)
             await send_wire_payload(ws, wire)
         return True
 
@@ -2295,6 +2333,11 @@ class AgentWebSocketServer:
             return await self._handle_authenticated_message(ws, json.dumps(data), send_lock)
 
     async def _handle_authenticated_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
+        from jiuwenswarm.governance.session_boundary import delivery_scope
+        with delivery_scope():
+            await self._handle_authenticated_message_impl(ws, raw, send_lock)
+
+    async def _handle_authenticated_message_impl(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
         try:
             data = json.loads(raw)
@@ -2354,6 +2397,27 @@ class AgentWebSocketServer:
                 request = e2a_to_agent_request(env)
 
         _strip_untrusted_session_message_context(request)
+
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is not None:
+            from jiuwenswarm.governance.session_boundary import admit_session_request, set_delivery_permit
+            try:
+                host = getattr(self, "_organization_session_host", None)
+                if host is None:
+                    raise PermissionError("Session authority unavailable")
+                permit = admit_session_request(
+                    request.req_method.value if request.req_method else "",
+                    request.params or {}, identity_resolver=lambda: self._resolve_trusted_identity(request),
+                    host=host, envelope_session=(request.session_id if (request.params or {}).get("session_id") else None),
+                )
+                set_delivery_permit(permit)
+            except Exception:
+                response = AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
+                    ok=False, payload={"code": "FORBIDDEN", "error": "Session authorization denied."})
+                async with send_lock:
+                    await send_wire_payload(ws, encode_agent_response_for_wire(response, response_id=request.request_id))
+                return
+
 
         logger.info(
             "[AgentWebSocketServer] 收到请求: request_id=%s channel_id=%s is_stream=%s",
@@ -11365,6 +11429,7 @@ class AgentWebSocketServer:
                 response_id=request.request_id,
             )
             async with send_lock:
+                runtime.validate_session_provision_for_delivery(prepared)
                 await send_wire_payload(ws, wire)
             response_delivered = True
 

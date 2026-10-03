@@ -33,6 +33,12 @@ class _ConfirmedFrame:
     receipt: asyncio.Future
 
 
+@dataclass
+class _AuthorizedFrame:
+    data: Any
+    guard: Any
+
+
 _delivery_receipts: ContextVar = ContextVar("gateway_delivery_receipts", default=None)
 
 
@@ -112,6 +118,13 @@ class BaseWsChannel(BaseWebChannel):
         旧 session 的延迟 chunk 不应再路由到该 ws。ws_id 映射不受影响，
         断连重连后物理寻址仍可命中。
         """
+        from jiuwenswarm.governance.organization_auth import configured_authenticator, connection_principal
+        if configured_authenticator() is not None:
+            identity = connection_principal(ws).identity()
+            if routing_key.session_id != getattr(ws, "_jiuwen_initial_sid", None):
+                from jiuwenswarm.governance.session_boundary import organization_sharing_host
+                if not organization_sharing_host().owner_current(routing_key.session_id, identity):
+                    raise PermissionError("Session subscription denied")
         async with self._lock:
             ws_key = id(ws)
             ws_id = self._id_by_ws.get(ws_key)
@@ -240,7 +253,7 @@ class BaseWsChannel(BaseWebChannel):
         # 非阻塞入队：dispatch loop 不 await IO，背压隔离在 writer 协程内。
         # frame 可为 dict（writer 统一序列化）或 str/bytes，_enqueue_send 两者皆收。
         for w in ws_set:
-            self._enqueue_send(w, frame)
+            self._enqueue_send(w, frame, session_id=msg.session_id)
 
     # ── per-ws writer：出站背压隔离 ──
 
@@ -287,13 +300,59 @@ class BaseWsChannel(BaseWebChannel):
                 if not receipt.done():
                     receipt.cancel()
 
-    def _enqueue_send(self, ws: Any, data: Any) -> None:
+    def _enqueue_send(self, ws: Any, data: Any, *, session_id: str | None = None) -> None:
         """非阻塞入队一帧到 ws 的出站队列，立即返回。
 
         ``data`` 可为 dict（由 writer 统一序列化一次，省去入队前预 dumps
         与 ``_coalesce`` 解析回 dict 的往返）、str/bytes（原样发送）或 None
         哨兵。ws 已关闭或队列缺失时静默丢弃（与旧 _safe_send 语义一致）。
         """
+        from jiuwenswarm.governance.organization_auth import configured_authenticator, connection_principal
+        if data is not None and configured_authenticator() is not None:
+            from jiuwenswarm.governance.session_boundary import admit_session_request, organization_sharing_host
+            try:
+                principal = connection_principal(ws)
+                permits = getattr(ws, "_jiuwen_session_permits", {})
+                permit = permits.get(data.get("id")) if isinstance(data, dict) else None
+                if isinstance(data, dict) and data.get("type") == "res" and data.get("ok") is False:
+                    # Failure messages from unscoped handlers never carry their
+                    # original potentially sensitive payload into a browser.
+                    data = {"type": "res", "id": data.get("id", ""), "ok": False,
+                            "error": "Request denied or unavailable.", "code": data.get("code", "FORBIDDEN"),
+                            "payload": {}}
+                    def guard():
+                        return principal.identity() is not None
+                elif permit is not None:
+                    guard = permit.revalidate
+                    if permit.method == "session.create":
+                        # The newly allocated ID comes from the host result, not
+                        # the create request. Capture its owner revision before
+                        # queuing so revocation cannot revive a buffered result.
+                        payload = data.get("payload", {})
+                        created_id = payload.get("session_id") if isinstance(payload, dict) else None
+                        created = admit_session_request(
+                            "history.get", {"session_id": created_id},
+                            identity_resolver=principal.identity, host=permit.host,
+                        )
+                        def guard():
+                            return permit.revalidate() and created.revalidate()
+                elif isinstance(data, dict) and data.get("event") == "connection.ack":
+                    data = {"type": "event", "event": "connection.ack", "payload": {
+                        "session_id": getattr(ws, "_jiuwen_initial_sid", ""), "mode": "BUILD",
+                        "tools": [], "protocol_version": "1.0"}}
+                    def guard():
+                        return principal.identity() is not None
+                elif session_id:
+                    permit = admit_session_request('history.get', {'session_id': session_id},
+                        identity_resolver=principal.identity, host=organization_sharing_host())
+                    guard = permit.revalidate
+                else:
+                    raise PermissionError("outbound Session scope unavailable")
+                if guard() is not True:
+                    raise PermissionError("outbound Session authority changed")
+                data = _AuthorizedFrame(data, guard)
+            except Exception:
+                return
         receipt = None
         current = _delivery_receipts.get()
         if current is not None and current[0] is self:
@@ -343,6 +402,10 @@ class BaseWsChannel(BaseWebChannel):
                 receipt = frame.receipt if isinstance(frame, _ConfirmedFrame) else None
                 if receipt is not None:
                     frame = frame.data
+                delivery_guard = None
+                if isinstance(frame, _AuthorizedFrame):
+                    delivery_guard = frame.guard
+                    frame = frame.data
                 # dict 帧在出口处序列化一次；str/bytes 原样发送。避免入队前
                 # 预 dumps 与 _coalesce 解析回 dict 的二次编解码往返。序列化
                 # 与 send 共用下方兜底：任一失败都只丢这一帧，不杀 writer。
@@ -361,7 +424,11 @@ class BaseWsChannel(BaseWebChannel):
                     wire = frame
                 try:
                     from jiuwenswarm.governance.organization_auth import connection_principal
-                    connection_principal(ws)  # Recheck after queue/backpressure, before delivery.
+                    principal = connection_principal(ws)  # Recheck after queue/backpressure.
+                    if principal is not None and (delivery_guard is None or delivery_guard() is not True):
+                        if receipt is not None and not receipt.done():
+                            receipt.set_result(False)
+                        continue
                     await asyncio.wait_for(ws.send(wire), timeout=10.0)
                     if receipt is not None and not receipt.done():
                         receipt.set_result(True)

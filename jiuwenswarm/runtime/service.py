@@ -391,6 +391,14 @@ class AgentRuntime:
             participant_registry=self._participant_registry,
             team_execution_controller=team_execution_controller,
         )
+        from jiuwenswarm.governance.session_boundary import organization_sharing_host
+        from jiuwenswarm.governance.session_publication import SessionOwnerPublication
+        self._organization_session_host = organization_sharing_host()
+        self._owner_publication = (SessionOwnerPublication(self._organization_session_host)
+                                   if self._organization_session_host is not None else None)
+        self._owner_provision_checks = {}
+        if self._owner_publication is not None:
+            self._session_provisioner.set_owner_lifecycle(self._owner_publication)
         self._resource_lease = resource_lease
         self._session_coordinator = session_coordinator or RuntimeSessionCoordinator()
         self.set_admission_controller(admission_controller)
@@ -561,6 +569,7 @@ class AgentRuntime:
             request_id="", session_id=normalized, channel_id=channel_id,
             req_method=ReqMethod.SESSION_DELETE,
         )
+        self._require_session_owner(normalized, request)
         project_id = self._governance_project(request, action="write")
         self._submission_guard.check_access(project_id, self._governance_identity(request), "write")
 
@@ -569,6 +578,7 @@ class AgentRuntime:
         return snapshot.generation if snapshot else None
 
     def _governance_owned_request(self, request: AgentRequest) -> AgentRequest:
+        self._require_session_owner(request.session_id, request)
         project_id = self._governance_project(request)
         identity = self._governance_identity(request)
         if project_id or identity is not None:
@@ -589,6 +599,7 @@ class AgentRuntime:
         )
 
     def _commit_governed_request(self, prepared: PreparedRequest | None, request: AgentRequest) -> None:
+        self._require_session_owner(request.session_id, request)
         if prepared is None:
             return
         if self._governance_project(request) != prepared.project_id:
@@ -600,6 +611,54 @@ class AgentRuntime:
         self._submission_guard.begin_submission(
             prepared, generation=self._governance_generation(prepared.session_id),
         )
+
+    def _publication_identity_check(self, provision_input):
+        captured = copy_context()
+        identity = self._governance_identity(provision_input)
+        def check():
+            current = captured.run(self._governance_identity, provision_input)
+            if current != identity or current is None:
+                raise GovernanceError("Session publication identity changed")
+            return current
+        return check
+
+    async def _prepare_owned_provision(self, operation, provision_input):
+        if self._owner_publication is None:
+            return await operation(provision_input)
+        check = self._publication_identity_check(provision_input)
+        with self._owner_publication.scope(check):
+            prepared = await operation(provision_input)
+            try:
+                session_id = prepared.result.session_id
+                revision = self._organization_session_host.owner_revision(session_id, check())
+            except BaseException:
+                await self._session_provisioner.abort_session_provision(prepared)
+                raise
+        def final_check():
+            identity = check()
+            if self._organization_session_host.owner_revision(session_id, identity) != revision:
+                raise GovernanceError("Session publication authority changed")
+            return identity
+        self._owner_provision_checks[prepared] = final_check
+        return prepared
+
+    def validate_session_provision_for_delivery(self, prepared):
+        """Required before success is exposed, including after send-lock waits."""
+        if self._owner_publication is None:
+            return
+        check = self._owner_provision_checks.get(prepared)
+        if check is None:
+            raise GovernanceError("Session publication owner missing")
+        check()
+        governed = self._governed_provisions.get(prepared)
+        if governed is not None:
+            self._submission_guard.revalidate(governed, generation=self._governance_generation(governed.session_id))
+
+    def _require_session_owner(self, session_id, value):
+        if self._organization_session_host is not None and not self._organization_session_host.owner_current(
+            session_id, self._governance_identity(value),
+        ):
+            raise GovernanceError("current trusted Session owner required")
 
     def _prepare_governed_provision(self, provision_input: object) -> PreparedRequest | None:
         identity = self._governance_identity(provision_input)
@@ -972,16 +1031,34 @@ class AgentRuntime:
     def get_session(self, request: SessionGetInput) -> SessionSummary | None:
         """Read one Channel-owned single-Agent Session."""
         self._require_started()
-        from jiuwenswarm.runtime.session_catalog import get_session
+        from jiuwenswarm.runtime.session_catalog import SessionGetInput, get_session
 
-        return get_session(request)
+        if self._organization_session_host is None or not isinstance(request, SessionGetInput):
+            return get_session(request)
+        from jiuwenswarm.governance.session_boundary import admit_session_request
+        permit = admit_session_request('session.get_metadata', {'session_id': request.session_id},
+            identity_resolver=lambda: self._governance_identity(request), host=self._organization_session_host)
+        result = get_session(request)
+        if not permit.revalidate():
+            raise GovernanceError("Session read authority changed")
+        return result
 
     def list_sessions(self, request: SessionListInput) -> SessionListResult:
         """List Channel-owned single-Agent Sessions after safe filtering."""
         self._require_started()
         from jiuwenswarm.runtime.session_catalog import list_sessions
 
-        return list_sessions(request)
+        if self._organization_session_host is None:
+            return list_sessions(request)
+        from jiuwenswarm.governance.session_boundary import admit_session_request, inventory_identity_scope
+        def check():
+            return self._governance_identity(request)
+        permit = admit_session_request('session.list', {}, identity_resolver=check, host=self._organization_session_host)
+        with inventory_identity_scope(check):
+            result = list_sessions(request)
+        if not permit.revalidate():
+            raise GovernanceError("Session inventory authority changed")
+        return result
 
     def get_permission_snapshot(
         self,
@@ -1076,6 +1153,8 @@ class AgentRuntime:
                     # another Channel, and never register it under the caller's
                     # in-memory ownership before this check.
                     raise SessionCatalogError("session not found", code="NOT_FOUND")
+        if self._organization_session_host is not None:
+            raise GovernanceError("organization Session creation requires prepare_session_create")
         resolved_session_id = await self._agent_manager.create_session(
             channel_id=channel_id,
             session_id=requested or None,
@@ -1102,6 +1181,7 @@ class AgentRuntime:
         if not target:
             return None
 
+        self._require_session_owner(target, SimpleNamespace(session_id=target))
         from jiuwenswarm.common.utils import get_agent_sessions_dir
         from jiuwenswarm.server.runtime.session.session_history import (
             resolve_session_dir,
@@ -1236,7 +1316,9 @@ class AgentRuntime:
         governed = None
         try:
             governed = self._prepare_governed_provision(provision_input)
-            prepared = await self._session_provisioner.prepare_session_fork(provision_input)
+            prepared = await self._prepare_owned_provision(
+                self._session_provisioner.prepare_session_fork, provision_input,
+            )
             if governed is not None:
                 self._governed_provisions[prepared] = governed
             return prepared
@@ -1262,7 +1344,9 @@ class AgentRuntime:
         governed = None
         try:
             governed = self._prepare_governed_provision(provision_input)
-            prepared = await self._session_provisioner.prepare_session_create(provision_input)
+            prepared = await self._prepare_owned_provision(
+                self._session_provisioner.prepare_session_create, provision_input,
+            )
             if governed is not None:
                 self._governed_provisions[prepared] = governed
             return prepared
@@ -1287,8 +1371,11 @@ class AgentRuntime:
         prepared: PreparedSessionProvision[SessionSwitchResult] | None = None
         governed = None
         try:
+            self._require_session_owner(provision_input.target_session_id, provision_input)
             governed = self._prepare_governed_provision(provision_input)
-            prepared = await self._session_provisioner.prepare_session_switch(provision_input)
+            prepared = await self._prepare_owned_provision(
+                self._session_provisioner.prepare_session_switch, provision_input,
+            )
             if governed is not None:
                 self._governed_provisions[prepared] = governed
             return prepared
@@ -1325,11 +1412,19 @@ class AgentRuntime:
                         exc.add_note(f"owned provision compensation failed: {failure}")
                 raise
         try:
-            result = await self._session_provisioner.commit_session_provision(
-                prepared,
-                timing=timing,
-                context=context,
-            )
+            if self._owner_publication is not None:
+                check = self._owner_provision_checks.get(prepared)
+                if check is None:
+                    raise GovernanceError("Session publication owner missing")
+                check()
+                with self._owner_publication.scope(check):
+                    result = await self._session_provisioner.commit_session_provision(
+                        prepared, timing=timing, context=context,
+                    )
+            else:
+                result = await self._session_provisioner.commit_session_provision(
+                    prepared, timing=timing, context=context,
+                )
             if governed is not None:
                 self._submission_guard.accepted(governed)
             if isinstance(result, SessionCreateResult):
@@ -1377,6 +1472,7 @@ class AgentRuntime:
             SessionProvisionState.ABORTED,
         }:
             self._pending_session_provisions.discard(prepared)
+            self._owner_provision_checks.pop(prepared, None)
 
     async def _register_session(self, *, session_id: str, channel_id: str) -> None:
         """Adopt an existing product Session into this Runtime.
@@ -3012,6 +3108,7 @@ class AgentRuntime:
             self._closed = True
             self._submission_guard.clear()
             self._governed_provisions.clear()
+            self._owner_provision_checks.clear()
             if cleanup_errors:
                 raise cleanup_errors[0]
 

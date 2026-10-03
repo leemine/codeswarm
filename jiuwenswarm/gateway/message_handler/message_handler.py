@@ -539,6 +539,12 @@ class MessageHandler(ABC):
         - params.mode is a team variant (team / code.team / team.plan), or
         - session already has subscribers (already a team session; web mode may be "agent")
         """
+        from jiuwenswarm.governance.organization_auth import configured_authenticator, current_identity
+        if configured_authenticator() is not None:
+            from jiuwenswarm.governance.session_boundary import organization_sharing_host, OWNER_METHODS
+            method = getattr(getattr(msg, "req_method", None), "value", "")
+            if method not in OWNER_METHODS or not organization_sharing_host().owner_current(msg.session_id, current_identity()):
+                return
         if not msg.session_id:
             return
         req_method = str(getattr(getattr(msg, "req_method", None), "value", "") or "")
