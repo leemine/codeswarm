@@ -347,3 +347,50 @@ def test_exhausted_epoch_cannot_wrap_or_reactivate_old_grants(setup):
     with pytest.raises(SessionSharingDenied):
         host.invalidate_source('session', expected_epoch=(1 << 64) - 1)
     assert host.source_epoch('session') == (1 << 64) - 1
+
+
+def test_owner_revision_needs_no_history_and_never_writes(setup, monkeypatch):
+    host, access, pid, session, _, _, _ = setup
+    empty = session.parent / 'empty'
+    empty.mkdir()
+    (empty / 'metadata.json').write_text(json.dumps({'project_id': pid}))
+    host.register_owner_and_source('empty', ALICE, pid)
+    assert access._load()['session_sharing']['owners']['empty']['source']['history'] is None
+    before = copy.deepcopy(access._load())
+    monkeypatch.setattr(access, '_save', lambda *_: pytest.fail('revision lookup wrote sidecar'))
+    monkeypatch.setattr(sharing_host, 'compile_shared_history_range', lambda *a, **kw: pytest.fail('history access'))
+    revision = host.owner_revision('empty', ALICE)
+    assert type(revision) is int and revision > 0
+    assert host.owner_revision('empty', ALICE) == revision
+    assert not (empty / 'history.jsonl').exists()
+    assert access._load() == before
+
+
+def test_owner_revision_changes_after_acl_revoke_restore(setup):
+    host, access, pid, _, _, _, _ = setup
+    old = host.owner_revision('session', ALICE)
+    access.replace_acl(pid, 'admin', acl={}, expected_revision=2)
+    with pytest.raises(SessionSharingDenied):
+        host.owner_revision('session', ALICE)
+    access.replace_acl(pid, 'admin', acl={'alice': ['read', 'admin']}, expected_revision=3)
+    assert host.source_epoch('session') == 1
+    assert host.owner_revision('session', ALICE) > old
+    assert host.owner_revision('session', ALICE) == host.resolve_source('session').revision
+
+
+@pytest.mark.parametrize('actor', [None, BOB, replace(ALICE, authority='other'),
+                                  replace(ALICE, subject_id='other')])
+def test_owner_revision_rejects_unknown_or_wrong_identity(setup, actor):
+    host, _, _, _, _, _, _ = setup
+    with pytest.raises(SessionSharingDenied):
+        host.owner_revision('session', actor)
+
+
+def test_owner_revision_rejects_invalidated_source_then_advances(setup):
+    host, _, pid, _, _, _, _ = setup
+    old = host.owner_revision('session', ALICE)
+    epoch = host.invalidate_source('session', expected_epoch=1)
+    with pytest.raises(SessionSharingDenied):
+        host.owner_revision('session', ALICE)
+    host.activate_source('session', pid, expected_epoch=epoch)
+    assert host.owner_revision('session', ALICE) > old

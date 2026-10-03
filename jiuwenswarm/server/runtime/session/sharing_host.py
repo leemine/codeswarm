@@ -154,6 +154,20 @@ class SharingHostService:
         except Exception:
             return False
 
+    def owner_revision(self, session_id: str, identity: TrustedIdentity) -> int:
+        """Pin current owner authority, including ACL/lifecycle changes.
+
+        Unlike ``resolve_source``, this does not require or inspect a history
+        file/range. A host may use it immediately after metadata publication.
+        It never registers unknown owners or refreshes persistent source state.
+        Errors deny admission; callers must not substitute a default revision.
+        """
+        with self._storage._locked():
+            _, owner, source, facts = self._current(self._storage._load(), session_id)
+            if not isinstance(identity, TrustedIdentity) or identity != owner or 'view' not in facts[0]:
+                raise SessionSharingDenied('current Session owner required')
+            return _revision(source['epoch'], *facts[1:])
+
     def register_owner_and_source(self, session_id: str, owner: TrustedIdentity, project_id: str, *,
                                   expected_owner_revision: int = 0) -> int:
         """Host-only prepublish registration; one sidecar save and no history IO.
