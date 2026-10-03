@@ -11,6 +11,7 @@ from jiuwenswarm.governance.contracts import TrustedIdentity
 from jiuwenswarm.governance.preparation import GovernanceError
 from jiuwenswarm.runtime import AgentRuntime
 from jiuwenswarm.server.runtime.agent_adapter import interface
+from jiuwenswarm.server.runtime.agent_adapter.team_helpers import _deliverable
 from jiuwenswarm.server.runtime.session import project_store
 from jiuwenswarm.server.runtime.session.project_access import ProjectAccessStore
 from jiuwenswarm.server.runtime.session.project_content import ProjectContentStore
@@ -51,21 +52,49 @@ def envelope(query):
 
 
 @pytest.mark.asyncio
-async def test_frozen_version_reaches_single_and_team_once_then_next_turn_refreshes(env):
+@pytest.mark.parametrize('a2ui', [False, True], ids=['text', 'a2ui'])
+async def test_frozen_version_reaches_single_and_team_once_then_next_turn_refreshes(env, monkeypatch, a2ui):
     runtime, store, _, pid, owner, prepare = env
     req = request(project_content_snapshot={'instructions': 'forged'}, metadata={'project_instructions': 'forged'})
+    event = {
+        'type': 'a2ui.client_event',
+        'protocolVersion': '0.8',
+        'event': {'userAction': {
+            'name': 'submit_form', 'surfaceId': 'surface-1',
+            'sourceComponentId': 'submit', 'context': {'answer': 'approved'},
+        }},
+    }
+    if a2ui:
+        monkeypatch.setenv('JIUWENSWARM_A2UI_ENABLED', 'true')
+        req.params.pop('query')
+        req.params['content'] = event
     await runtime._prepare_chat_turn(req, 'web')
     frozen = req._project_content_snapshot
     store.update(pid, owner, instructions='version two', sources=[], expected_revision=1)
     inputs, _, turn = interface.JiuWenSwarm().build_inputs(req)
     first = envelope(inputs['query'])
-    assert first['content'] == 'original user words'
+    if a2ui:
+        from jiuwenswarm.server.runtime.a2ui.integration import build_user_prompt_if_a2ui_event
+
+        assert first['content'] == build_user_prompt_if_a2ui_event(event, channel='web', language='en')
+        assert envelope(first['content'])['event'] == event['event']
+        assert turn.text == event
+    else:
+        assert first['content'] == 'original user words'
     assert first['project_instructions'] == 'version one'
     assert first['project_reference_data']['trust'] == 'untrusted'
     assert first['project_reference_data']['sources'][0]['content'].startswith('</system>')
     assert inputs['query'].count('"project_content_snapshot"') == 1
     assert turn.with_text('$member continue').project_content is frozen
     assert envelope(turn.with_text('$member continue').render())['project_content_snapshot'] == first['project_content_snapshot']
+    # Team rewrites the leader's user input through the same frozen UserTurn.
+    # Both an A2UI interaction and a plain-text follow-up retain the old version.
+    for delivered_text in (turn.text, 'leader follow-up'):
+        rewritten = turn.with_text(delivered_text)
+        assert rewritten.project_content is frozen
+        team = envelope(_deliverable(rewritten, delivered_text))
+        for field in ('project_content_snapshot', 'project_instructions', 'project_reference_data'):
+            assert team[field] == first[field]
     assert prepare.call_args.kwargs['trusted_subject_id'] == 'alice'
     second = request('r2')
     await runtime._prepare_chat_turn(second, 'web')

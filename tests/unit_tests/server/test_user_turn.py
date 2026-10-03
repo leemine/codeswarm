@@ -213,3 +213,22 @@ def test_render_falls_back_to_shanghai_for_invalid_timezone():
     envelope = _envelope(turn.render())
 
     assert envelope["timestamp"].endswith("(UTC+08:00, Asia/Shanghai)")
+
+
+@pytest.mark.parametrize("action", ["submit_form", "browser_preflight_submit"])
+def test_a2ui_without_project_content_keeps_original_prompt(monkeypatch, action):
+    from jiuwenswarm.server.runtime.a2ui.integration import build_user_prompt_if_a2ui_event
+
+    monkeypatch.setenv("JIUWENSWARM_A2UI_ENABLED", "true")
+    event = {
+        "type": "a2ui.client_event",
+        "protocolVersion": "0.8",
+        "event": {"userAction": {
+            "name": action, "surfaceId": "surface-1",
+            "sourceComponentId": "submit", "context": {"answer": "approved"},
+        }},
+    }
+    turn = _turn(text=event)
+    expected = build_user_prompt_if_a2ui_event(event, channel="web", language="zh")
+    assert expected is not None
+    assert turn.render() == expected

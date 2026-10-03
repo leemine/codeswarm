@@ -90,8 +90,9 @@ class UserTurn:
         """Render this turn into the prompt an agent receives.
 
         Returns:
-            The JSON envelope for ordinary text, the A2UI prompt for a client
-            event, or the value unchanged when it is not renderable text (an
+            The JSON envelope for ordinary text and project-backed A2UI events,
+            the original A2UI prompt when no project snapshot is attached, or
+            the value unchanged when it is not renderable text (an
             ``InteractiveInput`` resume carries its own structure).
         """
         from jiuwenswarm.server.runtime.a2ui.integration import build_user_prompt_if_a2ui_event
@@ -101,7 +102,7 @@ class UserTurn:
             channel=self.channel,
             language=self.language,
         )
-        if a2ui_prompt is not None:
+        if a2ui_prompt is not None and self.project_content is None:
             return a2ui_prompt
 
         if not isinstance(self.text, (str, dict)):
@@ -109,10 +110,13 @@ class UserTurn:
             # own payload and must reach the agent untouched.
             return self.text
 
-        content = self.text
+        # Preserve the specialized A2UI instructions while carrying the same
+        # frozen project context as every other renderable Turn. References
+        # remain structured, untrusted data in the outer user envelope.
+        content = a2ui_prompt if a2ui_prompt is not None else self.text
         origin_kind = self.origin_kind
         prompt_channel = self._prompt_channel()
-        if isinstance(content, str) and prompt_channel != "agent_session":
+        if a2ui_prompt is None and isinstance(content, str) and prompt_channel != "agent_session":
             # /statusline <prompt> is a prompt-type command (mirrors Claude Code);
             # it never goes through /skills. The rewritten content instructs
             # the parent to invoke the dedicated built-in subagent.
