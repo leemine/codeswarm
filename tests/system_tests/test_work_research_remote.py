@@ -93,14 +93,74 @@ def _check_evidence(root: Path, report: str) -> dict:
         report,
         re.I,
     ), "Untested evidence was converted into independence"
-    assert not re.search(
+    _check_absent_dependency_claims(findings)
+    _check_local_index_locator(report)
+    return ledger
+
+
+def _check_absent_dependency_claims(findings: str) -> None:
+    """Reject assertions of absence, preserving an explicitly negated that-clause."""
+    for claim in re.finditer(
         r"(?:untested (?:network )?requirement|network (?:requirement|dependency))"
         r"\s+(?:is|remains|was|means)\s+(?:absent|not required|zero)\b",
         findings,
         re.I,
-    ), "Untested evidence was converted into an absent dependency"
-    _check_local_index_locator(report)
-    return ledger
+    ):
+        # Only the immediately governing negation qualifies. A negation in an
+        # earlier sentence/clause cannot excuse a later assertion of absence.
+        negated = re.search(
+            r"\bnot\s+(?:(?:evidence|proof)\s+)?that\s+(?:(?:a|the)\s+)?$",
+            findings[:claim.start()],
+            re.I,
+        )
+        assert negated, "Untested evidence was converted into an absent dependency"
+
+
+def _source_citation_ranges(text: str, source: str) -> list[tuple[int, int]]:
+    return [
+        (int(match[1]), int(match[2] or match[1]))
+        for match in re.finditer(
+            re.escape(source)
+            + r"`?\s*(?:[:,]\s*L?\s*|L\s*|lines?\s+)(\d+)"
+            r"(?:\s*[-–]\s*L?(\d+))?\b",
+            text,
+            re.I,
+        )
+    ]
+
+
+def _check_report_citation_coverage(root: Path, report: str) -> None:
+    """Check dates and whole-source omissions against this canary's source ranges."""
+    findings = report.split("## Sources", 1)[0]
+    sources = {
+        name: (root / name).read_text().splitlines()
+        for name in ("source-a.md", "source-b.md")
+    }
+    for source, lines in sources.items():
+        for line_number, line in enumerate(lines, 1):
+            for date in re.findall(r"\b\d{4}-\d{2}-\d{2}\b", line):
+                # A complete sentence may combine two dated facts with separate
+                # references; never borrow a reference from a later sentence.
+                for sentence in re.split(r"(?<=[.!?])\s+|\n\s*\n", findings):
+                    if date in sentence:
+                        assert any(
+                            first <= line_number <= last <= len(lines)
+                            for first, last in _source_citation_ranges(sentence, source)
+                        ), f"Date {date} lacks its adjacent {source} citation"
+    limitations = findings.split("## Limitations", 1)[-1]
+    omission = re.compile(
+        r"\b(?:do(?:es)? not|don't|doesn't)\s+(?:report|describe|specify)\b"
+        r"|\b(?:no|neither)\b[^.!?\n]*\breport(?:s|ed)?\b"
+        r"|\bnot\s+(?:been\s+)?reported\b",
+        re.I,
+    )
+    for paragraph in re.split(r"\n\s*\n", limitations):
+        if not omission.search(paragraph):
+            continue
+        for source, lines in sources.items():
+            assert (1, len(lines)) in _source_citation_ranges(paragraph, source), (
+                f"Whole-source omission lacks inspected full range for {source}"
+            )
 
 
 def _check_local_index_locator(report: str) -> None:
@@ -291,6 +351,7 @@ class _ResearchTrace:
 def _check_report(root: Path):
     report = (root / "research-report.md").read_text()
     _check_evidence(root, report)
+    _check_report_citation_coverage(root, report)
     for fragment in ("42", "31", "source-a.md", "source-b.md"):
         assert fragment in report, f"Missing evidence {fragment}"
     assert any(

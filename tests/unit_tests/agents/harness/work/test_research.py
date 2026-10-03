@@ -57,27 +57,42 @@ def test_explicit_native_overrides_are_preserved():
         ("code", False),
         ("agent.code.normal", False),
         ("agent.code.plan", False),
-        ("team", False),
-        ("unknown", False),
     ],
 )
-async def test_external_adapter_freezes_work_research_at_construction(mode, enabled):
-    from types import SimpleNamespace
+async def test_external_adapter_freezes_work_research_at_construction(tmp_path, mode, enabled):
+    from jiuwenswarm.runtime.harness.surface import SurfaceAdmissionError
     from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import (
         EngineAgentAdapter,
     )
+    from tests.unit_tests.runtime.harness.test_external_execution_route import _route
 
-    route = SimpleNamespace(
-        provider_id="codex",
-        bound=SimpleNamespace(binding=SimpleNamespace(host_session_id="parent")),
-    )
-    adapter = EngineAgentAdapter(route)
-    with patch.object(adapter, "_build_session", return_value=object()):
+    adapter = EngineAgentAdapter(_route(tmp_path))
+    with patch.object(adapter, "_build_session", return_value=object()) as build:
         await adapter.create_instance(mode=mode)
         assert adapter._work_research_enabled is enabled
+        # Repeated construction and a different product Surface both fail before
+        # another Provider is allocated or the admitted research flag changes.
         with pytest.raises(RuntimeError, match="already exists"):
-            await adapter.create_instance(mode="agent.code.normal")
+            await adapter.create_instance(mode=mode)
+        with pytest.raises(SurfaceAdmissionError):
+            await adapter.create_instance(mode="agent.code.normal" if enabled else "agent.work.normal")
         assert adapter._work_research_enabled is enabled
+        build.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["team", "unknown"])
+async def test_single_external_adapter_rejects_non_single_surface_before_allocation(tmp_path, mode):
+    from jiuwenswarm.runtime.harness.surface import SurfaceAdmissionError
+    from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import EngineAgentAdapter
+    from tests.unit_tests.runtime.harness.test_external_execution_route import _route
+
+    adapter = EngineAgentAdapter(_route(tmp_path))
+    with patch.object(adapter, "_build_session") as build:
+        with pytest.raises(SurfaceAdmissionError):
+            await adapter.create_instance(mode=mode)
+        build.assert_not_called()
+    assert adapter._work_research_enabled is False
 
 
 def test_two_native_research_children_do_not_share_mutable_rails(tmp_path):
