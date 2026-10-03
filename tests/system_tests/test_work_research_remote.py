@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -349,6 +350,94 @@ def _write_sources(root: Path) -> None:
     )
 
 
+
+def _read_content_hash(content):
+    # ReadFileTool and CLI cat -n discard a final newline. Preserve all other
+    # whitespace, blank lines, Markdown and source locator differences.
+    return hashlib.sha256("\n".join(content.splitlines()).encode()).hexdigest()
+
+
+def _parent_read_blocks(result):
+    """Decode only public read-result envelopes, never arbitrary object reprs.
+
+    The returned paths are completed-read metadata (when available). Numbered
+    lines are unwrapped only as a complete sequential run, not with a blanket
+    regex that could erase real text differences. A shell command may return
+    several cat -n runs; each remains a separate candidate content block.
+    """
+    if getattr(result, "success", True) is False:
+        return []
+    if hasattr(result, "data"):
+        result = result.data
+    if isinstance(result, dict):
+        if result.get("success") is False or result.get("isError") is True:
+            return []
+        path = result.get("file_path", result.get("path"))
+        for key in ("data", "content", "text", "output", "result"):
+            if key in result:
+                return [(path or nested_path, text) for nested_path, text
+                        in _parent_read_blocks(result[key])]
+        return []
+    if isinstance(result, list):
+        return [block for part in result for block in _parent_read_blocks(part)]
+    if not isinstance(result, str):
+        return []
+    path = None
+    numbered = "cat"
+    match = re.fullmatch(
+        r"<path>([^\n]+)</path>\n(?:<type>file</type>\n)?<content>(.*)</content>\s*",
+        result, re.S,
+    )
+    if match:
+        path, result = match.groups()
+        result = result.removeprefix("\n")
+        result = re.sub(r"\n\n\(End of file - total \d+ lines\)\n?$", "", result)
+        numbered = "opencode"
+    elif result.startswith(("Chunk ID:", "Wall time:")) and "\nOutput:\n" in result:
+        result = result.split("\nOutput:\n", 1)[1]
+    lines = result.splitlines()
+    pattern = r"(\d+): (.*)" if numbered == "opencode" else r"[ ]*(\d+)\t(.*)"
+    parsed = [re.fullmatch(pattern, line) for line in lines]
+    if parsed and all(parsed):
+        if [int(item[1]) for item in parsed] == list(range(1, len(parsed) + 1)):
+            return [(path, "\n".join(item[2] for item in parsed))]
+        return []  # A partial/duplicated/reordered numbered read is not complete.
+    if any(parsed):
+        # Support actual shell multi-file cat -n readbacks without including
+        # command headers or the next file in this report's digest.
+        blocks, run = [], []
+        for item in [*parsed, None]:
+            if item and int(item[1]) == len(run) + 1:
+                run.append(item[2])
+                continue
+            if run:
+                blocks.append((path, "\n".join(run)))
+                run = []
+            if item and int(item[1]) == 1:
+                run = [item[2]]
+        return blocks
+    return [(path, "\n".join(lines))]
+
+
+def _parent_read_argument_paths(arguments):
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            return set()
+    if not isinstance(arguments, dict):
+        return set()
+    paths = {arguments[key] for key in ("file_path", "filePath", "path")
+             if isinstance(arguments.get(key), str)}
+    command = arguments.get("cmd", arguments.get("command"))
+    if isinstance(command, str):
+        try:
+            paths.update(shlex.split(command))
+        except ValueError:
+            pass
+    return paths
+
+
 class _ResearchTrace:
     """Test-only observations: no source text, arguments, env or credentials."""
 
@@ -363,6 +452,7 @@ class _ResearchTrace:
         self.model_request_contracts = []
         self.parent_source_reads = set()
         self.parent_report_reads = []
+        self.parent_report_read_hashes = []
         self.parent_revision_count = 0
         self.parent_final_text = ""
         self.spawned_child_ids = set()
@@ -427,21 +517,25 @@ class _ResearchTrace:
         name = tool.rsplit(".", 1)[-1].lower()
         if name not in {"read_file", "read", "exec_command", "bash", "shell"}:
             return
-        args = json.dumps(arguments, default=str)
-        output = json.dumps(result, default=str)
-        def read_path(name):
-            # A completed OpenCode read includes its actual path even if the
-            # earlier projected STARTED event still had empty arguments.
-            return name in args or f"<path>{self.root / name}</path>" in output
-        for source in ("source-a.md", "source-b.md"):
-            original = (self.root / source).read_text().splitlines()
-            if read_path(source) and all(line in output for line in original[2:]):
-                self.parent_source_reads.add(source)
-                self.mark("parent_source_read", source=source, tool=tool)
-        if read_path("research-report.md") and "## Sources" in output:
-            elapsed = round(time.monotonic() - self.started, 3)
-            self.parent_report_reads.append(elapsed)
-            self.mark("parent_report_read", tool=tool)
+        paths = _parent_read_argument_paths(arguments)
+        for observed_path, content in _parent_read_blocks(result):
+            def read_path(filename):
+                target = self.root / filename
+                if observed_path is not None:
+                    return Path(observed_path) in {target, Path(filename)}
+                return bool(paths & {filename, str(target)})
+
+            for source in ("source-a.md", "source-b.md"):
+                original = (self.root / source).read_text()
+                if read_path(source) and _read_content_hash(content) == _read_content_hash(original):
+                    self.parent_source_reads.add(source)
+                    self.mark("parent_source_read", source=source, tool=tool)
+            if read_path("research-report.md") and "## Sources" in content:
+                elapsed = round(time.monotonic() - self.started, 3)
+                digest = _read_content_hash(content)
+                self.parent_report_reads.append(elapsed)
+                self.parent_report_read_hashes.append({"seconds": elapsed, "sha256": digest})
+                self.mark("parent_report_read", tool=tool, content_sha256=digest)
 
     def mark(self, stage: str, **details):
         self.events.append(
@@ -500,6 +594,7 @@ class _ResearchTrace:
                     "child_providers": self.child_providers,
                     "parent_source_reads": sorted(self.parent_source_reads),
                     "parent_report_reads": self.parent_report_reads,
+                    "parent_report_read_hashes": self.parent_report_read_hashes,
                     "parent_revision_count": self.parent_revision_count,
                     "spawned_child_ids": sorted(self.spawned_child_ids),
                     "parent_revision_targets": self.parent_revision_targets,
@@ -618,8 +713,10 @@ def _check_parent_acceptance(trace):
         "Parent did not independently read both original source files"
     )
     last_review = max(e["seconds"] for e in trace.events if e["stage"] == "research_review")
-    assert trace.parent_report_reads and trace.parent_report_reads[-1] >= last_review, (
-        "Parent did not read the final reviewed report"
+    final_hash = _read_content_hash((trace.root / "research-report.md").read_text())
+    assert any(read["seconds"] >= last_review and read["sha256"] == final_hash
+               for read in trace.parent_report_read_hashes), (
+        "Parent did not read the final reviewed report content"
     )
     final = trace.reviews[-1]
     saved = json.loads((trace.root / "research-review-input.json").read_text())
