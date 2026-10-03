@@ -18,6 +18,7 @@ import re
 import secrets
 from typing import TYPE_CHECKING, Any
 
+from jiuwenswarm.governance.model_consumer import runtime_model_kwargs
 from jiuwenswarm.common.config import _parse_custom_headers
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.gateway.routing.interaction_context import PendingInteraction
@@ -126,7 +127,14 @@ class IMOutboundPipeline:
                     model_name=model_name,
                 )
             )
-            self._llm = Model(model_client_config=client_config, model_config=model_config)
+            self._llm = Model(**runtime_model_kwargs(
+                model_client_config=client_config,
+                model_config=model_config,
+                binding_config={
+                    **mcc_raw,
+                    "model_name": react.get("model_name") or mcc_raw.get("model_name"),
+                },
+            ))
             self._llm_model_name = model_name
             logger.info(
                 "[IMOutboundPipeline] LLM 初始化完成: model=%s provider=%s api_base=%s",

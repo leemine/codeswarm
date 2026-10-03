@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from jiuwenswarm.governance.model_consumer import runtime_model_kwargs
 from jiuwenswarm.common.mode_matrix import (
     NEW_AGENT_WORK_NORMAL,
     NEW_AGENT_WORK_PLAN,
@@ -410,10 +411,11 @@ class Sweeper:
         mcc = entry.get("model_client_config", {})
         model_name = mcc.get("model_name", "")
         mcc_fields = {k: v for k, v in mcc.items() if k != "model_name"}
-        model = Model(
+        model = Model(**runtime_model_kwargs(
             model_client_config=ModelClientConfig(**mcc_fields),
             model_config=ModelRequestConfig(model=model_name, temperature=0.3),
-        )
+            binding_config=mcc
+        ))
 
         key = (self._mode, self._language)
         prompt_template = self._prompt_map.get(key, _PROMPT_CODE)

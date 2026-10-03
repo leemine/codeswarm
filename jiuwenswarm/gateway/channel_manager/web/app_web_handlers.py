@@ -45,6 +45,7 @@ from openjiuwen.extensions.external_provider.openai_auth.openai_account_models i
     OpenAIAccountModelListError,
 )
 
+from jiuwenswarm.governance.model_consumer import runtime_model_kwargs
 from jiuwenswarm.common.auth.model_catalog import is_login_model
 from jiuwenswarm.common.config import (
     DEFAULT_SWARMFLOW_ENABLED,
@@ -3982,7 +3983,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "[config.validate_model] skip budget floor from reasoning plan",
                 exc_info=True,
             )
-        llm = Model(model_config=model_request_config, model_client_config=model_client_config)
+        llm = Model(**runtime_model_kwargs(model_config=model_request_config, model_client_config=model_client_config))
 
         try:
             await probe_model_connection(

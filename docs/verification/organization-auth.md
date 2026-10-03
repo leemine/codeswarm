@@ -49,3 +49,34 @@ Base swarm SHA: `1eefab4163ce280f622cde0b30f7c5cf5c00da57`. Python 3.13.15 is `/
 Earlier attempts: sandbox Starlette TestClient blocked and was interrupted; a no-coverage async-only retry passed. The first host adjacent-suite run used global `JIUWENSWARM_CONFIG_URL=off`, which made two existing campaign-state tests observe `off` instead of their mocked campaign state (61 passed, 2 failed). Replacing that test-process configuration with a loopback URL allowed their mocked configuration to operate; subsequent expanded suite passed. No product behavior or test expectation was weakened. The first frontend invocation lacked the dependency symlink and failed `tsc: not found`; after reusing the installed dependencies, full build passed. An initial Ruff command used the frontend working directory with repository-relative paths and failed file lookup; the repository-root command passed.
 
 Not yet run for this slice: interactive browser visual QA, two-browser project sharing story, real Provider execution acceptance, stable CI, clean locked-source installation, Team acceptance. These remain integration gates; authentication component tests do not close R2-B2.
+
+
+## Auxiliary Native model factories
+
+Auxiliary chat models now use the same `runtime_model_kwargs` host boundary as
+primary model construction. This covers evolution helpers, Symphony, hook prompt
+review, memory extraction, proactive recommendations, wiki models and the IM
+inbound/outbound LLM helpers. Catalog credential reference and explicit encoding
+are retained separately from typed client settings; typed API keys are replaced
+by the authority placeholder in organization mode. Construction does not grant
+background/service permission. Every invocation still needs the current Native
+request's exact-owner authority, and a model shared between calls must bind each
+call independently. IM environment endpoint fallback cannot become host binding
+metadata. Existing optional-helper error/fallback behavior is retained.
+
+The existing image consumers (including raw OpenAI/Gemini SDK calls), KVC fallback
+model factory, environment-only AutoHarness model fallback, and Web/TUI connection
+probes have no scoped transport/catalog binding in this slice. They refuse
+organization-mode model work before model construction or SDK I/O. This does not
+add image/KVC/service credential authority. Legacy single-user constructor kwargs,
+model imports used by extensions/tests, and optional request-config omission are
+preserved. Symphony reconstructed only from a typed Model may lack raw credential
+metadata and is therefore not a supported governed reconstruction route.
+
+Local tests replace Model at the constructor boundary for new governance cases;
+these prove propagation, missing-metadata denial, per-call authority selection and
+unsupported-entry rejection, not actual HTTP credential isolation. Nearby legacy
+behavior tests exercise the existing installed core. Team materialization, core
+retry/HTTP consumption, exact-owner Runtime integration, clean locked-source CI,
+and real Single/Team Provider acceptance remain separate integration gates. This
+slice does not close R1-13C or R2-B by itself.
