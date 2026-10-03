@@ -4687,6 +4687,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             is_legacy_shared_directory_client(real_client)
             and not getattr(real_client, "server_ready", True)
         ):
+            from jiuwenswarm.gateway.routing.e2a_proxy import organization_local_fallback_denial
+
+            denied = organization_local_fallback_denial()
+            if denied is not None:
+                await channel.send_response(ws, req_id, ok=False, error=denied["error"], code=denied["code"])
+                return
             from jiuwenswarm.server.runtime.gateway_adapter.base import parse_int_param
             from jiuwenswarm.server.runtime.session.session_info import to_session_info
             from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata
@@ -4849,6 +4855,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             is_legacy_shared_directory_client(real_client)
             and not getattr(real_client, "server_ready", True)
         ):
+            from jiuwenswarm.gateway.routing.e2a_proxy import organization_local_fallback_denial
+
+            denied = organization_local_fallback_denial()
+            if denied is not None:
+                await channel.send_response(ws, req_id, ok=False, error=denied["error"], code=denied["code"])
+                return
             from jiuwenswarm.server.runtime.session.session_rename import apply_session_rename
 
             ok, payload, error, code = apply_session_rename(
@@ -4892,6 +4904,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             is_legacy_shared_directory_client(real_client)
             and not getattr(real_client, "server_ready", True)
         ):
+            from jiuwenswarm.gateway.routing.e2a_proxy import organization_local_fallback_denial
+
+            denied = organization_local_fallback_denial()
+            if denied is not None:
+                await channel.send_response(ws, req_id, ok=False, error=denied["error"], code=denied["code"])
+                return
             raw_params = params if isinstance(params, dict) else {}
             sid = raw_params.get("session_id")
             pinned = raw_params.get("pinned")

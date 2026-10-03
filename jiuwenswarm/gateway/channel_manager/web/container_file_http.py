@@ -490,6 +490,15 @@ def attach_container_file_routes(app: FastAPI, channel: WebChannel) -> None:
     async def _file_api_access_log(request: Request, call_next):  # type: ignore[no-untyped-def]
         if not str(request.url.path or "").startswith(prefix):
             return await call_next(request)
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is not None:
+            # IAM/user_id and sealed-file tokens do not prove organization
+            # Session ownership, independent download action or history scope.
+            return JSONResponse(
+                {"error": "Organization Session authority is required for file access",
+                 "code": "ORGANIZATION_AUTHORITY_REQUIRED"},
+                status_code=403, headers={"Cache-Control": "no-store"},
+            )
         started = time.monotonic()
         denied = await _authenticate_file_api(request)
         if denied is not None:
