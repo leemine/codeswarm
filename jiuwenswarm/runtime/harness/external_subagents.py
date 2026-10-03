@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -61,6 +61,39 @@ PRODUCT_SUBAGENT_TOOL_NAMES = (
     "subagent_close",
     "subagent_resume",
 )
+
+
+class _ResearchWaitTool:
+    """Return periodic snapshots before the External tool transport deadline."""
+
+    _MAX_WAIT_MS = 45_000
+
+    def __init__(self, tool: ProductTool) -> None:
+        self._tool = tool
+        self.card = tool.card.model_copy(deep=True)
+        explanation = (
+            "Each call waits at most 45000 ms; omitted or larger timeouts return "
+            "an earlier snapshot. A running result keeps the same child active; "
+            "wait again within the overall task budget."
+        )
+        self.card.description = "Wait for selected subagents and return their statuses and results. " + explanation
+        timeout = self.card.input_params["properties"]["timeout_ms"]
+        # MCP validates this schema before invoke: a JSON Schema maximum would
+        # reject oversized requests before they can become early snapshots.
+        timeout["default"] = self._MAX_WAIT_MS
+        timeout["description"] = explanation
+
+    async def invoke(self, inputs, **kwargs):
+        if isinstance(inputs, Mapping):
+            inputs = dict(inputs)
+            if "timeout_ms" not in inputs:
+                inputs["timeout_ms"] = self._MAX_WAIT_MS
+            elif type(inputs["timeout_ms"]) is int and inputs["timeout_ms"] > self._MAX_WAIT_MS:
+                inputs["timeout_ms"] = self._MAX_WAIT_MS
+        return await self._tool.invoke(inputs, **kwargs)
+
+    def render_for_llm(self, output):
+        return self._tool.render_for_llm(output)
 
 
 def _product_tool_name(tool: ProductTool) -> str:
@@ -218,6 +251,11 @@ class ExternalSubagentRuntime:
         )
         if tuple(_product_tool_name(tool) for tool in tools) != PRODUCT_SUBAGENT_TOOL_NAMES:
             raise RuntimeError("product subagent tool namespace changed")
+        if work_mode == "work" or (work_mode is None and work_research_enabled):
+            tools = [
+                _ResearchWaitTool(tool) if _product_tool_name(tool) == "subagent_wait" else tool
+                for tool in tools
+            ]
         self._gateway = ProductToolGateway(
             [*tools, *additional_tools],
             scope=ProductToolScope(
