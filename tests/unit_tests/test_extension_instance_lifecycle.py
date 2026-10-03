@@ -81,6 +81,59 @@ async def test_instances_keep_configuration_capabilities_and_callbacks_separate(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("remove_all", [False, True])
+async def test_failed_load_cannot_unregister_published_policy(
+    monkeypatch, tmp_path, cancel, remove_all,
+):
+    reg = registry()
+    calls = []
+
+    async def borrowed():
+        calls.append("borrowed")
+
+    reg.register("event", borrowed)
+
+    async def failing(active):
+        with pytest.raises(RuntimeError, match="published callbacks"):
+            active.unregister("event", None if remove_all else borrowed)
+        if cancel:
+            raise asyncio.CancelledError()
+        raise ValueError("initialization failed")
+
+    loader = module_loader(monkeypatch, reg, failing)
+    await reg.trigger("event")
+    with pytest.raises(asyncio.CancelledError if cancel else ValueError):
+        await loader.load_extension(tmp_path, manifest={})
+    await reg.trigger("event")
+    assert calls == ["borrowed", "borrowed"]
+
+
+@pytest.mark.asyncio
+async def test_load_can_remove_own_staged_callback_without_removing_borrowed(
+    monkeypatch, tmp_path,
+):
+    reg = registry()
+    calls = []
+
+    async def callback():
+        calls.append("event")
+
+    reg.register("event", callback)
+
+    async def register(active):
+        active.register("event", callback)
+        active.unregister("event", callback)
+
+    loader = module_loader(monkeypatch, reg, register)
+    await loader.load_extension(tmp_path, manifest={})
+    await reg.trigger("event")
+    await loader.shutdown_loaded()
+    await reg.trigger("event")
+    assert calls == ["event", "event"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
 async def test_partial_registration_is_invisible_and_rolled_back(
     monkeypatch, tmp_path, cancel
 ):
@@ -483,3 +536,175 @@ def test_conflicting_manager_config_is_rejected(tmp_path):
         ExtensionManager(
             registry({"policy": "alice"}), config={"policy": "bob"}, root_dir=tmp_path
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other_loader", [False, True])
+async def test_close_rejects_inflight_load_without_consuming_manager_ownership(
+    monkeypatch, tmp_path, other_loader
+):
+    reg, closed = registry(), []
+    mgr = ExtensionManager(reg, config={}, root_dir=tmp_path)
+    owned = Resource("owned", closed)
+
+    async def first(active):
+        active.register_capability("policy", owned)
+        return [owned]
+
+    monkeypatch.setattr(mgr.loader, "_import_module", lambda root: SimpleNamespace(register_extensions=first))
+    await mgr.loader.load_extension(tmp_path, manifest={})
+    mgr._loaded_extensions.append(owned)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def pending(active):
+        entered.set()
+        await release.wait()
+
+    loader = ExtensionLoader(reg) if other_loader else mgr.loader
+    monkeypatch.setattr(loader, "_import_module", lambda root: SimpleNamespace(register_extensions=pending))
+    task = asyncio.create_task(loader.load_extension(tmp_path, manifest={}))
+    await entered.wait()
+    try:
+        with pytest.raises(RuntimeError, match="lifecycle operation"):
+            await mgr.shutdown_all_extensions()
+        assert mgr._loaded_extensions == [owned]
+        assert len(mgr.loader._loads) == 1
+        assert reg.get_capability("policy") is owned
+        assert not closed
+    finally:
+        release.set()
+        await task
+    await loader.shutdown_loaded()
+    await mgr.shutdown_all_extensions()
+    assert mgr._loaded_extensions == []
+    assert reg.get_capability("policy") is None
+    assert closed == ["owned"]
+
+
+@pytest.mark.asyncio
+async def test_load_and_second_close_reject_awaiting_shutdown_across_loaders(
+    monkeypatch, tmp_path
+):
+    reg, closed = registry(), []
+    mgr = ExtensionManager(reg, config={}, root_dir=tmp_path)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class Slow(Resource):
+        async def shutdown(self):
+            entered.set()
+            await release.wait()
+            await super().shutdown()
+
+    owned = Slow("owned", closed)
+    async def first(active):
+        active.register_capability("policy", owned)
+        return [owned]
+
+    monkeypatch.setattr(mgr.loader, "_import_module", lambda root: SimpleNamespace(register_extensions=first))
+    await mgr.loader.load_extension(tmp_path, manifest={})
+    mgr._loaded_extensions.append(owned)
+    task = asyncio.create_task(mgr.shutdown_all_extensions())
+    await entered.wait()
+    try:
+        for loader in (mgr.loader, ExtensionLoader(reg)):
+            with pytest.raises(RuntimeError, match="lifecycle operation"):
+                await loader.load_extension(tmp_path, manifest={})
+            with pytest.raises(RuntimeError, match="lifecycle operation"):
+                await loader.shutdown_loaded()
+        with pytest.raises(RuntimeError, match="lifecycle operation"):
+            await mgr.shutdown_all_extensions()
+        with pytest.raises(RuntimeError, match="lifecycle operation"):
+            await mgr.load_all_extensions()
+        other_manager = ExtensionManager(reg, config={}, root_dir=tmp_path)
+        with pytest.raises(RuntimeError, match="lifecycle operation"):
+            await other_manager.load_all_extensions()
+        assert mgr._loaded_extensions == [owned]
+        assert reg.get_capability("policy") is None
+    finally:
+        release.set()
+        await task
+    assert mgr._loaded_extensions == []
+    assert closed == ["owned"]
+    assert reg._closing is None
+    await mgr.loader.load_extension(tmp_path, manifest={})
+    await mgr.shutdown_all_extensions()
+    assert closed == ["owned", "owned"]
+
+
+@pytest.mark.asyncio
+async def test_shared_registry_out_of_order_close_never_restores_closed_provider(
+    monkeypatch, tmp_path
+):
+    reg, closed = registry(), []
+    borrowed = Resource("borrowed", closed)
+    first, second = Resource("first", closed), Resource("second", closed)
+    reg.register_third_agent(borrowed)
+    async def register_first(active):
+        active.register_third_agent(first)
+    async def register_second(active):
+        active.register_third_agent(second)
+    loader_a = module_loader(monkeypatch, reg, register_first)
+    loader_b = module_loader(monkeypatch, reg, register_second)
+    await loader_a.load_extension(tmp_path, manifest={})
+    await loader_b.load_extension(tmp_path, manifest={})
+    await loader_a.shutdown_loaded()
+    assert reg.get_third_agent_extension() is second
+    await loader_b.shutdown_loaded()
+    assert reg.get_third_agent_extension() is borrowed
+    assert closed == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_rollback_shutdown_retains_load_exclusion_and_original_error(monkeypatch, tmp_path):
+    reg, closed = registry(), []
+    entered, release = asyncio.Event(), asyncio.Event()
+    class Slow(Resource):
+        async def shutdown(self):
+            entered.set()
+            await release.wait()
+            await super().shutdown()
+            raise RuntimeError("cleanup failed")
+    async def broken(active):
+        active.register_capability("policy", Slow("failed", closed))
+        raise ValueError("original load failure")
+    loader = module_loader(monkeypatch, reg, broken)
+    task = asyncio.create_task(loader.load_extension(tmp_path, manifest={}))
+    await entered.wait()
+    try:
+        with pytest.raises(RuntimeError, match="lifecycle operation"):
+            await ExtensionLoader(reg).load_extension(tmp_path, manifest={})
+        with pytest.raises(RuntimeError, match="lifecycle operation"):
+            await loader.shutdown_loaded()
+    finally:
+        release.set()
+        with pytest.raises(ValueError, match="original load failure"):
+            await task
+    assert reg._loading is None and reg._closing is None
+    assert reg.get_capability("policy") is None
+    assert closed == ["failed"]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancellation_releases_lifecycle_marker_after_cleanup(monkeypatch, tmp_path):
+    reg, closed = registry(), []
+    entered = asyncio.Event()
+    class Waiting(Resource):
+        async def shutdown(self):
+            entered.set()
+            await asyncio.Event().wait()
+    async def register(active):
+        active.register_capability("first", Resource("first", closed))
+        active.register_capability("waiting", Waiting("waiting", closed))
+    loader = module_loader(monkeypatch, reg, register)
+    await loader.load_extension(tmp_path, manifest={})
+    task = asyncio.create_task(loader.shutdown_loaded())
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(BaseExceptionGroup) as caught:
+        await task
+    assert any(isinstance(error, asyncio.CancelledError) for error in caught.value.exceptions)
+    assert reg._closing is None
+    assert closed == ["first"]
+    assert reg.get_capability("first") is None
+    assert reg.get_capability("waiting") is None
+    await ExtensionLoader(reg).shutdown_loaded()

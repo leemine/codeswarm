@@ -101,6 +101,16 @@ class _RegistrationTransaction:
             for key, value in self.values.items():
                 if self.before.get(key) is value:
                     continue
+                # Later loads must not restore this provider after it closes.
+                # Keep their cleanup baselines pointing to a still-live predecessor.
+                for receipt in self.registry._callback_receipts:
+                    if receipt is self or receipt.closed:
+                        continue
+                    if receipt.before.get(key) is value:
+                        if key in self.before:
+                            receipt.before[key] = self.before[key]
+                        else:
+                            receipt.before.pop(key, None)
                 if self.registry._values.get(key) is value:
                     if key in self.before:
                         self.registry._values[key] = self.before[key]
@@ -180,6 +190,7 @@ class ExtensionRegistry:
     ):
         self._values: dict[str, Any] = {}
         self._loading: _RegistrationTransaction | None = None
+        self._closing: asyncio.Task | None = None
         self._callback_receipts: list[_RegistrationTransaction] = []
         self.callback_framework = callback_framework
         self._config = ExtensionConfig(config=deepcopy(config), logger=logger)
@@ -194,6 +205,8 @@ class ExtensionRegistry:
             return active.values
         if write and self._loading is not None:
             raise RuntimeError("extension registry is loading in another task")
+        if write and self._closing is not None and self._closing is not asyncio.current_task():
+            raise RuntimeError("extension registry is closing in another task")
         return self._values
 
     def _put(self, key: str, value: Any) -> None:
@@ -372,9 +385,22 @@ class ExtensionRegistry:
     def unregister(self, event: str, handler: Callable | None = None) -> None:
         self._state(write=True)
         active = _ACTIVE_TRANSACTION.get()
-        receipts = list(self._callback_receipts)
         if active is not None and active is self._loading:
-            receipts.append(active)
+            # Initialization is a transaction: it may undo its own staged
+            # registrations, but must never remove another owner's live policy.
+            staged = [
+                registration for registration in active.callbacks
+                if registration[0] == event and (
+                    handler is None
+                    or getattr(registration[1], "__extension_handler__", None) == handler
+                )
+            ]
+            if not staged:
+                raise RuntimeError("loading extension cannot remove published callbacks")
+            for registration in staged:
+                active.callbacks.remove(registration)
+            return
+        receipts = list(self._callback_receipts)
         matched = False
         for receipt in receipts:
             for registration in list(receipt.callbacks):
