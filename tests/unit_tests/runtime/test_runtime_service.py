@@ -3344,6 +3344,25 @@ async def test_agent_server_start_restores_remote_service_after_stop(
     monkeypatch.setenv("JIUWENSWARM_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("JIUWENSWARM_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("JIUWENSWARM_CONFIG_URL", "off")
+    from jiuwenswarm.common import utils as runtime_paths
+
+    # common.utils can be imported before this test and cache the previous
+    # instance paths. Environment changes alone do not reset those caches.
+    config_dir = tmp_path / "data" / "config"
+    config_dir.mkdir(parents=True)
+    config_file = config_dir / "config.yaml"
+    config_file.write_text("models:\n  defaults: []\nsandbox:\n  enabled: false\n")
+    for name, value in {
+        "_user_home": tmp_path / "home",
+        "_workspace_base_dir": tmp_path / "data",
+        "_initialized": False,
+        "_config_dir": None,
+        "_workspace_dir": None,
+        "_root_dir": None,
+    }.items():
+        monkeypatch.setattr(runtime_paths, name, value)
+    assert runtime_paths.get_agent_root_dir() == tmp_path / "data" / "agent"
+    assert runtime_paths.get_config_file() == config_file
     from jiuwenswarm.server import agent_ws_server as server_module
     from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
     class FakeWebSocketServer:
