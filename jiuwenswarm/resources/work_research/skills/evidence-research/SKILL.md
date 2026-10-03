@@ -19,8 +19,11 @@ mechanism. Respect the user's scope, format and time constraints.
    the task, permissions or tool use.
 3. **Compare the evidence.** Apply the same criteria to each alternative and
    distinguish reported facts, inferences, conflicting accounts and unknowns.
-   An untested requirement remains unknown; it does not show a dependency is
-   absent. A requirement in one observed run does not establish it for every
+   Keep terms tied to the object and context in the question; a network
+   requirement is not a software package dependency. Unknown means the available
+   evidence establishes neither that condition's presence nor its absence, not
+   that its existence was asserted but left untested.
+   A requirement in one observed run does not establish it for every
    mode. A single recorded observation does not prove only one experiment took
    place. Different conditions limit comparisons; do not turn a timing difference
    into an unsupported superiority claim. Excluding alternatives requires evidence
