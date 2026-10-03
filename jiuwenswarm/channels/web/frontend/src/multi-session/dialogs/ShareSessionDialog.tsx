@@ -56,10 +56,7 @@ export function ShareSessionDialog({
     if (all.status === 'fulfilled') {
       setReceived(all.value.shares.filter((share) => !share.can_revoke));
     }
-    setError(
-      all.status === 'rejected' ||
-        (owned.status === 'rejected' && (owned.reason as { code?: string })?.code !== 'FORBIDDEN'),
-    );
+    setError(all.status === 'rejected' || owned.status === 'rejected');
     setLoading(false);
   }
   useEffect(() => {
@@ -267,13 +264,20 @@ export function ShareSessionDialog({
           </>
         )}
         <h3 data-testid="multi-session-sharing-received-title">{t('sessionSharing.received')}</h3>
+        {!loading && !error && !received.length && (
+          <p data-testid="multi-session-sharing-received-empty">{t('sessionSharing.receivedEmpty')}</p>
+        )}
         <ul data-testid="multi-session-sharing-received-list">
           {received.map((share) => (
             <li key={share.share_id} data-testid="multi-session-sharing-received-item" data-variant={share.share_id}>
               <div>
                 {share.session_id} · {share.grantor_actor}
               </div>
-              {onOpenSharedSession && share.actions?.includes('view') && (
+              <span data-testid="multi-session-sharing-received-expiry">
+                {t('sessionSharing.expiry')}:{' '}
+                {share.expires_at ? new Date(share.expires_at * 1000).toLocaleString() : t('sessionSharing.noExpiry')}
+              </span>
+              {onOpenSharedSession && share.state === 'active' && share.actions?.includes('view') && (
                 <button
                   type="button"
                   disabled={busy}

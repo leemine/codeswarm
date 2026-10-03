@@ -3260,6 +3260,7 @@
     "revoke": "Revoke",
     "managed": "Access granted for this session",
     "received": "Shared with me",
+    "receivedEmpty": "No shared sessions are currently available. Expired or revoked access is not listed.",
     "open": "Open shared history",
     "unavailable": "Expired, revoked or unavailable",
     "noExpiry": "No expiry",

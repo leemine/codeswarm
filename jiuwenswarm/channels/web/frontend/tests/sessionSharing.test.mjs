@@ -231,3 +231,49 @@ test('execute-only incoming grant does not enable viewing', async () => {
     await unmount();
   }
 });
+
+test('refresh after expiry or revocation removes received items and explains the empty inbox', async () => {
+  let shares = [{ ...share, can_update: false, can_revoke: false }];
+  sessionSharingApi.list = async () => ({ shares });
+  await mount({ sessionId: undefined, onOpenSharedSession: () => {} });
+  try {
+    assert.ok(find('multi-session-sharing-received-expiry'));
+    assert.equal(find('multi-session-sharing-received-empty'), null);
+    shares = [];
+    await act(async () => find('multi-session-sharing-refresh').click());
+    await tick();
+    assert.equal(find('multi-session-sharing-received-item'), null);
+    assert.equal(find('multi-session-sharing-open'), null);
+    assert.ok(find('multi-session-sharing-received-empty'));
+  } finally {
+    await unmount();
+  }
+});
+
+test('management authorization denial is visible even when the inbox succeeds', async () => {
+  sessionSharingApi.list = async (id) => {
+    if (id) throw Object.assign(new Error('denied'), { code: 'FORBIDDEN' });
+    return { shares: [] };
+  };
+  await mount();
+  try {
+    assert.ok(find('multi-session-sharing-error'));
+    assert.equal(find('multi-session-sharing-form'), null);
+    assert.equal(find('multi-session-sharing-received-empty'), null);
+  } finally {
+    await unmount();
+  }
+});
+
+test('inbox failure displays an error rather than claiming no received shares', async () => {
+  sessionSharingApi.list = async () => {
+    throw new Error('FORBIDDEN');
+  };
+  await mount({ sessionId: undefined });
+  try {
+    assert.ok(find('multi-session-sharing-error'));
+    assert.equal(find('multi-session-sharing-received-empty'), null);
+  } finally {
+    await unmount();
+  }
+});

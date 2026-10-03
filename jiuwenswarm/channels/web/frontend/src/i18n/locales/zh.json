@@ -3246,6 +3246,7 @@
     "revoke": "撤销",
     "managed": "本会话已授予的访问权限",
     "received": "分享给我",
+    "receivedEmpty": "当前没有可用的共享会话。已到期或已撤销的授权不会出现在此处。",
     "open": "打开获准历史",
     "unavailable": "已到期、已撤销或不可用",
     "noExpiry": "无到期时间",
