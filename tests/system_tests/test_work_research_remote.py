@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import functools
+import hashlib
 import json
 import os
 import re
@@ -359,6 +360,7 @@ class _ResearchTrace:
         self.outcome = "running"
         self.child_providers = []
         self.reviews = []
+        self.model_request_contracts = []
         self.parent_source_reads = set()
         self.parent_report_reads = []
         self.parent_revision_count = 0
@@ -512,6 +514,9 @@ class _ResearchTrace:
             json.dumps(self.reviews, ensure_ascii=False, indent=2)
         )
         (output / "parent-final.txt").write_text(self.parent_final_text)
+        (output / "model-request-contracts.json").write_text(
+            json.dumps(self.model_request_contracts, indent=2)
+        )
 
 
 def _observe_reviews(monkeypatch, trace):
@@ -530,6 +535,51 @@ def _observe_reviews(monkeypatch, trace):
         return result
 
     monkeypatch.setattr(research_review, "review_research_report", observed)
+
+
+def _record_native_request(trace, messages, tools):
+    """Check the final model boundary, never archive prompts or model reasoning."""
+    from jiuwenswarm.agents.harness.work.research_parent import work_research_parent_instructions
+
+    def field(value, name, default=None):
+        return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
+
+    system = "\n".join(str(field(message, "content", "")) for message in messages
+                       if field(message, "role") == "system")
+    names = {field(tool, "name") or field(field(tool, "function", {}), "name") for tool in tools or []}
+    child = "## Evidence-to-report procedure" in system or "review_research_report" in names
+    scope = "child" if child else "parent"
+    present = (
+        "## Evidence-to-report procedure" in system
+        and "Copy the full `input_fingerprint` directly" in system
+        and "review_research_report" in names
+    ) if child else any(work_research_parent_instructions(lang).strip() in system for lang in ("en", "cn"))
+    trace.model_request_contracts.append({
+        "scope": scope, "system_sha256": hashlib.sha256(system.encode()).hexdigest(),
+        "system_characters": len(system), "policy_present": present,
+        "tool_names": sorted(name for name in names if isinstance(name, str)),
+    })
+    assert present, f"Native {scope} research policy missing at final model request boundary"
+
+
+def _observe_native_model_requests(monkeypatch, trace):
+    from openjiuwen.core.foundation.llm import Model
+
+    invoke, stream = Model.invoke, Model.stream
+
+    @functools.wraps(invoke)
+    async def observed_invoke(self, messages, **kwargs):
+        _record_native_request(trace, messages, kwargs.get("tools"))
+        return await invoke(self, messages, **kwargs)
+
+    @functools.wraps(stream)
+    async def observed_stream(self, messages, **kwargs):
+        _record_native_request(trace, messages, kwargs.get("tools"))
+        async for chunk in stream(self, messages, **kwargs):
+            yield chunk
+
+    monkeypatch.setattr(Model, "invoke", observed_invoke)
+    monkeypatch.setattr(Model, "stream", observed_stream)
 
 
 def _check_review_delivery(root, report, reviews, max_reviews=3):
@@ -783,6 +833,7 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path, monkeypa
     _write_sources(root)
     trace = _ResearchTrace("native", root)
     _observe_reviews(monkeypatch, trace)
+    _observe_native_model_requests(monkeypatch, trace)
     calls = []
     child_failures = []
 

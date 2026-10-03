@@ -138,3 +138,23 @@ async def test_late_first_delivery_does_not_borrow_acceptance_budget(reviewed):
     trace.observe_parent_control("subagent_wait", {}, {"statuses": {child: "completed"}})
     assert deadlines == []
     assert trace.first_delivery_seconds is None
+
+
+def test_native_request_guard_checks_final_messages_not_builder(reviewed):
+    from types import SimpleNamespace
+    from jiuwenswarm.agents.harness.work.research import work_research_instructions
+    from jiuwenswarm.agents.harness.work.research_parent import work_research_parent_instructions
+    from tests.system_tests.test_work_research_remote import _record_native_request
+
+    root, _, _ = reviewed
+    trace = _ResearchTrace("native", root)
+    with pytest.raises(AssertionError, match="parent research policy missing"):
+        _record_native_request(trace, [{"role": "system", "content": "Only general subagent guidance"}], [])
+    for lang in ["en", "cn"]:
+        _record_native_request(trace, [SimpleNamespace(role="system", content=work_research_parent_instructions(lang))], [])
+    child = [{"role": "system", "content": work_research_instructions()}]
+    with pytest.raises(AssertionError, match="child research policy missing"):
+        _record_native_request(trace, child, [])
+    _record_native_request(trace, child, [{"type": "function", "function": {"name": "review_research_report"}}])
+    assert [item["policy_present"] for item in trace.model_request_contracts] == [False, True, True, False, True]
+    assert all("system_sha256" in item and "content" not in item for item in trace.model_request_contracts)
