@@ -566,6 +566,7 @@ from jiuwenswarm.common.config import (
     resolve_env_vars,
 )
 from jiuwenswarm.common.mcp_config import (
+    require_legacy_mcp_access,
     build_mcp_credential_resolver,
     build_mcp_server_config,
     extract_enabled_mcp_server_entries,
@@ -4475,6 +4476,10 @@ class JiuWenSwarmDeepAdapter:
         in ``self.agents`` has no adapter yet).
         """
         try:
+            require_legacy_mcp_access()
+        except PermissionError:
+            return False
+        try:
             from jiuwenswarm.server.runtime.mcp.state_store import (
                 list_connected_mcps,
             )
@@ -4510,6 +4515,10 @@ class JiuWenSwarmDeepAdapter:
         """Token env keys an MCP owns: CredentialStore keys + schema's
         required field keys (covers the post-delete case where disconnect
         wants to clear env vars whose stored value is already gone)."""
+        try:
+            require_legacy_mcp_access()
+        except PermissionError:
+            return []
         n = str(name or "").strip()
         if not n:
             return []
@@ -4956,6 +4965,7 @@ class JiuWenSwarmDeepAdapter:
         return out
 
     async def _register_mcp_server(self, cfg: McpServerConfig, *, tag: str) -> bool:
+        require_legacy_mcp_access()
         if self._instance is None:
             return False
         # stdio: command 必须可执行（npx/uvx/node 等），否则 SDK 启动子进程会
@@ -4982,6 +4992,7 @@ class JiuWenSwarmDeepAdapter:
                 cfg.server_name, cfg.client_type, cfg.server_path, reason,
             )
             return False
+        require_legacy_mcp_access()
         try:
             result = await Runner.resource_mgr.add_mcp_server(cfg, tag=tag)
             ok = True
@@ -5122,6 +5133,7 @@ class JiuWenSwarmDeepAdapter:
         register; return True so the connect handler's apply_mcp_change
         succeeds instead of raising "register rejected".
         """
+        require_legacy_mcp_access()
         entry = get_mcp_server_config(name)
         if not entry:
             logger.debug(
@@ -5228,6 +5240,10 @@ class JiuWenSwarmDeepAdapter:
         request's disk-history boundary into context warmup.
         """
         needed_set = {str(n).strip() for n in (needed or []) if isinstance(n, str) and str(n).strip()}
+        if needed_set:
+            # Do not build a child with optimistic bundled Skill roots, then
+            # swallow register denial and continue with an unauthorized MCP.
+            require_legacy_mcp_access()
         child = await self._get_or_create_session_adapter(
             session_id,
             model_name=model_name,
@@ -5309,6 +5325,10 @@ class JiuWenSwarmDeepAdapter:
         首轮对话 reconcile 命中 existing-entry 不重 spawn。失败隔离：单个 MCP
         预热失败不阻断其余、不降级 state。
         """
+        try:
+            require_legacy_mcp_access()
+        except PermissionError:
+            return
         if self._mcp_prewarm_task is not None and not self._mcp_prewarm_task.done():
             return
         self._mcp_prewarm_task = asyncio.create_task(
@@ -5334,6 +5354,10 @@ class JiuWenSwarmDeepAdapter:
         field, config.yaml is tui-only). Per-MCP failure isolation: a bad
         entry logs and continues without starving the rest.
         """
+        try:
+            require_legacy_mcp_access()
+        except PermissionError:
+            return
         # state.json first so a name present in BOTH files resolves to the
         # state.json entry (user's latest via web connect / TUI add) —
         # config.yaml is legacy stock, state.json is the active source.
@@ -5412,6 +5436,10 @@ class JiuWenSwarmDeepAdapter:
     async def _sync_mcp_servers_for_runtime(
         self, config_base: dict[str, Any], *, tag: str = "agent.reload"
     ) -> None:
+        try:
+            require_legacy_mcp_access()
+        except PermissionError:
+            return
         if self._instance is None:
             return
         # Desired differs by channel (not adapter scope):

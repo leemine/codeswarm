@@ -7857,6 +7857,12 @@ class AgentWebSocketServer:
 
         Returns ``(ok, message)``.
         """
+        from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+
+        try:
+            require_legacy_mcp_access()
+        except PermissionError as exc:
+            return False, str(exc)
         import logging as _logging
         from openjiuwen.core.foundation.tool import McpServerConfig
         from openjiuwen.core.runner.resources_manager.tool_manager import ToolMgr
