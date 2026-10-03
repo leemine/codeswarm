@@ -31,6 +31,7 @@ _MAX_RULE_CHARS = 60_000
 _MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 _MAX_ATTACHMENT_COUNT = 32
 _MAX_ATTACHMENT_TOTAL_BYTES = 20 * 1024 * 1024
+_CURRENT_TOOL_AUTHORITY = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,9 +78,13 @@ def build_external_context(
     provider_id: str,
     surface: EffectiveSurfaceSnapshot | None = None,
     context_snapshot: ExternalContextSnapshot | None = None,
+    tool_authorizer: Any = _CURRENT_TOOL_AUTHORITY,
 ) -> HarnessContext:
     """Build the immutable Provider-cycle context from admitted paths only."""
 
+    if tool_authorizer is _CURRENT_TOOL_AUTHORITY:
+        from jiuwenswarm.governance.tool_context import current_tool_authorizer
+        tool_authorizer = current_tool_authorizer(provider_id)
     outputs = str(paths.outputs_dir) if paths.outputs_dir is not None else ""
     policy = surface.runtime_policy if surface is not None else None
     if surface is not None and paths != surface.identity.paths:
@@ -112,6 +117,7 @@ def build_external_context(
         system_prompt=system_prompt,
         cwd=str(paths.cwd),
         runtime_policy=policy,
+        **({"tool_authorizer": tool_authorizer} if tool_authorizer is not None else {}),
         metadata={
             **({"surface": surface.identity.record(), "surface_policy_revision": surface.policy_revision}
                if surface is not None else {}),

@@ -132,6 +132,40 @@ class OrganizationAuthenticator(CredentialAuthenticator):
                 )
         raise PermissionError("organization credential invalid or expired")
 
+    def resolve_actor(self, requestor: TrustedIdentity, actor_id: str) -> TrustedIdentity | None:
+        """Resolve a sharing recipient from this authority's live directory.
+
+        The caller supplies only an actor label. Authority and execution subject
+        come from configured credentials; no digest or token is exposed.
+        """
+        if not isinstance(requestor, TrustedIdentity) or not isinstance(actor_id, str) or not actor_id.strip():
+            return None
+        config = self._config()
+        if requestor.authority != config["authority"]:
+            return None
+        for entry in config["credentials"]:
+            if entry.get("actor_id") != actor_id:
+                continue
+            expiry = float(entry["expires_at"])
+            if not entry.get("revoked", False) and math.isfinite(expiry) and expiry > time.time():
+                return TrustedIdentity(actor_id, actor_id, config["authority"])
+        return None
+
+    def known_actor(self, identity: TrustedIdentity) -> bool:
+        """Recognize a durable subject, independently of its current login.
+
+        This is a directory lookup, never request authentication. Expiring or
+        signing out one credential does not erase a persistent share's owner.
+        """
+        if not isinstance(identity, TrustedIdentity):
+            return False
+        config = self._config()
+        return (
+            identity.authority == config["authority"]
+            and identity.subject_id == identity.actor_id
+            and any(entry.get("actor_id") == identity.actor_id for entry in config["credentials"])
+        )
+
     def principal(self, headers: Any) -> AuthenticatedPrincipal:
         lower = {str(k).lower(): str(v) for k, v in headers.items()}
         authorization = lower.get("authorization", "")

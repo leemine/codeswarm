@@ -18,6 +18,7 @@ import logging
 import os
 import uuid
 from contextlib import aclosing
+from contextvars import copy_context
 from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -337,6 +338,8 @@ class AgentRuntime:
         team_execution_controller: object | None = None,
         trusted_identity_resolver: Callable[[object], TrustedIdentity | None] | None = None,
         project_authorizer: ProjectAuthorizer | None = None,
+        resource_authorizer: Any | None = None,
+        tool_resource_resolver: Any | None = None,
         extension_registry: Any | None = None,
         extension_manager: Any | None = None,
         required_capabilities: Mapping[str, str] | None = None,
@@ -354,6 +357,9 @@ class AgentRuntime:
         self._owned_extensions_attempted = False
         self._explicit_identity_resolver = trusted_identity_resolver
         self._explicit_project_authorizer = project_authorizer
+        self._explicit_resource_authorizer = resource_authorizer
+        self._resource_authorizer = resource_authorizer
+        self._tool_resource_resolver = tool_resource_resolver
         self._trusted_identity_resolver = trusted_identity_resolver
         self._submission_guard = SubmissionGuard(project_authorizer or _StoredProjectAuthority())
         self._governed_provisions: dict[PreparedSessionProvision[Any], PreparedRequest] = {}
@@ -424,6 +430,54 @@ class AgentRuntime:
         if identity is not None and not isinstance(identity, TrustedIdentity):
             raise GovernanceError("host identity resolver returned an invalid identity")
         return identity
+
+    def _resource_authorizers_for(self, request: AgentRequest):
+        """Freeze private execution identity; never trust a requested resource list."""
+        from jiuwenswarm.governance.tool_resources import BoundToolResourceAuthority, ResourceExecutionContext
+        from jiuwenswarm.server.runtime.session.project_store import get_project_dir_by_id
+
+        if request.req_method not in self._chat_turn_methods() and not self._is_mutating_goal_request(request):
+            return None
+        project_id = self._governance_project(request)
+        identity = self._governance_identity(request)
+        decision = self._submission_guard.check_access(project_id, identity, "execute")
+        if decision is None or decision.revision == 0:
+            return None
+        if identity is None:
+            raise GovernanceError("resource execution requires trusted identity")
+        workspace = get_project_dir_by_id(project_id)
+        if not workspace:
+            return {}  # Bound but unavailable: every Provider remains denied.
+        session_id = request.session_id or "default"
+        generation = self._governance_generation(session_id)
+        host_context = copy_context()
+
+        def current_identity():
+            # An MCP/server task must not accidentally borrow another browser's
+            # ambient principal. The original live resolver still rechecks revoke.
+            return host_context.run(self._governance_identity, request)
+
+        def is_current():
+            if self._closed or self._governance_generation(session_id) != generation:
+                return False
+            current = self._session_coordinator.snapshot_session(session_id)
+            if current is None:
+                return False  # No owner/generation proof is not execution authority.
+            if current.state in {RuntimeSessionState.QUIESCING, RuntimeSessionState.CLOSED}:
+                return False
+            return any(item.request_id == request.request_id and not item.state.terminal
+                       and not item.cancellation_requested for item in current.executions)
+
+        resolver = self._tool_resource_resolver
+        if resolver is None and callable(getattr(self._resource_authorizer, "resources_for_tool", None)):
+            resolver = self._resource_authorizer
+        return {
+            provider: BoundToolResourceAuthority(
+                ResourceExecutionContext(project_id, identity, session_id, str(Path(workspace).resolve()), provider),
+                authorizer=self._resource_authorizer, resolver=resolver,
+                current_identity=current_identity, is_current_execution=is_current,
+            ) for provider in ("native", "codex", "opencode")
+        }
 
     @property
     def extension_registry(self) -> Any | None:
@@ -1701,7 +1755,13 @@ class AgentRuntime:
         finally:
             reset_runtime_context(token)
 
-    async def _invoke_started(
+    async def _invoke_started(self, request: AgentRequest, **kwargs) -> list[RuntimeEvent]:
+        from jiuwenswarm.governance.tool_context import tool_authority_scope
+
+        with tool_authority_scope(None, provider_authorizers=self._resource_authorizers_for(request)):
+            return await self._invoke_started_impl(request, **kwargs)
+
+    async def _invoke_started_impl(
         self,
         request: AgentRequest,
         *,
@@ -2194,7 +2254,26 @@ class AgentRuntime:
             finally:
                 reset_runtime_context(token)
 
-    async def _stream_started(
+    async def _stream_started(self, request: AgentRequest, **kwargs) -> AsyncIterator[RuntimeEvent]:
+        from jiuwenswarm.governance.tool_context import tool_authority_scope
+
+        authorities = self._resource_authorizers_for(request)
+        stream = self._stream_started_impl(request, **kwargs)
+        try:
+            while True:
+                # Tokens stay within a single slice, never across a yield or a
+                # finalizer running in another task. Child tasks inherit scope.
+                with tool_authority_scope(None, provider_authorizers=authorities):
+                    try:
+                        event = await anext(stream)
+                    except StopAsyncIteration:
+                        return
+                yield event
+        finally:
+            with tool_authority_scope(None, provider_authorizers=authorities):
+                await stream.aclose()
+
+    async def _stream_started_impl(
         self,
         request: AgentRequest,
         *,
@@ -3525,6 +3604,7 @@ class AgentRuntime:
             return
         identity = get_capability("governance.identity")
         projects = get_capability("governance.projects")
+        resources = get_capability("governance.resources")
         if identity is not None:
             if not callable(identity):
                 raise GovernanceError("governance.identity must be a callable resolver")
@@ -3535,10 +3615,16 @@ class AgentRuntime:
                 raise GovernanceError("governance.projects must be a project authorizer")
             if self._explicit_project_authorizer is not None and projects is not self._explicit_project_authorizer:
                 raise GovernanceError("conflicting Runtime project policies")
+        if resources is not None:
+            if not callable(getattr(resources, "authorize_resource", None)):
+                raise GovernanceError("governance.resources must be a resource authorizer")
+            if self._explicit_resource_authorizer is not None and resources is not self._explicit_resource_authorizer:
+                raise GovernanceError("conflicting Runtime resource policies")
         self._trusted_identity_resolver = identity or self._explicit_identity_resolver
         self._submission_guard = SubmissionGuard(
             projects or self._explicit_project_authorizer or _StoredProjectAuthority()
         )
+        self._resource_authorizer = resources or self._explicit_resource_authorizer
 
     async def _rollback_start(self) -> None:
         """Undo partially initialized owned dependencies after start failure."""

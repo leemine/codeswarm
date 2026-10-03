@@ -9123,6 +9123,11 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("%s Failed to attach AgentObservabilityRail: %s", log_prefix, exc)
         stage_timer.mark("observability_rail")
 
+        from jiuwenswarm.agents.harness.common.rails.permissions.resource_authority_rail import (
+            ensure_native_tool_authority,
+        )
+        rails_list = ensure_native_tool_authority(rails_list)
+
         total_ms = stage_timer.total_ms()
         log_rail_build = _stage_breakdown_logger(total_ms, _SLOW_RAIL_BUILD_MS)
         log_rail_build(

@@ -70,6 +70,22 @@ def test_identity_ignores_routing_and_rechecks_current_revocation(credentials):
     assert principal(auth, tokens, "bob").identity().actor_id == "bob"
 
 
+def test_sharing_target_directory_never_accepts_supplied_authority_or_expired_actor(credentials):
+    from jiuwenswarm.governance.contracts import TrustedIdentity
+
+    auth, tokens, _ = credentials
+    alice = principal(auth, tokens, "alice").identity()
+    assert auth.resolve_actor(alice, "bob") == TrustedIdentity("bob", "bob", alice.authority)
+    assert auth.resolve_actor(alice, "unknown") is None
+    assert auth.resolve_actor(TrustedIdentity("alice", "alice", "foreign"), "bob") is None
+    auth.revoke(principal(auth, tokens, "bob"))
+    assert auth.resolve_actor(alice, "bob") is None
+    assert auth.known_actor(TrustedIdentity("bob", "bob", alice.authority)) is True
+    assert auth.known_actor(TrustedIdentity("bob", "other", alice.authority)) is False
+    assert auth.known_actor(TrustedIdentity("bob", "bob", "foreign")) is False
+    assert auth.known_actor(TrustedIdentity("unknown", "unknown", alice.authority)) is False
+
+
 @pytest.mark.parametrize(
     "mutation", ["body", "signature", "audience", "expired", "missing"]
 )
