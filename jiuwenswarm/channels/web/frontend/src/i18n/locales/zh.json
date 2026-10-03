@@ -3222,6 +3222,16 @@
     }
   },
   "sessionSharing": {
+    "viewerTitle": "共享历史 · 只读",
+    "viewerLimits": "固定的主会话历史快照，最新消息在前。仅显示文本，不加载媒体、工具输出或链接；不会切换你的活动会话。",
+    "viewerRefresh": "刷新历史",
+    "viewerUnavailable": "历史不可用或无法核验权限，已清空缓存内容。可刷新重新核验权限。",
+    "viewerEmpty": "此共享快照内没有消息。",
+    "viewerOlder": "加载更早消息",
+    "viewerRole": {
+      "user": "用户",
+      "assistant": "助手"
+    },
     "title": "分享授权",
     "scope": "分享已有历史的固定快照，不包含后续消息。各项权限独立，讨论不会启动智能体。",
     "target": "接收者主体 ID",

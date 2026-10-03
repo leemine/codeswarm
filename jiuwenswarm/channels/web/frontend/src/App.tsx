@@ -1,3 +1,5 @@
+import { SharedHistoryDialog } from './multi-session/dialogs/SharedHistoryDialog';
+import { onOrganizationCredentialChange } from './services/organizationCredentialEvents';
 import { ShareSessionDialog } from './multi-session/dialogs/ShareSessionDialog';
 import type { SharedSessionTarget } from './services/sessionSharingApi';
 import { AssetPublishHost } from './components/AssetPublishDrawer';
@@ -416,6 +418,18 @@ function AppContent({
   const [restartSuccess, setRestartSuccess] = useState(false);
   const [sharingInboxOpen, setSharingInboxOpen] = useState(false);
   const [sharingDialogSessionId, setSharingDialogSessionId] = useState<string | null>(null);
+  const [sharedHistoryTarget, setSharedHistoryTarget] = useState<SharedSessionTarget | null>(null);
+  useEffect(() => {
+    return onOrganizationCredentialChange(() => {
+      setSharedHistoryTarget(null);
+      setSharingDialogSessionId(null);
+      setSharingInboxOpen(false);
+    });
+  }, []);
+  useEffect(() => {
+    if (!organizationAuth) setSharedHistoryTarget(null);
+  }, [organizationAuth]);
+
   const [exportingShareSessionIds, setExportingShareSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const [restartSeenDisconnect, setRestartSeenDisconnect] = useState(false);
   const [appliedWithoutRestart, setAppliedWithoutRestart] = useState(false);
@@ -4230,8 +4244,16 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
           key={sharingDialogSessionId ?? 'inbox'}
           sessionId={sharingDialogSessionId ?? undefined}
           onClose={() => { setSharingDialogSessionId(null); setSharingInboxOpen(false); }}
-          onOpenSharedSession={onOpenSharedSession}
+          onOpenSharedSession={(target) => {
+            setSharingDialogSessionId(null);
+            setSharingInboxOpen(false);
+            setSharedHistoryTarget(target);
+            onOpenSharedSession?.(target);
+          }}
         />
+      )}
+      {organizationAuth && sharedHistoryTarget && (
+        <SharedHistoryDialog target={sharedHistoryTarget} onClose={() => setSharedHistoryTarget(null)} />
       )}
       <LoginDialog />
     </div>

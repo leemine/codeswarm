@@ -3236,6 +3236,16 @@
     }
   },
   "sessionSharing": {
+    "viewerTitle": "Shared history · Read only",
+    "viewerLimits": "Fixed main-conversation snapshot, newest first. Text only; media, tool output and links are not loaded. This viewer does not change your active session.",
+    "viewerRefresh": "Refresh history",
+    "viewerUnavailable": "History is unavailable or access could not be verified. Cached content has been cleared. Refresh to check access again.",
+    "viewerEmpty": "No messages in this shared snapshot.",
+    "viewerOlder": "Load older messages",
+    "viewerRole": {
+      "user": "User",
+      "assistant": "Assistant"
+    },
     "title": "Share access",
     "scope": "Share a fixed snapshot of existing history. Later messages are excluded. Each permission is independent; discussion does not start an agent.",
     "target": "Recipient actor ID",

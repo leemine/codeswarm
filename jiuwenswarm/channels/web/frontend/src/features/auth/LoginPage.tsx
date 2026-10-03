@@ -1,3 +1,4 @@
+import { notifyOrganizationCredentialChange } from '../../services/organizationCredentialEvents';
 import { useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -36,6 +37,7 @@ export function LoginPage({ organization = false }: { organization?: boolean }) 
         setError(t('auth.loginFailed'));
         return;
       }
+      if (organization) notifyOrganizationCredentialChange();
       // 成功: cookie 已由反代写入。跳转到带 user_id 的入口。
       const target = organization ? window.location.origin + '/' : `${window.location.origin}/?user_id=${encodeURIComponent(username)}`;
       window.location.href = target;

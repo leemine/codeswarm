@@ -1,3 +1,4 @@
+import { notifyOrganizationCredentialChange } from '../../services/organizationCredentialEvents';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -39,6 +40,7 @@ export function LogoutButton({ organization = false }: { organization?: boolean 
         return;
       }
     }
+    if (organization) notifyOrganizationCredentialChange();
     // HttpOnly cookie 由后端 Set-Cookie 清除; 这里 reload 即可让浏览器带上(已清空的)请求,
       // AppWithAuth 重探 /auth-api/v1/auth/permissions → 401 → 回登录页。
     window.location.href = window.location.origin + '/';
