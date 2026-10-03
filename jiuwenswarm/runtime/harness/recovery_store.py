@@ -134,6 +134,31 @@ class SessionExecutionRecovery:
     def execution_profile_id(self) -> str:
         return self._profile_id
 
+    @classmethod
+    def validate_existing_scope(
+        cls, *, execution_profile_id: str, binding: ExecutionBinding,
+        runtime_paths: RuntimeWorkspacePaths, surface_identity: SessionSurfaceIdentity,
+    ) -> None:
+        """Check an existing root archive without admission, migration or writes.
+
+        Identity-only carriers cannot establish a new execution authority. This
+        view deliberately bypasses construction's create/upgrade behavior and
+        reuses the archive's original scope codec under its existing lock.
+        """
+        session_dir, error = resolve_session_dir(binding.host_session_id, create=False)
+        if session_dir is None:
+            raise ExecutionRecoveryUnavailableError(error or "recovery Session is missing")
+        view = cls.__new__(cls)
+        view._path = session_dir / _RECOVERY_FILE_NAME
+        view._session_id = binding.host_session_id
+        view._parent_session_id = None
+        view._profile_id = execution_profile_id
+        view._binding = binding
+        view._runtime_paths = runtime_paths
+        view._surface_identity = surface_identity
+        with view._archive_lock(existing_only=True):
+            view._validate_scope(view._read_archive())
+
     def child(
         self,
         binding: ExecutionBinding,
@@ -589,16 +614,20 @@ class SessionExecutionRecovery:
         return value
 
     @contextlib.contextmanager
-    def _archive_lock(self):
+    def _archive_lock(self, *, existing_only: bool = False):
         """Serialize archive transactions across threads and server processes."""
 
         with _LOCK:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
+            if not existing_only:
+                self._path.parent.mkdir(parents=True, exist_ok=True)
             lock_path = self._path.with_name(f".{self._path.name}.lock")
             try:
-                with portalocker.Lock(str(lock_path), mode="a", timeout=10):
-                    lock_path.chmod(0o600)
+                with portalocker.Lock(str(lock_path), mode="r+" if existing_only else "a", timeout=10):
+                    if not existing_only:
+                        lock_path.chmod(0o600)
                     yield
+            except FileNotFoundError as exc:
+                raise ExecutionRecoveryUnavailableError("recovery archive is missing") from exc
             except portalocker.exceptions.LockException as exc:
                 raise ExecutionRecoveryUnavailableError(
                     "recovery archive is busy"

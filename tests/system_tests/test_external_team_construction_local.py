@@ -2,6 +2,7 @@
 """Real Provider CLIs through the Team member factory; loopback models only."""
 import asyncio
 from contextlib import AsyncExitStack
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
@@ -22,10 +23,14 @@ from openjiuwen.harness.engine import ExecutionBinding
 from openjiuwen.harness_protocol import TurnStatus
 
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
+from jiuwenswarm.common.schema.agent import AgentRequest
+from jiuwenswarm.server.runtime.agent_adapter.team_engine_adapter import ExternalTeamAgentAdapter
 from jiuwenswarm.runtime.harness.binding_store import BoundExecution, ExecutionBindingStore
 from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
-from jiuwenswarm.runtime.harness.surface import EffectiveSurfaceSnapshot, build_surface_identity
+from jiuwenswarm.runtime.harness.surface import EffectiveSurfaceSnapshot, build_surface_identity, creation_surface
+from jiuwenswarm.runtime.harness.recovery_store import SessionExecutionRecovery
+from tests.unit_tests.runtime.harness.test_execution_recovery import recovery_env as recovery_env
 from jiuwenswarm.runtime.harness import team_execution as module
 from tests.system_tests.test_external_codex_product_route_local import _ResponsesFixture
 from tests.system_tests.test_external_opencode_product_route_local import _ModelFixture
@@ -37,7 +42,8 @@ pytestmark = [pytest.mark.integration, pytest.mark.system,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('provider', ['codex', 'opencode'])
-async def test_real_team_member_provider_turn_and_resume(tmp_path, monkeypatch, provider):
+@pytest.mark.parametrize('trusted_subject', [False, True], ids=['routing-subject', 'trusted-subject'])
+async def test_real_team_member_provider_turn_and_resume(tmp_path, monkeypatch, recovery_env, provider, trusted_subject):
     root = tmp_path / 'project'
     home = tmp_path / 'home'
     runtime_root = tmp_path / 'provider-runtime'
@@ -107,7 +113,7 @@ async def test_real_team_member_provider_turn_and_resume(tmp_path, monkeypatch, 
                 'authorization': {'full_access': True},
             }}}}
             source = load_execution_catalog(config).source(explicit_profile_id='team-local')
-            binding = ExecutionBinding.create(source.resolve(), subject_id='fixture-owner',
+            binding = ExecutionBinding.create(source.resolve(), subject_id='host-worker' if trusted_subject else 'fixture-owner',
                                               host_session_id='team-local', workspace=str(root))
             paths = RuntimeWorkspacePaths(home, root, root, root)
             metadata = {'session_id': 'team-local', 'user_id': 'fixture-owner', 'channel_id': 'local',
@@ -117,9 +123,29 @@ async def test_real_team_member_provider_turn_and_resume(tmp_path, monkeypatch, 
                         'execution_config_fingerprint': binding.fingerprint}
             monkeypatch.setattr(module, '_host_config', lambda: config)
             monkeypatch.setattr(module, '_session_metadata', lambda _: metadata)
-            identity = build_surface_identity(metadata=metadata, binding=binding, paths=paths, channel_id='local')
+            metadata['surface_creation'] = creation_surface(metadata)
+            persisted = deepcopy(metadata)
+            surface_metadata = deepcopy(metadata)
+            if trusted_subject:
+                surface_metadata['user_id'] = binding.subject_id
+                surface_metadata['surface_creation']['user_id'] = binding.subject_id
+            identity = build_surface_identity(metadata=surface_metadata, binding=binding, paths=paths, channel_id='local')
+            recovery = SessionExecutionRecovery(
+                session_id='team-local', execution_profile_id='team-local', binding=binding,
+                runtime_paths=paths, surface_identity=identity,
+            )
             route = AdmittedExecutionRoute('local', source, ExecutionBindingStore(), BoundExecution(binding, source.resolve()),
-                                           paths, surface=EffectiveSurfaceSnapshot(identity, metadata['mode']))
+                                           paths, recovery=recovery, surface=EffectiveSurfaceSnapshot(identity, metadata['mode']),
+                                           trusted_subject_id=binding.subject_id if trusted_subject else None)
+            request = AgentRequest('team-turn', session_id='team-local', channel_id='local',
+                                   user_id='wire-routing-user' if trusted_subject else 'fixture-owner',
+                                   params={'mode': metadata['mode']})
+            request._execution_route = route
+            ExternalTeamAgentAdapter(route).select_execution_for_request(request)
+            factory = module.ExternalTeamMemberFactory(route, team_name='team')
+            reconstructed = module.ExternalTeamMemberFactory.from_seed(factory.to_seed(), config=config)
+            assert reconstructed._host_selection_unchanged()
+            assert metadata == persisted
             spec = TeamAgentSpec(agents={'leader': DeepAgentSpec(), 'teammate': DeepAgentSpec()},
                                  team_name='team', evolution_enabled=False, spawn_mode='inprocess',
                                  storage=StorageSpec(type='memory'))
@@ -168,6 +194,7 @@ async def test_real_team_member_provider_turn_and_resume(tmp_path, monkeypatch, 
                     (member.blueprint.ctx.member_name, 'view_task') for member in members
                 ]
                 assert all(not output.is_error for _, _, output in tool_results), tool_results
+                assert metadata == persisted
         finally:
             for member in reversed(members):
                 await member.harness.stop()

@@ -99,14 +99,16 @@ def _context() -> ParentExecutionContext:
     )
 
 
-def _surface_route(tmp_path: Path) -> AdmittedExecutionRoute:
+def _surface_route(
+    tmp_path: Path, *, work_mode: str = "code"
+) -> AdmittedExecutionRoute:
     route = _route(tmp_path)
     metadata = {
         "session_id": "parent-session",
         "channel_id": "web",
         "user_id": "alice",
-        "mode": "agent.code.normal",
-        "work_mode": "code",
+        "mode": f"agent.{work_mode}.normal",
+        "work_mode": work_mode,
         "project_dir": str(route.runtime_paths.project_root),
         "execution_profile_id": "profile",
     }
@@ -132,7 +134,9 @@ def _surface_route(tmp_path: Path) -> AdmittedExecutionRoute:
             ),
         ),
         product_tool_names=("subagent_spawn",),
-        product_subagent_types=("explore_agent",),
+        product_subagent_types=(
+            "research_agent" if work_mode == "work" else "explore_agent",
+        ),
         authorization=ExecutionAuthorization(),
     )
     return dataclasses.replace(
@@ -857,3 +861,65 @@ async def test_browser_start_failure_retains_cleanup_before_releasing_recovery(t
     await factory.close_pending()
     await factory.close_pending()
     assert events == ["close", "close", "release-recovery"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_id", ["codex", "opencode"])
+@pytest.mark.parametrize("work_research_enabled", [True, False])
+async def test_research_policy_is_frozen_to_work_parent_and_keeps_binding(
+    tmp_path, monkeypatch, provider_id, work_research_enabled,
+):
+    from jiuwenswarm.agents.harness.work.research import work_research_instructions
+
+    route = _route(tmp_path, provider_id=provider_id)
+    calls = _install_session_builder(monkeypatch)
+    factory = ExternalSubagentExecutionFactory(
+        route, work_research_enabled=work_research_enabled,
+    )
+    request = dataclasses.replace(_request(), subagent_type="research_agent")
+    execution = await factory.create(request, _context())
+    prompt = calls[0][1].started_context.system_prompt
+    assert (work_research_instructions() in prompt) is work_research_enabled
+    assert execution.binding.provider_id == route.provider_id
+    assert execution.binding.config_revision == route.bound.binding.config_revision
+    assert execution.binding.workspace == route.bound.binding.workspace
+    assert execution.binding.subject_id != route.bound.binding.subject_id
+    await execution.close("research_finished")
+    assert calls[0][1].stopped
+
+
+@pytest.mark.asyncio
+async def test_work_research_does_not_inject_policy_into_general_child(tmp_path, monkeypatch):
+    calls = _install_session_builder(monkeypatch)
+    factory = ExternalSubagentExecutionFactory(_route(tmp_path), work_research_enabled=True)
+    execution = await factory.create(_request(), _context())
+    assert "# Evidence research" not in calls[0][1].started_context.system_prompt
+    await execution.close("finished")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("work_mode", ["work", "code"])
+async def test_frozen_surface_owns_research_policy_over_legacy_flag(
+    tmp_path, monkeypatch, work_mode,
+):
+    from jiuwenswarm.agents.harness.work.research import work_research_instructions
+    from jiuwenswarm.runtime.harness.external_subagent_profiles import (
+        ExternalSubagentProfileUnavailableError,
+    )
+
+    route = _surface_route(tmp_path, work_mode=work_mode)
+    calls = _install_session_builder(monkeypatch)
+    factory = ExternalSubagentExecutionFactory(
+        route, work_research_enabled=work_mode != "work",
+    )
+    request = dataclasses.replace(_request(), subagent_type="research_agent")
+    if work_mode == "code":
+        with pytest.raises(ExternalSubagentProfileUnavailableError, match="not mounted"):
+            await factory.create(request, _context())
+        assert calls == []
+        return
+    execution = await factory.create(request, _context())
+    assert work_research_instructions() in calls[0][1].started_context.system_prompt
+    assert calls[0][1].started_context.metadata["surface"]["work_mode"] == "work"
+    await execution.close("research_finished")
+    assert calls[0][1].stopped

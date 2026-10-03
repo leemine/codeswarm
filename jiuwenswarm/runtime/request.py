@@ -331,6 +331,7 @@ async def prepare_chat_turn(
     metadata_sync: Callable[..., str | None] = sync_chat_request_metadata,
     agent_definition: dict[str, Any] | None = None,
     agent_definition_fingerprint: str | None = None,
+    trusted_subject_id: str | None = None,
 ) -> tuple[str, str | None, Any]:
     """Resolve session semantics and select an agent from the shared manager."""
     params = request.params if isinstance(request.params, dict) else {}
@@ -371,7 +372,7 @@ async def prepare_chat_turn(
                     surface_mode, require_policy=False,
                     topology="team" if surface_mode.startswith("team.") else "single",
                 )
-                if (raw_metadata.get("user_id") and request.user_id
+                if (trusted_subject_id is None and raw_metadata.get("user_id") and request.user_id
                         and raw_metadata["user_id"] != request.user_id):
                     from jiuwenswarm.runtime.harness.surface import SurfaceAdmissionError
                     raise SurfaceAdmissionError("Surface subject changed")
@@ -443,12 +444,21 @@ async def prepare_chat_turn(
     def admit_request() -> str | None:
         nonlocal session_metadata
         if sync_metadata:
+            # External Surface creation already froze the routing identity,
+            # including an empty user_id. A chat envelope must not fill that
+            # empty value after validation and invalidate surface_creation.
+            # The separately admitted host subject binds execution below.
+            metadata_user_id = (
+                session_metadata.get("user_id", "")
+                if external_surface
+                else getattr(request, "user_id", "")
+            )
             project_dir = metadata_sync(
                 request,
                 requested_project_dir,
                 canonical_mode if canonical_mode else mode,
                 explicit_mode_provided=explicit_mode_provided,
-                user_id=str(getattr(request, "user_id", "") or "").strip(),
+                user_id=str(metadata_user_id or "").strip(),
             )
             if session_id:
                 # Re-read only after permission admission succeeds. A rejected
@@ -519,6 +529,7 @@ async def prepare_chat_turn(
                 request,
                 admitted_project_dir,
                 session_metadata=session_metadata,
+                **({"trusted_subject_id": trusted_subject_id} if trusted_subject_id is not None else {}),
             )
         )
     if agent_definition is not None:

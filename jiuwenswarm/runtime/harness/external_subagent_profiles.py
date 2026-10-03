@@ -10,6 +10,7 @@ from types import MappingProxyType
 
 GENERAL_PURPOSE_SUBAGENT_TYPE = "general-purpose"
 BROWSER_SUBAGENT_TYPE = "browser_agent"
+RESEARCH_SUBAGENT_TYPE = "research_agent"
 
 
 class ExternalSubagentExecutionKind(str, Enum):
@@ -60,10 +61,13 @@ _profile_catalog = {
         ),
         advertised=False,
     ),
-    "research_agent": ExternalSubagentProfile(
-        subagent_type="research_agent",
+    RESEARCH_SUBAGENT_TYPE: ExternalSubagentProfile(
+        subagent_type=RESEARCH_SUBAGENT_TYPE,
         execution_kind=ExternalSubagentExecutionKind.GENERIC,
-        description="same Provider research delegation for the Work Surface",
+        description=(
+            "Work evidence research using the same Provider and admitted workspace; "
+            "scope, inspect sources, compare evidence and return a cited report"
+        ),
         surfaces=frozenset({"work"}),
         advertised=True,
         compatibility_alias=True,
@@ -189,6 +193,7 @@ def render_external_subagent_catalog(
     *,
     work_mode: str | None = None,
     browser_available: bool = False,
+    work_research_enabled: bool = False,
 ) -> str:
     """Render only profiles that the current product runtime can construct."""
 
@@ -198,6 +203,10 @@ def render_external_subagent_catalog(
             for profile in EXTERNAL_SUBAGENT_PROFILES.values()
             if (
                 profile.advertised and not profile.compatibility_alias
+                or (
+                    work_research_enabled
+                    and profile.subagent_type == RESEARCH_SUBAGENT_TYPE
+                )
                 or (
                     browser_available
                     and profile.execution_kind
@@ -219,6 +228,7 @@ __all__ = [
     "BROWSER_SUBAGENT_TYPE",
     "EXTERNAL_SUBAGENT_PROFILES",
     "GENERAL_PURPOSE_SUBAGENT_TYPE",
+    "RESEARCH_SUBAGENT_TYPE",
     "ExternalSubagentExecutionKind",
     "ExternalSubagentProfile",
     "ExternalSubagentProfileUnavailableError",

@@ -46,6 +46,9 @@ class ExternalTeamAgentAdapter:
     def bind_route(self, route: AdmittedExecutionRoute) -> None:
         if (route.cache_identity != self._route.cache_identity
                 or route.bound.binding is not self._route.bound.binding
+                or route.trusted_subject_id != self._route.trusted_subject_id
+                or (route.trusted_subject_id is not None
+                    and route.trusted_subject_id != route.bound.binding.subject_id)
                 or route.surface is None
                 or route.surface.identity != self._route.surface.identity
                 or route.runtime_paths != self._route.runtime_paths):
@@ -62,7 +65,8 @@ class ExternalTeamAgentAdapter:
         binding = self._route.bound.binding
         if (request.session_id != binding.host_session_id
                 or request.channel_id != self._route.channel_id
-                or (request.user_id and request.user_id != binding.subject_id)):
+                or (self._route.trusted_subject_id is None
+                    and request.user_id and request.user_id != binding.subject_id)):
             raise ValueError('External Team request identity changed')
         params = request.params if isinstance(request.params, dict) else {}
         self._route.surface.validate_mode(

@@ -140,6 +140,7 @@ class ExternalSubagentRuntime:
         tool_admit=None,
         invoke_kwargs: dict[str, Any] | None = None,
         event_observer_factory=None,
+        work_research_enabled: bool = False,
     ) -> None:
         if route.provider_id not in SUPPORTED_SUBAGENT_PROVIDERS:
             raise ValueError(
@@ -201,6 +202,7 @@ class ExternalSubagentRuntime:
             browser_artifact_sink=browser_artifact_sink,
             browser_decision_id_for=browser_decision_id_for,
             **({'event_observer_factory': event_observer_factory} if event_observer_factory is not None else {}),
+            work_research_enabled=work_research_enabled,
         )
         self._browser_admit = browser_admit
         tools = build_subagent_tools(
@@ -209,6 +211,7 @@ class ExternalSubagentRuntime:
             available_agents=render_external_subagent_catalog(
                 work_mode=work_mode,
                 browser_available=browser_admit is not None,
+                work_research_enabled=work_research_enabled,
             ),
             allowed_subagent_types=allowed_subagent_types,
             execution_factory=self._factory,
