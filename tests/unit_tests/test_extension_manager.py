@@ -76,6 +76,10 @@ async def test_transport_manifest_flag_requires_a_real_boolean() -> None:
 
     class FakeLoader:
         @staticmethod
+        def _check_lifecycle_idle() -> None:
+            pass
+
+        @staticmethod
         def discover_extension_roots() -> list[Path]:
             return list(manifests)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import importlib.util
 import importlib.metadata
@@ -44,6 +45,10 @@ def _extension_display_name(manifest: dict, root: Path) -> str:
     return name or root.name
 
 
+class _ExtensionLifecycleConflict(RuntimeError):
+    """A rejected lifecycle operation has not consumed any cleanup receipts."""
+
+
 class ExtensionLoader:
     def __init__(self, registry: ExtensionRegistry):
         self.registry = registry
@@ -72,10 +77,13 @@ class ExtensionLoader:
         """Read extension metadata without importing its entry module."""
         return _load_manifest_dict(root)
 
+    def _check_lifecycle_idle(self) -> None:
+        if self.registry._loading is not None or self.registry._closing is not None:
+            raise _ExtensionLifecycleConflict("concurrent or nested extension lifecycle operation is unsupported")
+
     async def load_extension(self, root: Path, *, manifest: dict | None = None) -> Any:
         manifest = manifest if manifest is not None else _load_manifest_dict(root)
-        if self.registry._loading is not None:
-            raise RuntimeError("concurrent or nested extension loading is unsupported")
+        self._check_lifecycle_idle()
         transaction = _RegistrationTransaction(self.registry)
         self.registry._loading = transaction
         token = _ACTIVE_TRANSACTION.set(transaction)
@@ -159,11 +167,16 @@ class ExtensionLoader:
 
     async def shutdown_loaded(self) -> None:
         """Release this loader's registrations/resources, never a borrowed registry."""
-        errors: list[BaseException] = []
-        while self._loads:
-            errors.extend(await self._loads.pop().close())
-        if errors:
-            raise BaseExceptionGroup("extension shutdown failed", errors)
+        self._check_lifecycle_idle()
+        self.registry._closing = asyncio.current_task()
+        try:
+            errors: list[BaseException] = []
+            while self._loads:
+                errors.extend(await self._loads.pop().close())
+            if errors:
+                raise BaseExceptionGroup("extension shutdown failed", errors)
+        finally:
+            self.registry._closing = None
 
     @staticmethod
     def _check_compatibility(manifest: dict) -> None:

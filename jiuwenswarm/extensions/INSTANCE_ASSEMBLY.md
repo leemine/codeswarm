@@ -46,8 +46,15 @@ No existing `dependencies` entry is reinterpreted as an extension ID.
 ## Loading and ownership
 
 Loading stages registry writes and callback registration in the loading task.
+During loading, `unregister` may only undo that transaction's own staged
+callbacks; attempts to remove previously published or borrowed callbacks fail
+without changing them.
 Other tasks continue seeing the previously published registry until success.
-Concurrent/nested loads on one registry are rejected. Application plugins retain
+Concurrent/nested lifecycle operations on one registry are rejected, including
+load versus close and close versus close across different loaders/managers.
+A rejected close consumes no receipts and preserves the manager's owned list
+for retry. Closing an earlier load also rebases later cleanup receipts so they
+cannot restore an already closed provider. Application plugins retain
 the loader's one initialization call; legacy non-application plugins retain
 control of their own initialization.
 

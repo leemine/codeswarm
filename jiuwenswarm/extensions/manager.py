@@ -3,7 +3,7 @@ from typing import Any, Mapping
 from copy import deepcopy
 
 from jiuwenswarm.common.config import get_config
-from jiuwenswarm.extensions.loader import ExtensionLoader
+from jiuwenswarm.extensions.loader import ExtensionLoader, _ExtensionLifecycleConflict
 from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.common.utils import get_root_dir, logger
 
@@ -99,6 +99,7 @@ class ExtensionManager:
         *,
         include_transport_extensions: bool = True,
     ) -> None:
+        self.loader._check_lifecycle_idle()
         self.diagnostics = []
         roots = self.loader.discover_extension_roots()
         logger.info("[ExtensionManager] 发现扩展路径: %s", roots)
@@ -149,6 +150,8 @@ class ExtensionManager:
                         self._loaded_extensions.extend(loaded)
                     else:
                         self._loaded_extensions.append(loaded)
+            except _ExtensionLifecycleConflict:
+                raise
             except Exception as e:
                 self.diagnostics.append({"path": str(path), "error": str(e)})
                 logger.error("[ExtensionManager] 加载扩展 %s 失败: %s", path, e)
@@ -171,7 +174,13 @@ class ExtensionManager:
     async def shutdown_all_extensions(self) -> None:
         try:
             await self.loader.shutdown_loaded()
-        finally:
+        except _ExtensionLifecycleConflict:
+            # No receipt was consumed. Keep owned resources visible for retry.
+            raise
+        except BaseException:
+            self._loaded_extensions.clear()
+            raise
+        else:
             self._loaded_extensions.clear()
 
     def list_extensions(self) -> list[dict]:
