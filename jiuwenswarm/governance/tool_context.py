@@ -13,12 +13,37 @@ _AUTHORITY: ContextVar[Mapping[str, ToolAuthorizer] | None] = ContextVar(
 )
 
 
+_NATIVE_SOURCE: ContextVar[Callable[[], ToolAuthorizer | None] | None] = ContextVar(
+    "native_tool_authority_source", default=None
+)
+
+
+@contextmanager
+def native_authority_source_scope(source):
+    """Private host selector inherited by the existing Native lifetime tasks."""
+    if not callable(source):
+        raise TypeError("Native authority source must be callable")
+    token = _NATIVE_SOURCE.set(source)
+    try:
+        yield
+    finally:
+        _NATIVE_SOURCE.reset(token)
+
+
 async def _deny_unknown_provider(_context: BeforeToolContext) -> bool:
     return False
 
 
 def current_tool_authorizer(provider_id: str = "native") -> ToolAuthorizer | None:
     """Return the current task's authority; never cache it on a shared rail."""
+    source = _NATIVE_SOURCE.get() if provider_id == "native" else None
+    if source is not None:
+        return source()
+    return submitted_tool_authorizer(provider_id)
+
+
+def submitted_tool_authorizer(provider_id: str = "native") -> ToolAuthorizer | None:
+    """Capture the submitting Runtime scope, without a lifetime task selector."""
     authorities = _AUTHORITY.get()
     return (
         None
