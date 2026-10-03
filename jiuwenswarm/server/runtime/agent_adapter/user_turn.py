@@ -19,7 +19,7 @@ import json
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from jiuwenswarm.agents.harness.common.rails.permissions.root_context import (
@@ -30,6 +30,9 @@ from jiuwenswarm.agents.harness.common.rails.permissions.root_context import (
 from jiuwenswarm.common.session_message import SESSION_MESSAGE_INTERNAL_KEY
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from jiuwenswarm.governance.project_content import ProjectContentSnapshot
 
 # ``inputs`` key carrying the UserTurn across the team dispatch boundary.
 # Private to the adapter layer: DeepAgent's ``_normalize_inputs`` reads only
@@ -77,6 +80,7 @@ class UserTurn:
     skills: list[str] | None = None
     metadata: dict[str, Any] | None = None
     origin_kind: str = HOST_USER_ORIGIN_INTERNAL
+    project_content: ProjectContentSnapshot | None = None
 
     def with_text(self, text: Any) -> "UserTurn":
         """Return a copy carrying rewritten user text, keeping all context."""
@@ -170,6 +174,13 @@ class UserTurn:
         envelope.update(self._sender_fields())
         envelope.update(self._skill_scene_fields())
         envelope.update(self._prefer_mcp_field())
+        if self.project_content is not None:
+            snapshot = self.project_content
+            envelope["project_content_snapshot"] = snapshot.provenance
+            envelope["project_instructions"] = snapshot.instructions
+            # Reference bytes stay a data object inside the user envelope.
+            # They never become a system/developer instruction or cold prompt.
+            envelope["project_reference_data"] = json.loads(snapshot.reference_json)
         return envelope
 
     def _prompt_channel(self) -> str:

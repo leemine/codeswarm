@@ -541,6 +541,8 @@ class AgentRuntime:
             raise GovernanceError("request project changed during preparation")
         if self._governance_identity(request) != prepared.identity:
             raise GovernanceError("trusted identity changed during preparation")
+        if getattr(request, "_project_content_snapshot", None) is not None:
+            self._submission_guard.check_access(prepared.project_id, prepared.identity, "read")
         self._submission_guard.begin_submission(
             prepared, generation=self._governance_generation(prepared.session_id),
         )
@@ -1385,12 +1387,20 @@ class AgentRuntime:
         from jiuwenswarm.runtime.request import prepare_chat_turn
 
         prepare_kwargs: dict[str, Any] = {"sync_metadata": sync_metadata}
+        # This host-only attribute is never decoded from transport params or
+        # metadata. Clear a reused request before considering a new Turn.
+        request._project_content_snapshot = None
         identity = self._governance_identity(request)
         project_id = self._governance_project(request)
         if identity is not None and project_id:
             decision = self._submission_guard.check_access(project_id, identity, "execute")
             if decision is not None and decision.revision > 0:
                 prepare_kwargs["trusted_subject_id"] = identity.subject_id
+                if (request.req_method in self._chat_turn_methods()
+                        and not self._is_interrupt_resume_request(request)):
+                    from jiuwenswarm.server.runtime.session.project_content import ProjectContentStore
+
+                    request._project_content_snapshot = ProjectContentStore().freeze(project_id, identity)
         if agent_execution is not None:
             prepare_kwargs.update(
                 agent_definition=agent_execution.definition.to_dict(),

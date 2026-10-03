@@ -54,6 +54,14 @@ class ProjectContentSnapshot:
             raise ValueError("invalid immutable project content snapshot")
 
     @property
+    def provenance(self) -> dict[str, Any]:
+        """Persist the exact version identity without copying reference contents."""
+        return {'project_id': self.project_id, 'revision': self.revision,
+                'compile_version': self.compile_version, 'digest': self.digest,
+                'sources': [{'source_id': source.source_id, 'revision': source.revision,
+                             'trust': source.trust} for source in self.sources]}
+
+    @property
     def reference_json(self) -> str:
         """A structured data payload, separate from instruction authority.
 

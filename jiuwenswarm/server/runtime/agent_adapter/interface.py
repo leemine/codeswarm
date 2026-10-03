@@ -547,7 +547,7 @@ def _with_heartbeat_history_metadata(
     return result
 
 
-def _history_user_extra(params: Any) -> dict[str, Any] | None:
+def _history_user_extra(params: Any, *, project_content=None) -> dict[str, Any] | None:
     """Extract media/files/skills from ``params`` for the history extra.
 
     Image attachments and uploaded files are scoped to the *current turn* only
@@ -558,6 +558,8 @@ def _history_user_extra(params: Any) -> dict[str, Any] | None:
         return None
 
     extra = _with_cross_session_history_metadata(None, params) or {}
+    if project_content is not None:
+        extra["project_content_snapshot"] = project_content.provenance
     raw_media_items = params.get("media_items")
     if isinstance(raw_media_items, list):
         media_items: list[dict[str, Any]] = []
@@ -1750,6 +1752,7 @@ class JiuWenSwarm:
             skills=skills,
             metadata=metadata,
             origin_kind=origin_kind,
+            project_content=getattr(request, "_project_content_snapshot", None),
         )
 
         if isinstance(query, InteractiveInput):
@@ -3186,7 +3189,9 @@ class JiuWenSwarm:
                 role="user",
                 content=_history_user_content(request.params, query),
                 timestamp=time.time(),
-                extra=_history_user_extra(request.params),
+                extra=_history_user_extra(
+                    request.params, project_content=getattr(request, "_project_content_snapshot", None),
+                ),
                 channel_metadata=request.metadata,
                 mode=request.params.get("mode", "unknown"),
             )
@@ -3577,7 +3582,9 @@ class JiuWenSwarm:
                 role="user",
                 content=_history_user_content(params_for_history, query),
                 timestamp=time.time(),
-                extra=_history_user_extra(params_for_history),
+                extra=_history_user_extra(
+                    params_for_history, project_content=getattr(request, "_project_content_snapshot", None),
+                ),
                 channel_metadata=request.metadata,
                 mode=params_for_history.get("mode", "unknown"),
             )
