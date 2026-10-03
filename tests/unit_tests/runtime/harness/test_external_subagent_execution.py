@@ -28,7 +28,6 @@ from openjiuwen.harness_protocol import (
     ProviderCapability,
     ProviderCapabilityInventory,
     ProviderCapabilityKind,
-    ToolInvocation,
     TurnEventKind,
 )
 from openjiuwen.harness_providers.io_adapter import ProjectedOutput
@@ -885,31 +884,7 @@ async def test_research_policy_is_frozen_to_work_parent_and_keeps_binding(
     assert execution.binding.config_revision == route.bound.binding.config_revision
     assert execution.binding.workspace == route.bound.binding.workspace
     assert execution.binding.subject_id != route.bound.binding.subject_id
-    gateway = calls[0][0]["tool_gateway"]
-    if work_research_enabled:
-        assert gateway.tool_names == ("review_research_report",)
-        assert gateway.scope.subject_id == execution.binding.subject_id
-        assert gateway.scope.host_session_id == request.subagent_id
-        assert gateway.scope.workspace == execution.binding.workspace
-        result = await gateway.invoke(ToolInvocation(
-            call_id="review-invalid-draft",
-            name="review_research_report",
-            arguments={
-                "sources": [{"id": "source", "text": "Observed fact", "start_line": 1, "complete": True}],
-                "claims": [{
-                    "id": "claim", "section": "Findings", "kind": "fact", "text": "Draft fact",
-                    "refs": [{"source_id": "source", "start_line": 1, "end_line": 1, "quote": "Invented quote"}],
-                }],
-            },
-        ))
-        assert "structural_valid" in result.content
-        assert "false" in result.content.lower()
-        unknown = await gateway.invoke(ToolInvocation(
-            call_id="not-a-file-tool", name="read_file", arguments={},
-        ))
-        assert unknown.is_error
-    else:
-        assert gateway is None
+    assert calls[0][0]["tool_gateway"] is None
     await execution.close("research_finished")
     assert calls[0][1].stopped
 
@@ -948,6 +923,6 @@ async def test_frozen_surface_owns_research_policy_over_legacy_flag(
     execution = await factory.create(request, _context())
     assert work_research_instructions() in calls[0][1].started_context.system_prompt
     assert calls[0][1].started_context.metadata["surface"]["work_mode"] == "work"
-    assert calls[0][0]["tool_gateway"].tool_names == ("review_research_report",)
+    assert calls[0][0]["tool_gateway"] is None
     await execution.close("research_finished")
     assert calls[0][1].stopped

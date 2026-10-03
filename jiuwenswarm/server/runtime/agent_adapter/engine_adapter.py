@@ -964,9 +964,9 @@ class EngineAgentAdapter:
             raise RuntimeError("External execution session cleanup is pending")
         return session
 
-    def _external_context(self, binding=None):
-        binding = binding or self._route.bound.binding
-        context = build_external_context(
+    def _external_context(self):
+        binding = self._route.bound.binding
+        return build_external_context(
             paths=self._route.runtime_paths,
             host_session_id=binding.host_session_id,
             channel_id=self._route.channel_id,
@@ -974,18 +974,6 @@ class EngineAgentAdapter:
             surface=self._surface,
             context_snapshot=self._context_snapshot,
         )
-        if self._work_research_enabled and self._subagent_runtime is not None:
-            from jiuwenswarm.agents.harness.work.research_parent import (
-                work_research_parent_instructions,
-            )
-
-            context = replace(
-                context,
-                system_prompt=(
-                    f"{context.system_prompt}\n{work_research_parent_instructions()}"
-                ),
-            )
-        return context
 
     async def _ensure_started(self, session: ExecutionSession) -> None:
         if session.started:
@@ -998,7 +986,16 @@ class EngineAgentAdapter:
             self._compile_cold_surface_policy()
             binding = session.binding
             await self._projection.replay_product_artifacts()
-            await session.start(self._external_context(binding))
+            await session.start(
+                build_external_context(
+                    paths=self._route.runtime_paths,
+                    host_session_id=binding.host_session_id,
+                    channel_id=self._route.channel_id,
+                    provider_id=binding.provider_id,
+                    surface=self._surface,
+                    context_snapshot=self._context_snapshot,
+                )
+            )
 
     def _compile_cold_surface_policy(self) -> None:
         if self._surface is None:
