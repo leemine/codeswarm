@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal, flushSync } from 'react-dom';
-import { Archive, Check, ChevronDown, CircleAlert, Code2, LoaderCircle, Workflow } from 'lucide-react';
+import { Archive, Check, ChevronDown, CircleAlert, Code2, LoaderCircle, Share2, Workflow } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useAdaptiveTooltip } from '../../hooks/useAdaptiveTooltip';
 import { useChatStore, type ChatRuntime } from '../../stores/chatStore';
@@ -97,6 +97,7 @@ interface ConversationSidebarProps {
   onSelect: (session: Session) => void;
   /** 跳转到"定时任务"主面板；该入口原来在最左侧图标栏，现移到工作小窗口的"新建任务"下方 */
   onOpenCron: () => void;
+  onOpenSharedSessions?: () => void;
   /** 当前是否正停留在定时任务面板，用于给下面这个入口按钮加选中态 */
   isCronActive: boolean;
   /** 侧边栏是否收起 */
@@ -862,6 +863,7 @@ export function ConversationSidebar({
   onNew,
   onSelect,
   onOpenCron,
+  onOpenSharedSessions,
   isCronActive,
   collapsed = false,
   floating = false,
@@ -1648,6 +1650,17 @@ export function ConversationSidebar({
           <CronIcon aria-hidden />
           <span data-testid="multi-session-open-cron-label">{t('nav.cron')}</span>
         </button>
+        {onOpenSharedSessions && (
+          <button
+            type="button"
+            className="conversation-sidebar__new"
+            onClick={onOpenSharedSessions}
+            data-testid="multi-session-open-shared-sessions"
+          >
+            <Share2 size={18} aria-hidden />
+            <span data-testid="multi-session-open-shared-sessions-label">{t('sessionSharing.received')}</span>
+          </button>
+        )}
         </div>
         <div className="conversation-sidebar__body" data-testid="multi-session-sidebar-body">
         {hasPinnedSection ? (

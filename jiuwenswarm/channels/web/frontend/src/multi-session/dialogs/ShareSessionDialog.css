@@ -1,0 +1,91 @@
+.session-sharing-content {
+  padding: 24px;
+}
+.session-sharing-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.session-sharing-content h2 {
+  margin: 0;
+  font-size: 20px;
+}
+.session-sharing-content p,
+.session-sharing-content span {
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+.session-sharing-content form {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+}
+.session-sharing-content label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+.session-sharing-content input:not([type='checkbox']) {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 12px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-surface-card);
+  color: var(--color-text-primary);
+}
+.session-sharing-content fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+}
+.session-sharing-content fieldset label {
+  display: flex;
+  align-items: center;
+}
+.session-sharing-content button {
+  padding: 6px 12px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-surface-card);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+.session-sharing-content button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.session-sharing-content button:focus-visible,
+.session-sharing-content input:focus-visible {
+  outline: 2px solid var(--color-text-link);
+  outline-offset: 2px;
+}
+.session-sharing-content ul {
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 10px;
+}
+.session-sharing-content li {
+  padding: 12px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+.session-sharing-row-actions {
+  display: flex;
+  gap: 8px;
+}
+.session-sharing-content .session-sharing-error {
+  color: var(--color-feedback-danger);
+}
+@media (max-width: 480px) {
+  .session-sharing-content {
+    padding: 16px;
+  }
+}
