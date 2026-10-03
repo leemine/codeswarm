@@ -3,7 +3,8 @@
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from openjiuwen.harness_protocol import BeforeToolContext
@@ -41,6 +42,78 @@ class ExecutionResourceAuthorities(Mapping):
 
 _MODEL_AUTHORITY: ContextVar[Callable | None] = ContextVar('model_resource_authority', default=None)
 _NATIVE_MODEL_SOURCE: ContextVar[Callable | None] = ContextVar('native_model_authority_source', default=None)
+_NATIVE_SLICE_SOURCE: ContextVar[Callable | None] = ContextVar('native_execution_slice_source', default=None)
+_NATIVE_SLICE: ContextVar[object | None] = ContextVar('native_execution_slice', default=None)
+
+
+@dataclass(slots=True)
+class NativeExecutionSlice:
+    owner: object
+    tool_authorizer: Callable | None
+    model_authorizer: Callable | None
+    subject: object
+    active: bool = True
+    _task: asyncio.Task | None = field(default=None, repr=False, compare=False)
+    _task_done_callback: Callable | None = field(default=None, repr=False, compare=False)
+
+
+def current_native_execution_slice():
+    bound = _NATIVE_SLICE.get()
+    if bound is not None and bound._task is not None:
+        # Task completion callbacks run on a later event-loop tick. Check here
+        # too so inherited work cannot use that interval or pending cancellation.
+        if bound._task.done() or bound._task.cancelling():
+            bound.active = False
+    return bound
+
+
+def deny_native_execution_slice():
+    """Fail closed in this task without restoring an inherited parent scope."""
+    denied = NativeExecutionSlice(None, None, None, None, active=False)
+    _NATIVE_SLICE.set(denied)
+    return denied
+
+
+def begin_native_execution_slice(ctx):
+    source = _NATIVE_SLICE_SOURCE.get()
+    if source is None:
+        return None
+    previous = _NATIVE_SLICE.get()
+    denied = deny_native_execution_slice()
+    # A failed child/owner admission must never retain an inherited valid slice.
+    bound = source(ctx)
+    if bound is None:
+        return denied, previous, asyncio.current_task()
+    if type(bound) is not NativeExecutionSlice or bound is previous or bound._task is not None:
+        raise TypeError('Native execution admission must produce a fresh slice')
+    task = asyncio.current_task()
+    if task is None:
+        raise RuntimeError('Native execution slice requires its owning task')
+    bound._task = task
+
+    def invalidate(_completed):
+        bound.active = False
+        bound._task = None
+        bound._task_done_callback = None
+
+    bound._task_done_callback = invalidate
+    task.add_done_callback(invalidate)
+    _NATIVE_SLICE.set(bound)
+    return bound, previous, task
+
+
+def end_native_execution_slice(handle, *, restore=True):
+    if handle is None:
+        return
+    bound, previous, task = handle
+    bound.active = False
+    if bound._task_done_callback is not None:
+        task.remove_done_callback(bound._task_done_callback)
+        bound._task_done_callback = None
+    bound._task = None
+    # Never restore another task's ContextVar or a replacement execution slice.
+    if restore and asyncio.current_task() is task and _NATIVE_SLICE.get() is bound:
+        _NATIVE_SLICE.set(previous)
 
 
 def submitted_model_authorizer():
@@ -58,17 +131,21 @@ async def deny_model_consumption(*_):
 
 
 @contextmanager
-def native_authority_source_scope(source, *, model_source=None):
+def native_authority_source_scope(source, *, model_source=None, slice_source=None):
     """Private host selector inherited by the existing Native lifetime tasks."""
     if not callable(source):
         raise TypeError("Native authority source must be callable")
     if model_source is not None and not callable(model_source):
         raise TypeError("Native model source must be callable")
+    if slice_source is not None and not callable(slice_source):
+        raise TypeError("Native execution slice source must be callable")
     token = _NATIVE_SOURCE.set(source)
     model_token = _NATIVE_MODEL_SOURCE.set(model_source)
+    slice_token = _NATIVE_SLICE_SOURCE.set(slice_source)
     try:
         yield
     finally:
+        _NATIVE_SLICE_SOURCE.reset(slice_token)
         _NATIVE_MODEL_SOURCE.reset(model_token)
         _NATIVE_SOURCE.reset(token)
 

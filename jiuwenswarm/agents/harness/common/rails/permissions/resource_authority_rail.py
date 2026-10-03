@@ -128,9 +128,61 @@ class NativeResourceAuthorityRail(DeepAgentRail):
         await permission.before_tool_call(ctx)
 
 
+class NativeExecutionScopeRail(DeepAgentRail):
+    """Pin the existing outer invocation/iteration to its original host input."""
+
+    priority = 10000
+
+    def callback_priority(self, event):
+        from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
+        return -10001 if event in {AgentCallbackEvent.AFTER_INVOKE,
+                                  AgentCallbackEvent.AFTER_TASK_ITERATION} else self.priority
+
+    @staticmethod
+    def _begin(ctx):
+        from jiuwenswarm.governance.tool_context import (
+            begin_native_execution_slice, deny_native_execution_slice, end_native_execution_slice,
+        )
+        from jiuwenswarm.governance.resources import ResourceAccessDenied
+        from openjiuwen.core.runner.callback.errors import AbortError
+        try:
+            if '_native_execution_slice' in ctx.extra:
+                end_native_execution_slice(ctx.extra.pop('_native_execution_slice'), restore=False)
+                deny_native_execution_slice()
+                raise ResourceAccessDenied('Native execution slice already entered')
+            handle = begin_native_execution_slice(ctx)
+            ctx.extra['_native_execution_slice'] = handle
+        except Exception:
+            raise AbortError('Native execution scope denied',
+                             cause=ResourceAccessDenied('Native execution scope denied')) from None
+
+    @staticmethod
+    def _end(ctx):
+        from jiuwenswarm.governance.tool_context import end_native_execution_slice
+        end_native_execution_slice(ctx.extra.pop('_native_execution_slice', None))
+
+    async def before_invoke(self, ctx):
+        self._begin(ctx)
+
+    async def before_task_iteration(self, ctx):
+        self._begin(ctx)
+
+    async def after_invoke(self, ctx):
+        self._end(ctx)
+
+    async def after_task_iteration(self, ctx):
+        self._end(ctx)
+
+
 def ensure_native_tool_authority(rails: list[Any]) -> list[Any]:
     """Return the assembly list with exactly one final authority rail."""
     existing = [rail for rail in rails if isinstance(rail, NativeResourceAuthorityRail)]
     if len(existing) > 1:
         raise ValueError("duplicate mandatory Native authority rails")
-    return rails if existing else [*rails, NativeResourceAuthorityRail()]
+    scopes = [rail for rail in rails if isinstance(rail, NativeExecutionScopeRail)]
+    if len(scopes) > 1:
+        raise ValueError('duplicate mandatory Native execution scopes')
+    if existing and scopes:
+        return rails
+    return [*rails, *([] if scopes else [NativeExecutionScopeRail()]),
+            *([] if existing else [NativeResourceAuthorityRail()])]

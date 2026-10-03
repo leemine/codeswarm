@@ -161,7 +161,7 @@ def test_assembly_is_idempotent_and_independent_from_optional_group():
 
     rails = ensure_native_tool_authority([])
     assert ensure_native_tool_authority(rails) is rails
-    assert len(rails) == 1 and not isinstance(rails[0], PERMISSION_GROUP_TYPES)
+    assert len(rails) == 2 and all(not isinstance(rail, PERMISSION_GROUP_TYPES) for rail in rails)
     with pytest.raises(ValueError):
         ensure_native_tool_authority([*rails, NativeResourceAuthorityRail()])
 
