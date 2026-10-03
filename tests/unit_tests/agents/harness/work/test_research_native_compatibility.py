@@ -132,3 +132,73 @@ async def test_native_requests_keep_light_research_and_existing_tools(tmp_path, 
             await child.stop()
         await parent.stop()
         await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_explicit_read_only_rail_reads_source_and_returns_inline(tmp_path, monkeypatch):
+    import json
+
+    from openjiuwen.core.foundation.llm import ToolCall
+    from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
+
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    source = workspace / 'source.md'
+    source.write_text('Recorded observation: four items.\n')
+    requests = []
+
+    async def invoke(_model, messages, **kwargs):
+        requests.append((copy.deepcopy(messages), copy.deepcopy(kwargs)))
+        if len(requests) == 1:
+            return AssistantMessage(content='', tool_calls=[ToolCall(
+                id='read-source', type='function', name='read_file',
+                arguments=json.dumps({'file_path': str(source)}),
+            )])
+        return AssistantMessage(content='The record describes four items (source.md:1).')
+
+    monkeypatch.setattr(Model, 'invoke', invoke)
+    model = Model(
+        model_client_config=ModelClientConfig(
+            client_provider='OpenAI', api_base='https://example.invalid/v1', api_key='unused',
+        ),
+        model_config=ModelRequestConfig(model='read-only-capture'),
+    )
+    operation = SysOperation(SysOperationCard(
+        id='read-only-research', mode=OperationMode.LOCAL,
+        work_config=LocalWorkConfig(
+            sandbox_root=[str(workspace)], restrict_to_sandbox=True,
+            dangerous_patterns=[r'[\s\S]'],
+        ),
+    ))
+    spec = build_research_agent_config(
+        model, workspace=str(workspace), sys_operation=operation, language='en',
+        rails=[SysOperationRail(read_only=True)],
+    )
+    spec.enable_read_image_multimodal = False
+    parent = create_deep_agent(
+        model=model, workspace=str(workspace), sys_operation=operation,
+        subagents=[spec], rails=[], enable_task_loop=False, enable_read_image_multimodal=False,
+    )
+    child = parent.create_subagent('research_agent', 'read-only-child')
+    await Runner.start()
+    try:
+        result = await child.invoke({
+            'query': f'Read {source} and answer inline. Do not create output files.',
+            'conversation_id': 'read-only-child',
+        })
+        assert result['result_type'] == 'answer'
+        assert result['output'] == 'The record describes four items (source.md:1).'
+        assert len(requests) == 2
+        for request in requests:
+            names = {tool.name for tool in request[1].get('tools') or []}
+            assert 'read_file' in names
+            assert not {'write_file', 'edit_file', 'review_research_report'} & names
+            assert work_research_instructions() in _system(request)
+        tool_messages = [m for m in requests[-1][0] if m.role == 'tool']
+        assert any('Recorded observation: four items.' in str(m.content) for m in tool_messages)
+        assert source.read_text() == 'Recorded observation: four items.\n'
+        assert not list(workspace.glob('research-*'))
+    finally:
+        await child.stop()
+        await parent.stop()
+        await Runner.stop()
