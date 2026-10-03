@@ -46,7 +46,7 @@ def organization_ui_projection(method: str, params: object) -> dict[str, Any] | 
     if not isinstance(params, dict) or params:
         raise PermissionError("organization bootstrap accepts no parameters")
 
-    from jiuwenswarm.common.config import get_config, get_config_raw, get_default_models
+    from jiuwenswarm.common.config import get_config_raw, get_default_models
     from jiuwenswarm.common.context_window import DEFAULT_CONTEXT_WINDOW_TOKENS
     from jiuwenswarm.common.version import __version__
     import os
@@ -95,7 +95,7 @@ def organization_ui_projection(method: str, params: object) -> dict[str, Any] | 
     else:
         # Configured model catalog only: never resolve another web login's
         # model credentials or invoke account/remote catalog providers.
-        models = get_default_models(mapping(get_config()))
+        models = get_default_models(mapping(get_config_raw()))
         result = []
         for entry in models if isinstance(models, list) else []:
             entry = mapping(entry)

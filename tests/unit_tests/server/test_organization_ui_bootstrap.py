@@ -224,7 +224,7 @@ async def test_no_principal_or_revoke_during_read_never_releases_buffer(
 
     monkeypatch.setattr(
         config,
-        "get_config_raw" if method == "config.get" else "get_config",
+        "get_config_raw",
         revoke_read,
     )
     with organization_auth.authenticated_scope(organization.principal):

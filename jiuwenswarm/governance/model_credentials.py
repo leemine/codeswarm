@@ -17,6 +17,46 @@ from .resources import ResourceAccessDenied, ResourceDefinition
 from .tool_resources import ResourceExecutionContext
 
 
+def configured_model_metadata():
+    """Read configured catalog metadata without decrypting or resolving env.
+
+    Only credential consumption may retrieve a key. Organization catalogs do
+    not append login, environment, AgentOS, or service-default credentials.
+    """
+    from copy import deepcopy
+    from jiuwenswarm.common.config import get_config_raw, _infer_is_default
+    raw = get_config_raw()
+    models = raw.get('models', {}) if isinstance(raw, dict) else {}
+    if not isinstance(models, dict):
+        return []
+    entries = models.get('defaults')
+    if not isinstance(entries, list):
+        default = models.get('default')
+        entries = [default] if isinstance(default, dict) else []
+    result = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        client = entry.get('model_client_config')
+        if not isinstance(client, dict) or not isinstance(client.get('model_name'), str):
+            continue
+        metadata = {key: deepcopy(client[key]) for key in (
+            'model_name', 'api_base', 'client_provider', 'api_mode', 'auth_mode',
+            'endpoint_profile', 'credential_reference', 'credential_encoding',
+            'timeout', 'verify_ssl', 'extensions',
+        ) if key in client}
+        # Preserve an unsupported declaration without copying header secrets.
+        if client.get('custom_headers'):
+            metadata['custom_headers'] = {'unsupported': 'host-custom-headers'}
+        metadata['api_key'] = 'MODEL_REQUEST_AUTHORITY'
+        result.append({
+            **{key: deepcopy(entry[key]) for key in ('alias', 'is_default', 'is_free') if key in entry},
+            'model_client_config': metadata,
+            'model_config_obj': deepcopy(entry.get('model_config_obj') or {}),
+        })
+    return _infer_is_default(result)
+
+
 @dataclass(frozen=True, slots=True)
 class ModelCredentialBinding:
     model: str

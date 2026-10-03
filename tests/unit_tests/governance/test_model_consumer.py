@@ -91,3 +91,34 @@ def test_runtime_factory_legacy_preserves_config_and_constructor_shape(monkeypat
     monkeypatch.setattr(auth, 'configured_authenticator', lambda: None)
     original = object()
     assert runtime_model_kwargs(original) == {'model_client_config': original}
+
+
+def test_organization_catalog_never_decrypts_or_resolves_login_environment(monkeypatch):
+    import jiuwenswarm.common.config as config
+    import jiuwenswarm.governance.organization_auth as auth
+    monkeypatch.setattr(auth, 'configured_authenticator', lambda: object())
+    raw = {'models': {'defaults': [{
+        'model_client_config': {
+            'model_name': 'model', 'api_base': 'https://model.example/v1',
+            'api_key': '${PRIVATE_KEY}', 'client_provider': 'OpenAI',
+            'credential_reference': 'model:alice', 'credential_encoding': 'host_crypto',
+            'custom_headers': {'Authorization': 'Bearer synthetic-header-secret'},
+        }, 'model_config_obj': {},
+    }], 'agentos': [{'model_client_config': {'model_name': 'ambient'}}]}}
+    monkeypatch.setattr(config, 'get_config_raw', lambda: raw)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('metadata must not resolve credentials')
+    monkeypatch.setattr(config, 'get_config', forbidden)
+    monkeypatch.setattr(config, '_decrypt_model_entries', forbidden)
+    monkeypatch.setattr(config, 'get_agentos_models', forbidden)
+    monkeypatch.setenv('API_KEY', 'ambient-synthetic-key')
+    entries = config.get_available_models(session_id='unrelated-login')
+    assert len(entries) == 1
+    client = entries[0]['model_client_config']
+    assert client['credential_reference'] == 'model:alice'
+    assert client['credential_encoding'] == 'host_crypto'
+    assert client['api_key'] == 'MODEL_REQUEST_AUTHORITY'
+    assert client['custom_headers']  # Unsupported transport stays denied.
+    assert 'synthetic-header-secret' not in repr(entries)
+    assert 'PRIVATE_KEY' not in repr(entries)
+    assert raw['models']['defaults'][0]['model_client_config']['api_key'] == '${PRIVATE_KEY}'
