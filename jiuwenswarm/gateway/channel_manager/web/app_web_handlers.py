@@ -3175,7 +3175,24 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     if callable(register_disconnect):
         register_disconnect(_on_disconnect)
 
+    async def _organization_bootstrap_response(ws, req_id, params, method):
+        from jiuwenswarm.server.runtime.gateway_adapter.config_adapter import organization_ui_projection
+        try:
+            projection = organization_ui_projection(method, params)
+        except PermissionError:
+            await channel.send_response(ws, req_id, ok=False, error="organization configuration access denied", code="FORBIDDEN")
+            return True
+        except Exception:
+            await channel.send_response(ws, req_id, ok=False, error="organization bootstrap unavailable", code="INTERNAL_ERROR")
+            return True
+        if projection is None:
+            return False
+        await channel.send_response(ws, req_id, ok=True, payload=projection)
+        return True
+
     async def _config_get(ws, req_id, params, session_id):
+        if await _organization_bootstrap_response(ws, req_id, params, "config.get"):
+            return
         # 返回 _CONFIG_SET_ENV_MAP 里所有键对应的环境变量当前值
         payload = {
             param_key: (os.getenv(env_key) or "")
@@ -4000,6 +4017,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         一旦机器上存在两个活跃会话（换个浏览器再登一次就够了），那个假设会拒绝
         猜是谁，于是登录了却一个免费模型都列不出来。
         """
+        if await _organization_bootstrap_response(ws, req_id, params, "models.list"):
+            return
         try:
             config = get_config()
             auth_session = getattr(ws, "_jiuwen_auth_session", "") or None
