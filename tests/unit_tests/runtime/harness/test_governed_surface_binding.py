@@ -161,6 +161,7 @@ async def test_prepare_chat_preserves_frozen_user_through_real_metadata_sync_and
         _, _, agent = await prepare_chat_turn(manager, request, "web", trusted_subject_id="host-worker")
         assert agent is allocated
         assert routes[-1].bound.binding.subject_id == "host-worker"
+        assert routes[-1].trusted_subject_id == "host-worker"
         assert session_metadata.flush_pending_writes()
         stored = session_metadata.get_session_metadata(
             metadata["session_id"], cache_bust=True, enable_writeback=False, infer_defaults=False,
@@ -210,3 +211,20 @@ async def test_prepare_chat_rejects_identity_drift_before_metadata_sync(admissio
     manager.wait_for_session_prewarm.assert_not_awaited()
     assert metadata == before
     assert not manager.execution_bindings._bindings
+
+
+@pytest.mark.parametrize("subject", ["", "   "])
+def test_empty_host_subject_cannot_fall_back_to_wire_identity(admission, subject):
+    bind, manager, _, _ = admission
+    with pytest.raises(ValueError, match="must not be empty"):
+        bind(subject)
+    assert not manager.execution_bindings._bindings
+
+
+def test_wire_fields_cannot_mark_route_as_trusted(admission):
+    bind, _, request, metadata = admission
+    request.params["trusted_subject_id"] = "forged-host"
+    metadata["trusted_subject_id"] = "forged-host"
+    route = bind()
+    assert route.trusted_subject_id is None
+    assert route.bound.binding.subject_id == "routing-user"

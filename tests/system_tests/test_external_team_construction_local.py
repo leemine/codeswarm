@@ -23,6 +23,8 @@ from openjiuwen.harness.engine import ExecutionBinding
 from openjiuwen.harness_protocol import TurnStatus
 
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
+from jiuwenswarm.common.schema.agent import AgentRequest
+from jiuwenswarm.server.runtime.agent_adapter.team_engine_adapter import ExternalTeamAgentAdapter
 from jiuwenswarm.runtime.harness.binding_store import BoundExecution, ExecutionBindingStore
 from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
@@ -133,7 +135,13 @@ async def test_real_team_member_provider_turn_and_resume(tmp_path, monkeypatch, 
                 runtime_paths=paths, surface_identity=identity,
             )
             route = AdmittedExecutionRoute('local', source, ExecutionBindingStore(), BoundExecution(binding, source.resolve()),
-                                           paths, recovery=recovery, surface=EffectiveSurfaceSnapshot(identity, metadata['mode']))
+                                           paths, recovery=recovery, surface=EffectiveSurfaceSnapshot(identity, metadata['mode']),
+                                           trusted_subject_id=binding.subject_id if trusted_subject else None)
+            request = AgentRequest('team-turn', session_id='team-local', channel_id='local',
+                                   user_id='wire-routing-user' if trusted_subject else 'fixture-owner',
+                                   params={'mode': metadata['mode']})
+            request._execution_route = route
+            ExternalTeamAgentAdapter(route).select_execution_for_request(request)
             factory = module.ExternalTeamMemberFactory(route, team_name='team')
             reconstructed = module.ExternalTeamMemberFactory.from_seed(factory.to_seed(), config=config)
             assert reconstructed._host_selection_unchanged()

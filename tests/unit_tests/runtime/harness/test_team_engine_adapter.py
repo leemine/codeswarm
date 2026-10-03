@@ -339,12 +339,16 @@ async def test_original_runner_drives_external_team_and_releases_member_transpor
 @pytest.mark.parametrize('kind', ['command', 'attach', 'tui'])
 async def test_unintegrated_goal_does_not_become_an_ordinary_team_turn(host, monkeypatch, kind):
     from jiuwenswarm.server.runtime.agent_adapter import team_helpers
-    route = host.route
+    # The negative case deliberately omits the Goal persistence capability;
+    # the independent Team identity archive remains present and valid.
+    assert host.route.recovery.path.is_file()
+    route = replace(host.route, recovery=None)
     if kind == 'tui':
         route = replace(route, channel_id='tui', surface=replace(route.surface,
             identity=replace(route.surface.identity, channel_id='tui')))
     adapter = create_adapter(execution_route=route)
     await adapter.create_instance()
+    assert not adapter.supports_goal_execution and adapter._goal_runtime is None
     request = request_for(host)
     request._execution_route = route
     request.channel_id = route.channel_id
@@ -397,13 +401,17 @@ async def test_unavailable_active_control_keeps_owner_and_never_calls_legacy_ack
 async def test_goal_rejection_survives_original_facade_and_does_not_start_work(host, monkeypatch, action, entry):
     from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
     from jiuwenswarm.server.runtime.agent_adapter import team_helpers
-    adapter = create_adapter(execution_route=host.route)
+    assert host.route.recovery.path.is_file()
+    route = replace(host.route, recovery=None)
+    adapter = create_adapter(execution_route=route)
     await adapter.create_instance()
+    assert not adapter.supports_goal_execution and adapter._goal_runtime is None
     facade = object.__new__(JiuWenSwarm)
     facade._adapter = adapter
     facade._ensure_adapter = lambda **kwargs: adapter
     facade._session_manager = SimpleNamespace(get_session_id=lambda sid: sid)
     request = request_for(host, mode=False)
+    request._execution_route = route
     request.req_method = ReqMethod.COMMAND_GOAL
     request.params.update(action=action, objective='root objective')
     unexpected = Mock(side_effect=AssertionError('unsupported Goal must not execute'))
@@ -431,6 +439,18 @@ async def test_goal_rejection_survives_original_facade_and_does_not_start_work(h
         assert chunks[0].payload['code'] == 'EXTERNAL_TEAM_OPERATION_UNAVAILABLE'
         assert chunks[0].runtime_completion != 'completed'
     unexpected.assert_not_called()
+    assert not host.engines
+
+
+@pytest.mark.asyncio
+async def test_admitted_recovery_enables_original_team_goal_without_starting_provider(host):
+    from jiuwenswarm.runtime.harness.team_goal import ExternalTeamGoalRuntime
+
+    adapter = create_adapter(execution_route=host.route)
+    assert not adapter.supports_goal_execution
+    await adapter.create_instance()
+    assert adapter.supports_goal_execution
+    assert isinstance(adapter._goal_runtime, ExternalTeamGoalRuntime)
     assert not host.engines
 
 
@@ -504,10 +524,14 @@ def test_runtime_only_classifies_controls_for_bound_external_team(host, case):
     runtime = AgentRuntime(agent_manager=SimpleNamespace(get_agent_for_session_nowait=lambda ch, sid: facade), initializer=AsyncMock())
     request = request_for(host)
     request.params.update(source='confirm_interrupt', request_id='pending', answers=[{'selected_options': ['allow_once']}])
-    if case == 'answer': request.req_method = ReqMethod.CHAT_ANSWER
-    if case == 'wrong_channel': request.channel_id = 'other'
-    if case == 'wrong_session': request.session_id = 'other'
-    if case == 'ordinary': request.params = {'mode': 'team.code.normal', 'query': 'hello'}
+    if case == 'answer':
+        request.req_method = ReqMethod.CHAT_ANSWER
+    if case == 'wrong_channel':
+        request.channel_id = 'other'
+    if case == 'wrong_session':
+        request.session_id = 'other'
+    if case == 'ordinary':
+        request.params = {'mode': 'team.code.normal', 'query': 'hello'}
     kind = runtime._request_work_kind(request, background=case == 'background')
     assert kind is (SessionWorkKind.CONTROL_INPUT if case in {'send', 'answer'} else None)
     assert not host.engines
@@ -529,3 +553,55 @@ def test_ordinary_external_team_uses_runtime_owner_before_member_approval(host, 
     assert runtime._request_work_kind(request, background=True) is None
     host.metadata.pop('execution_profile_id')
     assert runtime._request_work_kind(request) is None
+
+
+def test_team_trusted_route_uses_admitted_subject_and_keeps_wire_user_unmodified(host):
+    route = replace(host.route, trusted_subject_id=host.route.bound.binding.subject_id)
+    adapter = create_adapter(execution_route=route)
+    request = request_for(host)
+    request._execution_route = route
+    request.user_id = 'untrusted-wire-alias'
+    adapter.select_execution_for_request(request)
+    assert request.user_id == 'untrusted-wire-alias'
+    assert adapter.route.bound.binding.subject_id == 'alice'
+    assert not host.engines
+
+
+@pytest.mark.parametrize('changed', ['drop', 'replace', 'inject'])
+def test_team_route_rejects_trusted_marker_drift(host, changed):
+    route = (host.route if changed == 'inject'
+             else replace(host.route, trusted_subject_id=host.route.bound.binding.subject_id))
+    adapter = create_adapter(execution_route=route)
+    supplied = replace(route, trusted_subject_id=None if changed == 'drop' else (
+        'alice' if changed == 'inject' else 'different-trusted-subject'
+    ))
+    request = request_for(host)
+    request._execution_route = supplied
+    with pytest.raises(ValueError, match='binding changed'):
+        adapter.select_execution_for_request(request)
+    assert adapter.route is route
+    assert not host.engines
+
+
+def test_team_trusted_marker_must_match_its_admitted_binding(host):
+    route = replace(host.route, trusted_subject_id='different-subject')
+    adapter = create_adapter(execution_route=route)
+    request = request_for(host)
+    request._execution_route = route
+    request.user_id = 'different-subject'
+    with pytest.raises(ValueError, match='binding changed'):
+        adapter.select_execution_for_request(request)
+    assert not host.engines
+
+
+@pytest.mark.parametrize('changed', ['session', 'channel'])
+def test_team_trusted_route_does_not_override_session_or_channel(host, changed):
+    route = replace(host.route, trusted_subject_id=host.route.bound.binding.subject_id)
+    adapter = create_adapter(execution_route=route)
+    request = request_for(host)
+    request._execution_route = route
+    request.user_id = 'untrusted-wire-alias'
+    setattr(request, 'session_id' if changed == 'session' else 'channel_id', 'other')
+    with pytest.raises(ValueError, match='identity changed'):
+        adapter.select_execution_for_request(request)
+    assert not host.engines

@@ -38,6 +38,8 @@ class AdmittedExecutionRoute:
     runtime_paths: RuntimeWorkspacePaths
     recovery: SessionExecutionRecovery | None = None
     surface: EffectiveSurfaceSnapshot | None = None
+    # Host-only admission provenance; never populated from request metadata.
+    trusted_subject_id: str | None = None
 
     @property
     def provider_id(self) -> str:
@@ -63,6 +65,8 @@ def bind_admitted_request_execution(
     Session. The product admission callback has already authorized its
     subject, mode and Workspace before this function is called.
     """
+    if trusted_subject_id is not None and not trusted_subject_id.strip():
+        raise ValueError("Trusted execution subject must not be empty")
     session_id = str(getattr(request, "session_id", "") or "").strip()
     if not session_id:
         return None
@@ -185,6 +189,7 @@ def bind_admitted_request_execution(
         runtime_paths=runtime_paths,
         recovery=recovery,
         surface=surface,
+        trusted_subject_id=subject if trusted_subject_id is not None else None,
     )
     setattr(request, "_bound_execution", bound)
     setattr(request, "_execution_source", source)
