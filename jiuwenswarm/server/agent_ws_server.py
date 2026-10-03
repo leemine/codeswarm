@@ -1085,6 +1085,11 @@ _MCP_KEY_SENSITIVE_SUBSTRINGS = frozenset({
 })
 
 
+def current_identity_for_request(_request: object):
+    from jiuwenswarm.governance.organization_auth import current_identity
+    return current_identity()
+
+
 class AgentWebSocketServer:
     """Gateway 与 AgentServer 之间的 WebSocket 服务端（单例）.
 
@@ -1115,6 +1120,9 @@ class AgentWebSocketServer:
         from jiuwenswarm.governance.host_identity import local_instance_identity
 
         local_identity = local_instance_identity(host, get_agent_root_dir())
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is not None:
+            trusted_identity_resolver = current_identity_for_request
         self._trusted_identity_resolver = (
             trusted_identity_resolver
             if trusted_identity_resolver is not None
@@ -1747,6 +1755,17 @@ class AgentWebSocketServer:
     async def _process_request(self, *args: Any) -> Any:
         """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
         path, request_headers = extract_handshake_request(args)
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        auth = configured_authenticator()
+        if auth is not None:
+            try:
+                proof = json.loads(get_header_value(request_headers, "X-Jiuwen-Gateway-Assertion") or "{}")
+                auth.verify(proof)
+                if proof.get("upgrade") != "agentserver":
+                    raise PermissionError("wrong assertion target")
+            except (OSError, ValueError, KeyError, TypeError, PermissionError):
+                from jiuwenswarm.gateway.channel_manager.base import BaseWebChannel
+                return BaseWebChannel.unauthorized_handshake_response(args)
         origin = get_header_value(request_headers, "Origin")
         enable_origin_check = is_origin_check_enabled()
         if not enable_origin_check:
@@ -2259,6 +2278,23 @@ class AgentWebSocketServer:
         return True
 
     async def _handle_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
+        from jiuwenswarm.governance.organization_auth import (
+            ASSERTION, authenticated_scope, configured_authenticator,
+        )
+        auth = configured_authenticator()
+        if auth is None:
+            return await self._handle_authenticated_message(ws, raw, send_lock)
+        try:
+            data = json.loads(raw)
+            principal = auth.verify(data)
+            data.pop(ASSERTION, None)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, PermissionError):
+            await ws.close(code=1008, reason="authentication required")
+            return
+        with authenticated_scope(principal):
+            return await self._handle_authenticated_message(ws, json.dumps(data), send_lock)
+
+    async def _handle_authenticated_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
         try:
             data = json.loads(raw)

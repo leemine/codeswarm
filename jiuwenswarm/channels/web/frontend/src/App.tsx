@@ -4250,17 +4250,29 @@ function AppWithAuth({
 }) {
   const [authStatus, setAuthStatus] = useState<'checking' | 'loggedOut' | 'loggedIn' | 'noIam'>('checking');
   const [remote, setRemote] = useState(false);
+  const [organization, setOrganization] = useState(false);
 
   useEffect(() => {
-    if (window.jiuwenDesktop?.isElectron) {
-      setAuthStatus('noIam');
-      return;
-    }
     let cancelled = false;
     // 先拿 web-config: 如果 iam_enabled=false, 直接跳过鉴权探测
-    fetch('/api/web-config', { credentials: 'same-origin' })
-      .then((r) => r.json())
+    fetch('/api/v1/auth/organization/status', { credentials: 'same-origin' })
+      .then((response) => response.ok ? response.json() : { enabled: false })
+      .then((status) => {
+        if (cancelled) return null;
+        if (status.enabled) {
+          setOrganization(true);
+          setAuthStatus(status.authenticated ? 'loggedIn' : 'loggedOut');
+          return null;
+        }
+        if (window.jiuwenDesktop?.isElectron) {
+          setAuthStatus('noIam');
+          return null;
+        }
+        return fetch('/api/web-config', { credentials: 'same-origin' });
+      })
+      .then((r) => r ? r.json() : null)
       .then((cfg) => {
+        if (cfg === null) return;
         if (cancelled) return;
         if (cfg && typeof cfg.remote === 'boolean') setRemote(cfg.remote);
         if (cfg && cfg.iam_enabled === false) {
@@ -4309,11 +4321,11 @@ function AppWithAuth({
     );
   }
   if (authStatus === 'loggedOut') {
-    return <LoginPage />;
+    return <LoginPage organization={organization} />;
   }
   return (
     <>
-      {remote && <LogoutButton />}
+      {(remote || organization) && <LogoutButton organization={organization} />}
       <App settingsPageDefinition={settingsPageDefinition} resolveSettingsRequest={resolveSettingsRequest} />
       <AssetPublishHost />
     </>

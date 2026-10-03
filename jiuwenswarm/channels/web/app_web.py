@@ -535,6 +535,14 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     def _is_ws_route(self) -> bool:
         return urlparse(self.path).path.startswith("/ws")
 
+    def _reject_organization_local_files(self) -> bool:
+        """Legacy installation-wide paths are not organization-authorized resources."""
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is not None and (self._is_file_api_route() or self._is_share_api_route()):
+            self._write_json(403, {"error": "organization_scoped_file_access_required"})
+            return True
+        return False
+
     def _is_file_api_route(self) -> bool:
         return urlparse(self.path).path.startswith("/file-api/")
 
@@ -2096,6 +2104,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         self._write_json(status, payload)
 
     def do_GET(self) -> None:  # noqa: N802
+        if self._reject_organization_local_files():
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/oauth/hub/callback":
             from jiuwenswarm.channels.web.hub_oauth import complete
@@ -2138,6 +2148,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self) -> None:  # noqa: N802
+        if self._reject_organization_local_files():
+            return
         parsed = urlparse(self.path)
         if parsed.path in {"/marketplace-oauth/hub/start", "/marketplace-oauth/hub/result"}:
             from jiuwenswarm.channels.web.hub_oauth import result, start
@@ -2175,6 +2187,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         self.send_error(405, "method not allowed")
 
     def do_PUT(self) -> None:  # noqa: N802
+        if self._reject_organization_local_files():
+            return
         if self._dispatch_proxy():
             return
         self.send_error(405, "method not allowed")
@@ -2185,6 +2199,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         self.send_error(405, "method not allowed")
 
     def do_DELETE(self) -> None:  # noqa: N802
+        if self._reject_organization_local_files():
+            return
         if self._dispatch_proxy():
             return
         self.send_error(405, "method not allowed")
@@ -2195,6 +2211,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         self.send_error(405, "method not allowed")
 
     def do_HEAD(self) -> None:  # noqa: N802
+        if self._reject_organization_local_files():
+            return
         parsed = urlparse(self.path)
         if self._is_share_api_route():
             self._handle_share_api_get(parsed)

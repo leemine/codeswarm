@@ -360,6 +360,8 @@ class BaseWsChannel(BaseWebChannel):
                 else:
                     wire = frame
                 try:
+                    from jiuwenswarm.governance.organization_auth import connection_principal
+                    connection_principal(ws)  # Recheck after queue/backpressure, before delivery.
                     await asyncio.wait_for(ws.send(wire), timeout=10.0)
                     if receipt is not None and not receipt.done():
                         receipt.set_result(True)

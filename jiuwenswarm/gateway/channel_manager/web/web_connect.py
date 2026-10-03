@@ -417,7 +417,10 @@ class WebChannel(BaseWsChannel):
 
     @classmethod
     def _resolve_connection_user_id(cls, flat_query: dict[str, str], ws: Any) -> str | None:
-        connection_user_id = cls._extract_query_user_id(flat_query) or cls._extract_ws_header_user_id(ws)
+        from jiuwenswarm.governance.organization_auth import connection_principal
+        principal = connection_principal(ws)
+        connection_user_id = (principal.identity().actor_id if principal is not None else
+                              cls._extract_query_user_id(flat_query) or cls._extract_ws_header_user_id(ws))
         setattr(ws, _WEB_CONNECTION_USER_ID_ATTR, connection_user_id)
         return connection_user_id
 
@@ -1433,6 +1436,16 @@ class WebChannel(BaseWsChannel):
             )
 
     async def _handle_raw_message(self, ws: Any, raw: str, query: dict[str, list[str]]) -> None:
+        from jiuwenswarm.governance.organization_auth import authenticated_scope, connection_principal
+        try:
+            principal = connection_principal(ws)
+        except (OSError, ValueError, KeyError, TypeError, PermissionError):
+            await ws.close(code=1008, reason="authentication required")
+            return
+        with authenticated_scope(principal):
+            return await self._handle_authenticated_raw_message(ws, raw, query)
+
+    async def _handle_authenticated_raw_message(self, ws: Any, raw: str, query: dict[str, list[str]]) -> None:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:

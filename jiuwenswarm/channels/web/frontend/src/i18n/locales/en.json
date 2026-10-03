@@ -3838,6 +3838,10 @@
     }
   },
   "auth": {
+    "organizationLogoutFailed": "Sign-out failed; credential remains active. Retry",
+    "organizationSubtitle": "Sign in with an organization access credential supplied by your administrator",
+    "organizationToken": "Organization access credential",
+    "organizationHint": "Access ends when the credential expires or is revoked. Signing out revokes this credential; ask your administrator for a new one.",
     "title": "Sign in to JiuwenSwarm",
     "subtitle": "Enter your account and password to continue",
     "username": "Account",

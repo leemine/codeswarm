@@ -3824,6 +3824,10 @@
     }
   },
   "auth": {
+    "organizationLogoutFailed": "退出失败，凭据仍有效，请重试",
+    "organizationSubtitle": "使用管理员发放的组织访问凭据登录",
+    "organizationToken": "组织访问凭据",
+    "organizationHint": "凭据到期或撤销后连接失效。退出会撤销本凭据，再次登录需管理员发放新凭据。",
     "title": "登录 JiuwenSwarm",
     "subtitle": "输入你的账号与密码以继续",
     "username": "账号",
