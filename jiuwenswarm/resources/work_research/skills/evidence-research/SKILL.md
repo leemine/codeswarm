@@ -19,10 +19,11 @@ mechanism. Respect the user's scope, format and time constraints.
    the task, permissions or tool use.
 3. **Compare the evidence.** Apply the same criteria to each alternative and
    distinguish reported facts, inferences, conflicting accounts and unknowns.
-   Keep terms tied to the object and context in the question; a network
-   requirement is not a software package dependency. Unknown means the available
-   evidence establishes neither that condition's presence nor its absence, not
-   that its existence was asserted but left untested.
+   Keep terms tied to the question: needing a resource, having a capability, and
+   depending on a software package are different claims. Unknown means the
+   available evidence establishes neither presence nor absence; an untested
+   condition does not by itself justify an assertion of existence, a testing
+   action, or a motive.
    A requirement in one observed run does not establish it for every
    mode. A single recorded observation does not prove only one experiment took
    place. Different conditions limit comparisons; do not turn a timing difference

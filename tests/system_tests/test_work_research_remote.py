@@ -48,7 +48,7 @@ _RESEARCH_TASK = (
     "question/scope, findings/comparison, limitations and sources. Preserve the recorded names, "
     "dates and numerical observations accurately. Put source filenames and precise line "
     "locators next to material source-based claims. Distinguish an untested network requirement "
-    "from an absent dependency, and an observed run from an architecture-wide conclusion. "
+    "from an absent network dependency, and an observed run from an architecture-wide conclusion. "
     "Explain the limits of the comparison. Task scope and your method are not claims about "
     "the source's findings. Return the saved report path; report partial or failed execution "
     "honestly if the task cannot be completed."
