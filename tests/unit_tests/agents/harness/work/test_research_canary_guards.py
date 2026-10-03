@@ -1,17 +1,56 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Regression guards for actual live research failures, without model calls."""
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from tests.system_tests.test_work_research_remote import (
+    _check_evidence,
     _check_local_index_locator,
     _native_research_parent,
     _native_research_work_config,
     _native_wait_problem,
+    _write_sources,
 )
+
+
+@pytest.mark.parametrize("conclusion", ["unknown", "absent", "not required"])
+def test_actual_codex_faithful_paraphrase_keeps_unknown_gate(tmp_path, conclusion):
+    # This validates the network canary, not the report's separately reviewed
+    # limitations citations; the original report remains unmodified evidence.
+    report = (
+        Path(__file__).parent / "fixtures/codex-faithful-network-paraphrase.md"
+    ).read_text()
+    root = tmp_path / "workspace"
+    _write_sources(root)
+    ledger = {
+        "sources": {
+            "source-a.md": {
+                "network_requirement": "unknown",
+                "exact_quote": "No network requirement was tested.",
+                "line_number": 4,
+            },
+            "source-b.md": {
+                "network_requirement": "required_in_observed_run",
+                "exact_quote": "A network connection was required.",
+                "line_number": 4,
+            },
+        }
+    }
+    (root / "research-evidence.json").write_text(json.dumps(ledger))
+    if conclusion == "unknown":
+        assert _check_evidence(root, report) == ledger
+    else:
+        corrupted = report.replace(
+            "untested requirement remains unknown",
+            f"untested requirement remains {conclusion}",
+        )
+        assert corrupted != report
+        with pytest.raises(AssertionError, match="absent dependency"):
+            _check_evidence(root, corrupted)
 
 
 def test_actual_opencode_report_rejects_compound_claim_wrong_line():

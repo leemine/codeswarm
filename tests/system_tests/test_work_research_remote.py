@@ -75,7 +75,8 @@ def _check_evidence(root: Path, report: str) -> dict:
                 re.I,
             )
     assert any(
-        "No network requirement was tested" in paragraph
+        re.search(r"Pilot\s+A|source-a\.md", paragraph, re.I)
+        and re.search(r"network", paragraph, re.I)
         and re.search(
             r"unknown|untested|not (?:formally )?(?:verified|tested|proven)|does not (?:prove|establish)|not proof",
             paragraph,
@@ -88,6 +89,12 @@ def _check_evidence(root: Path, report: str) -> dict:
         report,
         re.I,
     ), "Untested evidence was converted into independence"
+    assert not re.search(
+        r"(?:untested (?:network )?requirement|network (?:requirement|dependency))"
+        r"\s+(?:is|remains|was|means)\s+(?:absent|not required|zero)\b",
+        findings,
+        re.I,
+    ), "Untested evidence was converted into an absent dependency"
     _check_local_index_locator(report)
     return ledger
 

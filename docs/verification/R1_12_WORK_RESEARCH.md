@@ -72,3 +72,13 @@ Native 成功调用时与最终源码均为 wait 240000ms；曾在编辑期间�
 窄修在代表任务中明确每项事实后给文件名及精确行定位；合句包含不同行的事实时分引或给覆盖范围，行号必须从原文读取，不把正确答案写进提示。仅针对本次已知“indexed locally”事实，gate 检查它之后最近的 source-a 引用，支持 `file:4`、`file:L4`、`file, L4`、`file L4`、`file line 4` 及 `3-4`/`L3-L4` 范围；不跳过缺行号/错误定位去借下一句的正确引用。保留旧 OpenCode 原始误引反例，增加 9 种语法正例和跨句/无定位/超出真实来源范围反例，不扩展为通用语义解析器。新增要求不追溯冒称旧报告满足，也不以手工改报告替代 live；本增量没有远端调用，由最终集成树重新验收。
 
 引用窄修最终定向回归：73 passed / 3 skipped（远端关闭）/ 1 既有弃用警告，5.56 秒；`/tmp/r1-12-closure/citation-final.{log,xml}`。ruff/diff whitespace 检查通过，真实验证状态仍为待最终集成复验。
+
+### 忠实改写与缺失信息的证据边界
+
+`3f4ecb1c` 的 Native live 已由主线通过并独立人工核对。该版本 Codex 在 95.12 秒失败：报告忠实改写“Pilot A did not test any network requirement…unknown…not an absent dependency”，JSON 仍保留正确精确原文与第 4 行，旧报告 gate 却要求出现逐字原句，属于 checker 契约误拒。现允许报告忠实改写，精确短原文仍由 JSON 强制校验；保留 unknown 改为 absent/not required 的拒绝负例与原始 Codex 报告正例。这里的正例仅针对网络结论 gate，不代表全报告通过。
+
+该 Codex 原报告另有真实质量缺陷：Limitations 引两文件标题第 1 行来支持无 protocol/controls/replication，定位不充分；材料未报告这些信息也不能证明实验本身没有，单条记录不能证明仅运行一次。原报告保留不改，整体不记质量合格。Work 共用 Skill 窄补通用规则：缺失信息只陈述 inspected sources do not report；单条观察不等于只运行一次；全篇缺失判断引用实际检查过的完整范围；复合事实分引或覆盖全部支持行。不含 Pilot 名称/正确行号，不扩展 Runtime。Native/External 继续复用同一政策正文。
+
+这是新的生产政策改动，不能把 `3f4ecb1c` 的 Native 成功沿用为新政策成功；由主线在最终集成版本核源、stable 及三 Provider live 重新留证。本增量未自行调用远端。
+
+共用政策更新后的定向回归：76 passed / 3 skipped（远端关闭）/ 1 既有弃用警告，5.04 秒；`/tmp/r1-12-closure/policy-final.{log,xml}`。checker 先行回归为同数量 5.18 秒（paraphrase-final）。ruff/diff 检查通过；未运行新的真实模型验证。
