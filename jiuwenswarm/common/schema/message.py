@@ -109,6 +109,8 @@ class ReqMethod(Enum):
     PROJECT_EXTENSIONS_GET = "project.extensions.get"
     PROJECT_EXTENSIONS_UPDATE = "project.extensions.update"
     PROJECT_ACL_UPDATE = "project.acl.update"
+    PROJECT_CONTENT_GET = "project.content.get"
+    PROJECT_CONTENT_UPDATE = "project.content.update"
     PROJECT_INFO = "project.info"
     PROJECT_PINNED_SESSIONS = "project.pinned_sessions"
     PROJECT_GET_SESSIONS = "project.get_sessions"
