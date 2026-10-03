@@ -74,6 +74,19 @@ async def browser_probe(*, root, repo, web_port, tokens, sessions, env, children
             }
         )
 
+    async def wait_response(actor, method, *, after, ok):
+        async with asyncio.timeout(25):
+            while True:
+                for frame in frames[after:]:
+                    if (
+                        frame["actor"] == actor
+                        and frame["direction"] == "received"
+                        and frame["method"] == method
+                    ):
+                        assert frame["ok"] is ok, frame
+                        return
+                await asyncio.sleep(0.1)
+
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(
             executable_path=shutil.which("google-chrome"), headless=True
@@ -152,16 +165,9 @@ async def browser_probe(*, root, repo, web_port, tokens, sessions, env, children
                 "multi-session-conversation-list-item-main"
             ).filter(has_text="alice-PRIVATE-TITLE")
             await expect(row).to_be_visible()
+            before_switch = len(frames)
             await row.click()
-            async with asyncio.timeout(25):
-                while not any(
-                    frame["actor"] == "alice"
-                    and frame["direction"] == "received"
-                    and frame["method"] == "session.switch"
-                    and frame["ok"] is True
-                    for frame in frames
-                ):
-                    await asyncio.sleep(0.1)
+            await wait_response("alice", "session.switch", after=before_switch, ok=True)
             checks.append(
                 "Alice owner Session switch preserves authenticated principal"
             )
@@ -207,7 +213,11 @@ async def browser_probe(*, root, repo, web_port, tokens, sessions, env, children
                     json.dumps({"role": "user", "content": "AFTER-SHARE-PRIVATE"})
                     + "\n"
                 )
+            before_refresh = len(frames)
             await bob.get_by_test_id("multi-session-shared-history-refresh").click()
+            await wait_response(
+                "bob", "session.share.history.get", after=before_refresh, ok=True
+            )
             await expect(
                 bob.get_by_test_id("multi-session-shared-history-loading")
             ).to_have_count(0)
