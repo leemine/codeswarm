@@ -101,12 +101,20 @@ def work_research_parent_instructions(language: str = "en") -> str:
 class WorkResearchTaskPromptRail(BrowserTaskPromptRail):
     """Keep Browser routing and mount review only for an actual research spec."""
 
+    def init(self, agent) -> None:
+        # Model callbacks are bridged to the inner ReActAgent, which deliberately
+        # has no DeepAgent config. Keep the owner, not a snapshot of its specs,
+        # so real requests retain the policy and resource unloads stay visible.
+        self._research_owner = agent
+        super().init(agent)
+
     async def before_model_call(self, ctx) -> None:
         await super().before_model_call(ctx)
         builder = self.system_prompt_builder
         if builder is None:
             return
-        subagents = getattr(getattr(ctx.agent, "deep_config", None), "subagents", None) or []
+        owner = getattr(self, "_research_owner", None)
+        subagents = getattr(getattr(owner, "deep_config", None), "subagents", None) or []
         has_research = any(self._extract_agent_meta(spec)[0] == "research_agent" for spec in subagents)
         if not has_research or not self.tools:
             builder.remove_section(_PARENT_SECTION)
@@ -121,7 +129,10 @@ class WorkResearchTaskPromptRail(BrowserTaskPromptRail):
     def uninit(self, agent):
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section(_PARENT_SECTION)
-        super().uninit(agent)
+        try:
+            super().uninit(agent)
+        finally:
+            self._research_owner = None
 
 
 __all__ = ["work_research_parent_instructions", "WorkResearchTaskPromptRail"]

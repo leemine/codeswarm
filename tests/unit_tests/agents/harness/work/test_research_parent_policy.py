@@ -76,6 +76,7 @@ async def test_actual_parent_rail_preserves_browser_tools_and_research_review():
     finally:
         rail.uninit(parent)
     assert not parent.system_prompt_builder.has_section("work_research_parent_review")
+    assert rail._research_owner is None
 
 
 @pytest.mark.asyncio
