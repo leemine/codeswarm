@@ -18,6 +18,126 @@ from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.runtime.gateway_adapter.base import GatewayAdapter, build_error_response
 
 
+def organization_ui_projection(method: str, params: object) -> dict[str, Any] | None:
+    """Explicit organization bootstrap DTO, never the configuration editor DTO.
+
+    None preserves the single-user handler. A configured but unavailable
+    authority remains fail-closed. This projection does not confer execution
+    or credential/resource access; Runtime remains the execution authority.
+    """
+    from jiuwenswarm.governance.organization_auth import (
+        configured_authenticator,
+        current_identity,
+    )
+    from jiuwenswarm.governance.contracts import TrustedIdentity
+
+    if configured_authenticator() is None:
+        return None
+    try:
+        identity = current_identity()
+    except Exception as exc:
+        raise PermissionError("organization authentication unavailable") from exc
+    if not isinstance(identity, TrustedIdentity):
+        raise PermissionError("organization authentication required")
+    if method not in {"config.get", "models.list"}:
+        raise PermissionError("organization configuration operation unavailable")
+    if params is None:
+        params = {}
+    if not isinstance(params, dict) or params:
+        raise PermissionError("organization bootstrap accepts no parameters")
+
+    from jiuwenswarm.common.config import get_config, get_config_raw, get_default_models
+    from jiuwenswarm.common.context_window import DEFAULT_CONTEXT_WINDOW_TOKENS
+    from jiuwenswarm.common.version import __version__
+    import os
+
+    def mapping(value):
+        return value if isinstance(value, dict) else {}
+
+    def text(value, limit=256):
+        return value.strip() if isinstance(value, str) and len(value) <= limit else ""
+
+    def flag(config, section, default=False):
+        value = mapping(config.get(section)).get("enabled", default)
+        return "true" if value is True else "false"
+
+    if method == "config.get":
+        raw = mapping(get_config_raw())
+        platform = os.getenv("JIUWENSWARM_RUNTIME_PLATFORM", "default").strip().lower()
+        platform = platform if platform in {"default", "harmony"} else "default"
+        permissions = mapping(raw.get("permissions"))
+        enabled = permissions.get("enabled") is True
+        profile = (
+            "full_access"
+            if not enabled
+            else (
+                "automatic"
+                if text(permissions.get("mode"), 32).lower() == "auto"
+                else "default"
+            )
+        )
+        payload = {
+            "app_version": text(__version__, 64),
+            "runtime_platform": platform,
+            "external_cli_agents_supported": "false"
+            if platform == "harmony"
+            else "true",
+            "a2ui_enabled": flag(raw, "a2ui"),
+            "rsi_enabled": flag(raw, "rsi", True),
+            "symphony_enabled": flag(raw, "symphony"),
+            "permissions_profile": profile,
+            "permissions_enabled": "true" if enabled else "false",
+            # Organization mode currently has neither global setup editing nor
+            # owner-scoped trajectory HTTP. Do not advertise those UI entries.
+            "setup_guide_enabled": "false",
+            "trajectory_ui_enabled": "false",
+        }
+    else:
+        # Configured model catalog only: never resolve another web login's
+        # model credentials or invoke account/remote catalog providers.
+        models = get_default_models(mapping(get_config()))
+        result = []
+        for entry in models if isinstance(models, list) else []:
+            entry = mapping(entry)
+            client = mapping(entry.get("model_client_config"))
+            model = mapping(entry.get("model_config_obj"))
+            name = text(client.get("model_name"))
+            if not name:
+                continue
+            context_window = model.get("context_window")
+            if (
+                type(context_window) is not int
+                or not 0 < context_window <= (1 << 53) - 1
+            ):
+                context_window = DEFAULT_CONTEXT_WINDOW_TOKENS
+            result.append(
+                {
+                    "model_name": name,
+                    "model_provider": text(client.get("client_provider"), 64),
+                    "alias": text(entry.get("alias"), 128),
+                    "is_default": entry.get("is_default") is True,
+                    "is_agentos": model.get("_source") == "agentos",
+                    "is_free": entry.get("is_free") is True,
+                    "context_window_tokens": context_window,
+                    "read_only": True,
+                    # ModelEntry compatibility: blank means no browser credential
+                    # or endpoint access, not a redacted value to save back.
+                    "api_key": "",
+                    "api_base": "",
+                }
+            )
+        payload = {
+            "models": result,
+            "active_model": result[0]["model_name"] if result else "",
+        }
+    try:
+        if current_identity() != identity:
+            raise PermissionError("organization authentication changed")
+    except Exception as exc:
+        raise PermissionError("organization authentication changed") from exc
+    return payload
+
+
 def _resolve_browser_path(browser: dict[str, Any]) -> str:
     """Return the current platform's configured managed-browser binary."""
     resolved_browser = resolve_env_vars(browser)
@@ -96,6 +216,16 @@ class ConfigAdapter(GatewayAdapter):
     })
 
     async def handle(self, request: AgentRequest) -> AgentResponse:
+        try:
+            projection = organization_ui_projection(request.req_method.value, request.params)
+        except PermissionError:
+            return build_error_response(request, "organization configuration access denied", code="FORBIDDEN")
+        except Exception:
+            return build_error_response(request, "organization bootstrap unavailable", code="INTERNAL_ERROR")
+        if projection is not None:
+            return AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
+                                 ok=True, payload=projection, metadata=request.metadata)
+
         if request.req_method in {ReqMethod.LOCALE_GET_CONF, ReqMethod.LOCALE_SET_CONF}:
             from jiuwenswarm.common.config import (
                 get_config,

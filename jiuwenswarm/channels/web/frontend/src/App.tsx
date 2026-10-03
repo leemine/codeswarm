@@ -1,3 +1,7 @@
+import { SharedHistoryDialog } from './multi-session/dialogs/SharedHistoryDialog';
+import { onOrganizationCredentialChange } from './services/organizationCredentialEvents';
+import { ShareSessionDialog } from './multi-session/dialogs/ShareSessionDialog';
+import type { SharedSessionTarget } from './services/sessionSharingApi';
 import { AssetPublishHost } from './components/AssetPublishDrawer';
 // Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
@@ -381,7 +385,11 @@ async function waitForShareImageJob(
 function AppContent({
   settingsPageDefinition,
   resolveSettingsRequest,
+  organizationAuth = false,
+  onOpenSharedSession,
 }: {
+  organizationAuth?: boolean;
+  onOpenSharedSession?: (target: SharedSessionTarget) => void;
   settingsPageDefinition: SettingsPageDefinition;
   resolveSettingsRequest: (openSourceRequest: SettingsRequest) => SettingsRequest;
 }) {
@@ -408,6 +416,20 @@ function AppContent({
   const [initialDataLoaded, setInitialDataLoaded] = useState(false);
   const [restartModalOpen, setRestartModalOpen] = useState(false);
   const [restartSuccess, setRestartSuccess] = useState(false);
+  const [sharingInboxOpen, setSharingInboxOpen] = useState(false);
+  const [sharingDialogSessionId, setSharingDialogSessionId] = useState<string | null>(null);
+  const [sharedHistoryTarget, setSharedHistoryTarget] = useState<SharedSessionTarget | null>(null);
+  useEffect(() => {
+    return onOrganizationCredentialChange(() => {
+      setSharedHistoryTarget(null);
+      setSharingDialogSessionId(null);
+      setSharingInboxOpen(false);
+    });
+  }, []);
+  useEffect(() => {
+    if (!organizationAuth) setSharedHistoryTarget(null);
+  }, [organizationAuth]);
+
   const [exportingShareSessionIds, setExportingShareSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const [restartSeenDisconnect, setRestartSeenDisconnect] = useState(false);
   const [appliedWithoutRestart, setAppliedWithoutRestart] = useState(false);
@@ -3595,7 +3617,7 @@ function AppContent({
 
   useEffect(() => {
     const targetSessionId = sessionId;
-    if (!targetSessionId || targetSessionId === NEW_CONVERSATION_ID) return;
+    if (organizationAuth || !targetSessionId || targetSessionId === NEW_CONVERSATION_ID) return;
     if (shareExportMonitorTokensRef.current.has(targetSessionId)) return;
 
     void (async () => {
@@ -3630,10 +3652,17 @@ function AppContent({
         }
       }
     })();
-  }, [monitorAndSaveShareImageJob, sessionId, setShareExportSessionActive]);
+  }, [monitorAndSaveShareImageJob, organizationAuth, sessionId, setShareExportSessionActive]);
 
   const handleExportShare = useCallback(async () => {
     const currentSessionId = sessionIdRef.current;
+    if (organizationAuth) {
+      if (currentSessionId && currentSessionId !== NEW_CONVERSATION_ID) {
+        setSharingInboxOpen(false);
+        setSharingDialogSessionId(currentSessionId);
+      }
+      return;
+    }
     if (
       !currentSessionId
       || currentSessionId === NEW_CONVERSATION_ID
@@ -3671,7 +3700,7 @@ function AppContent({
         setShareExportSessionActive(currentSessionId, false);
       }
     }
-  }, [i18n.language, i18n.resolvedLanguage, isPaused, isProcessing, monitorAndSaveShareImageJob, setShareExportSessionActive, t]);
+  }, [i18n.language, i18n.resolvedLanguage, isPaused, isProcessing, monitorAndSaveShareImageJob, organizationAuth, setShareExportSessionActive, t]);
 
   const routeSessionMissing = routeSessionId !== null
     && initialDataLoaded
@@ -3739,6 +3768,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 onNew={(options) => requestSessionNavigation('new', options)}
                 onSelect={requestSessionNavigation}
                 onOpenCron={() => handleNavigate('cron')}
+                onOpenSharedSessions={organizationAuth ? () => { setSharingDialogSessionId(null); setSharingInboxOpen(true); } : undefined}
                 isCronActive={false}
                 collapsed={conversationSidebarCollapsed}
                 floating={conversationSidebarFloating}
@@ -3783,8 +3813,9 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                         isProcessing={isProcessing}
                         onUserAnswer={handleUserAnswer}
                         onExportShare={handleExportShare}
+                        shareActionLabel={organizationAuth ? t('sessionSharing.title') : undefined}
                         isExportingShare={isExportingShare}
-                        canExportShare={Boolean(sessionId && sessionId !== NEW_CONVERSATION_ID && (!isProcessing || isPaused))}
+                        canExportShare={Boolean(sessionId && sessionId !== NEW_CONVERSATION_ID && (organizationAuth || !isProcessing || isPaused))}
                         sessionTitle={sessionTitle}
                         sessionProjectName={sessionProjectName}
                         sessionProject={sessionProject}
@@ -3953,6 +3984,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
               onNew={(options) => requestSessionNavigation('new', options)}
               onSelect={requestSessionNavigation}
               onOpenCron={() => handleNavigate('cron')}
+                onOpenSharedSessions={organizationAuth ? () => { setSharingDialogSessionId(null); setSharingInboxOpen(true); } : undefined}
               isCronActive
               collapsed={conversationSidebarCollapsed}
               floating={conversationSidebarFloating}
@@ -4207,6 +4239,22 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
       />
 
       {/* 登录弹窗：默认不显示，由 requestLogin() 等事件唤起 */}
+      {organizationAuth && (sharingDialogSessionId || sharingInboxOpen) && (
+        <ShareSessionDialog
+          key={sharingDialogSessionId ?? 'inbox'}
+          sessionId={sharingDialogSessionId ?? undefined}
+          onClose={() => { setSharingDialogSessionId(null); setSharingInboxOpen(false); }}
+          onOpenSharedSession={(target) => {
+            setSharingDialogSessionId(null);
+            setSharingInboxOpen(false);
+            setSharedHistoryTarget(target);
+            onOpenSharedSession?.(target);
+          }}
+        />
+      )}
+      {organizationAuth && sharedHistoryTarget && (
+        <SharedHistoryDialog target={sharedHistoryTarget} onClose={() => setSharedHistoryTarget(null)} />
+      )}
       <LoginDialog />
     </div>
   );
@@ -4215,7 +4263,11 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
 function App({
   settingsPageDefinition,
   resolveSettingsRequest,
+  organizationAuth = false,
+  onOpenSharedSession,
 }: {
+  organizationAuth?: boolean;
+  onOpenSharedSession?: (target: SharedSessionTarget) => void;
   settingsPageDefinition: SettingsPageDefinition;
   resolveSettingsRequest: (openSourceRequest: SettingsRequest) => SettingsRequest;
 }) {
@@ -4223,6 +4275,8 @@ function App({
     <ErrorBoundary>
       <DesktopTextEditContextMenu />
       <AppContent
+        organizationAuth={organizationAuth}
+        onOpenSharedSession={onOpenSharedSession}
         settingsPageDefinition={settingsPageDefinition}
         resolveSettingsRequest={resolveSettingsRequest}
       />
@@ -4244,23 +4298,37 @@ function App({
 function AppWithAuth({
   settingsPageDefinition,
   resolveSettingsRequest,
+  onOpenSharedSession,
 }: {
+  onOpenSharedSession?: (target: SharedSessionTarget) => void;
   settingsPageDefinition: SettingsPageDefinition;
   resolveSettingsRequest: (openSourceRequest: SettingsRequest) => SettingsRequest;
 }) {
   const [authStatus, setAuthStatus] = useState<'checking' | 'loggedOut' | 'loggedIn' | 'noIam'>('checking');
   const [remote, setRemote] = useState(false);
+  const [organization, setOrganization] = useState(false);
 
   useEffect(() => {
-    if (window.jiuwenDesktop?.isElectron) {
-      setAuthStatus('noIam');
-      return;
-    }
     let cancelled = false;
     // 先拿 web-config: 如果 iam_enabled=false, 直接跳过鉴权探测
-    fetch('/api/web-config', { credentials: 'same-origin' })
-      .then((r) => r.json())
+    fetch('/api/v1/auth/organization/status', { credentials: 'same-origin' })
+      .then((response) => response.ok ? response.json() : { enabled: false })
+      .then((status) => {
+        if (cancelled) return null;
+        if (status.enabled) {
+          setOrganization(true);
+          setAuthStatus(status.authenticated ? 'loggedIn' : 'loggedOut');
+          return null;
+        }
+        if (window.jiuwenDesktop?.isElectron) {
+          setAuthStatus('noIam');
+          return null;
+        }
+        return fetch('/api/web-config', { credentials: 'same-origin' });
+      })
+      .then((r) => r ? r.json() : null)
       .then((cfg) => {
+        if (cfg === null) return;
         if (cancelled) return;
         if (cfg && typeof cfg.remote === 'boolean') setRemote(cfg.remote);
         if (cfg && cfg.iam_enabled === false) {
@@ -4309,12 +4377,17 @@ function AppWithAuth({
     );
   }
   if (authStatus === 'loggedOut') {
-    return <LoginPage />;
+    return <LoginPage organization={organization} />;
   }
   return (
     <>
-      {remote && <LogoutButton />}
-      <App settingsPageDefinition={settingsPageDefinition} resolveSettingsRequest={resolveSettingsRequest} />
+      {(remote || organization) && <LogoutButton organization={organization} />}
+      <App
+        organizationAuth={organization}
+        onOpenSharedSession={onOpenSharedSession}
+        settingsPageDefinition={settingsPageDefinition}
+        resolveSettingsRequest={resolveSettingsRequest}
+      />
       <AssetPublishHost />
     </>
   );

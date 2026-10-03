@@ -1872,6 +1872,10 @@ def get_all_sessions_metadata(
     if not sessions_dir.exists() or not sessions_dir.is_dir():
         return [], 0
 
+    from jiuwenswarm.governance.session_boundary import organization_sharing_host
+    from jiuwenswarm.governance.session_boundary import current_inventory_identity as current_identity
+    organization_host = organization_sharing_host()
+    organization_identity = current_identity() if organization_host is not None else None
     sessions = []
     # 批量入口构建一次 project 映射,所有会话共用,避免 N+1 扫描 project_store。
     dir_to_projects, id_to_work_mode = _build_project_lookup()
@@ -1883,6 +1887,8 @@ def get_all_sessions_metadata(
 
         session_id = session_dir.name
         if session_id.startswith(_EPHEMERAL_PROBE_SESSION_PREFIXES):
+            continue
+        if organization_host is not None and not organization_host.owner_current(session_id, organization_identity):
             continue
         state = lc.state("session", session_id)
         archived = lc.session_paths(session_id)[1].exists()
@@ -1938,6 +1944,8 @@ def get_all_sessions_metadata(
     # 按最后消息时间倒序排序
     sessions.sort(key=lambda x: x.get("last_message_at", 0), reverse=True)
 
+    from jiuwenswarm.governance.session_boundary import filter_current_inventory
+    sessions = filter_current_inventory(sessions)
     total = len(sessions)
     return sessions[offset: offset + limit], total
 
@@ -1946,7 +1954,10 @@ def collect_all_sessions_metadata(
     user_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Share only overlapping scans; later requests still read fresh disk state."""
-    key = (str(get_agent_sessions_dir()), user_id or "")
+    from jiuwenswarm.governance.organization_auth import configured_authenticator
+    from jiuwenswarm.governance.session_boundary import current_inventory_identity as current_identity, filter_current_inventory
+    authority_identity = current_identity() if configured_authenticator() is not None else None
+    key = (str(get_agent_sessions_dir()), user_id or "", authority_identity)
     with _COLLECT_LOCK:
         pending = _COLLECT_INFLIGHT.get(key)
         owner = pending is None
@@ -1954,11 +1965,11 @@ def collect_all_sessions_metadata(
             pending = Future()
             _COLLECT_INFLIGHT[key] = pending
     if not owner:
-        return copy.deepcopy(pending.result())
+        return filter_current_inventory(copy.deepcopy(pending.result()))
     try:
         result = _collect_all_sessions_metadata(user_id)
         pending.set_result(result)
-        return copy.deepcopy(result)
+        return filter_current_inventory(copy.deepcopy(result))
     except BaseException as exc:
         pending.set_exception(exc)
         raise
@@ -1994,6 +2005,13 @@ def _collect_all_sessions_metadata(
     该路径下直接读盘,不走进程级全局 ``get_agent_sessions_dir`` 单例,避免多连接
     并发时全局态串扰。为空(None)时维持原行为(扫 gateway 进程默认目录)。
     """
+    from jiuwenswarm.governance.session_boundary import organization_sharing_host
+    from jiuwenswarm.governance.session_boundary import current_inventory_identity as current_identity
+    organization_host = organization_sharing_host()
+    organization_identity = current_identity() if organization_host is not None else None
+    if organization_host is not None and user_id:
+        # OS-account directory selection is not a trusted organization Binding.
+        return []
     if user_id:
         if not _SAFE_USER_ID_RE.match(user_id):
             logger.warning("[session_metadata] invalid user_id rejected: %r", user_id)
@@ -2012,6 +2030,8 @@ def _collect_all_sessions_metadata(
         if not session_dir.is_dir():
             continue
         sid = session_dir.name
+        if organization_host is not None and not organization_host.owner_current(sid, organization_identity):
+            continue
         if sid.startswith(_EPHEMERAL_PROBE_SESSION_PREFIXES):
             continue
         state = lc.state("session", sid)

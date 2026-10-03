@@ -134,6 +134,7 @@ interface ChatPanelProps {
     source?: string,
   ) => Promise<boolean>;
   onExportShare?: () => void | Promise<void>;
+  shareActionLabel?: string;
   isExportingShare?: boolean;
   canExportShare?: boolean;
   sessionTitle?: string;
@@ -972,6 +973,7 @@ export const ChatPanel = React.memo(function ChatPanel({
   isProcessing,
   onUserAnswer,
   onExportShare,
+  shareActionLabel,
   isExportingShare = false,
   canExportShare = false,
   sessionTitle,
@@ -1066,7 +1068,7 @@ export const ChatPanel = React.memo(function ChatPanel({
     : 'chat-content chat-content--welcome';
   const suggestions = [t('chat.welcomeSuggestions.journey'), t('chat.welcomeSuggestions.skills')];
   const shouldShowChatHeader = hasConversation;
-  const shareExportTitle = getShareExportTitle(t, isExportingShare, canExportShare);
+  const shareExportTitle = shareActionLabel ?? getShareExportTitle(t, isExportingShare, canExportShare);
   const shouldShowShareExport = Boolean(onExportShare);
   const shouldShowHumanShare = mode === 'team' && teamHumanShareCommands.length > 0;
   const [humanShareOpen, setHumanShareOpen] = React.useState(false);

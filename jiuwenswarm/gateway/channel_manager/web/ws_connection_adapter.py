@@ -89,6 +89,12 @@ class StarletteWsAdapter:
         if msg_type == "websocket.disconnect":
             self._mark_closed(message.get("code", 1006), message.get("reason", ""))
             raise self._closed_exc()
+        from jiuwenswarm.governance.organization_auth import connection_principal
+        try:
+            connection_principal(self)
+        except Exception:
+            await self.close(code=1008, reason="authentication required")
+            raise self._closed_exc() from None
         if "text" in message and message["text"] is not None:
             return message["text"]
         if "bytes" in message and message["bytes"] is not None:

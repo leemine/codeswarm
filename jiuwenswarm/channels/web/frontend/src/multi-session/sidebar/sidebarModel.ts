@@ -1,6 +1,7 @@
 export type SessionIndicator = 'waiting' | 'processing' | 'unread' | 'error' | 'time';
 
 export type SidebarMenuAction =
+  | 'content'
   | 'archive-sessions'
   | 'pin'
   | 'rename'
@@ -115,6 +116,7 @@ export function getProjectMenuItems(
   return [
     { action: 'pin', label: translate(isPinned ? PIN_LABEL_PAIRS.project[1] : PIN_LABEL_PAIRS.project[0]), pinned: isPinned },
     { action: 'rename', label: translate('multiSession.project.rename') },
+    { action: 'content', label: translate('multiSession.project.content.menu') },
     { action: 'delete', label: translate('multiSession.delete'), danger: true },
     ...batchItems,
   ];

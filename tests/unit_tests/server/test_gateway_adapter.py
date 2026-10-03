@@ -542,7 +542,7 @@ class TestSessionAdapter:
         monkeypatch.setattr(module, "get_agent_root_dir", lambda: tmp_path)
         monkeypatch.setattr(
             "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
-            lambda sid, cache_bust=False: {"mode": "agent"},
+            lambda sid, cache_bust=False, enable_writeback=True: {"mode": "agent"},
         )
         monkeypatch.setattr(
             "jiuwenswarm.server.runtime.session.session_history.resolve_session_dir",
@@ -578,7 +578,7 @@ class TestSessionAdapter:
         monkeypatch.setattr(module, "get_agent_root_dir", lambda: tmp_path)
         monkeypatch.setattr(
             "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
-            lambda sid, cache_bust=False: {"mode": "agent"},
+            lambda sid, cache_bust=False, enable_writeback=True: {"mode": "agent"},
         )
         monkeypatch.setattr(
             "jiuwenswarm.server.runtime.session.session_history.resolve_session_dir",

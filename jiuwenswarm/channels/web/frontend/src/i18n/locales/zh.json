@@ -3221,6 +3221,44 @@
       "entryCount": "共 {{count}} 条演进经验"
     }
   },
+  "sessionSharing": {
+    "viewerTitle": "共享历史 · 只读",
+    "viewerLimits": "固定的主会话历史快照，最新消息在前。仅显示文本，不加载媒体、工具输出或链接；不会切换你的活动会话。",
+    "viewerRefresh": "刷新历史",
+    "viewerUnavailable": "历史不可用或无法核验权限，已清空缓存内容。可刷新重新核验权限。",
+    "viewerEmpty": "此共享快照内没有消息。",
+    "viewerOlder": "加载更早消息",
+    "viewerRole": {
+      "user": "用户",
+      "assistant": "助手"
+    },
+    "title": "分享授权",
+    "scope": "分享已有历史的固定快照，不包含后续消息。各项权限独立，讨论不会启动智能体。",
+    "target": "接收者主体 ID",
+    "actions": "权限",
+    "expiry": "到期时间",
+    "refresh": "刷新授权",
+    "loading": "正在核验当前授权…",
+    "error": "无法核验或修改授权，请刷新后重试。",
+    "create": "授予访问权限",
+    "update": "保存权限",
+    "edit": "编辑",
+    "revoke": "撤销",
+    "managed": "本会话已授予的访问权限",
+    "received": "分享给我",
+    "receivedEmpty": "当前没有可用的共享会话。已到期或已撤销的授权不会出现在此处。",
+    "open": "打开获准历史",
+    "unavailable": "已到期、已撤销或不可用",
+    "noExpiry": "无到期时间",
+    "action": {
+      "view": "查看",
+      "discuss": "讨论",
+      "execute": "执行",
+      "approve": "审批",
+      "download": "下载",
+      "manage": "管理分享"
+    }
+  },
   "share": {
     "export": "导出长图",
     "exporting": "正在导出长图...",
@@ -3434,6 +3472,29 @@
       "read": "已完成已读"
     },
     "project": {
+      "content": {
+        "menu": "项目资料",
+        "title": "项目资料 · {{name}}",
+        "nextTurn": "修改从下一轮对话生效，当前轮次继续使用已固定的版本。",
+        "forbidden": "你已无权查看或修改此项目资料。",
+        "loadFailed": "项目资料加载失败，请重新加载。",
+        "saveFailed": "资料保存失败，请检查内容大小和连接。",
+        "conflict": "其他人已保存新版本。你的草稿已保留；再次保存前请重新加载最新版本。",
+        "saved": "已保存，下一轮对话将使用此版本。",
+        "version": "资料版本",
+        "emptyVersion": "尚未保存资料",
+        "versionNumber": "版本 {{version}}",
+        "readOnly": "当前版本仅供查看。编辑需要最新版本的写入权限。",
+        "instructions": "项目 Instructions",
+        "sources": "Sources 参考资料",
+        "sourceTrust": "Sources 是参考资料，不作为指令。链接或路径只记录来源，不会自动抓取内容。",
+        "sourceVersion": "来源版本 {{version}}",
+        "sourceTitle": "标题",
+        "sourceOrigin": "来源位置或引用",
+        "sourceBody": "参考文本",
+        "addSource": "添加来源",
+        "reload": "重新加载最新版本"
+      },
       "projects": "项目",
       "newConversation": "新建对话",
       "pinned": "置顶",
@@ -3824,6 +3885,10 @@
     }
   },
   "auth": {
+    "organizationLogoutFailed": "退出失败，凭据仍有效，请重试",
+    "organizationSubtitle": "使用管理员发放的组织访问凭据登录",
+    "organizationToken": "组织访问凭据",
+    "organizationHint": "凭据到期或撤销后连接失效。退出会撤销本凭据，再次登录需管理员发放新凭据。",
     "title": "登录 JiuwenSwarm",
     "subtitle": "输入你的账号与密码以继续",
     "username": "账号",

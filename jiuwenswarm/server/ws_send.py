@@ -95,6 +95,14 @@ def _build_oversized_fallback(
 
 async def send_wire_payload(ws: Any, wire: dict[str, Any]) -> bool:
     """Send one bounded wire payload, replacing oversized data with an error."""
+    from jiuwenswarm.governance.session_boundary import delivery_authorized
+    if not delivery_authorized():
+        # Never forward a buffered private body after revocation. A bounded
+        # generic denial is safe even when admission never produced a permit.
+        wire = encode_agent_response_for_wire(AgentResponse(
+            request_id=str(wire.get("request_id") or ""), channel_id=str(wire.get("channel") or ""),
+            ok=False, payload={"code": "FORBIDDEN", "error": "Session authorization denied."},
+        ), response_id=str(wire.get("response_id") or wire.get("request_id") or ""))
     serialized = json.dumps(wire, ensure_ascii=False)
     actual_bytes = len(serialized.encode("utf-8"))
     if actual_bytes <= AGENT_WS_SEND_BUDGET_BYTES:
@@ -129,3 +137,13 @@ async def send_wire_payload(ws: Any, wire: dict[str, Any]) -> bool:
         )
     await ws.send(fallback_json)
     return False
+
+
+async def send_service_ready(ws: Any, *, heartbeat_protocol: int, heartbeat_ready: bool) -> None:
+    """Host-only fixed control handshake, with no Session or user data."""
+    if type(heartbeat_protocol) is not int or not 0 <= heartbeat_protocol <= 1000 or type(heartbeat_ready) is not bool:
+        raise ValueError("invalid service readiness metadata")
+    await ws.send(json.dumps({"type": "event", "event": "connection.ack", "payload": {
+        "status": "ready", "heartbeat_job_owner": "agentserver",
+        "heartbeat_job_protocol": heartbeat_protocol, "heartbeat_job_ready": heartbeat_ready,
+    }}))

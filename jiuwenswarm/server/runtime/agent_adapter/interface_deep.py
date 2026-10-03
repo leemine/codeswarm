@@ -9123,6 +9123,11 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("%s Failed to attach AgentObservabilityRail: %s", log_prefix, exc)
         stage_timer.mark("observability_rail")
 
+        from jiuwenswarm.agents.harness.common.rails.permissions.resource_authority_rail import (
+            ensure_native_tool_authority,
+        )
+        rails_list = ensure_native_tool_authority(rails_list)
+
         total_ms = stage_timer.total_ms()
         log_rail_build = _stage_breakdown_logger(total_ms, _SLOW_RAIL_BUILD_MS)
         log_rail_build(
@@ -12242,6 +12247,19 @@ class JiuWenSwarmDeepAdapter:
         if not request_id or not session_id:
             return False
         return has_runtime_capability
+
+    def owns_native_tool_session(self, execution, agent, session) -> bool:
+        """Resolve the existing Session adapter without allocating or adopting one."""
+        if not self._is_session_scoped_adapter:
+            child = self._get_cached_session_adapter(execution.session_id)
+            return child is not None and child.owns_native_tool_session(execution, agent, session)
+        native = getattr(self, "_native_execution", None)
+        owner = getattr(native, "_tool_owner", None)
+        return bool(
+            owner is not None and self._instance is owner[0]
+            and self._parent_session_id == execution.session_id
+            and native.owns_tool_session(execution, agent, session)
+        )
 
     def build_native_execution(self, bound: Any, *, event_observer: Any = None) -> Any:
         """Build an unstarted protocol execution from this session's assembled agent.

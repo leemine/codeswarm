@@ -1,3 +1,4 @@
+import { notifyOrganizationCredentialChange } from '../../services/organizationCredentialEvents';
 import { useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -10,7 +11,7 @@ import { useTranslation } from 'react-i18next';
  * 视觉参考 Apple 官网:纯净浅色背景、SF Pro 字体栈、大留白、克制配色、
  * 下划线式输入框、Apple 蓝 #0071e3 主按钮。
  */
-export function LoginPage() {
+export function LoginPage({ organization = false }: { organization?: boolean }) {
   const { t } = useTranslation();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -23,10 +24,10 @@ export function LoginPage() {
     setSubmitting(true);
     setError('');
     try {
-      const resp = await fetch('/auth-api/v1/auth/login', {
+      const resp = await fetch(organization ? '/api/v1/auth/organization/login' : '/auth-api/v1/auth/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
+        headers: { 'Content-Type': 'application/json', 'X-Jiuwen-Auth': '1' },
+        body: JSON.stringify(organization ? { token: password } : { username, password }),
       });
       if (resp.status === 401) {
         setError(t('auth.invalidCredentials'));
@@ -36,8 +37,9 @@ export function LoginPage() {
         setError(t('auth.loginFailed'));
         return;
       }
+      if (organization) notifyOrganizationCredentialChange();
       // 成功: cookie 已由反代写入。跳转到带 user_id 的入口。
-      const target = `${window.location.origin}/?user_id=${encodeURIComponent(username)}`;
+      const target = organization ? window.location.origin + '/' : `${window.location.origin}/?user_id=${encodeURIComponent(username)}`;
       window.location.href = target;
     } catch {
       setError(t('auth.loginFailed'));
@@ -69,13 +71,13 @@ export function LoginPage() {
             {t('auth.title')}
           </h1>
           <p className="mt-3 text-[15px] leading-[1.4] text-[#6e6e73] font-normal" data-testid="auth-login-subtitle">
-            {t('auth.subtitle')}
+            {t(organization ? 'auth.organizationSubtitle' : 'auth.subtitle')}
           </p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4" data-testid="auth-login-form">
           {/* 下划线式输入框:Apple 登录页常见, 无边框, 仅底线, 聚焦加深 */}
-          <div className="group">
+          {!organization && <div className="group">
             <label className="block text-[12px] font-medium text-[#86868b] mb-1.5 tracking-wide" data-testid="auth-login-username-label">
               {t('auth.username')}
             </label>
@@ -89,10 +91,10 @@ export function LoginPage() {
               className="w-full bg-transparent px-0 py-2.5 text-[17px] text-[#1d1d1f] placeholder-[#c7c7cc] border-b border-[#d2d2d7] focus:outline-none focus:border-[#0071e3] transition-colors duration-200"
               data-testid="auth-login-username-input"
             />
-          </div>
+          </div>}
           <div className="group">
             <label className="block text-[12px] font-medium text-[#86868b] mb-1.5 tracking-wide" data-testid="auth-login-password-label">
-              {t('auth.password')}
+              {t(organization ? 'auth.organizationToken' : 'auth.password')}
             </label>
             <input
               type="password"
@@ -100,7 +102,7 @@ export function LoginPage() {
               required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder={t('auth.passwordPlaceholder')}
+              placeholder={t(organization ? 'auth.organizationToken' : 'auth.passwordPlaceholder')}
               className="w-full bg-transparent px-0 py-2.5 text-[17px] text-[#1d1d1f] placeholder-[#c7c7cc] border-b border-[#d2d2d7] focus:outline-none focus:border-[#0071e3] transition-colors duration-200"
               data-testid="auth-login-password-input"
             />
@@ -124,7 +126,7 @@ export function LoginPage() {
 
         {/* 安全提示:Apple 式脚注小字 */}
         <p className="mt-8 text-center text-[12px] text-[#86868b] leading-[1.4]" data-testid="auth-login-secure-hint">
-          {t('auth.secureHint')}
+          {t(organization ? 'auth.organizationHint' : 'auth.secureHint')}
         </p>
       </div>
     </div>

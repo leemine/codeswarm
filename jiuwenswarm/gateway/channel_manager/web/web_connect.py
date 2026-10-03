@@ -376,6 +376,7 @@ class WebChannel(BaseWsChannel):
             *,
             seq: int | None = None,
             stream_id: str | None = None,
+            session_id: str | None = None,
     ) -> None:
         """向指定客户端发送 ``event`` 帧."""
         frame: dict[str, Any] = {"type": "event", "event": event, "payload": payload}
@@ -384,7 +385,7 @@ class WebChannel(BaseWsChannel):
         if stream_id is not None:
             frame["stream_id"] = stream_id
         try:
-            self._enqueue_send(ws, frame)
+            self._enqueue_send(ws, frame, session_id=session_id)
         except Exception as e:
             if bool(getattr(ws, "closed", False)):
                 logger.debug(
@@ -417,7 +418,10 @@ class WebChannel(BaseWsChannel):
 
     @classmethod
     def _resolve_connection_user_id(cls, flat_query: dict[str, str], ws: Any) -> str | None:
-        connection_user_id = cls._extract_query_user_id(flat_query) or cls._extract_ws_header_user_id(ws)
+        from jiuwenswarm.governance.organization_auth import connection_principal
+        principal = connection_principal(ws)
+        connection_user_id = (principal.identity().actor_id if principal is not None else
+                              cls._extract_query_user_id(flat_query) or cls._extract_ws_header_user_id(ws))
         setattr(ws, _WEB_CONNECTION_USER_ID_ATTR, connection_user_id)
         return connection_user_id
 
@@ -771,7 +775,7 @@ class WebChannel(BaseWsChannel):
                 "lifecycle": str(getattr(update, "lifecycle", "final") or "final"),
             }
             for ws in clients:
-                await self.send_event(ws, "trace.updated", payload)
+                await self.send_event(ws, "trace.updated", payload, session_id=session_id)
 
     async def connect(self) -> None:
         """兼容方法：调用 start."""
@@ -920,7 +924,7 @@ class WebChannel(BaseWsChannel):
             frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
             clients = self.clients
             for w in clients:
-                self._enqueue_send(w, frame)
+                self._enqueue_send(w, frame, session_id=msg.session_id)
             logger.debug(
                 "[WebChannel] health_check.relay broadcast to %d client(s) id=%s",
                 len(clients), getattr(msg, "id", ""),
@@ -943,7 +947,7 @@ class WebChannel(BaseWsChannel):
                 else self.clients
             )
             for w in clients:
-                self._enqueue_send(w, frame)
+                self._enqueue_send(w, frame, session_id=msg.session_id)
             logger.debug(
                 "[WebChannel] cron push broadcast to %d client(s) id=%s run_id=%s",
                 len(clients), getattr(msg, "id", ""),
@@ -964,7 +968,7 @@ class WebChannel(BaseWsChannel):
             frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
             clients = self.clients
             for w in clients:
-                self._enqueue_send(w, frame)
+                self._enqueue_send(w, frame, session_id=msg.session_id)
             logger.debug(
                 "[WebChannel] proactive_notification broadcast to %d client(s) id=%s",
                 len(clients), getattr(msg, "id", ""),
@@ -1033,7 +1037,7 @@ class WebChannel(BaseWsChannel):
                     getattr(msg, "id", ""),
                 )
                 return
-            await self._broadcast_to(frame, ws_set)
+            await self._broadcast_to(frame, ws_set, session_id=msg.session_id)
             return
 
         # ── V2 精确路由 ──
@@ -1065,7 +1069,7 @@ class WebChannel(BaseWsChannel):
                 if frame_data.get("event") == "context.usage":
                     await self._persist_frontend_context_usage(frame_data)
                 for w in ws_set:
-                    self._enqueue_send(w, frame_data)
+                    self._enqueue_send(w, frame_data, session_id=msg.session_id)
                 return
             if self.requires_delivery_confirmation:
                 raise ConnectionError("Artifact exact recipient is disconnected")
@@ -1139,7 +1143,7 @@ class WebChannel(BaseWsChannel):
             "event": event_name,
             "payload": payload,
         }
-        await self._broadcast_to(frame_data, all_clients)
+        await self._broadcast_to(frame_data, all_clients, session_id=msg.session_id)
 
         # interrupt_result 根据 intent 决定 is_processing 状态
         # (busy 映射已在 send() 入口 _track_session_busy 统一维护,此处仅补发
@@ -1239,6 +1243,11 @@ class WebChannel(BaseWsChannel):
         _mode = _flat_query.get("mode", "agent")
         _agent_id = _flat_query.get("agent_id", "default")
         _initial_sid = _flat_query.get("session_id", self._make_session_id())
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is not None:
+            # The handshake can allocate a transport placeholder only.
+            _initial_sid = self._make_session_id()
+        setattr(ws, "_jiuwen_initial_sid", _initial_sid)
         uid_marker = "" if connection_user_id else " uid_empty=yes"
         logger.info(
             "[WebChannel] ws.connect user_id=%s session_id=%s channel=web remote=%s path=%s%s",
@@ -1433,6 +1442,16 @@ class WebChannel(BaseWsChannel):
             )
 
     async def _handle_raw_message(self, ws: Any, raw: str, query: dict[str, list[str]]) -> None:
+        from jiuwenswarm.governance.organization_auth import authenticated_scope, connection_principal
+        try:
+            principal = connection_principal(ws)
+        except (OSError, ValueError, KeyError, TypeError, PermissionError):
+            await ws.close(code=1008, reason="authentication required")
+            return
+        with authenticated_scope(principal):
+            return await self._handle_authenticated_raw_message(ws, raw, query)
+
+    async def _handle_authenticated_raw_message(self, ws: Any, raw: str, query: dict[str, list[str]]) -> None:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
@@ -1460,6 +1479,28 @@ class WebChannel(BaseWsChannel):
         if not isinstance(params, dict):
             params = {}
 
+        from jiuwenswarm.governance.organization_auth import configured_authenticator, connection_principal
+        from jiuwenswarm.governance.session_boundary import (
+            admit_session_request, organization_sharing_host, SHARE_METHODS,
+        )
+        organization = configured_authenticator() is not None
+        if organization:
+            try:
+                permit = admit_session_request(method, params,
+                    identity_resolver=lambda: connection_principal(ws).identity(), host=organization_sharing_host())
+                permits = getattr(ws, "_jiuwen_session_permits", None)
+                if permits is None:
+                    permits = {}
+                    setattr(ws, "_jiuwen_session_permits", permits)
+                if req_id in permits:
+                    raise PermissionError("request ID already in use")
+                while len(permits) >= 1024:
+                    del permits[next(iter(permits))]
+                permits[req_id] = permit
+            except Exception:
+                await self.send_response(ws, req_id, ok=False, error="Session authorization denied.", code="FORBIDDEN")
+                return
+
         # ── V2: session_id 解析 ──
         # 请求自带 session_id（如 chat.send）→ 用它更新 ws 路由注册。
         # 请求未带 session_id（如 memory.compute 心跳、updater.check、config.get
@@ -1471,10 +1512,11 @@ class WebChannel(BaseWsChannel):
             isinstance(_explicit_session_id, str) and bool(_explicit_session_id)
         )
         session_id = _explicit_session_id if has_explicit_session else self._make_session_id()
+        route_session = has_explicit_session and not (organization and method in SHARE_METHODS)
 
         # 追踪 ws → 真实 session_id，用于断连清理/日志。
         # 与 register_ws 一致：仅显式 session 入集；临时 id 只供 Message 构造，避免膨胀。
-        if has_explicit_session:
+        if route_session:
             ws_id = id(ws)
             sessions = self._ws_sessions.get(ws_id)
             if sessions is None:
@@ -1495,7 +1537,7 @@ class WebChannel(BaseWsChannel):
         _agent_id = params.get("agent_id", "default")
         _app_id = _flat_query.get("app_id", "default")
         req_user_id = self._connection_user_id(ws)
-        if has_explicit_session:
+        if route_session:
             _rk = RoutingKey(
                 user_id=self._routing_key_user_id(req_user_id, getattr(ws, "remote_address", None)),
                 channel_id=self.channel_id,
@@ -1535,7 +1577,7 @@ class WebChannel(BaseWsChannel):
             },
         )
 
-        if has_explicit_session:
+        if route_session:
             from jiuwenswarm.common.e2a.constants import E2A_ARTIFACT_ORIGIN_KEY
             from jiuwenswarm.gateway.routing.artifact_delivery import freeze_origin
             user_message.metadata[E2A_ARTIFACT_ORIGIN_KEY] = freeze_origin(_rk)
@@ -1647,7 +1689,7 @@ class WebChannel(BaseWsChannel):
                 exc_info=True,
             )
 
-    async def _broadcast_to(self, frame: dict[str, Any], clients: set[Any]) -> None:
+    async def _broadcast_to(self, frame: dict[str, Any], clients: set[Any], *, session_id: str | None = None) -> None:
         """向指定 clients 集合广播帧（走 per-ws writer，非阻塞入队）.
 
         入队 dict，由 writer 统一序列化一次，避免此处预 dumps。
@@ -1660,7 +1702,7 @@ class WebChannel(BaseWsChannel):
         if frame.get("event") == "context.usage":
             await self._persist_frontend_context_usage(frame)
         for client in clients:
-            self._enqueue_send(client, frame)
+            self._enqueue_send(client, frame, session_id=session_id)
 
     # ── BaseWsChannel 抽象方法 ──
 

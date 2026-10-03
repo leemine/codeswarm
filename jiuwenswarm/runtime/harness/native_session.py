@@ -60,6 +60,8 @@ class _HostRequest:
     result: asyncio.Future | None = field(default=None, repr=False)
     resumes: list[SendInputRequest] = field(default_factory=list, repr=False)
     answered: set[str] = field(default_factory=set, repr=False)
+    authority: Any = field(default=None, repr=False)
+    guarded_authority: Any = field(default=None, repr=False)
 
 
 class NativeExecutionSession:
@@ -103,9 +105,22 @@ class NativeExecutionSession:
         self._closed = False
         self._exit_state = ExecutionExitState.NOT_STARTED
         self._lifecycle_lock = asyncio.Lock()
+        self._tool_owner = None
+        self._resource_governed = False
+
+        async def register_owner(instance, session):
+            if self._tool_owner is not None:
+                raise RuntimeError("Native tool owner already registered")
+            if before_start is not None:
+                await before_start(instance, session)
+            inner = instance.react_agent
+            if inner is None or session.get_session_id() != bound.binding.host_session_id:
+                raise RuntimeError("Native tool owner does not match the Binding")
+            self._tool_owner = (instance, inner, session, bound.binding)
+
         hooks = NativeHostHooks(
             create_session=session_factory,
-            before_start=before_start,
+            before_start=register_owner,
             dispatch_input=self._dispatch,
         )
         harness = DeepAgentHarness(
@@ -144,8 +159,11 @@ class NativeExecutionSession:
                 )
             if str(Path(context.cwd).resolve()) != binding.workspace:
                 raise ValueError("Native context workspace does not match the binding")
+            from jiuwenswarm.governance.tool_context import current_tool_authorizer, native_authority_source_scope
+            self._resource_governed = self._resource_governed or current_tool_authorizer() is not None
             try:
-                await self.io.start(context)
+                with native_authority_source_scope(self._current_resource_authority):
+                    await self.io.start(context)
             except BaseException as start_error:
                 try:
                     await asyncio.wait_for(
@@ -156,8 +174,24 @@ class NativeExecutionSession:
                     raise ExecutionExitUnconfirmedError(
                         [("provider", cleanup_error)]
                     ) from start_error
+                self._tool_owner = None
                 raise
             self._exit_state = ExecutionExitState.RUNNING
+
+    def owns_tool_session(self, execution, agent, session) -> bool:
+        """Exact objects owned by this live Native Binding, never an ID prefix."""
+        owner = self._tool_owner
+        if owner is None or self._closing or self._closed or self._exit_state is not ExecutionExitState.RUNNING:
+            return False
+        outer, inner, actual_session, binding = owner
+        return (
+            agent is inner and session is actual_session
+            and outer.react_agent is inner and self.engine.binding is binding
+            and execution.provider_id == "native"
+            and execution.session_id == binding.host_session_id
+            and execution.identity.subject_id == binding.subject_id
+            and str(Path(execution.workspace).resolve()) == binding.workspace
+        )
 
     @property
     def closed(self) -> bool:
@@ -198,6 +232,7 @@ class NativeExecutionSession:
             self._turn_requests.clear()
             self._goal_handoffs.clear()
             self._terminal_turns.clear()
+            self._tool_owner = None
             self._closed = True
             self._exit_state = ExecutionExitState.EXIT_CONFIRMED
 
@@ -244,6 +279,41 @@ class NativeExecutionSession:
             lambda: self.io.send(content, immediate=immediate)
         )
 
+    def _register_host_request(self, **kwargs):
+        from jiuwenswarm.governance.tool_context import submitted_tool_authorizer
+        token = uuid.uuid4().hex
+        authority = submitted_tool_authorizer()
+        self._resource_governed = self._resource_governed or authority is not None
+        entry = _HostRequest(**kwargs, authority=authority)
+
+        async def guarded(operation):
+            active = self._native.active_turn
+            def current():
+                return (
+                    not self._closing and not self._closed and active is not None
+                    and self._native.active_turn is active and not active.abort_requested
+                    and active.content.metadata.get(_REQUEST_KEY) == token
+                    and self._requests.get(token) is entry
+                )
+            if authority is None or not current():
+                return False
+            return await authority(operation) is True and current()
+
+        entry.guarded_authority = guarded
+        self._requests[token] = entry
+        return token
+
+    def _current_resource_authority(self):
+        from jiuwenswarm.governance.tool_context import _deny_unknown_provider
+        active = self._native.active_turn
+        token = active.content.metadata.get(_REQUEST_KEY) if active is not None else None
+        entry = self._requests.get(token)
+        if self._closing or self._closed or entry is None or active.abort_requested:
+            return _deny_unknown_provider if self._resource_governed else None
+        if entry.authority is None:
+            return _deny_unknown_provider if self._resource_governed else None
+        return entry.guarded_authority
+
     async def send_request(self, request: SendInputRequest) -> SendReceipt:
         """Accept a host request without serializing its permission/context objects."""
         if isinstance(request.inputs.get("query"), InteractiveInput):
@@ -251,8 +321,7 @@ class NativeExecutionSession:
         query = request.inputs.get("query")
         if not isinstance(query, str) or not query.strip():
             raise ValueError("Native user input must be non-empty text")
-        token = uuid.uuid4().hex
-        self._requests[token] = _HostRequest(request=request)
+        token = self._register_host_request(request=request)
         content = HarnessInput(content=query, metadata={_REQUEST_KEY: token})
         try:
             receipt = await self._send(
@@ -312,9 +381,8 @@ class NativeExecutionSession:
         async def operation(agent):
             return await self._goal_dispatcher(action=action, **kwargs)
 
-        token = uuid.uuid4().hex
         result = asyncio.get_running_loop().create_future()
-        self._requests[token] = _HostRequest(goal=operation, result=result)
+        token = self._register_host_request(goal=operation, result=result)
         try:
             receipt = await self._send(
                 HarnessInput(content="", metadata={_REQUEST_KEY: token}),
@@ -373,8 +441,7 @@ class NativeExecutionSession:
 
     async def attach_goal(self) -> SendReceipt:
         """Attach the existing active Goal through the same Turn output route."""
-        token = uuid.uuid4().hex
-        self._requests[token] = _HostRequest(attach_goal=True)
+        token = self._register_host_request(attach_goal=True)
         try:
             receipt = await self._send(
                 HarnessInput(content="", metadata={_REQUEST_KEY: token})
@@ -469,8 +536,7 @@ class NativeExecutionSession:
         goal = current.get("goal") if isinstance(current, dict) else None
         if not isinstance(goal, dict) or goal.get("status") != "active":
             return
-        token = uuid.uuid4().hex
-        self._requests[token] = _HostRequest(attach_goal=True)
+        token = self._register_host_request(attach_goal=True)
         try:
             receipt = await self.io.send(
                 HarnessInput(content="", metadata={_REQUEST_KEY: token})

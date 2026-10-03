@@ -358,3 +358,46 @@ async def test_session_creation_failure_hides_internal_error(
     assert notices == [{"error": expected_error}]
     assert "secret-database-path" not in str(notices)
     assert "secret-database-path" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('command', [
+    '/mode code', '/switch team', '/new_session', '/persist task',
+    '/branch copy', '/rewind confirm', '/review', '/security-review',
+    '/skills list', '/join session member', '/exit',
+])
+async def test_organization_controls_refuse_before_state_or_background_work(monkeypatch, command):
+    from unittest.mock import Mock
+    from jiuwenswarm.governance import organization_auth
+
+    handler = _TestMessageHandler.create()
+    state = ChannelControlState(session_id='private-session', mode=ChannelMode.AGENT_CODE_NORMAL)
+    handler._channel_states['feishu'] = state
+    state_lookup = Mock(side_effect=AssertionError('control must not read or mutate channel state'))
+    spawn = Mock(side_effect=AssertionError('control must not create cancellation or pre-execution tasks'))
+    preexecute = Mock(side_effect=AssertionError('control must not prepare git commands'))
+    monkeypatch.setattr(handler, 'get_or_create_channel_state', state_lookup)
+    monkeypatch.setattr(organization_auth, 'configured_authenticator', lambda: object())
+    monkeypatch.setattr(asyncio, 'create_task', spawn)
+    monkeypatch.setattr('jiuwenswarm.gateway.message_handler.message_handler.build_security_review_prompt', preexecute)
+    monkeypatch.setattr('jiuwenswarm.gateway.message_handler.message_handler.build_review_prompt', preexecute)
+
+    with pytest.raises(PermissionError, match='does not support controlled-channel slash commands'):
+        await handler._handle_channel_control(_control_message(command))
+
+    state_lookup.assert_not_called()
+    spawn.assert_not_called()
+    preexecute.assert_not_called()
+    assert state.session_id == 'private-session'
+    assert state.mode is ChannelMode.AGENT_CODE_NORMAL
+    assert handler.published == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('channel', 'text'), [('feishu', 'ordinary text'), ('web', '/mode code')])
+async def test_organization_control_gate_does_not_consume_ordinary_or_web_requests(monkeypatch, channel, text):
+    from jiuwenswarm.governance import organization_auth
+    handler = _TestMessageHandler.create()
+    monkeypatch.setattr(organization_auth, 'configured_authenticator', lambda: object())
+    assert await handler._handle_channel_control(_control_message(text, channel)) is False
+    assert handler._channel_states == {}

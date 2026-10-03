@@ -103,6 +103,8 @@ class EngineAgentAdapter:
         self._ordinary_send_attempted = False
         self._ordinary_request = None
         self._history_release = {}
+        self._resource_governed = False
+        self._turn_resource_authorizers = {}
 
     @property
     def route(self) -> AdmittedExecutionRoute:
@@ -298,6 +300,7 @@ class EngineAgentAdapter:
 
     async def complete_detached_turn(self, turn_id: str) -> None:
         """Called by the original projection only after durable terminal output."""
+        self._turn_resource_authorizers.pop(turn_id, None)
         if (self._ordinary_owner is None or turn_id != self._ordinary_turn
                 or turn_id not in self._ordinary_terminal):
             return
@@ -575,6 +578,7 @@ class EngineAgentAdapter:
         await session.stop()
         if session.exit_state is not ExecutionExitState.EXIT_CONFIRMED:
             raise RuntimeError("External stop did not confirm execution exit")
+        self._turn_resource_authorizers.clear()
         await self.release_subagent_runtime_for_session(
             session.binding.host_session_id, reason="parent_ended"
         )
@@ -650,7 +654,13 @@ class EngineAgentAdapter:
         immediate = str(params.get("input_mode") or "").strip().lower() == "steer"
         if goal_attempt is None and self._ordinary_owner is not None:
             self._ordinary_send_attempted = True
+        from jiuwenswarm.governance.tool_context import current_tool_authorizer
+        authority = current_tool_authorizer(self._route.provider_id)
+        if self._resource_governed and authority is None:
+            raise PermissionError("protected execution requires current resource authority")
         receipt = await session.send(external_input, immediate=immediate)
+        if authority is not None:
+            self._turn_resource_authorizers[receipt.turn_id] = authority
         if goal_attempt is not None:
             goal_attempt.bind_turn(receipt.turn_id)
         elif self._ordinary_owner is not None:
@@ -779,6 +789,8 @@ class EngineAgentAdapter:
                     runtime_completion="unknown",
                 )
         finally:
+            if terminal_seen:
+                self._turn_resource_authorizers.pop(receipt.turn_id, None)
             if not terminal_seen:
                 session.abandon_output(receipt.turn_id)
             forget_submission = getattr(session, "forget_submission", None)
@@ -965,6 +977,8 @@ class EngineAgentAdapter:
         return session
 
     def _external_context(self):
+        from jiuwenswarm.governance.tool_context import current_tool_authorizer
+        self._resource_governed = self._resource_governed or current_tool_authorizer(self._route.provider_id) is not None
         binding = self._route.bound.binding
         return build_external_context(
             paths=self._route.runtime_paths,
@@ -973,7 +987,14 @@ class EngineAgentAdapter:
             provider_id=binding.provider_id,
             surface=self._surface,
             context_snapshot=self._context_snapshot,
+            tool_authorizer=self._authorize_resource_tool if self._resource_governed else None,
         )
+
+    async def _authorize_resource_tool(self, operation):
+        # Provider-cycle contexts outlive individual Turns. Never reuse the
+        # first browser credential or deliver a late check to the next Turn.
+        authority = self._turn_resource_authorizers.get(operation.turn_id)
+        return authority is not None and await authority(operation) is True
 
     async def _ensure_started(self, session: ExecutionSession) -> None:
         if session.started:
@@ -984,18 +1005,8 @@ class EngineAgentAdapter:
             # Configuration switches change only the next provider cycle. The
             # snapshot below is then retained for every Turn in that cycle.
             self._compile_cold_surface_policy()
-            binding = session.binding
             await self._projection.replay_product_artifacts()
-            await session.start(
-                build_external_context(
-                    paths=self._route.runtime_paths,
-                    host_session_id=binding.host_session_id,
-                    channel_id=self._route.channel_id,
-                    provider_id=binding.provider_id,
-                    surface=self._surface,
-                    context_snapshot=self._context_snapshot,
-                )
-            )
+            await session.start(self._external_context())
 
     def _compile_cold_surface_policy(self) -> None:
         if self._surface is None:

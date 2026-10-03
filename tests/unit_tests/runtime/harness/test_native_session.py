@@ -1269,3 +1269,85 @@ def test_native_host_cannot_silently_ignore_explicit_authorization(tmp_path, ful
     with pytest.raises(UnsupportedHarnessCapabilityError, match="explicit execution authorization"):
         NativeExecutionSession(bound, agent_factory=factory, session_factory=AsyncMock())
     factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_native_tool_owner_is_exact_and_expires_before_cleanup(tmp_path):
+    from dataclasses import replace
+    from jiuwenswarm.governance.contracts import TrustedIdentity
+    from jiuwenswarm.governance.tool_resources import ResourceExecutionContext
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+    execution, outer, session, ctx, _, _ = _setup(tmp_path, [])
+    inner = object()
+    outer.react_agent = inner
+    scope = ResourceExecutionContext('project', TrustedIdentity('alice', 'alice', 'host'), 's', str(tmp_path), 'native')
+    assert not execution.owns_tool_session(scope, inner, session)
+    await execution.start(ctx)
+    assert execution.owns_tool_session(scope, inner, session)
+    assert not execution.owns_tool_session(scope, object(), session)
+    assert not execution.owns_tool_session(scope, inner, SimpleNamespace(get_session_id=lambda: 's'))
+    assert not execution.owns_tool_session(replace(scope, identity=TrustedIdentity('bob', 'bob', 'host')), inner, session)
+    assert not execution.owns_tool_session(replace(scope, session_id='s-child'), inner, session)
+    outer.react_agent = object()
+    assert not execution.owns_tool_session(scope, inner, session)
+    outer.react_agent = inner
+    adapter = JiuWenSwarmDeepAdapter.__new__(JiuWenSwarmDeepAdapter)
+    adapter._is_session_scoped_adapter = True
+    adapter._parent_session_id = 's'
+    adapter._instance = outer
+    adapter._native_execution = execution
+    assert adapter.owns_native_tool_session(scope, inner, session)
+    adapter._instance = object()
+    assert not adapter.owns_native_tool_session(scope, inner, session)
+    adapter._instance = outer
+    original_stop = execution.io.stop
+    execution.io.stop = AsyncMock(side_effect=RuntimeError('exit not confirmed'))
+    with pytest.raises(ExecutionExitUnconfirmedError):
+        await execution.stop()
+    assert execution._tool_owner is not None  # Retain references until cleanup.
+    assert not execution.owns_tool_session(scope, inner, session)
+    execution.io.stop = original_stop
+    await execution.stop()
+    assert execution._tool_owner is None
+    assert not execution.owns_tool_session(scope, inner, session)
+
+
+@pytest.mark.asyncio
+async def test_native_requests_capture_new_policy_and_reject_stale_waiter(tmp_path):
+    from jiuwenswarm.governance.tool_context import tool_authority_scope, native_authority_source_scope, current_tool_authorizer
+    execution, _, _, _, _, _ = _setup(tmp_path, [])
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+    async def first(operation):
+        calls.append('first')
+        entered.set()
+        await release.wait()
+        return True
+    second = AsyncMock(return_value=True)
+    # Simulate the actual lifetime-task selector inherited from startup. A new
+    # submission must capture its Runtime scope rather than recursively itself.
+    with native_authority_source_scope(execution._current_resource_authority):
+        with tool_authority_scope(first):
+            first_token = execution._register_host_request(request=SendInputRequest(request_id='first', inputs={'query': 'one'}))
+        first_turn = SimpleNamespace(content=SimpleNamespace(metadata={'native.host_request': first_token}), abort_requested=False)
+        execution._native._active_turn = first_turn
+        first_callback = current_tool_authorizer()
+        pending = asyncio.create_task(first_callback(object()))
+        await entered.wait()
+        with tool_authority_scope(second):
+            second_token = execution._register_host_request(request=SendInputRequest(request_id='second', inputs={'query': 'two'}))
+        second_turn = SimpleNamespace(content=SimpleNamespace(metadata={'native.host_request': second_token}), abort_requested=False)
+        execution._native._active_turn = second_turn
+        second_callback = current_tool_authorizer()
+        assert second_callback is not first_callback
+        assert await second_callback(object())
+        release.set()
+        assert not await pending
+        second.assert_awaited_once()
+        execution._requests.pop(second_token)
+        assert not await current_tool_authorizer()(object())
+        with tool_authority_scope(None):
+            third_token = execution._register_host_request(request=SendInputRequest(request_id='third', inputs={'query': 'three'}))
+        execution._native._active_turn = SimpleNamespace(content=SimpleNamespace(metadata={'native.host_request': third_token}), abort_requested=False)
+        assert not await current_tool_authorizer()(object())
+    assert calls == ['first']

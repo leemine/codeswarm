@@ -3175,7 +3175,24 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     if callable(register_disconnect):
         register_disconnect(_on_disconnect)
 
+    async def _organization_bootstrap_response(ws, req_id, params, method):
+        from jiuwenswarm.server.runtime.gateway_adapter.config_adapter import organization_ui_projection
+        try:
+            projection = organization_ui_projection(method, params)
+        except PermissionError:
+            await channel.send_response(ws, req_id, ok=False, error="organization configuration access denied", code="FORBIDDEN")
+            return True
+        except Exception:
+            await channel.send_response(ws, req_id, ok=False, error="organization bootstrap unavailable", code="INTERNAL_ERROR")
+            return True
+        if projection is None:
+            return False
+        await channel.send_response(ws, req_id, ok=True, payload=projection)
+        return True
+
     async def _config_get(ws, req_id, params, session_id):
+        if await _organization_bootstrap_response(ws, req_id, params, "config.get"):
+            return
         # 返回 _CONFIG_SET_ENV_MAP 里所有键对应的环境变量当前值
         payload = {
             param_key: (os.getenv(env_key) or "")
@@ -4000,6 +4017,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         一旦机器上存在两个活跃会话（换个浏览器再登一次就够了），那个假设会拒绝
         猜是谁，于是登录了却一个免费模型都列不出来。
         """
+        if await _organization_bootstrap_response(ws, req_id, params, "models.list"):
+            return
         try:
             config = get_config()
             auth_session = getattr(ws, "_jiuwen_auth_session", "") or None
@@ -4687,6 +4706,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             is_legacy_shared_directory_client(real_client)
             and not getattr(real_client, "server_ready", True)
         ):
+            from jiuwenswarm.gateway.routing.e2a_proxy import organization_local_fallback_denial
+
+            denied = organization_local_fallback_denial()
+            if denied is not None:
+                await channel.send_response(ws, req_id, ok=False, error=denied["error"], code=denied["code"])
+                return
             from jiuwenswarm.server.runtime.gateway_adapter.base import parse_int_param
             from jiuwenswarm.server.runtime.session.session_info import to_session_info
             from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata
@@ -4849,6 +4874,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             is_legacy_shared_directory_client(real_client)
             and not getattr(real_client, "server_ready", True)
         ):
+            from jiuwenswarm.gateway.routing.e2a_proxy import organization_local_fallback_denial
+
+            denied = organization_local_fallback_denial()
+            if denied is not None:
+                await channel.send_response(ws, req_id, ok=False, error=denied["error"], code=denied["code"])
+                return
             from jiuwenswarm.server.runtime.session.session_rename import apply_session_rename
 
             ok, payload, error, code = apply_session_rename(
@@ -4892,6 +4923,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             is_legacy_shared_directory_client(real_client)
             and not getattr(real_client, "server_ready", True)
         ):
+            from jiuwenswarm.gateway.routing.e2a_proxy import organization_local_fallback_denial
+
+            denied = organization_local_fallback_denial()
+            if denied is not None:
+                await channel.send_response(ws, req_id, ok=False, error=denied["error"], code=denied["code"])
+                return
             raw_params = params if isinstance(params, dict) else {}
             sid = raw_params.get("session_id")
             pinned = raw_params.get("pinned")
@@ -6956,6 +6993,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         ProjectMethod.PROJECT_EXTENSIONS_GET,
         ProjectMethod.PROJECT_EXTENSIONS_UPDATE,
         ProjectMethod.PROJECT_ACL_UPDATE,
+        ProjectMethod.PROJECT_CONTENT_GET,
+        ProjectMethod.PROJECT_CONTENT_UPDATE,
+        ProjectMethod.SESSION_SHARE_LIST,
+        ProjectMethod.SESSION_SHARE_CREATE,
+        ProjectMethod.SESSION_SHARE_UPDATE,
+        ProjectMethod.SESSION_SHARE_REVOKE,
+        ProjectMethod.SESSION_SHARE_HISTORY_GET,
     ):
         channel.register_method(method.value, _project_extension_handler(method))
     channel.register_method("project.list", _project_list)

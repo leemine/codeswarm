@@ -18,6 +18,7 @@ import logging
 import os
 import uuid
 from contextlib import aclosing
+from contextvars import copy_context
 from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -312,6 +313,31 @@ class _StoredProjectAuthority:
         return ProjectAccessStore().authorize(project_id, actor_id, action)
 
 
+class _StoredResourceAuthority:
+    def authorize_resource(self, project_id, identity, request):
+        from jiuwenswarm.server.runtime.session.project_access import ProjectAccessStore
+        return ProjectAccessStore().authorize_resource(project_id, identity, request)
+
+    def resource_grants(self, project_id, identity):
+        from jiuwenswarm.server.runtime.session.project_access import ProjectAccessStore
+        return ProjectAccessStore().resource_grants(project_id, identity)
+
+
+class _CurrentNativeToolResources:
+    def __init__(self, authority, owns_session):
+        self._authority = authority
+        self._owns_session = owns_session
+
+    def resources_for_tool(self, execution, operation):
+        from jiuwenswarm.governance.native_tool_resources import NativeToolResourceResolver
+        if execution.provider_id != "native":
+            raise GovernanceError("Provider resource mapping unavailable")
+        # Reload visible reference metadata; ResourceGuard independently checks
+        # every actual grant immediately before the concrete tool runs.
+        grants = self._authority.resource_grants(execution.project_id, execution.identity)
+        return NativeToolResourceResolver(grants, owns_session=self._owns_session).resources_for_tool(execution, operation)
+
+
 class AgentRuntime:
     """Own the existing ``AgentManager`` and its in-memory resources.
 
@@ -337,6 +363,8 @@ class AgentRuntime:
         team_execution_controller: object | None = None,
         trusted_identity_resolver: Callable[[object], TrustedIdentity | None] | None = None,
         project_authorizer: ProjectAuthorizer | None = None,
+        resource_authorizer: Any | None = None,
+        tool_resource_resolver: Any | None = None,
         extension_registry: Any | None = None,
         extension_manager: Any | None = None,
         required_capabilities: Mapping[str, str] | None = None,
@@ -354,6 +382,9 @@ class AgentRuntime:
         self._owned_extensions_attempted = False
         self._explicit_identity_resolver = trusted_identity_resolver
         self._explicit_project_authorizer = project_authorizer
+        self._explicit_resource_authorizer = resource_authorizer
+        self._resource_authorizer = resource_authorizer or _StoredResourceAuthority()
+        self._tool_resource_resolver = tool_resource_resolver
         self._trusted_identity_resolver = trusted_identity_resolver
         self._submission_guard = SubmissionGuard(project_authorizer or _StoredProjectAuthority())
         self._governed_provisions: dict[PreparedSessionProvision[Any], PreparedRequest] = {}
@@ -385,6 +416,14 @@ class AgentRuntime:
             participant_registry=self._participant_registry,
             team_execution_controller=team_execution_controller,
         )
+        from jiuwenswarm.governance.session_boundary import organization_sharing_host
+        from jiuwenswarm.governance.session_publication import SessionOwnerPublication
+        self._organization_session_host = organization_sharing_host()
+        self._owner_publication = (SessionOwnerPublication(self._organization_session_host)
+                                   if self._organization_session_host is not None else None)
+        self._owner_provision_checks = {}
+        if self._owner_publication is not None:
+            self._session_provisioner.set_owner_lifecycle(self._owner_publication)
         self._resource_lease = resource_lease
         self._session_coordinator = session_coordinator or RuntimeSessionCoordinator()
         self.set_admission_controller(admission_controller)
@@ -424,6 +463,63 @@ class AgentRuntime:
         if identity is not None and not isinstance(identity, TrustedIdentity):
             raise GovernanceError("host identity resolver returned an invalid identity")
         return identity
+
+    def _resource_authorizers_for(self, request: AgentRequest):
+        """Freeze private execution identity; never trust a requested resource list."""
+        from jiuwenswarm.governance.tool_resources import BoundToolResourceAuthority, ResourceExecutionContext
+        from jiuwenswarm.server.runtime.session.project_store import get_project_dir_by_id
+
+        if request.req_method not in self._chat_turn_methods() and not self._is_mutating_goal_request(request):
+            return None
+        project_id = self._governance_project(request)
+        identity = self._governance_identity(request)
+        decision = self._submission_guard.check_access(project_id, identity, "execute")
+        if decision is None or decision.revision == 0:
+            return None
+        if identity is None:
+            raise GovernanceError("resource execution requires trusted identity")
+        workspace = get_project_dir_by_id(project_id)
+        if not workspace:
+            return {}  # Bound but unavailable: every Provider remains denied.
+        session_id = request.session_id or "default"
+        generation = self._governance_generation(session_id)
+        host_context = copy_context()
+
+        def current_identity():
+            # An MCP/server task must not accidentally borrow another browser's
+            # ambient principal. The original live resolver still rechecks revoke.
+            return host_context.run(self._governance_identity, request)
+
+        def is_current():
+            if self._closed or self._governance_generation(session_id) != generation:
+                return False
+            current = self._session_coordinator.snapshot_session(session_id)
+            if current is None:
+                return False  # No owner/generation proof is not execution authority.
+            if current.state in {RuntimeSessionState.QUIESCING, RuntimeSessionState.CLOSED}:
+                return False
+            return any(item.request_id == request.request_id and not item.state.terminal
+                       and not item.cancellation_requested for item in current.executions)
+
+        resolver = self._tool_resource_resolver
+        if resolver is None and callable(getattr(self._resource_authorizer, "resources_for_tool", None)):
+            resolver = self._resource_authorizer
+        if resolver is None and isinstance(self._resource_authorizer, _StoredResourceAuthority):
+            def owns_session(execution, agent, session):
+                if not is_current():
+                    return False
+                lookup = getattr(self._agent_manager, "get_agent_for_session_nowait", None)
+                owner = lookup(request.channel_id or "default", session_id) if callable(lookup) else None
+                check = getattr(owner, "owns_native_tool_session", None)
+                return callable(check) and check(execution, agent, session) is True
+            resolver = _CurrentNativeToolResources(self._resource_authorizer, owns_session)
+        return {
+            provider: BoundToolResourceAuthority(
+                ResourceExecutionContext(project_id, identity, session_id, str(Path(workspace).resolve()), provider),
+                authorizer=self._resource_authorizer, resolver=resolver,
+                current_identity=current_identity, is_current_execution=is_current,
+            ) for provider in ("native", "codex", "opencode")
+        }
 
     @property
     def extension_registry(self) -> Any | None:
@@ -507,6 +603,7 @@ class AgentRuntime:
             request_id="", session_id=normalized, channel_id=channel_id,
             req_method=ReqMethod.SESSION_DELETE,
         )
+        self._require_session_owner(normalized, request)
         project_id = self._governance_project(request, action="write")
         self._submission_guard.check_access(project_id, self._governance_identity(request), "write")
 
@@ -515,6 +612,7 @@ class AgentRuntime:
         return snapshot.generation if snapshot else None
 
     def _governance_owned_request(self, request: AgentRequest) -> AgentRequest:
+        self._require_session_owner(request.session_id, request)
         project_id = self._governance_project(request)
         identity = self._governance_identity(request)
         if project_id or identity is not None:
@@ -535,15 +633,66 @@ class AgentRuntime:
         )
 
     def _commit_governed_request(self, prepared: PreparedRequest | None, request: AgentRequest) -> None:
+        self._require_session_owner(request.session_id, request)
         if prepared is None:
             return
         if self._governance_project(request) != prepared.project_id:
             raise GovernanceError("request project changed during preparation")
         if self._governance_identity(request) != prepared.identity:
             raise GovernanceError("trusted identity changed during preparation")
+        if getattr(request, "_project_content_snapshot", None) is not None:
+            self._submission_guard.check_access(prepared.project_id, prepared.identity, "read")
         self._submission_guard.begin_submission(
             prepared, generation=self._governance_generation(prepared.session_id),
         )
+
+    def _publication_identity_check(self, provision_input):
+        captured = copy_context()
+        identity = self._governance_identity(provision_input)
+        def check():
+            current = captured.run(self._governance_identity, provision_input)
+            if current != identity or current is None:
+                raise GovernanceError("Session publication identity changed")
+            return current
+        return check
+
+    async def _prepare_owned_provision(self, operation, provision_input):
+        if self._owner_publication is None:
+            return await operation(provision_input)
+        check = self._publication_identity_check(provision_input)
+        with self._owner_publication.scope(check):
+            prepared = await operation(provision_input)
+            try:
+                session_id = prepared.result.session_id
+                revision = self._organization_session_host.owner_revision(session_id, check())
+            except BaseException:
+                await self._session_provisioner.abort_session_provision(prepared)
+                raise
+        def final_check():
+            identity = check()
+            if self._organization_session_host.owner_revision(session_id, identity) != revision:
+                raise GovernanceError("Session publication authority changed")
+            return identity
+        self._owner_provision_checks[prepared] = final_check
+        return prepared
+
+    def validate_session_provision_for_delivery(self, prepared):
+        """Required before success is exposed, including after send-lock waits."""
+        if self._owner_publication is None:
+            return
+        check = self._owner_provision_checks.get(prepared)
+        if check is None:
+            raise GovernanceError("Session publication owner missing")
+        check()
+        governed = self._governed_provisions.get(prepared)
+        if governed is not None:
+            self._submission_guard.revalidate(governed, generation=self._governance_generation(governed.session_id))
+
+    def _require_session_owner(self, session_id, value):
+        if self._organization_session_host is not None and not self._organization_session_host.owner_current(
+            session_id, self._governance_identity(value),
+        ):
+            raise GovernanceError("current trusted Session owner required")
 
     def _prepare_governed_provision(self, provision_input: object) -> PreparedRequest | None:
         identity = self._governance_identity(provision_input)
@@ -564,6 +713,21 @@ class AgentRuntime:
             work_mode=work_mode,
             params={"cwd": inputs.get("cwd", "")},
         )
+        if isinstance(provision_input, SessionCreateInput) and session_id:
+            # Preserve the explicit TUI resume contract: the provisioner uses
+            # its stored binding, regardless of the caller's current directory.
+            # Authorize that same binding before any resource preparation.
+            from jiuwenswarm.server.runtime.session.session_history import is_valid_session_id
+            from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+            if not is_valid_session_id(session_id):
+                raise GovernanceError("invalid session_id")
+            if provision_input.channel_id.lower() == "tui":
+                stored = get_session_metadata(session_id, cache_bust=True, enable_writeback=False) or {}
+                if stored:
+                    resource.project_id = stored.get("project_id", "")
+                    resource.project_dir = stored.get("project_dir", "")
+                    resource.work_mode = stored.get("work_mode", work_mode)
+                    resource.params = {}
         project_id = self._governance_project(resource)
         if not project_id and identity is None:
             return None
@@ -916,16 +1080,34 @@ class AgentRuntime:
     def get_session(self, request: SessionGetInput) -> SessionSummary | None:
         """Read one Channel-owned single-Agent Session."""
         self._require_started()
-        from jiuwenswarm.runtime.session_catalog import get_session
+        from jiuwenswarm.runtime.session_catalog import SessionGetInput, get_session
 
-        return get_session(request)
+        if self._organization_session_host is None or not isinstance(request, SessionGetInput):
+            return get_session(request)
+        from jiuwenswarm.governance.session_boundary import admit_session_request
+        permit = admit_session_request('session.get_metadata', {'session_id': request.session_id},
+            identity_resolver=lambda: self._governance_identity(request), host=self._organization_session_host)
+        result = get_session(request)
+        if not permit.revalidate():
+            raise GovernanceError("Session read authority changed")
+        return result
 
     def list_sessions(self, request: SessionListInput) -> SessionListResult:
         """List Channel-owned single-Agent Sessions after safe filtering."""
         self._require_started()
         from jiuwenswarm.runtime.session_catalog import list_sessions
 
-        return list_sessions(request)
+        if self._organization_session_host is None:
+            return list_sessions(request)
+        from jiuwenswarm.governance.session_boundary import admit_session_request, inventory_identity_scope
+        def check():
+            return self._governance_identity(request)
+        permit = admit_session_request('session.list', {}, identity_resolver=check, host=self._organization_session_host)
+        with inventory_identity_scope(check):
+            result = list_sessions(request)
+        if not permit.revalidate():
+            raise GovernanceError("Session inventory authority changed")
+        return result
 
     def get_permission_snapshot(
         self,
@@ -1020,6 +1202,8 @@ class AgentRuntime:
                     # another Channel, and never register it under the caller's
                     # in-memory ownership before this check.
                     raise SessionCatalogError("session not found", code="NOT_FOUND")
+        if self._organization_session_host is not None:
+            raise GovernanceError("organization Session creation requires prepare_session_create")
         resolved_session_id = await self._agent_manager.create_session(
             channel_id=channel_id,
             session_id=requested or None,
@@ -1046,6 +1230,7 @@ class AgentRuntime:
         if not target:
             return None
 
+        self._require_session_owner(target, SimpleNamespace(session_id=target))
         from jiuwenswarm.common.utils import get_agent_sessions_dir
         from jiuwenswarm.server.runtime.session.session_history import (
             resolve_session_dir,
@@ -1180,7 +1365,9 @@ class AgentRuntime:
         governed = None
         try:
             governed = self._prepare_governed_provision(provision_input)
-            prepared = await self._session_provisioner.prepare_session_fork(provision_input)
+            prepared = await self._prepare_owned_provision(
+                self._session_provisioner.prepare_session_fork, provision_input,
+            )
             if governed is not None:
                 self._governed_provisions[prepared] = governed
             return prepared
@@ -1206,7 +1393,9 @@ class AgentRuntime:
         governed = None
         try:
             governed = self._prepare_governed_provision(provision_input)
-            prepared = await self._session_provisioner.prepare_session_create(provision_input)
+            prepared = await self._prepare_owned_provision(
+                self._session_provisioner.prepare_session_create, provision_input,
+            )
             if governed is not None:
                 self._governed_provisions[prepared] = governed
             return prepared
@@ -1231,8 +1420,11 @@ class AgentRuntime:
         prepared: PreparedSessionProvision[SessionSwitchResult] | None = None
         governed = None
         try:
+            self._require_session_owner(provision_input.target_session_id, provision_input)
             governed = self._prepare_governed_provision(provision_input)
-            prepared = await self._session_provisioner.prepare_session_switch(provision_input)
+            prepared = await self._prepare_owned_provision(
+                self._session_provisioner.prepare_session_switch, provision_input,
+            )
             if governed is not None:
                 self._governed_provisions[prepared] = governed
             return prepared
@@ -1269,11 +1461,19 @@ class AgentRuntime:
                         exc.add_note(f"owned provision compensation failed: {failure}")
                 raise
         try:
-            result = await self._session_provisioner.commit_session_provision(
-                prepared,
-                timing=timing,
-                context=context,
-            )
+            if self._owner_publication is not None:
+                check = self._owner_provision_checks.get(prepared)
+                if check is None:
+                    raise GovernanceError("Session publication owner missing")
+                check()
+                with self._owner_publication.scope(check):
+                    result = await self._session_provisioner.commit_session_provision(
+                        prepared, timing=timing, context=context,
+                    )
+            else:
+                result = await self._session_provisioner.commit_session_provision(
+                    prepared, timing=timing, context=context,
+                )
             if governed is not None:
                 self._submission_guard.accepted(governed)
             if isinstance(result, SessionCreateResult):
@@ -1321,6 +1521,7 @@ class AgentRuntime:
             SessionProvisionState.ABORTED,
         }:
             self._pending_session_provisions.discard(prepared)
+            self._owner_provision_checks.pop(prepared, None)
 
     async def _register_session(self, *, session_id: str, channel_id: str) -> None:
         """Adopt an existing product Session into this Runtime.
@@ -1385,12 +1586,20 @@ class AgentRuntime:
         from jiuwenswarm.runtime.request import prepare_chat_turn
 
         prepare_kwargs: dict[str, Any] = {"sync_metadata": sync_metadata}
+        # This host-only attribute is never decoded from transport params or
+        # metadata. Clear a reused request before considering a new Turn.
+        request._project_content_snapshot = None
         identity = self._governance_identity(request)
         project_id = self._governance_project(request)
         if identity is not None and project_id:
             decision = self._submission_guard.check_access(project_id, identity, "execute")
             if decision is not None and decision.revision > 0:
                 prepare_kwargs["trusted_subject_id"] = identity.subject_id
+                if (request.req_method in self._chat_turn_methods()
+                        and not self._is_interrupt_resume_request(request)):
+                    from jiuwenswarm.server.runtime.session.project_content import ProjectContentStore
+
+                    request._project_content_snapshot = ProjectContentStore().freeze(project_id, identity)
         if agent_execution is not None:
             prepare_kwargs.update(
                 agent_definition=agent_execution.definition.to_dict(),
@@ -1691,7 +1900,13 @@ class AgentRuntime:
         finally:
             reset_runtime_context(token)
 
-    async def _invoke_started(
+    async def _invoke_started(self, request: AgentRequest, **kwargs) -> list[RuntimeEvent]:
+        from jiuwenswarm.governance.tool_context import tool_authority_scope
+
+        with tool_authority_scope(None, provider_authorizers=self._resource_authorizers_for(request)):
+            return await self._invoke_started_impl(request, **kwargs)
+
+    async def _invoke_started_impl(
         self,
         request: AgentRequest,
         *,
@@ -2184,7 +2399,26 @@ class AgentRuntime:
             finally:
                 reset_runtime_context(token)
 
-    async def _stream_started(
+    async def _stream_started(self, request: AgentRequest, **kwargs) -> AsyncIterator[RuntimeEvent]:
+        from jiuwenswarm.governance.tool_context import tool_authority_scope
+
+        authorities = self._resource_authorizers_for(request)
+        stream = self._stream_started_impl(request, **kwargs)
+        try:
+            while True:
+                # Tokens stay within a single slice, never across a yield or a
+                # finalizer running in another task. Child tasks inherit scope.
+                with tool_authority_scope(None, provider_authorizers=authorities):
+                    try:
+                        event = await anext(stream)
+                    except StopAsyncIteration:
+                        return
+                yield event
+        finally:
+            with tool_authority_scope(None, provider_authorizers=authorities):
+                await stream.aclose()
+
+    async def _stream_started_impl(
         self,
         request: AgentRequest,
         *,
@@ -2923,6 +3157,7 @@ class AgentRuntime:
             self._closed = True
             self._submission_guard.clear()
             self._governed_provisions.clear()
+            self._owner_provision_checks.clear()
             if cleanup_errors:
                 raise cleanup_errors[0]
 
@@ -3515,6 +3750,7 @@ class AgentRuntime:
             return
         identity = get_capability("governance.identity")
         projects = get_capability("governance.projects")
+        resources = get_capability("governance.resources")
         if identity is not None:
             if not callable(identity):
                 raise GovernanceError("governance.identity must be a callable resolver")
@@ -3525,10 +3761,16 @@ class AgentRuntime:
                 raise GovernanceError("governance.projects must be a project authorizer")
             if self._explicit_project_authorizer is not None and projects is not self._explicit_project_authorizer:
                 raise GovernanceError("conflicting Runtime project policies")
+        if resources is not None:
+            if not callable(getattr(resources, "authorize_resource", None)):
+                raise GovernanceError("governance.resources must be a resource authorizer")
+            if self._explicit_resource_authorizer is not None and resources is not self._explicit_resource_authorizer:
+                raise GovernanceError("conflicting Runtime resource policies")
         self._trusted_identity_resolver = identity or self._explicit_identity_resolver
         self._submission_guard = SubmissionGuard(
             projects or self._explicit_project_authorizer or _StoredProjectAuthority()
         )
+        self._resource_authorizer = resources or self._explicit_resource_authorizer or _StoredResourceAuthority()
 
     async def _rollback_start(self) -> None:
         """Undo partially initialized owned dependencies after start failure."""

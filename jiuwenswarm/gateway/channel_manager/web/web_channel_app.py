@@ -127,6 +127,8 @@ def register_http_routes(app: FastAPI, channel: WebChannel) -> None:
     attach_trajectory_routes(app, channel)
     # register auth http routes for huawei account login
     register_auth_routes(app)
+    from jiuwenswarm.gateway.channel_manager.web.organization_auth_http import register_organization_auth
+    register_organization_auth(app)
 
 
 async def _serve_channel_websocket(channel: WebChannel, websocket: WebSocket) -> None:

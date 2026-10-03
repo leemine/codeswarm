@@ -76,6 +76,13 @@ def authorize_resource_request(
     method = getattr(getattr(request, "req_method", None), "value", "")
     if not method.startswith(_RESOURCE_PREFIXES):
         return
+    from .organization_auth import configured_authenticator
+    from .session_boundary import SHARE_METHODS
+    if configured_authenticator() is not None and (method in SHARE_METHODS or method == "session.list"):
+        # Persistent sharing evaluates the source owner's current project ACL;
+        # a recipient does not inherit project membership. Session inventory
+        # now filters durable ownership before reading or counting metadata.
+        return
     # ProjectAdapter performs its own operation-specific checks and filtering.
     if method.startswith("project.") and method not in {
         "project.delete", "project.lifecycle", "project.sessions.archive",
