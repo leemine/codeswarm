@@ -138,6 +138,21 @@ class ProductToolGateway:
     async def definitions(self) -> tuple[ToolDefinition, ...]:
         return self._definitions
 
+    async def _is_admitted(self, invocation: ToolInvocation) -> bool:
+        if self._admit is None:
+            return True
+        admitted = self._admit(self._scope, invocation)
+        if inspect.isawaitable(admitted):
+            admitted = await admitted
+        return admitted is True
+
+    @staticmethod
+    def _denied(invocation: ToolInvocation) -> ToolExecutionResult:
+        return ToolExecutionResult(
+            content=f"Product tool is not allowed for this Session: {invocation.name}",
+            is_error=True,
+        )
+
     async def invoke(self, invocation: ToolInvocation) -> ToolExecutionResult:
         tool = self._catalog.get(invocation.name)
         if tool is None:
@@ -145,16 +160,9 @@ class ProductToolGateway:
                 content=f"Unknown product tool: {invocation.name}",
                 is_error=True,
             )
-        if self._admit is not None:
-            admitted = self._admit(self._scope, invocation)
-            if inspect.isawaitable(admitted):
-                admitted = await admitted
-            if admitted is not True:
-                return ToolExecutionResult(
-                    content=f"Product tool is not allowed for this Session: {invocation.name}",
-                    is_error=True,
-                )
         try:
+            if not await self._is_admitted(invocation):
+                return self._denied(invocation)
             subject = ExecutionSubject(
                 subject_id=self._scope.subject_id,
                 display_name=self._scope.subject_id,
@@ -164,6 +172,10 @@ class ProductToolGateway:
             with execution_subject_scope(subject):
                 if invocation.name in self._unsafe_names:
                     async with self._unsafe_lock:
+                        # A queued call must not consume a decision made before
+                        # another invocation released the execution lock.
+                        if not await self._is_admitted(invocation):
+                            return self._denied(invocation)
                         output = await tool.invoke(
                             _mutable_tool_value(invocation.arguments),
                             **self._invoke_kwargs,
