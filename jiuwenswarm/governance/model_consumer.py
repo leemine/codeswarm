@@ -44,3 +44,33 @@ def model_request_authority(config):
     if configured_authenticator() is None and current_model_authorizer() is None:
         return None
     return NativeModelRequestAuthority(ModelCredentialBinding.from_config(config))
+
+
+def runtime_model_kwargs(model_client_config, model_config=None, *, binding_config=None):
+    """Keep model factories on the same mandatory host request boundary.
+
+    The explicit host catalog metadata must survive until this point. A typed
+    client config or a literal API key alone is not a credential grant.
+    """
+    authority = model_request_authority(binding_config)
+    result = {'model_client_config': model_client_config}
+    if model_config is not None:
+        result['model_config'] = model_config
+    if authority is None:
+        return result
+    try:
+        actual = model_client_config.model_dump(mode='json')
+        actual.update(model_name=authority.binding.model,
+                      credential_reference=authority.binding.credential_reference,
+                      credential_encoding=authority.binding.credential_encoding)
+        if ModelCredentialBinding.from_config(actual) != authority.binding:
+            raise ResourceAccessDenied('model factory binding mismatch')
+        configured_name = getattr(model_config, 'model', None)
+        if configured_name is not None and configured_name != authority.binding.model:
+            raise ResourceAccessDenied('model factory model mismatch')
+        result['model_client_config'] = model_client_config.model_copy(
+            update={'api_key': 'MODEL_REQUEST_AUTHORITY'})
+    except Exception:
+        raise ResourceAccessDenied('model factory binding unavailable') from None
+    result['request_authority'] = authority
+    return result
