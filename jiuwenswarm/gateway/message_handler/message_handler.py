@@ -1827,6 +1827,15 @@ class MessageHandler(ABC):
         if parsed.action is ParsedControlAction.NONE:
             return False
 
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is not None:
+            # IM channel state, slash-command resources and Team seats do not
+            # yet have trusted organization ownership mappings. Authentication
+            # alone cannot authorize their local mutations or background work.
+            raise PermissionError(
+                "Organization mode does not support controlled-channel slash commands"
+            )
+
         logger.info(
             "[MessageHandler] _handle_channel_control channel=%s text=%s action=%s",
             channel_type,
@@ -2459,6 +2468,13 @@ class MessageHandler(ABC):
                 logger.warning("[MessageHandler] /rewind E2A failed, fallback local: %s", e2a_exc)
 
             # --- Fallback: 仅单用户共享目录 client 回退到本地截断 history.json ---
+            from jiuwenswarm.gateway.routing.e2a_proxy import organization_local_fallback_denial
+            denied = organization_local_fallback_denial()
+            if denied is not None:
+                await self.send_channel_notice(
+                    user_infos, channel_id, reply_session_id, denied,
+                )
+                return
             if not is_legacy_shared_directory_client(self.agent_client):
                 await self.send_channel_notice(
                     user_infos, channel_id, reply_session_id,
@@ -2536,16 +2552,18 @@ class MessageHandler(ABC):
     # ---------- user_messages ----------
 
     @staticmethod
-    def _capture_message_principal(msg: "Message") -> None:
+    def _capture_message_principal(msg: "Message") -> "Message":
         from jiuwenswarm.governance.organization_auth import current_principal
         # Dynamic host-only attribute: absent from dataclass fields, wire codecs,
-        # params and metadata. Always replace it from the submitting context.
-        msg._queued_organization_principal = current_principal()
+        # params and metadata. Each queue item owns its captured principal even
+        # when a producer submits the same mutable Message more than once.
+        queued = replace(msg)
+        queued._queued_organization_principal = current_principal()
+        return queued
 
     async def publish_user_messages(self, msg: "Message") -> None:
         """将消息放入 user_messages 队列（异步）."""
-        self._capture_message_principal(msg)
-        await self._user_messages.put(msg)
+        await self._user_messages.put(self._capture_message_principal(msg))
 
     async def _publish_runtime_wake(self, msg: "Message") -> None:
         """Accept Runtime wakeups only while the forwarding host is live."""
@@ -2555,8 +2573,7 @@ class MessageHandler(ABC):
 
     def publish_user_messages_nowait(self, msg: "Message") -> None:
         """将消息放入 user_messages 队列（同步）."""
-        self._capture_message_principal(msg)
-        self._user_messages.put_nowait(msg)
+        self._user_messages.put_nowait(self._capture_message_principal(msg))
 
     async def consume_user_messages(self, timeout: float | None = None) -> "Message | None":
         """消费一条 user_messages；timeout 为 None 则阻塞，否则超时返回 None."""

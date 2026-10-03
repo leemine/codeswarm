@@ -442,7 +442,8 @@ async def test_browser_cookie_origin_and_status_do_not_expose_credentials(creden
 
 
 @pytest.mark.asyncio
-async def test_gateway_queue_retains_each_live_principal_without_wire_fields(credentials):
+@pytest.mark.parametrize('reuse_message', [False, True])
+async def test_gateway_queue_retains_each_live_principal_without_wire_fields(credentials, reuse_message):
     from dataclasses import asdict
     from jiuwenswarm.common.schema.message import Message, ReqMethod
     from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
@@ -461,8 +462,10 @@ async def test_gateway_queue_retains_each_live_principal_without_wire_fields(cre
             handler._running = False
         return True
     handler._handle_channel_control = control
+    reused = Message('pending', 'req', 'web', None, {}, time.time(), True, req_method=ReqMethod.SESSION_CREATE)
     for actor in ('alice', 'bob'):
-        msg = Message(actor, 'req', 'web', None, {}, time.time(), True, req_method=ReqMethod.SESSION_CREATE)
+        msg = reused if reuse_message else Message(actor, 'req', 'web', None, {}, time.time(), True, req_method=ReqMethod.SESSION_CREATE)
+        msg.id = actor
         msg._queued_organization_principal = object()  # Ignore any preexisting value.
         with authenticated_scope(principal(auth, tokens, actor)):
             handler.publish_user_messages_nowait(msg)
