@@ -30,6 +30,7 @@ import {
   type SidebarMenuItem,
 } from './sidebarModel';
 import { ProjectCreateMenu } from './ProjectCreateMenu';
+import { ProjectContentDialog } from './ProjectContentDialog';
 import { projectCreateErrorKey } from './projectCreateErrors';
 import { projectRegistryClient } from '../../features/workspace/projectRegistryClient';
 import {
@@ -162,6 +163,7 @@ function getSessionTitle(session: Session, fallback: string): string {
 const menuIconByAction: Record<SidebarMenuAction, React.ComponentType<React.SVGProps<SVGSVGElement>>> = {
   pin: PinIcon,
   rename: EditIcon,
+  content: EditIcon,
   archive: Archive,
   delete: DeleteIcon,
   'archive-sessions': FolderIcon,
@@ -377,6 +379,7 @@ function ProjectEntityRow({
   onNew,
   onPin,
   onRename,
+  onContent,
   onRemove,
   onBatch,
   newLabel,
@@ -393,6 +396,7 @@ function ProjectEntityRow({
   onNew: () => void;
   onPin: () => void;
   onRename: () => void;
+  onContent: () => void;
   onRemove: () => void;
   onBatch: (action: 'archive') => void;
   newLabel?: string;
@@ -510,6 +514,9 @@ function ProjectEntityRow({
               switch (action) {
                 case 'pin':
                   onPin();
+                  break;
+                case 'content':
+                  onContent();
                   break;
                 case 'rename':
                   onRename();
@@ -867,6 +874,7 @@ export function ConversationSidebar({
   const [relativeTimeNow, setRelativeTimeNow] = useState(Date.now);
   const [unreadSessions, setUnreadSessions] = useState(loadUnreadSessions);
   const [pathDialogOpen, setPathDialogOpen] = useState(false);
+  const [contentProject, setContentProject] = useState<ProjectInfo | null>(null);
   const [projectCreateMode, setProjectCreateMode] = useState<'blank' | 'existing'>('existing');
   const [pathDialogError, setPathDialogError] = useState<string | null>(null);
   const [pathDialogInitial, setPathDialogInitial] = useState<{ name?: string; path?: string } | null>(null);
@@ -1526,6 +1534,7 @@ export function ConversationSidebar({
             setRenameError(null);
             setRenameTarget({ kind: 'project', id: project.project_id, value: project.name });
           }}
+          onContent={() => setContentProject(project)}
           onRemove={() => {
             if (isDefaultProject(project)) return;
             setProjectAction('delete');
@@ -1741,6 +1750,13 @@ export function ConversationSidebar({
         </div>
         </div>
       </div>
+      {contentProject && (
+        <ProjectContentDialog
+          key={contentProject.project_id}
+          project={contentProject}
+          onClose={() => setContentProject(null)}
+        />
+      )}
       {pathDialogOpen ? (
         <ProjectCreateDialog
           mode={projectCreateMode}

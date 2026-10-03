@@ -8,9 +8,9 @@ import {
 const t = (key) => key;
 const findItem = (items, action) => items.find((item) => item.action === action);
 
-test('ordinary project menu shows pin, rename, delete and archive-sessions', () => {
+test('ordinary project menu shows content alongside project actions', () => {
   const items = getProjectMenuItems(false, t);
-  assert.deepEqual(items.map((item) => item.action), ['pin', 'rename', 'delete', 'archive-sessions']);
+  assert.deepEqual(items.map((item) => item.action), ['pin', 'rename', 'content', 'delete', 'archive-sessions']);
   assert.equal(findItem(items, 'delete').danger, true);
   assert.equal(findItem(items, 'archive-sessions').disabled, undefined);
 });
