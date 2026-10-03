@@ -144,13 +144,14 @@ async def _ensure_server_initialized_async() -> None:
 
     # ---------- 扩展系统初始化（必须先执行）----------
     from openjiuwen.core.runner import Runner
+    from jiuwenswarm.common.config import get_config
     from jiuwenswarm.extensions.manager import ExtensionManager
     from jiuwenswarm.extensions.registry import ExtensionRegistry
 
     callback_framework = Runner.callback_framework
     extension_registry = ExtensionRegistry.create_instance(
         callback_framework=callback_framework,
-        config={},
+        config=get_config(),
         logger=logger,
     )
     extension_manager = ExtensionManager(registry=extension_registry)
