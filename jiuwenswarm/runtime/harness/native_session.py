@@ -62,6 +62,8 @@ class _HostRequest:
     answered: set[str] = field(default_factory=set, repr=False)
     authority: Any = field(default=None, repr=False)
     guarded_authority: Any = field(default=None, repr=False)
+    model_authority: Any = field(default=None, repr=False)
+    guarded_model_authority: Any = field(default=None, repr=False)
 
 
 class NativeExecutionSession:
@@ -107,6 +109,7 @@ class NativeExecutionSession:
         self._lifecycle_lock = asyncio.Lock()
         self._tool_owner = None
         self._resource_governed = False
+        self._model_resource_governed = False
 
         async def register_owner(instance, session):
             if self._tool_owner is not None:
@@ -159,10 +162,13 @@ class NativeExecutionSession:
                 )
             if str(Path(context.cwd).resolve()) != binding.workspace:
                 raise ValueError("Native context workspace does not match the binding")
-            from jiuwenswarm.governance.tool_context import current_tool_authorizer, native_authority_source_scope
+            from jiuwenswarm.governance.tool_context import current_tool_authorizer, native_authority_source_scope, submitted_model_authorizer
+            self._model_resource_governed = self._model_resource_governed or submitted_model_authorizer() is not None
             self._resource_governed = self._resource_governed or current_tool_authorizer() is not None
             try:
-                with native_authority_source_scope(self._current_resource_authority):
+                with native_authority_source_scope(
+                    self._current_resource_authority, model_source=self._current_model_authority,
+                ):
                     await self.io.start(context)
             except BaseException as start_error:
                 try:
@@ -280,11 +286,13 @@ class NativeExecutionSession:
         )
 
     def _register_host_request(self, **kwargs):
-        from jiuwenswarm.governance.tool_context import submitted_tool_authorizer
+        from jiuwenswarm.governance.tool_context import submitted_tool_authorizer, submitted_model_authorizer
         token = uuid.uuid4().hex
         authority = submitted_tool_authorizer()
+        model_authority = submitted_model_authorizer()
+        self._model_resource_governed = self._model_resource_governed or model_authority is not None
         self._resource_governed = self._resource_governed or authority is not None
-        entry = _HostRequest(**kwargs, authority=authority)
+        entry = _HostRequest(**kwargs, authority=authority, model_authority=model_authority)
 
         async def guarded(operation):
             active = self._native.active_turn
@@ -299,7 +307,25 @@ class NativeExecutionSession:
                 return False
             return await authority(operation) is True and current()
 
+        async def guarded_model(binding, target):
+            from jiuwenswarm.governance.resources import ResourceAccessDenied
+            active = self._native.active_turn
+            def current():
+                return (
+                    not self._closing and not self._closed and active is not None
+                    and self._native.active_turn is active and not active.abort_requested
+                    and active.content.metadata.get(_REQUEST_KEY) == token
+                    and self._requests.get(token) is entry
+                )
+            if model_authority is None or not current():
+                raise ResourceAccessDenied("model execution authority unavailable")
+            headers = await model_authority(binding, target, native_session=self)
+            if not current():
+                raise ResourceAccessDenied("model execution authority changed")
+            return headers
+
         entry.guarded_authority = guarded
+        entry.guarded_model_authority = guarded_model
         self._requests[token] = entry
         return token
 
@@ -313,6 +339,16 @@ class NativeExecutionSession:
         if entry.authority is None:
             return _deny_unknown_provider if self._resource_governed else None
         return entry.guarded_authority
+
+    def _current_model_authority(self):
+        from jiuwenswarm.governance.tool_context import deny_model_consumption
+        active = self._native.active_turn
+        token = active.content.metadata.get(_REQUEST_KEY) if active is not None else None
+        entry = self._requests.get(token)
+        if (self._closing or self._closed or entry is None or active.abort_requested
+                or entry.model_authority is None):
+            return deny_model_consumption if self._model_resource_governed else None
+        return entry.guarded_model_authority
 
     async def send_request(self, request: SendInputRequest) -> SendReceipt:
         """Accept a host request without serializing its permission/context objects."""

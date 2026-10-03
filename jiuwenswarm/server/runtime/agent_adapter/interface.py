@@ -4964,6 +4964,10 @@ class JiuWenSwarm:
             return bool(has_runtime())
         return bool(has_runtime(session_id))
 
+    def owns_native_model_session(self, execution, native_session) -> bool:
+        check = getattr(self._adapter, "owns_native_model_session", None)
+        return callable(check) and check(execution, native_session) is True
+
     def owns_native_tool_session(self, execution, agent, session) -> bool:
         check = getattr(self._adapter, "owns_native_tool_session", None)
         return callable(check) and check(execution, agent, session) is True

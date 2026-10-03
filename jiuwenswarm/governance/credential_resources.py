@@ -8,6 +8,7 @@ call this for every actual request/retry, not cache the returned credential.
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 from dataclasses import dataclass
 from typing import Callable, Literal, Protocol
@@ -96,6 +97,8 @@ class BoundCredentialAuthority:
             if before != after or type(secret) is not str or not secret or '\r' in secret or '\n' in secret:
                 raise ResourceAccessDenied('credential resolution is unavailable')
             return secret
+        except asyncio.CancelledError:
+            raise asyncio.CancelledError() from None
         except Exception:
             # Host resolvers may include secrets in their exceptions. Neither
             # public text nor chained diagnostics may expose those values.

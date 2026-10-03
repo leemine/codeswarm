@@ -513,13 +513,36 @@ class AgentRuntime:
                 check = getattr(owner, "owns_native_tool_session", None)
                 return callable(check) and check(execution, agent, session) is True
             resolver = _CurrentNativeToolResources(self._resource_authorizer, owns_session)
-        return {
+        from jiuwenswarm.governance.model_credentials import NativeModelCredentialAuthority
+        from jiuwenswarm.governance.tool_context import ExecutionResourceAuthorities
+        def owns_model_execution(execution, native_session):
+            if not is_current():
+                return False
+            lookup = getattr(self._agent_manager, "get_agent_for_session_nowait", None)
+            owner = lookup(request.channel_id or "default", session_id) if callable(lookup) else None
+            check = getattr(owner, "owns_native_model_session", None)
+            return callable(check) and check(execution, native_session) is True
+        def decode_model_credential(value):
+            # The Runtime's selected registry is authoritative. Never borrow
+            # a process-global default crypto extension from another Runtime.
+            registry = self._extension_registry
+            crypto = registry.get_crypto_provider() if registry is not None else None
+            if crypto is None:
+                raise GovernanceError("instance credential decoder unavailable")
+            return crypto.decrypt(value)
+        model_authority = NativeModelCredentialAuthority(
+            ResourceExecutionContext(project_id, identity, session_id, str(Path(workspace).resolve()), "native"),
+            resource_authorizer=self._resource_authorizer,
+            current_identity=current_identity, is_current_execution=is_current,
+            owns_execution=owns_model_execution, credential_decoder=decode_model_credential,
+        )
+        return ExecutionResourceAuthorities({
             provider: BoundToolResourceAuthority(
                 ResourceExecutionContext(project_id, identity, session_id, str(Path(workspace).resolve()), provider),
                 authorizer=self._resource_authorizer, resolver=resolver,
                 current_identity=current_identity, is_current_execution=is_current,
             ) for provider in ("native", "codex", "opencode")
-        }
+        }, model_authorizer=model_authority)
 
     @property
     def extension_registry(self) -> Any | None:

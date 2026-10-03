@@ -95,3 +95,15 @@ async def test_resolver_diagnostics_do_not_expose_secret(bound):
 def test_destination_cannot_contain_credential_or_ambient_file(destination):
     with pytest.raises(ValueError):
         CredentialUse('model', 'private:bob', 'model', destination)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_keeps_semantics_without_resolver_secret(bound):
+    import asyncio
+    import traceback
+    authority, use, _, resolver = bound
+    resolver.resolve_credential.side_effect = asyncio.CancelledError('cancel-secret-sentinel')
+    with pytest.raises(asyncio.CancelledError) as error:
+        await authority.resolve_for_request(use, destination=use.destination)
+    assert not str(error.value)
+    assert 'cancel-secret-sentinel' not in ''.join(traceback.format_exception(error.value))

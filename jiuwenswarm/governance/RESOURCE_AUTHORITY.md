@@ -101,3 +101,21 @@ A successful adapter unit test is not evidence that existing Model, MCP or
 Provider consumers have adopted it. Those production integrations and their
 real transport evidence remain required; unsupported consumers must not be
 represented as credential-isolated.
+
+The initial Native model consumer selects only explicit `models.defaults` or
+`models.default` entries from raw host configuration. Each governed entry must
+declare `credential_encoding` as `plain` or `host_crypto`; encrypted values
+require this Runtime's crypto extension and fail closed on decoding errors.
+Environment interpolation, OAuth placeholder fallback and ambiguous entries are
+rejected. `credential_reference` may name an explicit host-managed opaque
+account reference; otherwise a deterministic reference derives from public
+model/endpoint metadata. The host registers that exact reference and grants
+`credential/use` independently of project execution. Two accounts using the
+same model and endpoint require distinct explicit references.
+
+Runtime captures the model authority in the original Native HostRequest;
+consumption also checks the exact currently owned Native execution and Binding.
+A stale request, changed adapter instance, revoked credential or changed
+authority cannot deliver its resolved credential. The model transport must pin
+this authority at the beginning of each logical call and recheck it for each
+HTTP send/retry. Actual transport/factory integration is still in progress.

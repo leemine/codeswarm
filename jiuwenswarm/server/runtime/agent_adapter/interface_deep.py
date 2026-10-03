@@ -12276,6 +12276,16 @@ class JiuWenSwarmDeepAdapter:
             return False
         return has_runtime_capability
 
+    def owns_native_model_session(self, execution, native_session) -> bool:
+        if not self._is_session_scoped_adapter:
+            child = self._get_cached_session_adapter(execution.session_id)
+            return child is not None and child.owns_native_model_session(execution, native_session)
+        native = getattr(self, "_native_execution", None)
+        if native is None or native_session is not native:
+            return False
+        owner = getattr(native, "_tool_owner", None)
+        return bool(owner is not None and self.owns_native_tool_session(execution, owner[1], owner[2]))
+
     def owns_native_tool_session(self, execution, agent, session) -> bool:
         """Resolve the existing Session adapter without allocating or adopting one."""
         if not self._is_session_scoped_adapter:

@@ -6,6 +6,7 @@ This adapter never selects a credential from request headers or model inputs.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from dataclasses import dataclass
@@ -22,11 +23,14 @@ class ModelCredentialBinding:
     api_base: str
     implementation: str = 'OpenAI'
     credential_reference: str | None = None
+    credential_encoding: str = 'plain'
 
     def __post_init__(self):
         if (not isinstance(self.model, str) or not self.model or self.model.strip() != self.model
                 or self.implementation != 'OpenAI' or not isinstance(self.api_base, str)
-                or not self.api_base.startswith(('http://', 'https://'))):
+                or not self.api_base.startswith(('http://', 'https://'))
+                or self.credential_encoding not in {'plain', 'host_crypto'}
+                or '${' in self.model or '${' in self.api_base):
             raise ValueError('supported host model binding required')
         object.__setattr__(self, 'api_base', self.api_base.rstrip('/'))
         ResourceDefinition('model', 'credential', self.reference)
@@ -52,7 +56,8 @@ class ModelCredentialBinding:
                 or config.get('custom_headers')):
             raise ResourceAccessDenied('model credential transport is unsupported')
         return cls(config.get('model_name', ''), config.get('api_base', ''),
-                   credential_reference=config.get('credential_reference'))
+                   credential_reference=config.get('credential_reference'),
+                   credential_encoding=config.get('credential_encoding'))
 
 
 class ConfiguredModelCredentialResolver:
@@ -62,15 +67,17 @@ class ConfiguredModelCredentialResolver:
     model fallback. A duplicate destination/model entry is ambiguous and denied.
     Only the selected entry is decrypted after matching nonsecret metadata.
     """
-    def __init__(self, binding: ModelCredentialBinding, *, config_source: Callable | None = None):
+    def __init__(self, binding: ModelCredentialBinding, *, config_source: Callable | None = None,
+                 credential_decoder: Callable | None = None):
         self._binding = binding
         self._config_source = config_source
+        self._decoder = credential_decoder
 
     def resolve_credential(self, reference):
-        from jiuwenswarm.common.config import get_config, get_default_models
+        from jiuwenswarm.common.config import get_config_raw
         if reference != self._binding.reference:
             raise ResourceAccessDenied('model credential reference mismatch')
-        config = (self._config_source or get_config)()
+        config = (self._config_source or get_config_raw)()
         models = config.get('models', {})
         entries = models.get('defaults')
         if not isinstance(entries, list):
@@ -85,24 +92,35 @@ class ConfiguredModelCredentialResolver:
                 continue
         if len(matches) != 1:
             raise ResourceAccessDenied('explicit model credential unavailable')
-        selected = get_default_models({'models': {'defaults': matches}})
-        secret = selected[0]['model_client_config'].get('api_key')
+        secret = matches[0]['model_client_config'].get('api_key')
         if (not isinstance(secret, str) or not secret.strip()
-                or secret.startswith(('jiuwen-login:', '${'))):
+                or secret.startswith('jiuwen-login:') or '${' in secret):
             raise ResourceAccessDenied('explicit model credential unavailable')
+        if self._binding.credential_encoding == 'host_crypto':
+            try:
+                if self._decoder is None:
+                    raise ResourceAccessDenied('credential decoder unavailable')
+                secret = self._decoder(secret)
+            except Exception:
+                raise ResourceAccessDenied('credential decoding denied') from None
+        if not isinstance(secret, str) or not secret or '${' in secret or secret.startswith('jiuwen-login:'):
+            raise ResourceAccessDenied('decoded credential unavailable')
         return secret
 
 
 class NativeModelCredentialAuthority:
     def __init__(self, execution: ResourceExecutionContext, *, resource_authorizer,
-                 current_identity, is_current_execution, config_source=None):
+                 current_identity, is_current_execution, owns_execution=None, config_source=None,
+                 credential_decoder=None):
         self.execution = execution
         self._resources = resource_authorizer
         self._identity = current_identity
         self._current = is_current_execution
         self._config_source = config_source
+        self._owns_execution = owns_execution
+        self._credential_decoder = credential_decoder
 
-    async def __call__(self, binding: ModelCredentialBinding, target):
+    async def __call__(self, binding: ModelCredentialBinding, target, *, native_session=None):
         try:
             if (type(binding) is not ModelCredentialBinding or self.execution.provider_id != 'native'
                     or target.method != 'POST' or target.url != binding.destination
@@ -110,7 +128,10 @@ class NativeModelCredentialAuthority:
                     or target.implementation != 'OpenAIModelClient'
                     or target.operation not in {'invoke', 'stream'}):
                 raise ResourceAccessDenied('model request target mismatch')
-            if self._identity() != self.execution.identity or self._current() is not True:
+            def current():
+                return (self._current() is True and self._owns_execution is not None
+                        and self._owns_execution(self.execution, native_session) is True)
+            if self._identity() != self.execution.identity or not current():
                 raise ResourceAccessDenied('model execution unavailable')
             grants = self._resources.resource_grants(self.execution.project_id, self.execution.identity)
             matches = [r for r in grants.get('resources', ())
@@ -121,10 +142,13 @@ class NativeModelCredentialAuthority:
             use = CredentialUse(matches[0]['resource_id'], binding.reference, 'model', binding.destination)
             authority = BoundCredentialAuthority(
                 self.execution, uses=(use,), authorizer=self._resources,
-                resolver=ConfiguredModelCredentialResolver(binding, config_source=self._config_source),
-                current_identity=self._identity, is_current_execution=self._current,
+                resolver=ConfiguredModelCredentialResolver(binding, config_source=self._config_source,
+                                                           credential_decoder=self._credential_decoder),
+                current_identity=self._identity, is_current_execution=current,
             )
             credential = await authority.resolve_for_request(use, destination=target.url)
             return {'Authorization': 'Bearer ' + credential}
+        except asyncio.CancelledError:
+            raise asyncio.CancelledError() from None
         except Exception:
             raise ResourceAccessDenied('model credential consumption denied') from None
