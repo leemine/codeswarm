@@ -3337,8 +3337,13 @@ async def test_agent_server_stop_replaces_runtime_after_closed_cleanup_error(
 
 @pytest.mark.asyncio
 async def test_agent_server_start_restores_remote_service_after_stop(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ) -> None:
+    # This transport-restart test starts real optional lifecycle services. Keep
+    # their local storage isolated and disable the unrelated login-config fetch.
+    monkeypatch.setenv("JIUWENSWARM_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("JIUWENSWARM_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("JIUWENSWARM_CONFIG_URL", "off")
     from jiuwenswarm.server import agent_ws_server as server_module
     from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
     class FakeWebSocketServer:
@@ -3378,31 +3383,43 @@ async def test_agent_server_start_restores_remote_service_after_stop(
     first_runtime.start = AsyncMock()
     first_runtime.close = AsyncMock(wraps=first_runtime.close)
 
-    await server.start()
-    await server._checkpointer_warmup_task
-    await server.stop()
+    try:
+        await server.start()
+        await server._checkpointer_warmup_task
+        await server.stop()
 
-    recovered_runtime = server.get_runtime()
-    recovered_manager = server.get_agent_manager()
-    recovered_runtime.start = AsyncMock()
-    recovered_runtime.close = AsyncMock(wraps=recovered_runtime.close)
+        recovered_runtime = server.get_runtime()
+        recovered_manager = server.get_agent_manager()
+        recovered_runtime.start = AsyncMock()
+        recovered_runtime.close = AsyncMock(wraps=recovered_runtime.close)
 
-    await server.start()
-    await server._checkpointer_warmup_task
+        await server.start()
+        await server._checkpointer_warmup_task
 
-    assert len(listeners) == 2
-    assert listeners[0].closed is True
-    listeners[0].wait_closed.assert_awaited_once_with()
-    first_runtime.start.assert_awaited_once_with()
-    first_runtime.close.assert_awaited_once_with()
-    assert recovered_runtime is not first_runtime
-    assert recovered_manager is not first_manager
-    assert recovered_runtime.agent_manager is recovered_manager
-    recovered_runtime.start.assert_awaited_once_with()
-    assert server._server is listeners[1]
-    assert install_runtime_push_handler.call_count == 2
-    restore_runtime_push_handler.assert_called_once()
+        assert len(listeners) == 2
+        assert listeners[0].closed is True
+        listeners[0].wait_closed.assert_awaited_once_with()
+        first_runtime.start.assert_awaited_once_with()
+        first_runtime.close.assert_awaited_once_with()
+        assert recovered_runtime is not first_runtime
+        assert recovered_manager is not first_manager
+        assert recovered_runtime.agent_manager is recovered_manager
+        recovered_runtime.start.assert_awaited_once_with()
+        assert server._server is listeners[1]
+        assert install_runtime_push_handler.call_count == 2
+        restore_runtime_push_handler.assert_called_once()
 
-    await server.stop()
-    recovered_runtime.close.assert_awaited_once_with()
-    assert listeners[1].closed is True
+        await server.stop()
+        recovered_runtime.close.assert_awaited_once_with()
+        assert listeners[1].closed is True
+        assert server._checkpointer_warmup_task is None
+        assert server._mcp_prewarm_task is None
+        assert server._login_credential_refresh_task is None
+        assert server._personal_context_start_task is None
+        assert server._asset_start_task is None
+        assert server._archive_service is None
+    finally:
+        # An assertion failure after either start must still release the owned
+        # listener and background services before pytest closes its event loop.
+        if server._server is not None:
+            await server.stop()
