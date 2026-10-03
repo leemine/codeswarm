@@ -537,7 +537,9 @@ def _check_review_delivery(root, report, reviews, max_reviews=3):
     assert 1 <= len(reviews) <= max_reviews, "Review calls exceeded the bounded delivery budget"
     final = reviews[-1]
     assert final["result"]["structural_valid"] is True
-    assert report == final["result"]["rendered_markdown"], (
+    from tests.unit_tests.test_work_research_delivery_fidelity import matches_reviewed_report
+
+    assert matches_reviewed_report(report, final["result"]["rendered_markdown"], final["sources"]), (
         "Final report differs from the reviewed rendering"
     )
     assert len(report.split()) <= 300, "Report exceeds the requested word budget"
