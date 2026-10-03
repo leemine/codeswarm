@@ -795,6 +795,7 @@ async def test_work_research_real_external_cited_artifact(
         )
         raise
     finally:
+        trace.parent_final_text = "".join(parent_text)
         trace.mark("cleanup_start")
         try:
             async with asyncio.timeout(_CLEANUP_BUDGET_S):
@@ -930,18 +931,20 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path, monkeypa
         trace.execution_started = asyncio.get_running_loop().time()
         async with asyncio.timeout(_FIRST_DELIVERY_BUDGET_S) as deadline:
             trace.execution_timeout = deadline
-            result = await Runner.run_agent(
+            result = None
+            async for chunk in Runner.run_agent_streaming(
                 parent,
-                {
-                    "query": (
-                        "Use the research agent for this assignment: " + _RESEARCH_TASK
-                    )
-                },
+                {"query": "Use the research agent for this assignment: " + _RESEARCH_TASK},
                 session="r1-12-native-session",
-            )
-        trace.mark("parent_terminal")
-        if isinstance(result, dict):
-            trace.parent_final_text = str(result.get("output", ""))
+            ):
+                # The product Native path streams. EOF is not a successful
+                # terminal: core can also emit errors in an answer envelope.
+                kind = chunk.get("type") if isinstance(chunk, dict) else getattr(chunk, "type", None)
+                payload = chunk.get("payload") if isinstance(chunk, dict) else getattr(chunk, "payload", None)
+                if kind == "answer" and isinstance(payload, dict):
+                    result = payload
+                    trace.parent_final_text = str(payload.get("output", ""))
+                    trace.mark("parent_terminal", terminal=payload.get("result_type"))
         assert not child_failures, child_failures
         assert isinstance(result, dict) and result.get("result_type") == "answer", (
             result

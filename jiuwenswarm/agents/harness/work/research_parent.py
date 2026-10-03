@@ -36,12 +36,17 @@ or structural_valid=true is a candidate delivery, not accepted research.
    requested, verify the saved sources/claims/question are the full final valid
    tool input, not a reduced evidence table, and input_fingerprint is copied
    exactly from that tool result, not a short identifier or a shell recomputation.
-   Record your own claim-level acceptance or concrete defects; do not treat the
-   child's structural review or completion message as your semantic acceptance.
+   Check every claim, but keep public review concise: report only concrete defect
+   IDs, unsupported clauses and necessary corrections. Do not narrate successful
+   checks or reproduce the child's report or input table. A successful final reply
+   states acceptance and artifact paths; unresolved issues remain explicit.
+   Do not treat the child's structural review or completion message as your
+   semantic acceptance.
 3. If there is an evidenced defect and the remaining budget covers both repair
    and source-based rechecking,
    send one targeted correction request with subagent_send_input to the exact
-   existing child ID. Identify the claim/unsupported clause and the issue; require
+   existing child ID. Reference the unchanged original assignment/schema without
+   repeating it. Identify the claim/unsupported clause and the issue; require
    that child to reread the originals, revise its table, review/render again and
    rewrite/read back the artifacts. Never subagent_spawn a replacement or rewrite
    the child's report yourself to conceal a failed delivery. Use subagent_resume
@@ -51,7 +56,8 @@ or structural_valid=true is a candidate delivery, not accepted research.
    additional revisions. A failed child without artifacts is a failure to report,
    not a reason for blind send_input restarts.
 4. Wait for that same child, then reread the changed report and original evidence
-   and perform the same acceptance check. Allow at most one parent-requested
+   and perform the same acceptance check, including unchanged claims. Do not
+   repeat a public narration of successful checks. Allow at most one parent-requested
    revision for this delivery; the child's own bounded structural revision is
    separate. No new timeout, permission, source scope or iteration budget is granted.
    If the child fails, the defect remains, access is denied, continuation tools
@@ -76,15 +82,18 @@ _PARENT_POLICY_CN = """## Work 研究父智能体验收
    同时检查最终产物、被审核呈现及来源映射是否一致，保留 inference/unknown 标签。
    如要求 review-input/audit 产物，核对 sources/claims/question 为最后一次有效工具调用的
    完整输入而非简化证据表，input_fingerprint 原样复制该次工具返回值，不能用短标识或
-   shell 重算替代。记录父方逐声明结论或具体缺陷，
-   不能把子方结构审核或完成消息当成父方语义验收。
+   shell 重算替代。逐项核验，但公开复核只简要列出具体缺陷 ID、不受支持的子句及必要修改，
+   不逐项叙述通过项或复述报告和输入表。最终回复简明声明是否通过并列出产物路径，
+   未解决问题必须明确；不能把子方结构审核或完成消息当成父方语义验收。
 3. 发现有证据的缺陷且剩余预算足够完成返修和原来源复核时，仅用 subagent_send_input 向原 child ID
-   发送一次定向返修，指出声明/不受支持的子句及问题，让原子智能体重读原资料、修改表、
+   发送一次定向返修，引用并保留原任务/schema，无需重复全文；指出声明/不受支持的子句
+   及问题，让原子智能体重读原资料、修改表、
    重新 review/render 并写入和读回产物。不得 subagent_spawn 替代实例，不得由父方偷改报告
    掩盖失败；仅当现有工具状态明确要求恢复时，才对同一 child 调 subagent_resume。
    每次 subagent_wait 的 timeout_ms <= 45000，为现有传输超时预留回复空间；
    仍在运行时重复等待不算返修。子方失败且无产物时应报告失败，不能盲目 send_input 重启。
-4. 等待同一 child 后重新读取变更产物及原证据，执行同样验收。每次交付最多一次父方返修，
+4. 等待同一 child 后重新读取变更产物及原证据，执行同样验收，包括未改声明，
+   不重复公开叙述通过项。每次交付最多一次父方返修，
    与子方已有限次结构修订分开；不新增时间、权限、来源或迭代预算。子方失败、仍有缺陷、
    无读取权限、没有继续工具或预算不足以返修并复核时，明确报告 partial/unverified，列出
    未解决声明及产物路径，不能因文件存在或执行完成而声称验收通过。
