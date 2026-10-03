@@ -12,6 +12,8 @@ import json
 from dataclasses import dataclass
 from typing import Callable
 
+import httpx
+
 from .credential_resources import BoundCredentialAuthority, CredentialUse
 from .resources import ResourceAccessDenied, ResourceDefinition
 from .tool_resources import ResourceExecutionContext
@@ -72,7 +74,13 @@ class ModelCredentialBinding:
                 or self.credential_encoding not in {'plain', 'host_crypto'}
                 or '${' in self.model or '${' in self.api_base):
             raise ValueError('supported host model binding required')
-        object.__setattr__(self, 'api_base', self.api_base.rstrip('/'))
+        # Match core's retained support for full Chat Completions endpoints
+        # and HTTPX normalization (host case/default ports) before deriving IDs.
+        CredentialUse('model', 'model-validation', 'model', self.api_base)
+        base = self.api_base.rstrip('/')
+        if base.endswith('/chat/completions'):
+            base = base[:-len('/chat/completions')].rstrip('/')
+        object.__setattr__(self, 'api_base', str(httpx.URL(base)).rstrip('/'))
         ResourceDefinition('model', 'credential', self.reference)
         # Reuse the sink validation, including inline secret/query rejection.
         CredentialUse('model', self.reference, 'model', self.destination)

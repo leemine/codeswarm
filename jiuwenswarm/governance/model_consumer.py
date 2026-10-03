@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from .model_credentials import ModelCredentialBinding
 from .resources import ResourceAccessDenied
-from .tool_context import current_model_authorizer
+from .tool_context import current_model_authorizer, current_tool_authorizer
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +41,8 @@ class NativeModelRequestAuthority:
 def model_request_authority(config):
     """Select mandatory governance only from host state, never a wire flag."""
     from .organization_auth import configured_authenticator
-    if configured_authenticator() is None and current_model_authorizer() is None:
+    if (configured_authenticator() is None and current_model_authorizer() is None
+            and current_tool_authorizer() is None):
         return None
     return NativeModelRequestAuthority(ModelCredentialBinding.from_config(config))
 

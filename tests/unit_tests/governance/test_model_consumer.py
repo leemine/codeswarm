@@ -34,6 +34,24 @@ def test_factory_requires_host_scope_without_falling_back_to_config_key():
         NativeModelRequestAuthority(ModelCredentialBinding('model', 'https://model.example/v1')).bind_for_call()
 
 
+def test_explicit_resource_scope_without_model_callback_cannot_become_legacy(monkeypatch):
+    import jiuwenswarm.governance.organization_auth as auth
+    monkeypatch.setattr(auth, 'configured_authenticator', lambda: None)
+    with tool_authority_scope(None, provider_authorizers={}):
+        with pytest.raises(ResourceAccessDenied):
+            model_request_authority(None)
+
+
+@pytest.mark.parametrize('base', ['https://model.example/v1/chat/completions/',
+                                 'https://MODEL.example:443/v1'])
+def test_model_destination_matches_actual_core_normalization(base):
+    import httpx
+    from openjiuwen.core.foundation.llm.model_clients.openai_model_client import _chat_completions_url
+    binding = ModelCredentialBinding('model', base)
+    assert binding.destination == str(httpx.URL(_chat_completions_url(base)))
+    assert binding == ModelCredentialBinding('model', 'https://model.example/v1')
+
+
 def test_legacy_factory_preserves_unbound_behavior(monkeypatch):
     import jiuwenswarm.governance.organization_auth as auth
     monkeypatch.setattr(auth, 'configured_authenticator', lambda: None)

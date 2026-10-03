@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1315,10 +1316,24 @@ async def test_native_tool_owner_is_exact_and_expires_before_cleanup(tmp_path):
     assert not execution.owns_tool_session(scope, inner, session)
 
 
+@contextmanager
+def _request_slice(execution, token, agent, session):
+    from jiuwenswarm.governance.tool_context import begin_native_execution_slice, end_native_execution_slice
+    execution._tool_owner = (agent, agent.react_agent, session, execution.engine.binding)
+    execution._exit_state = ExecutionExitState.RUNNING
+    ctx = SimpleNamespace(agent=agent, session=session,
+                          inputs=SimpleNamespace(run_context={'extra': {'native.host_request': token}}))
+    handle = begin_native_execution_slice(ctx)
+    try:
+        yield
+    finally:
+        end_native_execution_slice(handle)
+
+
 @pytest.mark.asyncio
 async def test_native_requests_capture_new_policy_and_reject_stale_waiter(tmp_path):
     from jiuwenswarm.governance.tool_context import tool_authority_scope, native_authority_source_scope, current_tool_authorizer
-    execution, _, _, _, _, _ = _setup(tmp_path, [])
+    execution, agent, session, _, _, _ = _setup(tmp_path, [])
     entered, release = asyncio.Event(), asyncio.Event()
     calls = []
     async def first(operation):
@@ -1329,21 +1344,23 @@ async def test_native_requests_capture_new_policy_and_reject_stale_waiter(tmp_pa
     second = AsyncMock(return_value=True)
     # Simulate the actual lifetime-task selector inherited from startup. A new
     # submission must capture its Runtime scope rather than recursively itself.
-    with native_authority_source_scope(execution._current_resource_authority):
+    with native_authority_source_scope(execution._current_resource_authority, slice_source=execution._execution_slice_for):
         with tool_authority_scope(first):
             first_token = execution._register_host_request(request=SendInputRequest(request_id='first', inputs={'query': 'one'}))
         first_turn = SimpleNamespace(content=SimpleNamespace(metadata={'native.host_request': first_token}), abort_requested=False)
         execution._native._active_turn = first_turn
-        first_callback = current_tool_authorizer()
-        pending = asyncio.create_task(first_callback(object()))
-        await entered.wait()
+        with _request_slice(execution, first_token, agent, session):
+            first_callback = current_tool_authorizer()
+            pending = asyncio.create_task(first_callback(object()))
+            await entered.wait()
         with tool_authority_scope(second):
             second_token = execution._register_host_request(request=SendInputRequest(request_id='second', inputs={'query': 'two'}))
         second_turn = SimpleNamespace(content=SimpleNamespace(metadata={'native.host_request': second_token}), abort_requested=False)
         execution._native._active_turn = second_turn
-        second_callback = current_tool_authorizer()
-        assert second_callback is not first_callback
-        assert await second_callback(object())
+        with _request_slice(execution, second_token, agent, session):
+            second_callback = current_tool_authorizer()
+            assert second_callback is not first_callback
+            assert await second_callback(object())
         release.set()
         assert not await pending
         second.assert_awaited_once()
@@ -1362,7 +1379,7 @@ async def test_native_model_credentials_remain_with_submitting_host_request(tmp_
     from jiuwenswarm.governance.tool_context import (
         ExecutionResourceAuthorities, current_model_authorizer, native_authority_source_scope, tool_authority_scope,
     )
-    execution, _, _, _, _, _ = _setup(tmp_path, [])
+    execution, agent, session, _, _, _ = _setup(tmp_path, [])
     entered, release = asyncio.Event(), asyncio.Event()
     async def first(binding, target, *, native_session):
         assert native_session is execution
@@ -1371,19 +1388,20 @@ async def test_native_model_credentials_remain_with_submitting_host_request(tmp_
         return {'Authorization': 'Bearer old-request-credential'}
     second = AsyncMock(return_value={'Authorization': 'Bearer new-request-credential'})
     with native_authority_source_scope(execution._current_resource_authority,
-                                      model_source=execution._current_model_authority):
+                                      model_source=execution._current_model_authority, slice_source=execution._execution_slice_for):
         for name, callback in [('first', first), ('second', second)]:
             with tool_authority_scope(None, provider_authorizers=ExecutionResourceAuthorities({}, callback)):
                 token = execution._register_host_request(request=SendInputRequest(request_id=name, inputs={'query': name}))
             execution._native._active_turn = SimpleNamespace(
                 content=SimpleNamespace(metadata={'native.host_request': token}), abort_requested=False)
-            if name == 'first':
-                old_callback = current_model_authorizer()
-                pending = asyncio.create_task(old_callback(object(), object()))
-                await entered.wait()
-            else:
-                assert await current_model_authorizer()(object(), object()) == {
-                    'Authorization': 'Bearer new-request-credential'}
+            with _request_slice(execution, token, agent, session):
+                if name == 'first':
+                    old_callback = current_model_authorizer()
+                    pending = asyncio.create_task(old_callback(object(), object()))
+                    await entered.wait()
+                else:
+                    assert await current_model_authorizer()(object(), object()) == {
+                        'Authorization': 'Bearer new-request-credential'}
         release.set()
         with pytest.raises(ResourceAccessDenied):
             await pending
@@ -1405,3 +1423,65 @@ async def test_legacy_native_model_scope_is_unbound_until_first_governed_request
     from jiuwenswarm.governance.resources import ResourceAccessDenied
     with pytest.raises(ResourceAccessDenied):
         await execution._current_model_authority()(object(), object())
+
+
+@pytest.mark.asyncio
+async def test_delayed_first_model_call_cannot_borrow_replacement_request(tmp_path):
+    from jiuwenswarm.governance.resources import ResourceAccessDenied
+    from jiuwenswarm.governance.model_consumer import NativeModelRequestAuthority
+    from jiuwenswarm.governance.model_credentials import ModelCredentialBinding
+    from jiuwenswarm.governance.tool_context import (
+        ExecutionResourceAuthorities, native_authority_source_scope, tool_authority_scope,
+    )
+    execution, agent, session, _, _, _ = _setup(tmp_path, [])
+    first = AsyncMock(return_value={'Authorization': 'Bearer synthetic-first'})
+    second = AsyncMock(return_value={'Authorization': 'Bearer synthetic-second'})
+    entered, release = asyncio.Event(), asyncio.Event()
+    factory = NativeModelRequestAuthority(ModelCredentialBinding('model', 'https://model.example/v1'))
+
+    async def delayed():
+        entered.set()
+        await release.wait()
+        return await factory.bind_for_call()(object())
+
+    with native_authority_source_scope(execution._current_resource_authority,
+                                      model_source=execution._current_model_authority,
+                                      slice_source=execution._execution_slice_for):
+        for index, callback in enumerate((first, second)):
+            with tool_authority_scope(None, provider_authorizers=ExecutionResourceAuthorities({}, callback)):
+                token = execution._register_host_request()
+            execution._native._active_turn = SimpleNamespace(
+                content=SimpleNamespace(metadata={'native.host_request': token}), abort_requested=False)
+            with _request_slice(execution, token, agent, session):
+                if index == 0:
+                    pending = asyncio.create_task(delayed())
+                    await entered.wait()
+                else:
+                    release.set()
+                    with pytest.raises(ResourceAccessDenied):
+                        await pending
+                    second.assert_not_awaited()
+                    assert await factory.bind_for_call()(object()) == {'Authorization': 'Bearer synthetic-second'}
+            execution._requests.pop(token)
+        first.assert_not_awaited()
+        second.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_native_dispatch_overwrites_only_copied_host_origin(tmp_path):
+    from jiuwenswarm.governance.tool_context import ExecutionResourceAuthorities, tool_authority_scope
+    from openjiuwen.harness_protocol import HarnessInput
+    execution, agent, _, _, _, _ = _setup(tmp_path, [])
+    original = SendInputRequest(request_id='owner', inputs={
+        'query': 'hello', 'run': {'context': {'native.host_request': 'shadow',
+                                            'extra': {'native.host_request': 'forged'}}}})
+    with tool_authority_scope(None, provider_authorizers=ExecutionResourceAuthorities({}, AsyncMock())):
+        token = execution._register_host_request(request=original)
+    content = HarnessInput(content='hello', metadata={'native.host_request': token})
+    execution._native._active_turn = SimpleNamespace(content=content, abort_requested=False)
+    assert await execution._dispatch(agent, original, content, False)
+    sent = agent.send_input.call_args.args[0]
+    assert sent is not original
+    assert sent.inputs['run']['context']['extra']['native.host_request'] == token
+    assert 'native.host_request' not in sent.inputs['run']['context']
+    assert original.inputs['run']['context']['extra']['native.host_request'] == 'forged'

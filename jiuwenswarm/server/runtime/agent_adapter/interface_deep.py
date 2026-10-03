@@ -1194,7 +1194,10 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
         model_name=name,
     )
     m_config = ModelRequestConfig(**request_kwargs)
-    model = Model(model_client_config=ModelClientConfig(**mcc_fields), model_config=m_config)
+    from jiuwenswarm.governance.model_consumer import runtime_model_kwargs
+    model = Model(**runtime_model_kwargs(
+        ModelClientConfig(**mcc_fields), m_config, binding_config=mcc,
+    ))
     return model
 
 

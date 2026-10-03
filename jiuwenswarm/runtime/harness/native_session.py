@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable
 
@@ -168,6 +168,7 @@ class NativeExecutionSession:
             try:
                 with native_authority_source_scope(
                     self._current_resource_authority, model_source=self._current_model_authority,
+                    slice_source=self._execution_slice_for,
                 ):
                     await self.io.start(context)
             except BaseException as start_error:
@@ -330,7 +331,12 @@ class NativeExecutionSession:
         return token
 
     def _current_resource_authority(self):
-        from jiuwenswarm.governance.tool_context import _deny_unknown_provider
+        from jiuwenswarm.governance.tool_context import _deny_unknown_provider, current_native_execution_slice
+        from openjiuwen.harness.execution_subject import current_execution_subject
+        bound = current_native_execution_slice()
+        if (bound is None or bound.owner is not self or not bound.active
+                or bound.subject != current_execution_subject()):
+            return _deny_unknown_provider if self._resource_governed else None
         active = self._native.active_turn
         token = active.content.metadata.get(_REQUEST_KEY) if active is not None else None
         entry = self._requests.get(token)
@@ -338,17 +344,45 @@ class NativeExecutionSession:
             return _deny_unknown_provider if self._resource_governed else None
         if entry.authority is None:
             return _deny_unknown_provider if self._resource_governed else None
-        return entry.guarded_authority
+        return bound.tool_authorizer or _deny_unknown_provider
 
     def _current_model_authority(self):
-        from jiuwenswarm.governance.tool_context import deny_model_consumption
+        from jiuwenswarm.governance.tool_context import deny_model_consumption, current_native_execution_slice
+        from openjiuwen.harness.execution_subject import current_execution_subject
+        bound = current_native_execution_slice()
+        if (bound is None or bound.owner is not self or not bound.active
+                or bound.subject != current_execution_subject()):
+            return deny_model_consumption if self._model_resource_governed else None
         active = self._native.active_turn
         token = active.content.metadata.get(_REQUEST_KEY) if active is not None else None
         entry = self._requests.get(token)
         if (self._closing or self._closed or entry is None or active.abort_requested
                 or entry.model_authority is None):
             return deny_model_consumption if self._model_resource_governed else None
-        return entry.guarded_model_authority
+        # A late task keeps the original callback, even before its first Model call.
+        return bound.model_authorizer or deny_model_consumption
+
+    def _execution_slice_for(self, ctx):
+        from jiuwenswarm.governance.tool_context import NativeExecutionSlice
+        from jiuwenswarm.governance.resources import ResourceAccessDenied
+        from openjiuwen.harness.execution_subject import current_execution_subject
+        if not (self._resource_governed or self._model_resource_governed):
+            return None
+        owner = self._tool_owner
+        if owner is None or ctx.agent is not owner[0] or ctx.session is not owner[2]:
+            raise ResourceAccessDenied('Native execution slice owner unavailable')
+        context = getattr(ctx.inputs, 'run_context', None)
+        extra = context.get('extra', context) if isinstance(context, dict) else getattr(context, 'extra', {})
+        token = extra.get(_REQUEST_KEY) if isinstance(extra, dict) else None
+        active = self._native.active_turn
+        entry = self._requests.get(token)
+        subject = current_execution_subject()
+        if (self._closing or self._closed or self._exit_state is not ExecutionExitState.RUNNING
+                or active is None or active.abort_requested
+                or active.content.metadata.get(_REQUEST_KEY) != token or entry is None
+                or (subject is not None and subject.kind == 'subagent')):
+            raise ResourceAccessDenied('Native execution slice request unavailable')
+        return NativeExecutionSlice(self, entry.guarded_authority, entry.guarded_model_authority, subject)
 
     async def send_request(self, request: SendInputRequest) -> SendReceipt:
         """Accept a host request without serializing its permission/context objects."""
@@ -531,6 +565,17 @@ class NativeExecutionSession:
                 raise RuntimeError(
                     "Native turn was cancelled before host input dispatch"
                 )
+            if self._resource_governed or self._model_resource_governed:
+                inputs = dict(host_request.inputs)
+                run = dict(inputs.get('run') or {})
+                context = dict(run.get('context') or {})
+                context.pop(_REQUEST_KEY, None)
+                extra = dict(context.get('extra') or {})
+                extra[_REQUEST_KEY] = token
+                context['extra'] = extra
+                run['context'] = context
+                inputs['run'] = run
+                host_request = replace(host_request, inputs=inputs)
             await agent.send_input(host_request)
 
         if self._dispatch_guard is None:
