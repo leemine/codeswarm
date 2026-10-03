@@ -48,12 +48,15 @@ async def test_current_authority_is_strict_and_errors_deny(decision):
 
 
 @pytest.mark.asyncio
-async def test_unbound_context_leaves_legacy_inputs_and_optional_decision_alone():
+async def test_unbound_context_leaves_legacy_inputs_and_optional_decision_alone(monkeypatch):
     ctx = context()
     ctx.inputs.tool_args = "invalid"
     rail = NativeResourceAuthorityRail()
+    def forbidden_allocation(**kwargs):
+        pytest.fail("legacy execution must not allocate a mandatory permission rail")
+    monkeypatch.setattr("jiuwenswarm.agents.harness.common.rails.permissions.resource_authority_rail.PermissionInterruptRail", forbidden_allocation)
     await rail.before_tool_call(ctx)
-    assert not ctx.extra and rail._permission is None
+    assert not ctx.extra
 
 
 @pytest.mark.asyncio

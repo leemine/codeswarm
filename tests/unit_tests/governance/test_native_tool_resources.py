@@ -510,3 +510,29 @@ async def test_final_policy_context_mutation_denies_before_side_effect(
     )
     assert mutated and "PERMISSION_DENIED" in str(result)
     assert "RESOURCE-MARKER" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_final_call_cannot_borrow_new_request_authority_after_transform(native):
+    from openjiuwen.core.runner import Runner
+    from openjiuwen.core.runner.callback.events import ToolCallEvents
+    from jiuwenswarm.governance.tool_context import native_authority_source_scope
+
+    newer_calls = []
+    async def newer(_):
+        newer_calls.append(True)
+        return True
+    selected = [native.policy()]
+    async def change_request(*args, **kwargs):
+        selected[0] = newer
+        return args, kwargs
+    framework = Runner.callback_framework
+    await framework.register(ToolCallEvents.TOOL_INVOKE_INPUT, change_request, callback_type="transform")
+    try:
+        with native_authority_source_scope(lambda: selected[0]):
+            result = await native.invoke("read_file", {"file_path": "source.txt"})
+        assert "PERMISSION_DENIED" in str(result)
+        assert "RESOURCE-MARKER" not in str(result)
+        assert not newer_calls
+    finally:
+        await framework.unregister(ToolCallEvents.TOOL_INVOKE_INPUT, change_request)

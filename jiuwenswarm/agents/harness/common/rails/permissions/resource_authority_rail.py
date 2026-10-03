@@ -71,13 +71,8 @@ class NativeResourceAuthorityRail(DeepAgentRail):
 
     priority = -10000
 
-    def __init__(self) -> None:
-        super().__init__()
-        self._permission: PermissionInterruptRail | None = None
-
-    async def _authorize(self, incoming: Any) -> bool:
-        callback = current_tool_authorizer()
-        if callback is None:
+    async def _authorize(self, incoming: Any, callback, expected_ctx) -> bool:
+        if incoming.ctx is not expected_ctx or current_tool_authorizer() is not callback or callback is None:
             return False  # A bound authority cannot disappear during a check.
         final = current_tool_invocation()
         if final is not None:
@@ -113,18 +108,24 @@ class NativeResourceAuthorityRail(DeepAgentRail):
         )
 
     async def before_tool_call(self, ctx: Any) -> None:
-        if current_tool_authorizer() is None or ctx.extra.get("_skip_tool") is True:
+        callback = current_tool_authorizer()
+        if callback is None or ctx.extra.get("_skip_tool") is True:
             return
-        if self._permission is None:
-            self._permission = PermissionInterruptRail(
-                config={
-                    "enabled": True,
-                    "defaults": {"*": "allow"},
-                    "file_guard": {"enabled": False},
-                },
-                host=ToolPermissionHost(authorize_tool=self._authorize),
-            )
-        await self._permission.before_tool_call(ctx)
+
+        async def authorize(incoming):
+            return await self._authorize(incoming, callback, ctx)
+
+        # The core final hook retains this per-call host. A delayed transform
+        # cannot pick a newer Turn's authority merely because it shares a rail.
+        permission = PermissionInterruptRail(
+            config={
+                "enabled": True,
+                "defaults": {"*": "allow"},
+                "file_guard": {"enabled": False},
+            },
+            host=ToolPermissionHost(authorize_tool=authorize),
+        )
+        await permission.before_tool_call(ctx)
 
 
 def ensure_native_tool_authority(rails: list[Any]) -> list[Any]:
