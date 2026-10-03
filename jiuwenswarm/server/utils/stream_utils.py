@@ -331,7 +331,8 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             if isinstance(payload, dict)
             else str(payload)
         )
-        if not content or not content.strip():
+        # A standalone space or newline still belongs to the streamed text.
+        if not content:
             return None
         return {"event_type": "chat.delta", "content": content}
 
@@ -351,7 +352,7 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             if isinstance(payload, dict)
             else str(payload)
         )
-        if not content or not content.strip():
+        if not content:
             return None
         return {"event_type": "chat.delta", "content": content}
 

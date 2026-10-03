@@ -884,6 +884,7 @@ async def test_research_policy_is_frozen_to_work_parent_and_keeps_binding(
     assert execution.binding.config_revision == route.bound.binding.config_revision
     assert execution.binding.workspace == route.bound.binding.workspace
     assert execution.binding.subject_id != route.bound.binding.subject_id
+    assert calls[0][0]["tool_gateway"] is None
     await execution.close("research_finished")
     assert calls[0][1].stopped
 
@@ -894,6 +895,7 @@ async def test_work_research_does_not_inject_policy_into_general_child(tmp_path,
     factory = ExternalSubagentExecutionFactory(_route(tmp_path), work_research_enabled=True)
     execution = await factory.create(_request(), _context())
     assert "# Evidence research" not in calls[0][1].started_context.system_prompt
+    assert calls[0][0]["tool_gateway"] is None
     await execution.close("finished")
 
 
@@ -921,5 +923,6 @@ async def test_frozen_surface_owns_research_policy_over_legacy_flag(
     execution = await factory.create(request, _context())
     assert work_research_instructions() in calls[0][1].started_context.system_prompt
     assert calls[0][1].started_context.metadata["surface"]["work_mode"] == "work"
+    assert calls[0][0]["tool_gateway"] is None
     await execution.close("research_finished")
     assert calls[0][1].stopped
