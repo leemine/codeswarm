@@ -894,7 +894,13 @@ async def test_research_policy_is_frozen_to_work_parent_and_keeps_binding(
         result = await gateway.invoke(ToolInvocation(
             call_id="review-invalid-draft",
             name="review_research_report",
-            arguments={"sources": [], "claims": []},
+            arguments={
+                "sources": [{"id": "source", "text": "Observed fact", "start_line": 1, "complete": True}],
+                "claims": [{
+                    "id": "claim", "section": "Findings", "kind": "fact", "text": "Draft fact",
+                    "refs": [{"source_id": "source", "start_line": 1, "end_line": 1, "quote": "Invented quote"}],
+                }],
+            },
         ))
         assert "structural_valid" in result.content
         assert "false" in result.content.lower()
