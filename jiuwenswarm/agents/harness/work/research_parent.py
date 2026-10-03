@@ -16,9 +16,11 @@ from jiuwenswarm.agents.harness.common.rails.browser_task_prompt_rail import (
 _PARENT_SECTION = "work_research_parent_review"
 _PARENT_POLICY_EN = """## Work research parent acceptance
 
-Apply this after an authorized research_agent delegation; this policy does not
-itself authorize a spawn. A completed child or structural_valid=true is a
-candidate delivery, not accepted research.
+For an authorized research_agent delegation, include the original assignment and
+required artifact schemas verbatim in the child task; do not replace them with a
+summary, simplified fields or suggested answers. Preserve this contract in any
+repair request. This policy does not itself authorize a spawn. A completed child
+or structural_valid=true is a candidate delivery, not accepted research.
 
 1. After subagent_wait reports completion, use the existing read tools to inspect
    the saved report, evidence/claim table and review audit, then read the original
@@ -29,10 +31,15 @@ candidate delivery, not accepted research.
    compound claim does not support its other parts: comparisons need supporting
    spans for every compared alternative. Check full inspected ranges for omission
    claims, unknown versus absent, one record versus all runs, and exclusivity.
-   Check the final artifact against the reviewed rendering and source mapping.
+   Check the final artifact against the reviewed rendering and source mapping,
+   preserving inference/unknown labels. Where review-input/audit artifacts are
+   requested, verify the saved sources/claims/question are the full final valid
+   tool input, not a reduced evidence table, and input_fingerprint is copied
+   exactly from that tool result, not a short identifier or a shell recomputation.
    Record your own claim-level acceptance or concrete defects; do not treat the
    child's structural review or completion message as your semantic acceptance.
-3. If there is an evidenced defect and enough of the existing budget remains,
+3. If there is an evidenced defect and the remaining budget covers both repair
+   and source-based rechecking,
    send one targeted correction request with subagent_send_input to the exact
    existing child ID. Identify the claim/unsupported clause and the issue; require
    that child to reread the originals, revise its table, review/render again and
@@ -57,7 +64,8 @@ execution completion separately from research quality when they differ.
 """
 _PARENT_POLICY_CN = """## Work 研究父智能体验收
 
-本规则只用于已获授权的 research_agent 委派，不自行授权 spawn。
+对已获授权的 research_agent 委派，将原始任务和要求的产物 schema 原样传给子智能体，
+不能以摘要、简化字段或建议答案替代；返修请求也保留此契约。本规则不自行授权 spawn。
 子智能体 completed 或 structural_valid=true 只表示候选交付，不代表研究验收通过。
 
 1. subagent_wait 返回完成后，父智能体使用现有读取工具检查报告、证据/声明表及审核记录，
@@ -65,9 +73,12 @@ _PARENT_POLICY_CN = """## Work 研究父智能体验收
 2. 对每个事实子句逐项核对原来源与邻接定位，包括 Scope 和 Limitations。
    引文支持复合陈述的一部分，不代表支持其余部分；比较必须有各被比较对象的对应证据。
    缺失声明需覆盖完整已读范围；核对未知与不存在、单条记录与全部实验、排他性推断。
-   同时检查最终产物、被审核呈现及来源映射是否一致，记录父方逐声明结论或具体缺陷，
+   同时检查最终产物、被审核呈现及来源映射是否一致，保留 inference/unknown 标签。
+   如要求 review-input/audit 产物，核对 sources/claims/question 为最后一次有效工具调用的
+   完整输入而非简化证据表，input_fingerprint 原样复制该次工具返回值，不能用短标识或
+   shell 重算替代。记录父方逐声明结论或具体缺陷，
    不能把子方结构审核或完成消息当成父方语义验收。
-3. 发现有证据的缺陷且现有预算足够时，仅用 subagent_send_input 向原 child ID
+3. 发现有证据的缺陷且剩余预算足够完成返修和原来源复核时，仅用 subagent_send_input 向原 child ID
    发送一次定向返修，指出声明/不受支持的子句及问题，让原子智能体重读原资料、修改表、
    重新 review/render 并写入和读回产物。不得 subagent_spawn 替代实例，不得由父方偷改报告
    掩盖失败；仅当现有工具状态明确要求恢复时，才对同一 child 调 subagent_resume。

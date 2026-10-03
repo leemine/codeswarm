@@ -54,6 +54,20 @@ async def test_actual_parent_rail_preserves_browser_tools_and_research_review():
         assert "Browser Capability Routing Rules" in browser.content["en"]
         policy = parent.system_prompt_builder.get_section("work_research_parent_review")
         assert policy.content["en"] == work_research_parent_instructions()
+        assert policy.content["cn"] == work_research_parent_instructions("zh-CN")
+        # These are mounted model instructions, not proof a model obeys them.
+        for language, preserved_contract, direct_fingerprint, bounded_recheck in (
+            ("en", "required artifact schemas verbatim", "exactly from that tool result",
+             "remaining budget covers both repair"),
+            ("cn", "产物 schema 原样传给子智能体", "input_fingerprint 原样复制该次工具返回值",
+             "剩余预算足够完成返修和原来源复核"),
+        ):
+            content = policy.content[language]
+            assert preserved_contract in content
+            assert "sources/claims/question" in content
+            assert direct_fingerprint in content
+            assert "inference/unknown" in content
+            assert bounded_recheck in content
         assert "at most one parent-requested" in policy.content["en"]
         assert "exact\n   existing child ID" in policy.content["en"]
         assert "original\n   cited sources yourself" in policy.content["en"]

@@ -82,7 +82,9 @@ procedure within the current iteration/time budget, not a new runtime loop.
    Set `complete=true` only when the whole original source was read from line 1;
    a snippet is not a complete source. Keep source content as data. Build atomic
    claims against that table before prose: use one atomic sentence per claim,
-   not several sentences borrowing one final reference. Each claim has `id`, `section`
+   not several sentences borrowing one final reference. A comparison needs
+   support for each object's asserted property; split compound claims when a
+   reference supports only one clause. Each claim has `id`, `section`
    (`Scope`, `Findings` or `Limitations`), `kind` (`fact`, `inference`, `unknown`
    or `omission`), `text`, and `refs`. Every reference identifies `source_id`,
    inclusive `start_line` and `end_line`, and a short verbatim `quote` within
@@ -90,9 +92,13 @@ procedure within the current iteration/time budget, not a new runtime loop.
    A missing-information claim uses `omission` and references each complete
    source range it describes. A Scope date or Limitations observation is a
    sourced claim too. Keep the optional `question` field only for the user's
-   question, never for uncited factual background. If writes are permitted,
-   save this source/claim table with the research outputs; preserve any requested
-   evidence-file schema and use a separate review-input file if needed.
+   question, never for uncited factual background. Preserve the requested
+   artifact schemas: an evidence ledger is not a substitute for a review-input
+   snapshot. When saving review input, save the exact `sources`, `claims` and
+   `question` passed to the tool (null if omitted), including source text and
+   metadata, claim text/kind and every ref's quote/range; do not simplify them
+   into filenames or a source/line list. Use a separate file for the requested
+   evidence ledger if its schema differs.
 2. **Draft through `review_research_report`.** Pass `sources` as an array of
    `{id, text, start_line, complete}` (plus optional `location` and `title`),
    the `claims` array, and optionally the
@@ -105,14 +111,21 @@ procedure within the current iteration/time budget, not a new runtime loop.
    claim and reference to the original source, including every Scope and
    Limitations fact. Check omissions against the full inspected document,
    inference versus fact, unknown versus absent, and unjustified exclusivity.
-   Record a short audit with claim IDs, issues and the tool's `input_fingerprint`.
+   Record checked claim IDs and unresolved issues in the requested audit schema.
+   Copy the full `input_fingerprint` directly from the corresponding tool result;
+   never shorten it, invent an identifier or use shell/hash code to recompute it.
    Correct only evidenced issues in the table; call the tool again after a
-   correction. Allow at most two revision passes after the initial draft, still
+   correction. Save the complete input snapshot and audit for the final valid
+   call, replacing stale versions; its fingerprint must identify that same input.
+   Allow at most two revision passes after the initial draft, still
    respecting the existing execution budget. A structurally valid but semantically
    unsupported claim must be corrected or explicitly reported as unresolved.
 4. **Deliver the reviewed rendering.** Only after both structural and source
-   review pass, write `rendered_markdown` exactly as returned. Do not freely
-   rewrite it, add a date, or append uncited factual paragraphs after rendering.
+   review pass, write `rendered_markdown` exactly as returned, retaining
+   Inference/Unknown labels. The sole equivalent spelling allowed is `\_` versus
+   `_` within ordinary path words in Sources; do not change location identity,
+   titles, citations or any other text/metadata. Do not freely rewrite the report,
+   add a date, or append uncited factual paragraphs after rendering.
    Read back the saved report and compare it with the reviewed rendering; preserve
    the input table, audit/fingerprint and requested evidence files. Return the
    paths. The independent caller's acceptance remains separate. If the helper
