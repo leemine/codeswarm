@@ -19,6 +19,25 @@ SDK 直接访问受保护项目时同样需要注入身份；没有 resolver 不
 普通未迁移项目保持旧行为。受保护 External Session 使用可信执行主体建立
 Binding；旧 Binding 主体不一致时拒绝继续，不原地改绑或继承旧凭据。
 
+## Runtime 实例插件装配
+
+宿主可为每个 Runtime 构造独立 `ExtensionRegistry` 和
+`AsyncCallbackFramework`，并在 registry 中注册 `governance.identity`
+（可信身份 resolver）及 `governance.projects`（ProjectAuthorizer）。
+registry 保存自己的配置快照；不同实例不得复用需要隔离的 callback framework。
+能力版本与要求使用 PEP 440，例如 `version="1"`、`">=1,<2"`。
+
+`AgentRuntime(extension_registry=registry, required_capabilities=...)` 借用已装配的
+registry，只验证及消费能力，不关闭宿主的插件或回调。若需 Runtime 加载和关闭
+插件，传 `extension_manager=manager`，明确将该 manager 的生命周期交给 Runtime；
+两参数不能同时传。Manager 的显式配置须与 registry 一致，`root_dir` 确定实例
+插件目录。必需能力缺失、版本不兼容或治理能力类型不正确都会阻止 Runtime 启动，
+已加载的自有插件按逆序回滚。关闭错误会报告，不能视作资源已成功释放。
+
+显式构造的身份/项目策略与插件提供不同策略时拒绝启动，不静默覆盖。
+未传实例插件参数的旧调用继续使用进程默认 registry 及原引用计数；外部预加载的
+registry 仍由原宿主关闭。CLI/SDK 不需要导入 Web 服务来使用这些能力。
+
 ## 迁移与接口
 
 迁移是宿主操作，不开放“凭路由 ID 认领项目”的客户端接口。例如，由宿主完成

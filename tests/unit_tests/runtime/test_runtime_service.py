@@ -2553,6 +2553,104 @@ async def test_runtime_owned_extensions_are_reference_counted(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_runtime_instance_extensions_keep_policy_config_and_callbacks_separate() -> None:
+    from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
+    from jiuwenswarm.extensions.registry import ExtensionRegistry
+    from jiuwenswarm.governance.contracts import AuthorizationDecision, TrustedIdentity
+
+    class Authority:
+        def __init__(self, actor):
+            self.actor = actor
+
+        def authorize(self, project_id, actor_id, action):
+            return AuthorizationDecision(actor_id == self.actor, project_id, actor_id, action, 1)
+
+    registries = []
+    runtimes = []
+    observed = []
+    for actor in ("alice", "bob"):
+        registry = ExtensionRegistry(AsyncCallbackFramework(), {"actor": actor}, None)
+        registry.register_capability("governance.identity", lambda _value, actor=actor: TrustedIdentity(actor, actor, "test"))
+        registry.register_capability("governance.projects", Authority(actor))
+
+        async def callback(actor=actor):
+            observed.append(actor)
+
+        registry.register("instance.test", callback)
+        registries.append(registry)
+        runtimes.append(AgentRuntime(
+            agent_manager=FakeAgentManager(), initializer=AsyncMock(),
+            extension_registry=registry,
+            required_capabilities={"governance.identity": ">=1,<2", "governance.projects": ">=1,<2"},
+        ))
+    try:
+        await asyncio.gather(*(runtime.start() for runtime in runtimes))
+        for actor, runtime, registry in zip(("alice", "bob"), runtimes, registries):
+            identity = runtime._governance_identity(object())
+            assert identity.actor_id == actor
+            assert runtime.extension_registry is registry
+            assert registry.config.config["actor"] == actor
+            assert runtime._submission_guard.check_access("project", identity, "execute").allowed
+        await registries[0].trigger("instance.test")
+        assert observed == ["alice"]
+        await runtimes[0].close()
+        await registries[1].trigger("instance.test")
+        assert observed == ["alice", "bob"]
+        assert runtimes[1]._governance_identity(object()).actor_id == "bob"
+        # Borrowing a registry does not transfer its callbacks to Runtime.
+        await registries[0].trigger("instance.test")
+        assert observed == ["alice", "bob", "alice"]
+    finally:
+        await asyncio.gather(*(runtime.close() for runtime in runtimes))
+
+
+@pytest.mark.asyncio
+async def test_runtime_missing_required_capability_rolls_back_owned_manager() -> None:
+    from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
+    from jiuwenswarm.extensions.registry import ExtensionCapabilityError, ExtensionRegistry
+
+    registry = ExtensionRegistry(AsyncCallbackFramework(), {}, None)
+    manager = SimpleNamespace(registry=registry, load_all_extensions=AsyncMock(), shutdown_all_extensions=AsyncMock())
+    runtime = AgentRuntime(
+        agent_manager=FakeAgentManager(), initializer=AsyncMock(), extension_manager=manager,
+        required_capabilities={"governance.identity": ">=1"},
+    )
+    with pytest.raises(ExtensionCapabilityError):
+        await runtime.start()
+    with pytest.raises(RuntimeStateError, match="not started"):
+        runtime._require_started()
+    manager.shutdown_all_extensions.assert_awaited_once()
+    await runtime.close()
+    manager.shutdown_all_extensions.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_runtime_owned_manager_closes_once_and_rejects_policy_conflict() -> None:
+    from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
+    from jiuwenswarm.extensions.registry import ExtensionRegistry
+    from jiuwenswarm.governance.contracts import TrustedIdentity
+    from jiuwenswarm.governance.preparation import GovernanceError
+
+    registry = ExtensionRegistry(AsyncCallbackFramework(), {}, None)
+    registry.register_capability("governance.identity", lambda _: TrustedIdentity("alice", "alice", "test"))
+    manager = SimpleNamespace(registry=registry, load_all_extensions=AsyncMock(), shutdown_all_extensions=AsyncMock())
+    runtime = AgentRuntime(agent_manager=FakeAgentManager(), initializer=AsyncMock(), extension_manager=manager)
+    await runtime.start()
+    await runtime.start()
+    await runtime.close()
+    await runtime.close()
+    manager.load_all_extensions.assert_awaited_once_with(include_transport_extensions=False)
+    manager.shutdown_all_extensions.assert_awaited_once()
+    conflicting = AgentRuntime(
+        agent_manager=FakeAgentManager(), initializer=AsyncMock(), extension_registry=registry,
+        trusted_identity_resolver=lambda _: TrustedIdentity("bob", "bob", "test"),
+    )
+    with pytest.raises(GovernanceError, match="conflicting"):
+        await conflicting.start()
+    await conflicting.close()
+
+
+@pytest.mark.asyncio
 async def test_runtime_does_not_close_externally_owned_extensions(monkeypatch) -> None:
     from openjiuwen.core.runner import Runner
 

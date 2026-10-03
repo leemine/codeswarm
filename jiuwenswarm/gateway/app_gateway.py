@@ -1786,7 +1786,7 @@ async def _run(
     callback_framework = Runner.callback_framework
     extension_registry = ExtensionRegistry.create_instance(
         callback_framework=callback_framework,
-        config={},
+        config=get_config(),
         logger=logger,
     )
     extension_manager = ExtensionManager(registry=extension_registry)
