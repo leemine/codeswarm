@@ -6999,6 +6999,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         ProjectMethod.SESSION_SHARE_CREATE,
         ProjectMethod.SESSION_SHARE_UPDATE,
         ProjectMethod.SESSION_SHARE_REVOKE,
+        ProjectMethod.SESSION_SHARE_HISTORY_GET,
     ):
         channel.register_method(method.value, _project_extension_handler(method))
     channel.register_method("project.list", _project_list)
