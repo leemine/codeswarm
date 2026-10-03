@@ -8562,8 +8562,6 @@ class JiuWenSwarmDeepAdapter:
     def _build_subagent_rail(
         self,
         config_base: dict[str, Any] | None = None,
-        *,
-        work_mode: str | None = None,
     ) -> SubagentRail | None:
         """Build SubagentRail for subagent delegation.
 
@@ -8575,16 +8573,9 @@ class JiuWenSwarmDeepAdapter:
         """
         enable_runtime = self._resolve_enable_subagent_runtime(config_base)
         try:
-            # The Code adapter shares this builder and leaves work_mode unset.
-            # Research policy must never be inferred from adapter defaults.
-            rail_class = BrowserTaskPromptRail
-            if work_mode == "work":
-                from jiuwenswarm.agents.harness.work.research_parent import (
-                    WorkResearchTaskPromptRail,
-                )
-
-                rail_class = WorkResearchTaskPromptRail
-            subagent_rail = rail_class(enable_subagent_runtime=enable_runtime)
+            subagent_rail = BrowserTaskPromptRail(
+                enable_subagent_runtime=enable_runtime,
+            )
             logger.info(
                 "[JiuWenSwarmDeepAdapter] SubagentRail create success "
                 "(load-aware browser policy, subagent_runtime=%s)",
@@ -9282,7 +9273,7 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo(
                 "_subagent_rail",
                 self._build_subagent_rail,
-                {"config_base": config_base, "work_mode": "work"},
+                {"config_base": config_base},
             ),
             *([_RailBuildInfo("_permission_rail", lambda: group["_permission_rail"])]
               if group is not None else self._permission_interrupt_rail_infos(config_base)),
