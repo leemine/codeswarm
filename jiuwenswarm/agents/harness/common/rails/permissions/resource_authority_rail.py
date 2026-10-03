@@ -12,6 +12,7 @@ from openjiuwen.harness.security import ToolPermissionHost
 from openjiuwen.harness_protocol import BeforeToolContext, json_value_to_builtin
 
 from jiuwenswarm.governance.tool_context import current_tool_authorizer
+from jiuwenswarm.governance.native_executor import native_executor_scope
 
 
 def _arguments(value: Any) -> dict:
@@ -78,10 +79,13 @@ class NativeResourceAuthorityRail(DeepAgentRail):
         if callback is None:
             return False  # A bound authority cannot disappear during a check.
         operation = _operation(incoming.ctx)
-        allowed = await callback(operation)
+        with native_executor_scope(incoming.ctx, operation) as proof:
+            allowed = await callback(operation)
+            executor_unchanged = proof is None or proof.is_current()
         # Re-read live inputs after the await, not the approval/UI snapshot.
         return (
             allowed is True
+            and executor_unchanged
             and current_tool_authorizer() is callback
             and _same_operation(_operation(incoming.ctx), operation)
         )
