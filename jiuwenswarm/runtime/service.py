@@ -679,6 +679,21 @@ class AgentRuntime:
             work_mode=work_mode,
             params={"cwd": inputs.get("cwd", "")},
         )
+        if isinstance(provision_input, SessionCreateInput) and session_id:
+            # Preserve the explicit TUI resume contract: the provisioner uses
+            # its stored binding, regardless of the caller's current directory.
+            # Authorize that same binding before any resource preparation.
+            from jiuwenswarm.server.runtime.session.session_history import is_valid_session_id
+            from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+            if not is_valid_session_id(session_id):
+                raise GovernanceError("invalid session_id")
+            if provision_input.channel_id.lower() == "tui":
+                stored = get_session_metadata(session_id, cache_bust=True, enable_writeback=False) or {}
+                if stored:
+                    resource.project_id = stored.get("project_id", "")
+                    resource.project_dir = stored.get("project_dir", "")
+                    resource.work_mode = stored.get("work_mode", work_mode)
+                    resource.params = {}
         project_id = self._governance_project(resource)
         if not project_id and identity is None:
             return None
