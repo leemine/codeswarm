@@ -25,7 +25,8 @@ from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
 from jiuwenswarm.runtime.harness.binding_store import BoundExecution, ExecutionBindingStore
 from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
-from jiuwenswarm.runtime.harness.surface import EffectiveSurfaceSnapshot, build_surface_identity
+from jiuwenswarm.runtime.harness.surface import EffectiveSurfaceSnapshot, build_surface_identity, creation_surface
+from jiuwenswarm.runtime.harness.recovery_store import ExecutionRecoveryUnavailableError, SessionExecutionRecovery
 from jiuwenswarm.runtime.harness import team_execution as module
 
 
@@ -83,9 +84,14 @@ async def host(tmp_path, monkeypatch, request):
         'execution_profile_id': 'selected', 'execution_config_revision': binding.config_revision,
         'execution_config_fingerprint': binding.fingerprint,
     }
+    metadata['surface_creation'] = creation_surface(metadata)
     identity = build_surface_identity(metadata=metadata, binding=binding, paths=paths, channel_id='web')
+    recovery = SessionExecutionRecovery(
+        session_id=binding.host_session_id, execution_profile_id='selected', binding=binding,
+        runtime_paths=paths, surface_identity=identity,
+    )
     route = AdmittedExecutionRoute('web', source, ExecutionBindingStore(), BoundExecution(binding, source.resolve()),
-                                   paths, surface=EffectiveSurfaceSnapshot(identity, metadata['mode']))
+                                   paths, recovery=recovery, surface=EffectiveSurfaceSnapshot(identity, metadata['mode']))
     monkeypatch.setattr(module, '_host_config', lambda: config)
     monkeypatch.setattr(module, '_session_metadata', lambda _: metadata)
     engines = []
@@ -384,3 +390,119 @@ async def test_unsupported_spawn_drift_rejected_again_before_member_start(host, 
     transport.assert_not_called()
     assert all(not engine.harness.contexts for engine in host.engines)
     await leader.harness.stop()
+
+
+@pytest.fixture
+async def governed_host(host):
+    from copy import deepcopy
+
+    binding = replace(host.route.bound.binding, subject_id='host-worker', host_session_id='trusted-session')
+    host.metadata.update(session_id=binding.host_session_id, user_id='routing-user')
+    host.metadata['surface_creation'] = creation_surface(host.metadata)
+    view = deepcopy(host.metadata)
+    view['user_id'] = binding.subject_id
+    view['surface_creation']['user_id'] = binding.subject_id
+    identity = build_surface_identity(
+        metadata=view, binding=binding, paths=host.route.runtime_paths, channel_id='web',
+    )
+    recovery = SessionExecutionRecovery(
+        session_id=binding.host_session_id, execution_profile_id='selected', binding=binding,
+        runtime_paths=host.route.runtime_paths, surface_identity=identity,
+    )
+    host.route = replace(
+        host.route, bound=BoundExecution(binding, host.route.bound.spec), recovery=recovery,
+        surface=EffectiveSurfaceSnapshot(identity, host.metadata['mode']),
+    )
+    return host
+
+
+def test_governed_team_rehydrates_from_existing_admission_without_changing_routing_identity(governed_host):
+    from copy import deepcopy
+
+    host = governed_host
+    before = deepcopy(host.metadata)
+    archive = host.route.recovery.path.read_bytes()
+    factory = module.ExternalTeamMemberFactory(host.route, team_name='team')
+    assert factory._host_selection_unchanged()
+    restored = module.ExternalTeamMemberFactory.from_seed(factory.to_seed(), config=host.config)
+    assert restored._host_selection_unchanged()
+    assert restored.surface.identity.binding.subject_id == 'host-worker'
+    assert restored.to_seed() == factory.to_seed()
+    assert host.metadata == before
+    assert host.route.recovery.path.read_bytes() == archive
+
+
+@pytest.mark.parametrize('subject', ['forged-host-worker', 'routing-user'])
+def test_governed_team_seed_cannot_authorize_or_downgrade_subject(governed_host, subject):
+    host = governed_host
+    factory = module.ExternalTeamMemberFactory(host.route, team_name='team')
+    seed = factory.to_seed()
+    seed['binding']['subject_id'] = subject
+    archive = host.route.recovery.path.read_bytes()
+    with pytest.raises(ExecutionRecoveryUnavailableError, match='Binding changed'):
+        module.ExternalTeamMemberFactory.from_seed(seed, config=host.config)
+    assert host.route.recovery.path.read_bytes() == archive
+
+
+@pytest.mark.parametrize('changed', ['user_id', 'surface_creation'])
+def test_governed_team_rejects_persisted_routing_identity_drift(governed_host, changed):
+    host = governed_host
+    factory = module.ExternalTeamMemberFactory(host.route, team_name='team')
+    seed = factory.to_seed()
+    if changed == 'user_id':
+        host.metadata['user_id'] = 'changed-routing-user'
+    else:
+        host.metadata['surface_creation']['user_id'] = 'changed-routing-user'
+    assert not factory._host_selection_unchanged()
+    with pytest.raises(ValueError, match='Surface creation identity changed'):
+        module.ExternalTeamMemberFactory.from_seed(seed, config=host.config)
+
+
+def test_governed_team_missing_archive_cannot_reauthorize_seed_or_routing_downgrade(governed_host):
+    host = governed_host
+    factory = module.ExternalTeamMemberFactory(host.route, team_name='team')
+    seed = factory.to_seed()
+    path = host.route.recovery.path
+    path.unlink()
+    assert not factory._host_selection_unchanged()
+    for subject in ['host-worker', 'routing-user']:
+        seed['binding']['subject_id'] = subject
+        with pytest.raises(ExecutionRecoveryUnavailableError):
+            module.ExternalTeamMemberFactory.from_seed(seed, config=host.config)
+        assert not path.exists()
+
+
+def test_existing_team_scope_validation_does_not_upgrade_legacy_archive(host):
+    path = host.route.recovery.path
+    archive = json.loads(path.read_text())
+    archive['schema_version'] = 1
+    archive.pop('surface_identity')
+    path.write_text(json.dumps(archive))
+    before = path.read_bytes()
+    SessionExecutionRecovery.validate_existing_scope(
+        execution_profile_id='selected', binding=host.route.bound.binding,
+        runtime_paths=host.route.runtime_paths, surface_identity=host.route.surface.identity,
+    )
+    assert path.read_bytes() == before
+
+
+def test_existing_team_scope_validation_never_creates_archive_directory(host):
+    binding = replace(host.route.bound.binding, host_session_id='not-admitted')
+    missing = host.route.recovery.path.parent.parent / binding.host_session_id
+    assert not missing.exists()
+    with pytest.raises(ExecutionRecoveryUnavailableError):
+        SessionExecutionRecovery.validate_existing_scope(
+            execution_profile_id='selected', binding=binding,
+            runtime_paths=host.route.runtime_paths,
+            surface_identity=replace(host.route.surface.identity, binding=binding),
+        )
+    assert not missing.exists()
+
+
+def test_reconstructed_matching_subject_team_keeps_archive_authority_after_start(host):
+    factory = module.ExternalTeamMemberFactory(host.route, team_name='team')
+    restored = module.ExternalTeamMemberFactory.from_seed(factory.to_seed(), config=host.config)
+    assert restored._host_selection_unchanged()
+    host.route.recovery.path.unlink()
+    assert not restored._host_selection_unchanged()
+    assert not host.route.recovery.path.exists()

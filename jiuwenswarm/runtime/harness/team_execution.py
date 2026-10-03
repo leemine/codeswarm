@@ -24,9 +24,12 @@ from jiuwenswarm.runtime.harness.binding_store import BoundExecution, ExecutionB
 from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
 from jiuwenswarm.runtime.harness.context_bridge import build_external_context
 from jiuwenswarm.runtime.harness.request_binding import AdmittedExecutionRoute
+from jiuwenswarm.runtime.harness.recovery_store import (
+    ExecutionRecoveryUnavailableError, SessionExecutionRecovery,
+)
 from jiuwenswarm.runtime.harness.surface import (
     EffectiveSurfaceSnapshot, SurfaceAdmissionError, build_surface_identity, compile_surface_policy,
-    canonical_surface_mode,
+    canonical_surface_mode, validate_surface_metadata,
 )
 from jiuwenswarm.runtime.harness.team_tools import team_product_tools
 from jiuwenswarm.runtime.harness.capability_catalog import compile_capability_catalog
@@ -63,6 +66,26 @@ def _validate_metadata_workspace(metadata, binding):
         raise ValueError('Team Session workspace is missing or changed')
 
 
+def _team_surface_identity(metadata, binding, paths, channel_id, *, require_recovery=False):
+    # Validate the persisted routing identity before constructing an execution
+    # view. A seed's subject is not authentication: only the already admitted
+    # recovery Binding can authorize a different host execution subject.
+    validate_surface_metadata(metadata)
+    projected = metadata
+    different_subject = metadata.get('user_id') != binding.subject_id
+    if different_subject:
+        projected = {**metadata, 'user_id': binding.subject_id}
+        if isinstance(metadata.get('surface_creation'), dict):
+            projected['surface_creation'] = {**metadata['surface_creation'], 'user_id': binding.subject_id}
+    identity = build_surface_identity(metadata=projected, binding=binding, paths=paths, channel_id=channel_id)
+    if different_subject or require_recovery:
+        SessionExecutionRecovery.validate_existing_scope(
+            execution_profile_id=identity.execution_profile_id, binding=binding,
+            runtime_paths=paths, surface_identity=identity,
+        )
+    return identity
+
+
 class ExternalTeamMemberFactory:
     """One frozen root selection; original Team owns all member lifecycles."""
 
@@ -91,6 +114,7 @@ class ExternalTeamMemberFactory:
             include_personal_context=include_personal_context, topology='team',
         )
         self._route = route
+        self._require_existing_recovery = route.recovery is not None
         self._team_name = team_name
         self._include_personal_context = include_personal_context
         self._browser_enabled = browser_runtime_enabled(os.environ)
@@ -174,8 +198,8 @@ class ExternalTeamMemberFactory:
                 or metadata.get('execution_config_revision') != binding.config_revision):
             raise ValueError('Team Session execution identity is missing or changed')
         _validate_metadata_workspace(metadata, binding)
-        identity = build_surface_identity(
-            metadata=metadata, binding=binding, paths=paths, channel_id=seed['surface']['channel_id'],
+        identity = _team_surface_identity(
+            metadata, binding, paths, seed['surface']['channel_id'], require_recovery=True,
         )
         if identity.record() != seed['surface']:
             raise ValueError('Team Session Surface changed during reconstruction')
@@ -186,8 +210,12 @@ class ExternalTeamMemberFactory:
             bound=BoundExecution(binding, spec), runtime_paths=paths,
             surface=EffectiveSurfaceSnapshot(identity, seed['mode']),
         )
-        return cls(route, team_name=seed['team_name'],
-                   include_personal_context=seed['include_personal_context'])
+        factory = cls(route, team_name=seed['team_name'],
+                      include_personal_context=seed['include_personal_context'])
+        # Cold reconstruction remains bound to the independently verified
+        # archive even when routing and execution subjects happen to match.
+        factory._require_existing_recovery = True
+        return factory
 
     def _host_selection_unchanged(self) -> bool:
         try:
@@ -205,11 +233,13 @@ class ExternalTeamMemberFactory:
                     or metadata.get('execution_config_revision') != binding.config_revision):
                 return False
             _validate_metadata_workspace(metadata, binding)
-            identity = build_surface_identity(metadata=metadata, binding=binding,
-                                              paths=self._route.runtime_paths, channel_id=self._route.channel_id)
+            identity = _team_surface_identity(
+                metadata, binding, self._route.runtime_paths, self._route.channel_id,
+                require_recovery=self._require_existing_recovery,
+            )
             return (identity.record() == self._surface.identity.record()
                     and canonical_surface_mode(metadata) == self._surface.initial_mode)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, ExecutionRecoveryUnavailableError):
             return False
 
     def build_review_runtime(self, request):
