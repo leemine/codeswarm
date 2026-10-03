@@ -1,6 +1,6 @@
 """Private in-process proof of the Native executor under authorization.
 
-This object is never protocol data. Only the final Native rail creates a scope;
+This object is never protocol data. The Native rail creates an early or final scope;
 resource resolvers must match the exact immutable operation object in that scope.
 """
 
@@ -10,13 +10,14 @@ from dataclasses import dataclass, field
 from types import CodeType
 from typing import Any
 
+from openjiuwen.core.foundation.tool import current_tool_invocation
 from openjiuwen.core.foundation.tool.base import _ToolMeta
+from openjiuwen.core.session import get_current_session
 from openjiuwen.core.runner.callback.decorator import (
     create_emit_before_decorator,
     create_emit_after_decorator,
     _make_transform_io_decorator,
 )
-from openjiuwen.core.runner.callback.events import ToolCallEvents
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
@@ -45,32 +46,23 @@ _WRAPPER_CODES = frozenset(
 )
 
 
-def has_native_invoke(executor, expected) -> bool:
+def _original_method(executor):
     method = executor.invoke
     for _ in range(4):
         if getattr(method, "__code__", None) not in _WRAPPER_CODES:
-            return False
+            return None
         method = getattr(method, "__wrapped__", None)
+    return method
+
+
+def has_native_invoke(executor, expected) -> bool:
+    proof = _PROOF.get()
+    if proof is None or proof.executor is not executor or not proof.is_current():
+        return False
+    method = proof.original_invoke
     return (
         getattr(method, "__self__", None) is executor
         and getattr(method, "__func__", None) is expected.invoke
-    )
-
-
-def _input_callbacks_absent() -> bool:
-    # These wrappers run AFTER the rail. Input transforms or observers can
-    # replace/mutate the execution arguments; this adapter cannot certify them.
-    framework = Runner.callback_framework
-    # has_subscribers counts even empty per-event hook dictionaries after the
-    # first execution. Inspect actual registered handlers, not event history.
-    return not framework._global_filters and not any(
-        framework.callbacks.get(event)
-        or framework._filters.get(event)
-        or any(framework._hooks.get(event, {}).values())
-        for event in (
-            ToolCallEvents.TOOL_INVOKE_INPUT,
-            ToolCallEvents.TOOL_CALL_STARTED,
-        )
     )
 
 
@@ -107,6 +99,9 @@ class NativeExecutorProof:
     invoke: Any
     cwd: str
     workspace: str
+    ambient_session: Any
+    original_invoke: Any
+    final_invocation: Any
     lifetime: _ProofLifetime = field(default_factory=_ProofLifetime)
 
     def is_current(self) -> bool:
@@ -114,12 +109,22 @@ class NativeExecutorProof:
             manager, card, executor = _lookup(self.ctx, self.operation)
             return (
                 self.lifetime.active
-                and _input_callbacks_absent()
                 and manager is self.manager
                 and card is self.card
                 and executor is self.executor
                 and get_cwd() == self.cwd
                 and get_workspace() == self.workspace
+                and get_current_session() is self.ambient_session
+                and (
+                    self.final_invocation is None
+                    or (
+                        current_tool_invocation() is self.final_invocation
+                        and self.final_invocation.is_current()
+                        and self.final_invocation.operation is self.operation
+                        and self.final_invocation.original_invoke
+                        is self.original_invoke
+                    )
+                )
                 and self.ctx.agent is self.agent
                 and self.ctx.session is self.session
                 and self.agent.card.id == self.agent_id
@@ -141,9 +146,25 @@ _PROOF: ContextVar[NativeExecutorProof | None] = ContextVar(
 
 @contextmanager
 def native_executor_scope(ctx, operation: BeforeToolContext):
-    """Bind available executor evidence for one mandatory callback only."""
+    """Bind resource evidence around one host check.
+
+    Early approval uses the registered executor. Final checks must use core's
+    actual invocation proof; importing its API requires the supporting core.
+    """
     try:
         manager, card, executor = _lookup(ctx, operation)
+        final = current_tool_invocation()
+        if final is not None and (
+            final.operation is not operation
+            or final.executor is not executor
+            or final.agent_context is not ctx
+        ):
+            raise ValueError(
+                "final Native invocation does not match the resource operation"
+            )
+        original = (
+            final.original_invoke if final is not None else _original_method(executor)
+        )
         proof = NativeExecutorProof(
             operation,
             ctx,
@@ -162,6 +183,9 @@ def native_executor_scope(ctx, operation: BeforeToolContext):
             executor.invoke,
             get_cwd(),
             get_workspace(),
+            get_current_session(),
+            original,
+            final,
         )
     except Exception:
         proof = None

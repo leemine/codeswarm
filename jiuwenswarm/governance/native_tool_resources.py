@@ -92,6 +92,12 @@ class NativeToolResourceResolver:
             raise ValueError("Native path is outside the bound workspace")
         return [self._use("workspace", root, action, path) for action in actions]
 
+    @staticmethod
+    def _checked_uses(proof, uses):
+        if not proof.is_current():
+            raise ValueError("Native execution context changed while mapping resources")
+        return tuple(uses)
+
     def resources_for_tool(
         self, execution: ResourceExecutionContext, tool: BeforeToolContext
     ) -> tuple[ToolResourceUse, ...]:
@@ -135,7 +141,7 @@ class NativeToolResourceResolver:
             ):
                 raise ValueError("invalid or unsupported background shell operation")
             uses.append(self._use("process", "native:local-process", "execute"))
-            return tuple(uses)
+            return self._checked_uses(proof, uses)
         raw = args.get("file_path")
         if (
             not isinstance(raw, str)
@@ -171,4 +177,4 @@ class NativeToolResourceResolver:
                         str(history.parent), str(history) + ".tmp", ("write",)
                     )
                 )
-        return tuple(uses)
+        return self._checked_uses(proof, uses)

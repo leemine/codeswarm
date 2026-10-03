@@ -78,3 +78,33 @@ async def test_mapping_error_and_mid_resolution_revoke_fail_closed(policy):
         return (use,)
     resolver.resources_for_tool = revoke
     assert await bound(tool) is False
+
+
+@pytest.mark.asyncio
+async def test_resource_mapping_is_rechecked_after_policy(policy):
+    bound, state, resolver, tool = policy
+    original = resolver.resources_for_tool
+    calls = []
+    def changing(execution, operation):
+        calls.append(True)
+        if len(calls) == 1:
+            return original(execution, operation)
+        return (ToolResourceUse(ResourceRequest('another-id', 'read', '/workspace/file'), '/workspace'),)
+    resolver.resources_for_tool = changing
+    assert await bound(tool) is False
+    assert len(state.calls) == 1 and len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_identity_changed_by_final_mapping_cannot_pass(policy):
+    bound, state, resolver, tool = policy
+    original = resolver.resources_for_tool
+    calls = []
+    def changing(execution, operation):
+        calls.append(True)
+        if len(calls) == 2:
+            state.identity = None
+        return original(execution, operation)
+    resolver.resources_for_tool = changing
+    assert await bound(tool) is False
+    assert len(state.calls) == 1 and len(calls) == 2

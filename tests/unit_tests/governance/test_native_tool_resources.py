@@ -303,7 +303,7 @@ async def test_edit_requires_audit_and_preserves_old_history(native):
 
 
 @pytest.mark.asyncio
-async def test_post_rail_input_transform_is_denied_and_legacy_still_transforms(native):
+async def test_post_rail_redirect_is_rechecked_and_legacy_still_transforms(native):
     from openjiuwen.core.runner import Runner
     from openjiuwen.core.runner.callback.events import ToolCallEvents
 
@@ -321,7 +321,8 @@ async def test_post_rail_input_transform_is_denied_and_legacy_still_transforms(n
     )
     try:
         denied = await native.invoke("read_file", {"file_path": "source.txt"})
-        assert "PERMISSION_DENIED" in str(denied) and not transformed
+        assert "PERMISSION_DENIED" in str(denied) and transformed
+        assert "TRANSFORM-SECRET" not in str(denied)
         with tool_authority_scope(None):
             legacy = await native.manager.execute(
                 AgentCallbackContext(agent=native.agent),
@@ -412,3 +413,100 @@ async def test_backend_mode_change_during_authorization_is_denied(native):
         "read_file", {"file_path": "source.txt"}, authority=changing
     )
     assert "PERMISSION_DENIED" in str(result)
+
+
+@pytest.mark.asyncio
+async def test_legal_transform_uses_actual_final_operation_and_executor(native):
+    from openjiuwen.core.foundation.tool import current_tool_invocation
+    from openjiuwen.core.runner import Runner
+    from openjiuwen.core.runner.callback.events import ToolCallEvents
+
+    target = native.work / "transformed.txt"
+    target.write_text("LEGAL-TRANSFORM-MARKER")
+    seen = []
+    policy = native.policy()
+
+    async def transform(*args, **kwargs):
+        return (), {**kwargs, "inputs": {"file_path": str(target)}}
+
+    async def authority(tool):
+        actual = current_tool_invocation()
+        seen.append((actual is not None, tool.arguments["file_path"]))
+        if actual is not None:
+            assert tool is actual.operation
+            assert actual.executor is native.tools["read_file"]
+            assert actual.original_invoke.__func__ is ReadFileTool.invoke
+        return await policy(tool)
+
+    framework = Runner.callback_framework
+    await framework.register(
+        ToolCallEvents.TOOL_INVOKE_INPUT, transform, callback_type="transform"
+    )
+    try:
+        result = await native.invoke(
+            "read_file", {"file_path": "source.txt"}, authority=authority
+        )
+        assert "LEGAL-TRANSFORM-MARKER" in str(result)
+        assert seen == [
+            (False, "source.txt"),
+            (False, "source.txt"),
+            (True, str(target)),
+        ]
+    finally:
+        await framework.unregister(ToolCallEvents.TOOL_INVOKE_INPUT, transform)
+
+
+@pytest.mark.asyncio
+async def test_final_bridge_cannot_fall_back_to_early_proof(native, monkeypatch):
+    from jiuwenswarm.agents.harness.common.rails.permissions import (
+        resource_authority_rail,
+    )
+
+    monkeypatch.setattr(
+        resource_authority_rail, "current_tool_invocation", lambda: None
+    )
+    result = await native.invoke("read_file", {"file_path": "source.txt"})
+    assert "PERMISSION_DENIED" in str(result) and "RESOURCE-MARKER" not in str(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change", ["cwd", "workspace", "backend", "mode", "ambient_session", "owner"]
+)
+async def test_final_policy_context_mutation_denies_before_side_effect(
+    native, monkeypatch, change
+):
+    from openjiuwen.core.foundation.tool import current_tool_invocation
+    from openjiuwen.core.sys_operation import OperationMode
+    from openjiuwen.core.sys_operation.cwd import set_cwd, set_workspace
+
+    policy = native.policy()
+    authorize = native.store.authorize_resource
+    mutated = []
+
+    def changing(project_id, identity, request):
+        decision = authorize(project_id, identity, request)
+        if current_tool_invocation() is not None and not mutated:
+            mutated.append(True)
+            if change == "cwd":
+                set_cwd(str(native.tmp))
+            elif change == "workspace":
+                set_workspace(str(native.tmp))
+            elif change == "backend":
+                native.tools["read_file"].operation = object()
+            elif change == "mode":
+                native.operation.mode = OperationMode.SANDBOX
+            elif change == "ambient_session":
+                _current_session.set(
+                    SimpleNamespace(get_session_id=lambda: "different")
+                )
+            else:
+                policy._resolver._owns_session = lambda *_: False
+        return decision
+
+    monkeypatch.setattr(native.store, "authorize_resource", changing)
+    result = await native.invoke(
+        "read_file", {"file_path": "source.txt"}, authority=policy
+    )
+    assert mutated and "PERMISSION_DENIED" in str(result)
+    assert "RESOURCE-MARKER" not in str(result)

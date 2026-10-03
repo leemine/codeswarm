@@ -50,6 +50,8 @@ class ToolResourceResolver(Protocol):
 
         An empty result, unknown schema/executor, or exception denies. Reference
         values must come from host bindings, never from user-supplied metadata.
+        The host re-resolves after policy evaluation: unchanged execution must
+        yield the same ordered requirements, and mapping must never grant access.
         """
         ...
 
@@ -86,6 +88,12 @@ class BoundToolResourceAuthority:
                     return False
             # A host policy may itself mutate external state; never accept an
             # identity/generation transition during its synchronous resolution.
-            return self._identity() == self.execution.identity and self._current() is True
+            if self._identity() != self.execution.identity or self._current() is not True:
+                return False
+            # Policies are synchronous but may mutate executor/resource context.
+            # Re-resolve after all policy calls instead of trusting the first map.
+            final_uses = self._resolver.resources_for_tool(self.execution, tool)
+            return (final_uses == uses and self._identity() == self.execution.identity
+                    and self._current() is True)
         except Exception:
             return False

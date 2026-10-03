@@ -6,6 +6,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from openjiuwen.core.foundation.tool import current_tool_invocation
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
 from openjiuwen.harness.security import ToolPermissionHost
@@ -78,7 +79,24 @@ class NativeResourceAuthorityRail(DeepAgentRail):
         callback = current_tool_authorizer()
         if callback is None:
             return False  # A bound authority cannot disappear during a check.
-        operation = _operation(incoming.ctx)
+        final = current_tool_invocation()
+        if final is not None:
+            if final.agent_context is not incoming.ctx or not final.is_current():
+                return False
+            operation = final.operation
+            if (
+                incoming.tool_call.name != operation.tool_name
+                or incoming.tool_call.id != operation.call_id
+                or json.dumps(_arguments(incoming.tool_args), sort_keys=True)
+                != json.dumps(_arguments(operation.arguments), sort_keys=True)
+            ):
+                return False
+        else:
+            # The final bridge creates a new ToolCall carrying transformed args.
+            # It must never fall back to a merely registered early executor.
+            if incoming.tool_call is not incoming.ctx.inputs.tool_call:
+                return False
+            operation = _operation(incoming.ctx)
         with native_executor_scope(incoming.ctx, operation) as proof:
             allowed = await callback(operation)
             executor_unchanged = proof is None or proof.is_current()
@@ -87,7 +105,11 @@ class NativeResourceAuthorityRail(DeepAgentRail):
             allowed is True
             and executor_unchanged
             and current_tool_authorizer() is callback
-            and _same_operation(_operation(incoming.ctx), operation)
+            and (
+                final.is_current()
+                if final is not None
+                else _same_operation(_operation(incoming.ctx), operation)
+            )
         )
 
     async def before_tool_call(self, ctx: Any) -> None:
