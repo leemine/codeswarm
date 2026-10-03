@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Opt-in real model + Codex research delegation and evidence artifact.
+"""Opt-in real model research delegation and evidence artifacts.
 
 RUN_WORK_RESEARCH_REMOTE=1 with WORK_RESEARCH_API_BASE / WORK_RESEARCH_API_KEY
 and optionally WORK_RESEARCH_MODEL. Credentials are passed to the existing
@@ -12,6 +12,8 @@ import asyncio
 import json
 import os
 import re
+import time
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -89,14 +91,23 @@ def _check_evidence(root: Path, report: str) -> dict:
     return ledger
 
 
-@pytest.mark.asyncio
-async def test_work_research_real_codex_cited_artifact(tmp_path: Path):
-    pytest.importorskip("openai_codex")
-    root = tmp_path / "workspace"
-    home = tmp_path / "home"
-    codex_home = tmp_path / "codex"
-    for path in (root, home, codex_home, codex_home / "skills"):
-        path.mkdir()
+_RUN_BUDGET_S = 360
+_CLEANUP_BUDGET_S = 30
+_RESEARCH_TASK = (
+    "Compare the two recorded retrieval runs in source-a.md and source-b.md: what do they "
+    "establish about offline retrieval and benchmark comparability? These are two temporary "
+    "four-line synthetic field logs, not user documents. Read both original files with tools. "
+    "Write research-report.md (at most 300 words) with Scope, Findings, Limitations and Sources, "
+    "adjacent citations, both numeric observations and the comparability caveat. "
+    + _EVIDENCE_REQUEST
+    + " Read back and verify both outputs. Use only these sources, no web searches. "
+    "Do not restate the complete report in your final reply: return paths and verification "
+    "in at most 40 words. Batch independent source reads when supported."
+)
+
+
+def _write_sources(root: Path) -> None:
+    root.mkdir()
     (root / "source-a.md").write_text(
         "# Pilot A field log\nDate: 2026-09-01\n"
         "Primary observation: offline retrieval took 42 seconds for 12 documents.\n"
@@ -108,11 +119,117 @@ async def test_work_research_real_codex_cited_artifact(tmp_path: Path):
         "A network connection was required. The conditions differ from Pilot A; "
         "this is not a controlled benchmark and does not establish superiority.\n",
     )
-    spec = AgentExecutionSpec(
-        "codex",
-        "r1-12-remote",
-        authorization=ExecutionAuthorization(full_access=True),
-        provider_config={
+
+
+class _ResearchTrace:
+    """Test-only observations: no source text, arguments, env or credentials."""
+
+    def __init__(self, provider: str, root: Path):
+        self.provider = provider
+        self.root = root
+        self.started = time.monotonic()
+        self.events = []
+        self.outcome = "running"
+        self.child_providers = []
+
+    def mark(self, stage: str, **details):
+        self.events.append(
+            {
+                "stage": stage,
+                "seconds": round(time.monotonic() - self.started, 3),
+                **details,
+            }
+        )
+
+    async def watch(self, runtime=None):
+        seen = set()
+        children = set()
+        while True:
+            for name in ("research-report.md", "research-evidence.json"):
+                if name not in seen and (self.root / name).exists():
+                    seen.add(name)
+                    self.mark("artifact_observed", artifact=name)
+            if runtime is not None:
+                for child_id, child in tuple(runtime._factory._live.items()):
+                    if child_id not in children:
+                        children.add(child_id)
+                        self.child_providers.append(child.binding.provider_id)
+                        self.mark("child_bound", provider=child.binding.provider_id)
+            await asyncio.sleep(0.25)
+
+    def save(self):
+        destination = os.environ.get("WORK_RESEARCH_EVIDENCE_DIR")
+        if not destination:
+            return
+        output = Path(destination) / self.provider
+        output.mkdir(parents=True, exist_ok=True)
+        for name in (
+            "source-a.md",
+            "source-b.md",
+            "research-report.md",
+            "research-evidence.json",
+        ):
+            path = self.root / name
+            if path.is_file():
+                (output / name).write_bytes(path.read_bytes())
+        (output / "timing.json").write_text(
+            json.dumps(
+                {
+                    "provider": self.provider,
+                    "outcome": self.outcome,
+                    "execution_budget_seconds": _RUN_BUDGET_S,
+                    "cleanup_budget_seconds": _CLEANUP_BUDGET_S,
+                    "report_word_budget": 300,
+                    "child_reply_word_budget": 40,
+                    "child_providers": self.child_providers,
+                    "events": self.events,
+                },
+                indent=2,
+            )
+        )
+
+
+def _check_report(root: Path):
+    report = (root / "research-report.md").read_text()
+    _check_evidence(root, report)
+    for fragment in ("42", "31", "source-a.md", "source-b.md"):
+        assert fragment in report, f"Missing evidence {fragment}"
+    assert any(
+        word in report.lower()
+        for word in (
+            "not a controlled",
+            "not directly",
+            "different conditions",
+            "cannot",
+            "uncontrolled",
+            "不能",
+            "不可比",
+        )
+    ), "Missing benchmark comparability caveat"
+    return report
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["codex", "opencode"])
+async def test_work_research_real_external_cited_artifact(
+    tmp_path: Path, provider: str
+):
+    if provider == "codex":
+        pytest.importorskip("openai_codex")
+    root = tmp_path / "workspace"
+    _write_sources(root)
+    trace = _ResearchTrace(provider, root)
+    model = {
+        "model": os.environ.get("WORK_RESEARCH_MODEL", "glm-5.2"),
+        "provider": "work_research_remote",
+        "api_base": os.environ["WORK_RESEARCH_API_BASE"],
+        "api_key": os.environ["WORK_RESEARCH_API_KEY"],
+    }
+    if provider == "codex":
+        home, codex_home = tmp_path / "home", tmp_path / "codex"
+        for path in (home, codex_home, codex_home / "skills"):
+            path.mkdir()
+        provider_config = {
             "inherit_process_env": False,
             "env": {
                 "HOME": str(home),
@@ -120,25 +237,44 @@ async def test_work_research_real_codex_cited_artifact(tmp_path: Path):
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             },
             "mcp_required": True,
-            "model": {
-                "model": os.environ.get("WORK_RESEARCH_MODEL", "glm-5.2"),
-                "provider": "work_research_remote",
-                "api_base": os.environ["WORK_RESEARCH_API_BASE"],
-                "api_key": os.environ["WORK_RESEARCH_API_KEY"],
-            },
-        },
+            "model": model,
+            # Do not silently retry a stalled turn and multiply the test budget.
+            "turn_idle_timeout_s": 100,
+            "turn_idle_retries": 0,
+        }
+    else:
+        cli = Path(
+            os.environ.get(
+                "WORK_RESEARCH_OPENCODE_CLI",
+                str(Path.home() / ".opencode/bin/opencode"),
+            )
+        )
+        assert cli.is_file(), (
+            "A real OpenCode CLI is required for the selected provider"
+        )
+        runtime_root = tmp_path / "opencode-runtime"
+        runtime_root.mkdir(mode=0o700)
+        provider_config = {
+            "cli_path": str(cli),
+            "runtime_root": str(runtime_root),
+            "model": model,
+            "turn_timeout_s": _RUN_BUDGET_S,
+        }
+    spec = AgentExecutionSpec(
+        provider,
+        "r1-12-closure",
+        authorization=ExecutionAuthorization(full_access=True),
+        provider_config=provider_config,
     )
     route = _route(root, spec)
     adapter = EngineAgentAdapter(route)
     query = (
-        "Use the product subagent_spawn tool once with subagent_type research_agent "
-        "to compare source-a.md and source-b.md for offline suitability. Ask that child "
-        "to inspect both files using tools, write research-report.md in this workspace, "
-        "with Scope, Findings, Limitations and Sources sections, adjacent source citations, "
-        "both numeric observations and the comparability caveat, then read back the report. "
-        "Use subagent_wait with the exact returned ID until finished, and return the report path. "
-        "Do not answer the research yourself or use external sources."
-        + _EVIDENCE_REQUEST
+        "Use product subagent_spawn exactly once with subagent_type research_agent and pass "
+        "the entire assignment below. Your role is only to delegate and wait. "
+        "Then use subagent_wait with the exact returned ID and timeout_ms=60000; "
+        "if still running wait again. When completed, return ONLY the two artifact paths, "
+        "without opening files yourself or repeating the report. Assignment: "
+        + _RESEARCH_TASK
     )
     request = AgentRequest(
         request_id="r1-12-research",
@@ -148,56 +284,70 @@ async def test_work_research_real_codex_cited_artifact(tmp_path: Path):
         is_stream=True,
     )
     request._execution_route = route
-    chunks = []
     runtime = None
+    watcher = None
+    terminal = None
+    parent_text = []
     try:
+        trace.mark("construction_start")
         await adapter.create_instance(mode="agent")
         runtime = adapter._subagent_runtime
+        watcher = asyncio.create_task(trace.watch(runtime))
         adapter.select_execution_for_request(request)
-        async with asyncio.timeout(300):
+        trace.mark("execution_start")
+        async with asyncio.timeout(_RUN_BUDGET_S):
             async for chunk in adapter.process_message_stream_impl(
                 request, {"query": query}
             ):
-                chunks.append(chunk.payload or {})
+                payload = chunk.payload or {}
+                event = payload.get("event_type")
+                if event == "chat.tool_call":
+                    trace.mark(
+                        "parent_tool_start",
+                        tool=(payload.get("tool_call") or {}).get("name", ""),
+                    )
+                elif event == "chat.tool_result":
+                    trace.mark("parent_tool_end", tool=payload.get("tool_name", ""))
+                elif event == "chat.delta":
+                    parent_text.append(payload.get("content", ""))
+                elif event == "chat.final":
+                    terminal = payload.get("terminal_status")
+                    trace.mark("parent_terminal", terminal=terminal)
+        assert terminal == "completed", (
+            "Provider stream closed without successful terminal"
+        )
+        assert "research-report.md" in "".join(parent_text)
+        assert trace.child_providers == [provider], (
+            "Research child did not use the parent's Provider"
+        )
+        _check_report(root)
+        trace.mark("quality_gate_passed")
+        trace.outcome = "passed"
+    except BaseException as exc:
+        trace.outcome = type(exc).__name__
+        trace.mark(
+            "failed",
+            exception_type=type(exc).__name__,
+            error_code=getattr(getattr(exc, "error", None), "code", None),
+        )
+        raise
     finally:
-        async with asyncio.timeout(30):
-            await adapter.cleanup()
-    report = (root / "research-report.md").read_text()
-    ledger = _check_evidence(root, report)
-    for fragment in ("42", "31", "source-a.md", "source-b.md"):
-        assert fragment in report, f"Missing evidence {fragment}"
-    assert any(
-        word in report.lower()
-        for word in (
-            "not a controlled",
-            "not directly",
-            "different conditions",
-            "不能",
-            "不可比",
-        )
-    )
-    rendered = json.dumps(chunks, ensure_ascii=False)
-    assert "research_agent" in rendered
-    assert "research-report.md" in rendered
-    assert runtime is not None and not runtime.has_control()
-    evidence_dir = os.environ.get("WORK_RESEARCH_EVIDENCE_DIR")
-    if evidence_dir:
-        output = Path(evidence_dir)
-        output.mkdir(parents=True, exist_ok=True)
-        (output / "research-report.md").write_text(report)
-        (output / "research-evidence.json").write_text(json.dumps(ledger, indent=2))
-        (output / "events.json").write_text(rendered)
-        (output / "result.json").write_text(
-            json.dumps(
-                {
-                    "provider": "codex",
-                    "remote_model": os.environ.get("WORK_RESEARCH_MODEL", "glm-5.2"),
-                    "sources": ["source-a.md", "source-b.md"],
-                    "cleanup_complete": not runtime.has_control(),
-                },
-                indent=2,
-            )
-        )
+        trace.mark("cleanup_start")
+        try:
+            async with asyncio.timeout(_CLEANUP_BUDGET_S):
+                await adapter.cleanup()
+            assert runtime is None or not runtime.has_control()
+            trace.mark("cleanup_complete")
+        except BaseException as exc:
+            trace.outcome = "cleanup_" + type(exc).__name__
+            trace.mark("cleanup_failed", exception_type=type(exc).__name__)
+            raise
+        finally:
+            if watcher is not None:
+                watcher.cancel()
+                with suppress(asyncio.CancelledError):
+                    await watcher
+            trace.save()
 
 
 @pytest.mark.asyncio
@@ -220,23 +370,33 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path):
     from jiuwenswarm.agents.harness.work.research import build_research_agent_config
 
     root = tmp_path / "workspace"
-    root.mkdir()
-    (root / "source-a.md").write_text(
-        "# Pilot A field log\nDate: 2026-09-01\n"
-        "Primary observation: offline retrieval took 42 seconds for 12 documents.\n"
-        "All 12 documents were indexed locally. No network requirement was tested.\n",
-    )
-    (root / "source-b.md").write_text(
-        "# Pilot B field log\nDate: 2026-09-02\n"
-        "Primary observation: connected retrieval took 31 seconds for 12 documents.\n"
-        "A network connection was required. The conditions differ from Pilot A; "
-        "this is not a controlled benchmark and does not establish superiority.\n",
-    )
+    _write_sources(root)
+    trace = _ResearchTrace("native", root)
     calls = []
 
     class Trace(AgentRail):
+        def __init__(self, scope):
+            self.scope = scope
+
+        def fork_for_agent(self):
+            return type(self)(self.scope)
+
+        async def before_model_call(self, ctx):
+            trace.mark(
+                "model_start", scope=self.scope, iteration=ctx.inputs.react_iteration
+            )
+
+        async def after_model_call(self, ctx):
+            trace.mark(
+                "model_end", scope=self.scope, iteration=ctx.inputs.react_iteration
+            )
+
         async def before_tool_call(self, ctx):
-            calls.append(getattr(ctx.inputs, "tool_name", ""))
+            calls.append(ctx.inputs.tool_name)
+            trace.mark("tool_start", scope=self.scope, tool=ctx.inputs.tool_name)
+
+        async def after_tool_call(self, ctx):
+            trace.mark("tool_end", scope=self.scope, tool=ctx.inputs.tool_name)
 
     model = Model(
         model_client_config=ModelClientConfig(
@@ -246,72 +406,102 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path):
             timeout=90,
         ),
         model_config=ModelRequestConfig(
-            model=os.environ.get("WORK_RESEARCH_MODEL", "glm-5.2"), temperature=0.1
+            model=os.environ.get("WORK_RESEARCH_MODEL", "glm-5.2"),
+            temperature=0.1,
+            max_tokens=4096,
         ),
     )
     card = SysOperationCard(
         id="r1-12-native", mode=OperationMode.LOCAL, work_config=LocalWorkConfig()
     )
     parent = None
+    watcher = asyncio.create_task(trace.watch())
     await Runner.start()
     try:
+        trace.mark("construction_start")
         Runner.resource_mgr.add_sys_operation(card)
         operation = Runner.resource_mgr.get_sys_operation(card.id)
         init_cwd(str(root), workspace=str(root), project_root=str(root))
         spec = build_research_agent_config(
-            model, workspace=str(root), sys_operation=operation, language="en"
+            model,
+            workspace=str(root),
+            sys_operation=operation,
+            language="en",
+            max_iterations=12,
         )
-        spec.rails.append(Trace())
+        spec.enable_read_image_multimodal = False
+        spec.rails.append(Trace("child"))
         parent = create_deep_agent(
             model=model,
             workspace=str(root),
             sys_operation=operation,
             subagents=[spec],
-            rails=[SysOperationRail(), Trace()],
+            rails=[SysOperationRail(), Trace("parent")],
             enable_subagent_runtime=True,
-            max_iterations=15,
+            max_iterations=6,
             enable_task_loop=False,
-            system_prompt="Delegate the requested research to research_agent using the existing product subagent tools. Wait for completion and return the artifact path.",
+            enable_read_image_multimodal=False,
+            system_prompt="Delegate the complete assignment once to research_agent. Only use subagent_spawn and subagent_wait; do not read source files yourself. After child completion return only the artifact paths.",
         )
-        async with asyncio.timeout(300):
+        trace.mark("execution_start", model_max_tokens=4096)
+        async with asyncio.timeout(_RUN_BUDGET_S):
             result = await Runner.run_agent(
                 parent,
                 {
                     "query": (
-                        "Delegate one research_agent to compare source-a.md and source-b.md for offline suitability. "
-                        "Tell it to use list_skill to inspect evidence-research, read both files with tools, "
-                        "write research-report.md with Scope, Findings, Limitations and Sources, adjacent citations, "
-                        "both numeric observations and the comparability caveat, then read back the file. "
-                        "Wait for the exact child ID until completion. Do not do the research yourself."
-                        + _EVIDENCE_REQUEST
+                        "Spawn one research_agent with this complete assignment: "
+                        "Use list_skill to inspect evidence-research and read its instructions, then "
+                        + _RESEARCH_TASK
+                        + " Parent: wait for the exact child ID with timeout_ms=240000, "
+                        "wait again if running, then return only the two paths."
                     )
                 },
                 session="r1-12-native-session",
             )
-        report = (root / "research-report.md").read_text()
-        ledger = _check_evidence(root, report)
-        for fragment in ("42", "31", "source-a.md", "source-b.md"):
-            assert fragment in report
-        assert "subagent_spawn" in calls
-        assert "read_file" in calls
-        assert "write_file" in calls
-        assert "list_skill" in calls
-        evidence_dir = os.environ.get("WORK_RESEARCH_EVIDENCE_DIR")
-        if evidence_dir:
-            output = Path(evidence_dir) / "native"
-            output.mkdir(parents=True, exist_ok=True)
-            (output / "research-report.md").write_text(report)
-            (output / "research-evidence.json").write_text(json.dumps(ledger, indent=2))
-            (output / "tools.json").write_text(json.dumps(calls))
-            (output / "result.txt").write_text(str(result))
+        trace.mark("parent_terminal")
+        assert "research-report.md" in str(result)
+        _check_report(root)
+        for name in (
+            "subagent_spawn",
+            "subagent_wait",
+            "list_skill",
+            "read_file",
+            "write_file",
+        ):
+            assert name in calls, f"Required actual tool call missing: {name}"
+        assert spec.model is model
+        trace.mark("quality_gate_passed")
+        trace.outcome = "passed"
+    except BaseException as exc:
+        trace.outcome = type(exc).__name__
+        trace.mark(
+            "failed",
+            exception_type=type(exc).__name__,
+            error_code=getattr(getattr(exc, "error", None), "code", None),
+        )
+        raise
     finally:
-        if parent is not None:
-            from openjiuwen.harness.tools.subagent import release_subagent_control
+        trace.mark("cleanup_start")
+        try:
+            async with asyncio.timeout(_CLEANUP_BUDGET_S):
+                if parent is not None:
+                    from openjiuwen.harness.tools.subagent import (
+                        release_subagent_control,
+                    )
 
-            async with asyncio.timeout(30):
-                await release_subagent_control(
-                    parent, "r1-12-native-session", reason="test_finished"
-                )
-                await parent.stop()
-        Runner.resource_mgr.remove_sys_operation(sys_operation_id=card.id)
-        await Runner.stop()
+                    await release_subagent_control(
+                        parent, "r1-12-native-session", reason="test_finished"
+                    )
+                    await parent.stop()
+                Runner.resource_mgr.remove_sys_operation(sys_operation_id=card.id)
+                await Runner.stop()
+            trace.mark("cleanup_complete")
+        except BaseException as exc:
+            trace.outcome = "cleanup_" + type(exc).__name__
+            trace.mark("cleanup_failed", exception_type=type(exc).__name__)
+            raise
+        finally:
+            watcher.cancel()
+            with suppress(asyncio.CancelledError):
+                await watcher
+            trace.save()

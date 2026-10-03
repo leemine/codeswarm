@@ -35,3 +35,22 @@ Work 中委派一个研究问题：界定问题和比较维度 → 通过既有�
 最后源码复核还修复了 Native 并行研究 child 的可变 rail 复用：Work 私有薄子类实现既有 fork_for_agent 接缝，core 每个 child 取得独立 SysOperationRail / SkillUseRail，父 SysOperation 权限边界保持同一。真实 core.create_subagent 两 child 的隔离/缓存回归通过；最终该专项与 External child 范围 35 passed（5.20s），最终政策专项 52 passed（5.25s）。实现提交 fb238e9e，修正提交 4246a245，均仅本地。
 
 交付证据位于管理工作区 `artifacts/r1-three-lines/research-evidence/final-package/`，仅含两 Provider 原始报告、证据 JSON、源资料和结果/hash 统计，不含配置/环境/凭据。最终原始测试 log/XML 位于 `/tmp/r1-12-evidence/`（final-unit、final-policy、fork-final、remote、native；schema-failure另存 quality-schema-*）；日志已替换实际凭据，未纳入源码提交。最初与最终尝试分开保留。Native 覆盖产品研究 spec + 原子代理运行时，Codex 覆盖产品 EngineAgentAdapter；本测试不宣称完整 WebSocket/Gateway CLI、浏览器刷新/恢复或 Team 通道矩阵成功。OpenCode 仅确定性同引擎测试；其真实远端、Claude Code/DSH、受限 Native 包技能访问及全面引用质量评估另需验证。本轮未做远端推送或合并。
+
+## 2026-10-03 闭合复验
+
+本轮从已集成 swarm `2df3fa4a35e6c60ed7e4360306c43e494a0bf185` 的干净工作树创建 `codex/r1-12-closure-20261003`；仅改研究专项测试及本记录，生产研究政策/工厂与公共 Runtime、协议、Session、engine、锁保持不变。使用 `/tmp/r1-three-locked-venv/bin/python`，实际 core 非 editable `7cc1dfa9a1fc2ed130dae92fb586b9a7332b3f9a`，仅 swarm 工作树在 PYTHONPATH。真实模型仍为已授权 glm-5.2，输入只有本任务两份临时四行人工资料，没有用户资料；各 Provider 串行运行，HOME/data/tmp/Provider runtime 隔离，凭据只经内存和环境传递，证据包不包含配置、环境或凭据。
+
+这次没有仅调大超时：将问题明确限定为两次记录的检索运行，要求报告最多 300 词、child 最后回复最多 40 词、parent 仅委派/等待/返回路径；Native 模型上限 4096 tokens，关闭本夹具无关的图片能力探测。保留真实读源、Skill、报告/JSON 读回及未知/观察范围/精确引用行号 gate。任务总预算 360 秒，清理 30 秒，外层 430 秒。Codex idle 100 秒且不自动重试，单次 child wait 60 秒并仅继续同一个 ID，避免合法 MCP 等待触发 idle；Native 没有该 Codex idle 限制，单次 wait 240 秒。增加测试专用分阶段时间线，不引入产品调度器。异常仅记录类型和既有非秘密错误码，失败/清理失败不写成通过。
+
+- Native 完整 live：1 passed / 2 deselected，149.81 秒。真实 parent → 原 research_agent → list_skill/Skill 原文及来源 read_file → write_file → 输出 read_file → parent 返回路径 → 清理。质量检查通过：A unknown，B required_in_observed_run，两条精确短原文均在原文件第 4 行，报告 268 词并保留比较局限。时间线：23.115 秒 spawn；81.212 秒观测到两产物；84.357 秒完成输出读回；128.022 秒 child wait 返回；146.338 秒 parent 结束；146.369 秒清理结束。模型调用占主要耗时，文件工具毫秒级；child 最后一次模型调用约 43.65 秒，parent 收尾约 18.32 秒。parent 额外做了 glob 路径检查，未再次读取源文件。
+- Codex 完整 live：1 passed / 2 deselected，100.93 秒。真实产品 EngineAgentAdapter/MCP 子工具与相同 Codex Provider child；报告 261 词，严格质量 gate、parent completed 与输出路径断言、清理均通过。时间线：11.657 秒 spawn；58.238 秒两产物；第一次 wait 在 78.200 秒返回，第二次在 91.398 秒返回；96.163 秒 parent completed，96.438 秒清理结束。人工读报告核对来源/局限与 JSON 一致。
+- 受限 Native Skill 使用真实 SysOperation，不以 mock 代替文件权限：仅 workspace root 时包目录读取被拒绝，inline policy 保留；host 显式准入 workspace + 打包 Skill root 后可以读取 Skill，无关外部临时文件在两种配置下均被拒绝，父 SysOperation/根列表未被扩大。此处是路径准入验证，不声称底层根列表提供只读授权。新增 `tests/unit_tests/agents/harness/work/test_research_skill_access.py` 两分支，与工厂专项合跑 13 passed（5.80 秒）。
+- 受影响回归：研究工厂、实际 Skill 边界、External profile/执行和远端用例收集，共 55 passed / 3 skipped（远端 opt-in 关闭）/ 1 既有 AuthlibDeprecationWarning，5.59 秒。未改警告白名单。ruff 与 diff whitespace 检查通过。
+
+运行入口：隔离环境中 `RUN_WORK_RESEARCH_REMOTE=1 ... /tmp/r1-three-locked-venv/bin/python -m pytest --no-cov -q tests/system_tests/test_work_research_remote.py -k <native|codex|opencode> --tb=short --junitxml=<output>/run.xml`。可重现配置由测试中的 Provider 设置与环境参数定义；实际密钥不写入命令。受影响命令：同解释器 `-m pytest --no-cov -q tests/unit_tests/agents/harness/work/test_research.py tests/unit_tests/agents/harness/work/test_research_skill_access.py tests/unit_tests/runtime/harness/test_external_subagent_profiles.py tests/unit_tests/runtime/harness/test_external_subagent_execution.py tests/system_tests/test_work_research_remote.py --tb=short --junitxml=/tmp/r1-12-closure/affected.xml`（远端开关关闭）。原始 log/XML 与脱敏时间线位于 `/tmp/r1-12-closure/`，旧轮失败记录不改写为成功。
+
+OpenCode 最小真实同引擎场景也通过：1 passed / 2 deselected，68.34 秒；实际 EngineAgentAdapter/MCP → OpenCode research child → 两份来源/报告/JSON → parent completed → 清理，严格质量 gate 通过。spawn 16.310 秒，报告 47.985 秒、JSON 48.989 秒可见，child wait 60.710 秒返回，parent 64.827 秒完成，65.183 秒清理完成。CLI 的 SHA256 与锁 core 指定值 `bb71f45b564f9234a97f54d6252a4a41d2f4388ae4b078918f691824cc3b3e54` 一致；本机非 root、cgroup v2、systemd 用户服务可用。首轮因测试未创建 Provider 要求的 0700 runtime 根目录而在模型调用前失败（1 failed，3.54 秒），补齐测试 setup 后重新通过；首轮保存在 `opencode-initial-startup-failure`，不计为环境缺失或成功。
+
+Native 成功调用时与最终源码均为 wait 240000ms；曾在编辑期间短暂改为 60000ms，但未以此启动 Native live，随后恢复，避免把未运行配置冒充成功。Codex/OpenCode 为 60000ms。后续测试改动仅为 OpenCode 私有目录 setup、非秘密异常错误码记录与说明；Native/Codex 成功路径不变。主集成树的最终受影响回归仍应按新的集成 SHA 留证，不把本分支结果冒称另一 SHA 的成功。
+
+本轮闭合的是三种已运行 Provider 的代表性研究流程与受限 Native Skill 文件访问边界；不是 Claude Code/DSH、完整渠道/UI 恢复矩阵或任意研究内容的普遍语义正确性保证。旧轮已知质量失败保留；当前三份报告的断言与人工核对均通过。没有推送、远端合并或依赖升级。
