@@ -356,6 +356,29 @@ class _ResearchTrace:
         self.parent_source_reads = set()
         self.parent_report_reads = []
         self.parent_revision_count = 0
+        self.parent_final_text = ""
+        self.spawned_child_ids = set()
+        self.parent_revision_targets = []
+
+    def observe_parent_control(self, tool, arguments, result):
+        name = tool.rsplit(".", 1)[-1]
+        if name.endswith("subagent_spawn"):
+            self.spawned_child_ids.update(re.findall(
+                r"\b[\w-]+_sub_[\w-]+\b", json.dumps(result, default=str),
+            ))
+        elif name.endswith("subagent_send_input"):
+            try:
+                args = json.loads(arguments) if isinstance(arguments, str) else arguments
+            except ValueError:
+                args = None
+            child = args.get("subagent_id") if isinstance(args, dict) else None
+            if child is None:
+                # OpenCode can publish STARTED before arguments are available;
+                # the completed product result retains the resolved child ID.
+                resolved = set(re.findall(r"\b[\w-]+_sub_[\w-]+\b", json.dumps(result, default=str)))
+                if len(resolved) == 1:
+                    child = resolved.pop()
+            self.parent_revision_targets.append(child)
 
     def observe_parent_read(self, tool, arguments, result):
         name = tool.rsplit(".", 1)[-1].lower()
@@ -363,12 +386,16 @@ class _ResearchTrace:
             return
         args = json.dumps(arguments, default=str)
         output = json.dumps(result, default=str)
+        def read_path(name):
+            # A completed OpenCode read includes its actual path even if the
+            # earlier projected STARTED event still had empty arguments.
+            return name in args or f"<path>{self.root / name}</path>" in output
         for source in ("source-a.md", "source-b.md"):
             original = (self.root / source).read_text().splitlines()
-            if source in args and all(line in output for line in original[2:]):
+            if read_path(source) and all(line in output for line in original[2:]):
                 self.parent_source_reads.add(source)
                 self.mark("parent_source_read", source=source, tool=tool)
-        if "research-report.md" in args and "## Sources" in output:
+        if read_path("research-report.md") and "## Sources" in output:
             elapsed = round(time.monotonic() - self.started, 3)
             self.parent_report_reads.append(elapsed)
             self.mark("parent_report_read", tool=tool)
@@ -428,6 +455,8 @@ class _ResearchTrace:
                     "parent_source_reads": sorted(self.parent_source_reads),
                     "parent_report_reads": self.parent_report_reads,
                     "parent_revision_count": self.parent_revision_count,
+                    "spawned_child_ids": sorted(self.spawned_child_ids),
+                    "parent_revision_targets": self.parent_revision_targets,
                     "events": self.events,
                 },
                 indent=2,
@@ -438,6 +467,7 @@ class _ResearchTrace:
         (output / "review-calls.json").write_text(
             json.dumps(self.reviews, ensure_ascii=False, indent=2)
         )
+        (output / "parent-final.txt").write_text(self.parent_final_text)
 
 
 def _observe_reviews(monkeypatch, trace):
@@ -486,6 +516,8 @@ def _check_review_delivery(root, report, reviews, max_reviews=3):
 
 def _check_parent_acceptance(trace):
     assert trace.parent_revision_count <= 1, "Parent exceeded one same-child revision"
+    assert len(trace.spawned_child_ids) == 1, "Expected one original research child"
+    assert all(child in trace.spawned_child_ids for child in trace.parent_revision_targets)
     assert trace.parent_source_reads == {"source-a.md", "source-b.md"}, (
         "Parent did not independently read both original source files"
     )
@@ -634,6 +666,10 @@ async def test_work_research_real_external_cited_artifact(
                         payload.get("tool_name", ""), call.get("arguments", call.get("args")),
                         payload.get("result"),
                     )
+                    trace.observe_parent_control(
+                        payload.get("tool_name", ""), call.get("arguments", call.get("args")),
+                        payload.get("result"),
+                    )
                 elif event == "chat.delta":
                     parent_text.append(payload.get("content", ""))
                 elif event == "chat.final":
@@ -642,6 +678,7 @@ async def test_work_research_real_external_cited_artifact(
         assert terminal == "completed", (
             "Provider stream closed without successful terminal"
         )
+        trace.parent_final_text = "".join(parent_text)
         assert "research-report.md" in "".join(parent_text)
         assert trace.child_providers == [provider], (
             "Research child did not use the parent's Provider"
@@ -747,6 +784,7 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path, monkeypa
             trace.mark("tool_end", scope=self.scope, tool=ctx.inputs.tool_name)
             if self.scope == "parent":
                 trace.observe_parent_read(ctx.inputs.tool_name, ctx.inputs.tool_args, ctx.inputs.tool_result)
+                trace.observe_parent_control(ctx.inputs.tool_name, ctx.inputs.tool_args, ctx.inputs.tool_result)
             if self.scope == "parent" and ctx.inputs.tool_name == "subagent_wait":
                 problem = _native_wait_problem(ctx.inputs.tool_result, root)
                 if problem:
@@ -795,12 +833,14 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path, monkeypa
                 parent,
                 {
                     "query": (
-                        _RESEARCH_TASK
+                        "Use the research agent for this assignment: " + _RESEARCH_TASK
                     )
                 },
                 session="r1-12-native-session",
             )
         trace.mark("parent_terminal")
+        if isinstance(result, dict):
+            trace.parent_final_text = str(result.get("output", ""))
         assert not child_failures, child_failures
         assert isinstance(result, dict) and result.get("result_type") == "answer", (
             result

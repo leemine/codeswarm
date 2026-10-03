@@ -8,6 +8,7 @@ import pytest
 from tests.system_tests.test_work_research_remote import (
     _check_review_delivery,
     _check_condition_comparison_citations,
+    _ResearchTrace,
     _write_sources,
 )
 
@@ -58,3 +59,36 @@ def test_comparison_needs_both_condition_observations_not_just_caveat():
     with pytest.raises(AssertionError, match="source-b.md observation"):
         _check_condition_comparison_citations(claim + " (source-a.md:3; source-b.md:4).")
     _check_condition_comparison_citations(claim + " (source-a.md:3; source-b.md:3-4).")
+
+
+def test_parent_observer_requires_original_read_and_tracks_same_child(reviewed):
+    root, _, _ = reviewed
+    trace = _ResearchTrace("fixture", root)
+    original = (root / "source-a.md").read_text()
+    trace.observe_parent_read("subagent_wait", "source-a.md", original)
+    trace.observe_parent_read("read_file", {"file_path": "source-a.md"}, "a summary only")
+    assert trace.parent_source_reads == set()
+    trace.observe_parent_read("read_file", {"file_path": "source-a.md"}, {"content": original})
+    assert trace.parent_source_reads == {"source-a.md"}
+    child = "parent-session_sub_research_agent_fixture"
+    trace.observe_parent_control("product.subagent_spawn", {}, {"subagent_id": child})
+    trace.observe_parent_control("product.subagent_send_input", '{"subagent_id":"' + child + '"}', {"status": "running"})
+    assert trace.spawned_child_ids == {child}
+    assert trace.parent_revision_targets == [child]
+
+
+def test_completed_read_path_handles_pending_opencode_arguments(reviewed):
+    root, _, _ = reviewed
+    trace = _ResearchTrace("opencode", root)
+    source = root / "source-a.md"
+    trace.observe_parent_read("read", {}, f"<path>{source}</path>\n<content>{source.read_text()}</content>")
+    assert trace.parent_source_reads == {"source-a.md"}
+    other = root / "untrusted-copy.md"
+    trace.observe_parent_read("read", {}, f"<path>{other}</path>\n<content>{(root / 'source-b.md').read_text()}</content>")
+    assert trace.parent_source_reads == {"source-a.md"}
+    child = "parent-session_sub_research_agent_fixture"
+    output = {"content": "subagent_id: " + child + "\nstatus: running"}
+    trace.observe_parent_control("product_tools_subagent_spawn", {}, output)
+    trace.observe_parent_control("product_tools_subagent_send_input", {}, output)
+    assert trace.spawned_child_ids == {child}
+    assert trace.parent_revision_targets == [child]
