@@ -306,15 +306,38 @@ class ExternalSubagentExecutionFactory:
                 if self._parent_route.recovery is not None
                 else None
             )
+            tool_gateway = (
+                browser_resources.gateway if browser_resources is not None else None
+            )
+            if (
+                self._work_research_enabled
+                and profile.subagent_type == RESEARCH_SUBAGENT_TYPE
+            ):
+                from jiuwenswarm.agents.harness.work.research_review import (
+                    build_research_review_tool,
+                )
+                from jiuwenswarm.runtime.harness.tool_gateway import (
+                    ProductToolGateway,
+                    ProductToolScope,
+                )
+
+                # Reuse the session's authenticated MCP lifecycle and child scope.
+                # This pure review tool grants no filesystem or network authority.
+                tool_gateway = ProductToolGateway(
+                    [build_research_review_tool()],
+                    scope=ProductToolScope(
+                        subject_id=child_subject_id,
+                        host_session_id=request.subagent_id,
+                        workspace=prospective_binding.workspace,
+                    ),
+                )
             session = prepare_execution_session(
                 self._child_source,
                 bindings=self._parent_route.bindings,
                 subject_id=child_subject_id,
                 host_session_id=request.subagent_id,
                 runtime_paths=self._parent_route.runtime_paths,
-                tool_gateway=(
-                    browser_resources.gateway if browser_resources is not None else None
-                ),
+                tool_gateway=tool_gateway,
                 recovery=child_recovery,
                 **({'event_observer': self._event_observer_factory(request.subagent_id, child_subject_id)}
                    if self._event_observer_factory is not None else {}),

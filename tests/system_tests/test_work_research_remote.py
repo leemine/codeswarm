@@ -13,6 +13,8 @@ candidate is joint source validation, not locked dependency acceptance.
 from __future__ import annotations
 
 import asyncio
+import copy
+import functools
 import json
 import os
 import re
@@ -334,6 +336,7 @@ class _ResearchTrace:
         self.events = []
         self.outcome = "running"
         self.child_providers = []
+        self.reviews = []
 
     def mark(self, stage: str, **details):
         self.events.append(
@@ -390,6 +393,55 @@ class _ResearchTrace:
                 indent=2,
             )
         )
+        # Only the synthetic source/draft and public tool result are captured.
+        # This observer neither changes tool feedback nor supplies correct answers.
+        (output / "review-calls.json").write_text(
+            json.dumps(self.reviews, ensure_ascii=False, indent=2)
+        )
+
+
+def _observe_reviews(monkeypatch, trace):
+    from jiuwenswarm.agents.harness.work import research_review
+
+    original = research_review.review_research_report
+
+    @functools.wraps(original)
+    def observed(sources, claims, question=None):
+        result = original(sources, claims, question)
+        trace.reviews.append(copy.deepcopy({
+            "sources": sources, "claims": claims, "question": question,
+            "result": result,
+        }))
+        trace.mark("research_review", structural_valid=result["structural_valid"])
+        return result
+
+    monkeypatch.setattr(research_review, "review_research_report", observed)
+
+
+def _check_review_delivery(root, report, reviews):
+    """Bind the final artifact to actual review calls and original fixture bytes."""
+    assert 1 <= len(reviews) <= 3, "Expected initial review and at most two revisions"
+    final = reviews[-1]
+    assert final["result"]["structural_valid"] is True
+    assert report == final["result"]["rendered_markdown"], (
+        "Final report differs from the reviewed rendering"
+    )
+    assert len(report.split()) <= 300, "Report exceeds the requested word budget"
+    seen = set()
+    for source in final["sources"]:
+        name = Path(source["id"]).name
+        assert name in {"source-a.md", "source-b.md"}
+        assert name not in seen
+        seen.add(name)
+        original = (root / name).read_text().splitlines()
+        supplied = source["text"].splitlines()
+        first = source["start_line"] - 1
+        assert supplied == original[first:first + len(supplied)], (
+            "Review input does not match the original source"
+        )
+        if source["complete"]:
+            assert first == 0 and supplied == original
+    assert seen == {"source-a.md", "source-b.md"}
 
 
 def _check_report(root: Path):
@@ -418,13 +470,14 @@ def _check_report(root: Path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["codex", "opencode"])
 async def test_work_research_real_external_cited_artifact(
-    tmp_path: Path, provider: str
+    tmp_path: Path, provider: str, monkeypatch
 ):
     if provider == "codex":
         pytest.importorskip("openai_codex")
     root = tmp_path / "workspace"
     _write_sources(root)
     trace = _ResearchTrace(provider, root)
+    _observe_reviews(monkeypatch, trace)
     model = {
         "model": os.environ.get("WORK_RESEARCH_MODEL", "glm-5.2"),
         "provider": "work_research_remote",
@@ -531,7 +584,8 @@ async def test_work_research_real_external_cited_artifact(
         assert trace.child_providers == [provider], (
             "Research child did not use the parent's Provider"
         )
-        _check_report(root)
+        report = _check_report(root)
+        _check_review_delivery(root, report, trace.reviews)
         trace.mark("quality_gate_passed")
         trace.outcome = "passed"
     except BaseException as exc:
@@ -562,7 +616,7 @@ async def test_work_research_real_external_cited_artifact(
 
 
 @pytest.mark.asyncio
-async def test_work_research_real_native_cited_artifact(tmp_path: Path):
+async def test_work_research_real_native_cited_artifact(tmp_path: Path, monkeypatch):
     from openjiuwen.core.foundation.llm import (
         Model,
         ModelClientConfig,
@@ -580,6 +634,7 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path):
     root = tmp_path / "workspace"
     _write_sources(root)
     trace = _ResearchTrace("native", root)
+    _observe_reviews(monkeypatch, trace)
     calls = []
     child_failures = []
 
@@ -690,13 +745,15 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path):
             result
         )
         assert "research-report.md" in str(result)
-        _check_report(root)
+        report = _check_report(root)
+        _check_review_delivery(root, report, trace.reviews)
         for name in (
             "subagent_spawn",
             "subagent_wait",
             "list_skill",
             "read_file",
             "write_file",
+            "review_research_report",
         ):
             assert name in calls, f"Required actual tool call missing: {name}"
         assert spec.model is model
