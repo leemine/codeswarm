@@ -941,7 +941,10 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path, monkeypa
                 # terminal: core can also emit errors in an answer envelope.
                 kind = chunk.get("type") if isinstance(chunk, dict) else getattr(chunk, "type", None)
                 payload = chunk.get("payload") if isinstance(chunk, dict) else getattr(chunk, "payload", None)
+                if kind == "llm_output" and isinstance(payload, dict):
+                    trace.parent_final_text += str(payload.get("content", ""))
                 if kind == "answer" and isinstance(payload, dict):
+                    assert result is None, "Unexpected duplicate Native terminal"
                     result = payload
                     trace.parent_final_text = str(payload.get("output", ""))
                     trace.mark("parent_terminal", terminal=payload.get("result_type"))
