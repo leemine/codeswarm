@@ -439,3 +439,62 @@ async def test_browser_cookie_origin_and_status_do_not_expose_credentials(creden
             )
         ).status_code == 403
         assert (await client.get(prefix + "/status")).json()["authenticated"] is True
+
+
+@pytest.mark.asyncio
+async def test_gateway_queue_retains_each_live_principal_without_wire_fields(credentials):
+    from dataclasses import asdict
+    from jiuwenswarm.common.schema.message import Message, ReqMethod
+    from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+    auth, tokens, _ = credentials
+    handler = object.__new__(MessageHandler)
+    handler._user_messages = asyncio.Queue()
+    handler._running = True
+    seen, tasks = [], []
+    handler._is_session_input_message = lambda _: False
+    async def control(msg):
+        async def child():
+            signed = auth.sign({'request_id': msg.id})
+            seen.append((msg.id, auth.verify(signed).identity().actor_id))
+        tasks.append(asyncio.create_task(child()))
+        if msg.id == 'bob':
+            handler._running = False
+        return True
+    handler._handle_channel_control = control
+    for actor in ('alice', 'bob'):
+        msg = Message(actor, 'req', 'web', None, {}, time.time(), True, req_method=ReqMethod.SESSION_CREATE)
+        msg._queued_organization_principal = object()  # Ignore any preexisting value.
+        with authenticated_scope(principal(auth, tokens, actor)):
+            handler.publish_user_messages_nowait(msg)
+        assert '_queued_organization_principal' not in asdict(msg)
+    await handler._forward_loop()
+    await asyncio.gather(*tasks)
+    assert seen == [('alice', 'alice'), ('bob', 'bob')]
+    assert current_identity() is None
+
+
+@pytest.mark.asyncio
+async def test_gateway_queue_rechecks_revoked_principal_before_controls(credentials):
+    from jiuwenswarm.common.schema.message import Message, ReqMethod
+    from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+    auth, tokens, _ = credentials
+    handler = object.__new__(MessageHandler)
+    handler._user_messages = asyncio.Queue()
+    handler._running = True
+    control = AsyncMock(return_value=True)
+    handler._is_session_input_message = lambda _: False
+    handler._handle_channel_control = control
+    errors = []
+    async def error_response(msg):
+        errors.append(msg)
+        handler._running = False
+    handler.publish_robot_messages = error_response
+    msg = Message('revoked', 'req', 'web', None, {}, time.time(), True, req_method=ReqMethod.SESSION_CREATE)
+    alice = principal(auth, tokens, 'alice')
+    with authenticated_scope(alice):
+        await handler.publish_user_messages(msg)
+    auth.revoke(alice)
+    await handler._forward_loop()
+    assert len(errors) == 1 and not errors[0].ok
+    control.assert_not_awaited()
+    assert current_identity() is None

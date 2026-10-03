@@ -289,6 +289,14 @@ def configured_authenticator() -> OrganizationAuthenticator | None:
     return _instances[resolved]
 
 
+def current_principal() -> AuthenticatedPrincipal | None:
+    """Capture an opaque host principal for an existing asynchronous queue."""
+    principal = _current.get()
+    if principal is not None:
+        principal.identity()
+    return principal
+
+
 def current_identity() -> TrustedIdentity | None:
     principal = _current.get()
     return principal.identity() if principal is not None else None

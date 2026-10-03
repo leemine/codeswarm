@@ -21,7 +21,7 @@ OWNER_METHODS = frozenset({
     'session.get_metadata', 'session.preview', 'session.pin', 'session.color_set',
     'session.rename', 'session.switch', 'session.plan_status', 'session.input.intent',
     'history.get', 'history.list_turns', 'chat.send', 'chat.resume', 'chat.answer',
-    'chat.cancel', 'session.stop', 'session.delete', 'session.rewind',
+    'chat.cancel', 'chat.interrupt', 'session.stop', 'session.delete', 'session.rewind',
     'session.rewind_and_restore', 'session.rewind_compact', 'session.rewind_context',
     'session.restore_files', 'session.rebind_project', 'surface.capabilities.get',
 })
