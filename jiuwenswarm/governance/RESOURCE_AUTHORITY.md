@@ -83,3 +83,21 @@ safe descriptor-relative/no-follow primitives for that boundary. Native shell
 text is never parsed to claim path confinement. Provider admission, operating
 system isolation and in-flight cancellation require their actual execution
 adapters and remain separate from this authorization backend.
+
+## Credential consumer boundary (implementation in progress)
+
+`BoundCredentialAuthority` is an internal host adapter over the same
+`ResourceGuard`. A host freezes exact `CredentialUse` references, purposes and
+sink destinations for one private execution. The resolver runs only after the
+current subject's explicit `credential/use` decision; a revision, identity or
+execution change while resolving discards the result. Consumer exceptions omit
+resolver diagnostics, which may contain secret values. The adapter does not
+persist credentials or create another grant store.
+
+Each actual transport request, including retry and redirect, must call
+`resolve_for_request` with its real, exact destination before sending. Returned
+values must not be cached in a model configuration or reused for later calls.
+A successful adapter unit test is not evidence that existing Model, MCP or
+Provider consumers have adopted it. Those production integrations and their
+real transport evidence remain required; unsupported consumers must not be
+represented as credential-isolated.
