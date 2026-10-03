@@ -4950,6 +4950,23 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             label="project.list",
         )
 
+    def _project_extension_handler(method):
+        async def handler(ws, req_id, params, session_id, user_id=None):
+            from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
+
+            await proxy_unary_request(
+                channel=channel,
+                agent_client=_resolve(agent_client),
+                ws=ws,
+                req_id=req_id,
+                params=params if isinstance(params, dict) else {},
+                session_id=session_id,
+                user_id=user_id,
+                req_method=method,
+                label=method.value,
+            )
+        return handler
+
     async def _project_get_sessions(ws, req_id, params, session_id, user_id=None):
         """获取项目下的非置顶普通会话列表（目标 AgentServer 执行）。"""
         from jiuwenswarm.common.schema.message import ReqMethod
@@ -6933,6 +6950,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("session.rename", _session_rename)
     channel.register_method("session.pin", _session_pin)
 
+    from jiuwenswarm.common.schema.message import ReqMethod as ProjectMethod
+
+    for method in (
+        ProjectMethod.PROJECT_EXTENSIONS_GET,
+        ProjectMethod.PROJECT_EXTENSIONS_UPDATE,
+        ProjectMethod.PROJECT_ACL_UPDATE,
+    ):
+        channel.register_method(method.value, _project_extension_handler(method))
     channel.register_method("project.list", _project_list)
     channel.register_method("project.info", _project_info)
     channel.register_method("project.get_sessions", _project_get_sessions)

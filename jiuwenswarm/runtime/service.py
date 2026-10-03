@@ -10,15 +10,23 @@ operations; WebSocket framing remains in AgentServer.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import inspect
 import json
 import logging
+import os
 import uuid
 from contextlib import aclosing
-from dataclasses import replace
+from dataclasses import asdict, replace
+from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from jiuwenswarm.governance.contracts import ProjectAction, ProjectAuthorizer, TrustedIdentity
+from jiuwenswarm.governance.preparation import (
+    GovernanceError, PreparedRequest, SubmissionGuard, compensate_owned,
+)
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.runtime.session_provisioner import (
     PreparedSessionProvision,
@@ -295,6 +303,14 @@ async def _release_process_runtime_extensions() -> None:
                 ExtensionRegistry.reset_instance()
 
 
+class _StoredProjectAuthority:
+    def authorize(self, project_id, actor_id, action):
+        # The default still checks persisted ACLs when host governance injection
+        # is absent. A transport identity never substitutes for authentication.
+        from jiuwenswarm.server.runtime.session.project_access import ProjectAccessStore
+        return ProjectAccessStore().authorize(project_id, actor_id, action)
+
+
 class AgentRuntime:
     """Own the existing ``AgentManager`` and its in-memory resources.
 
@@ -318,7 +334,12 @@ class AgentRuntime:
         participant_registry: RuntimeParticipantRegistry | None = None,
         resource_lease: RuntimeResourceLease | None = None,
         team_execution_controller: object | None = None,
+        trusted_identity_resolver: Callable[[object], TrustedIdentity | None] | None = None,
+        project_authorizer: ProjectAuthorizer | None = None,
     ) -> None:
+        self._trusted_identity_resolver = trusted_identity_resolver
+        self._submission_guard = SubmissionGuard(project_authorizer or _StoredProjectAuthority())
+        self._governed_provisions: dict[PreparedSessionProvision[Any], PreparedRequest] = {}
         self._agent_manager = agent_manager or AgentManager()
         self._initializer = initializer or _initialize_runtime_dependencies
         self._initialize_extensions = initializer is None
@@ -377,6 +398,181 @@ class AgentRuntime:
         self._pending_session_provisions: set[PreparedSessionProvision[Any]] = set()
         self._started = False
         self._closed = False
+
+    def _governance_identity(self, value: object) -> TrustedIdentity | None:
+        identity = self._trusted_identity_resolver(value) if self._trusted_identity_resolver else None
+        if identity is not None and not isinstance(identity, TrustedIdentity):
+            raise GovernanceError("host identity resolver returned an invalid identity")
+        return identity
+
+    def _governance_project(self, value: object, *, action: ProjectAction = "execute") -> str:
+        params = getattr(value, "params", None)
+        params = params if isinstance(params, dict) else {}
+        metadata = getattr(value, "metadata", None)
+        metadata = metadata if isinstance(metadata, dict) else {}
+        project_id = str(getattr(value, "project_id", "") or params.get("project_id") or metadata.get("project_id") or "").strip()
+        project_dir = str(getattr(value, "project_dir", "") or params.get("project_dir") or metadata.get("project_dir") or "").strip()
+        # Legacy/Team preparation accepts cwd/trusted_dirs as its workspace.
+        # Code also uses cwd independently of project identity, so inspect every
+        # declared workspace for protected aliases without making a new project.
+        declared_dirs = [params.get("cwd"), metadata.get("cwd")]
+        trusted_dirs = params.get("trusted_dirs")
+        if isinstance(trusted_dirs, list):
+            declared_dirs.extend(trusted_dirs)
+        declared_dirs = [path.strip() for path in declared_dirs if isinstance(path, str) and path.strip()]
+        work_mode = str(getattr(value, "work_mode", "") or params.get("work_mode") or "work")
+        session_id = getattr(value, "session_id", None)
+        if session_id:
+            from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+            stored = get_session_metadata(session_id, cache_bust=True, enable_writeback=False) or {}
+            work_mode = str(stored.get("work_mode") or work_mode)
+            locked_id = str(stored.get("project_id") or "").strip()
+            locked_dir = str(stored.get("project_dir") or "").strip()
+            if locked_id:
+                if project_id and project_id != locked_id:
+                    raise GovernanceError("request project does not match the Session project")
+                project_id = locked_id
+            if locked_dir:
+                if project_dir and project_dir != locked_dir:
+                    raise GovernanceError("request directory does not match the Session project")
+                project_dir = locked_dir
+        from jiuwenswarm.server.runtime.session.project_store import (
+            get_project_by_id, get_project_by_dir_and_mode, list_projects,
+        )
+        if project_id:
+            project = get_project_by_id(project_id, cache_bust=True)
+            registered_dir = str(getattr(project, "project_dir", "") or "")
+            if registered_dir:
+                if project_dir and Path(project_dir).resolve() != Path(registered_dir).resolve():
+                    raise GovernanceError("project ID and directory identify different projects")
+                project_dir = registered_dir
+        if not project_dir and declared_dirs:
+            project_dir = declared_dirs[0]
+        if project_dir:
+            project = get_project_by_dir_and_mode(project_dir, work_mode, cache_bust=True)
+            directory_id = str(getattr(project, "project_id", "") or "")
+            if directory_id:
+                if project_id and project_id != directory_id:
+                    raise GovernanceError("project ID and directory identify different projects")
+                project_id = directory_id
+            selected_paths = {Path(path).resolve() for path in [project_dir, *declared_dirs]}
+            for candidate in list_projects(include_hidden=True, cache_bust=True):
+                if candidate.project_id == project_id or not candidate.project_dir:
+                    continue
+                candidate_path = Path(candidate.project_dir).resolve()
+                if any(selected_path == candidate_path or selected_path.is_relative_to(candidate_path)
+                       or candidate_path.is_relative_to(selected_path) for selected_path in selected_paths):
+                    decision = self._submission_guard.check_access(
+                        candidate.project_id, self._governance_identity(value), action,
+                    )
+                    if decision is not None and decision.revision > 0:
+                        raise GovernanceError("directory overlaps a different protected project")
+        return project_id
+
+    def _authorize_session_mutation(self, session_id: str, channel_id: str) -> None:
+        from jiuwenswarm.common.schema.agent import AgentRequest
+        from jiuwenswarm.server.runtime.session.session_history import is_valid_session_id
+
+        normalized = str(session_id or "").strip()
+        # Preserve the Provisioner's established BAD_REQUEST result for invalid
+        # IDs before any resource can be addressed.
+        if not normalized or not is_valid_session_id(normalized):
+            return
+        request = AgentRequest(
+            request_id="", session_id=normalized, channel_id=channel_id,
+            req_method=ReqMethod.SESSION_DELETE,
+        )
+        project_id = self._governance_project(request, action="write")
+        self._submission_guard.check_access(project_id, self._governance_identity(request), "write")
+
+    def _governance_generation(self, session_id: str) -> int | None:
+        snapshot = self._session_coordinator.snapshot_session(session_id) if session_id else None
+        return snapshot.generation if snapshot else None
+
+    def _governance_owned_request(self, request: AgentRequest) -> AgentRequest:
+        project_id = self._governance_project(request)
+        identity = self._governance_identity(request)
+        if project_id or identity is not None:
+            self._submission_guard.check_access(project_id, identity, "execute")
+            return copy.deepcopy(request)
+        return request
+
+    def _prepare_governed_request(self, request: AgentRequest) -> PreparedRequest | None:
+        project_id = self._governance_project(request)
+        identity = self._governance_identity(request)
+        if not project_id and identity is None:
+            return None
+        session_id = request.session_id or ""
+        return self._submission_guard.prepare(
+            request_id=request.request_id, identity=identity, project_id=project_id,
+            action="execute", session_id=session_id,
+            generation=self._governance_generation(session_id), inputs=asdict(request),
+        )
+
+    def _commit_governed_request(self, prepared: PreparedRequest | None, request: AgentRequest) -> None:
+        if prepared is None:
+            return
+        if self._governance_project(request) != prepared.project_id:
+            raise GovernanceError("request project changed during preparation")
+        if self._governance_identity(request) != prepared.identity:
+            raise GovernanceError("trusted identity changed during preparation")
+        self._submission_guard.begin_submission(
+            prepared, generation=self._governance_generation(prepared.session_id),
+        )
+
+    def _prepare_governed_provision(self, provision_input: object) -> PreparedRequest | None:
+        identity = self._governance_identity(provision_input)
+        session_id = str(getattr(provision_input, "source_session_id", "")
+                         or getattr(provision_input, "target_session_id", "")
+                         or getattr(provision_input, "requested_session_id", "") or "").strip()
+        from jiuwenswarm.server.runtime.session.work_mode import default_work_mode_for_channel
+        work_mode = getattr(provision_input, "work_mode", None) or default_work_mode_for_channel(
+            getattr(provision_input, "channel_id", "") or "web"
+        )
+        inputs = asdict(provision_input)
+        for name in ("cwd", "project_dir"):
+            if isinstance(inputs.get(name), os.PathLike):
+                inputs[name] = os.fsdecode(inputs[name])
+        resource = SimpleNamespace(
+            session_id=session_id, project_id=getattr(provision_input, "project_id", ""),
+            project_dir=getattr(provision_input, "project_dir", ""),
+            work_mode=work_mode,
+            params={"cwd": inputs.get("cwd", "")},
+        )
+        project_id = self._governance_project(resource)
+        if not project_id and identity is None:
+            return None
+        return self._submission_guard.prepare(
+            request_id=getattr(provision_input, "create_token", "") or uuid.uuid4().hex,
+            identity=identity, project_id=project_id, action="execute",
+            session_id=session_id, generation=self._governance_generation(session_id),
+            inputs=inputs,
+        )
+
+    def _owns_new_preparation_scope(self, request: AgentRequest, governed: PreparedRequest | None) -> bool:
+        # Only a serialized single-Agent execution can establish exclusive new
+        # Session resource ownership. Shared roots and previously bound sessions
+        # remain with AgentManager and must never be torn down by this request.
+        if governed is None or not self.uses_session_runtime(request):
+            return False
+        lookup = getattr(self._agent_manager, "get_agent_for_session_nowait", None)
+        bindings = getattr(self._agent_manager, "_session_execution_bindings", None)
+        if not callable(lookup) or not isinstance(bindings, dict):
+            return False
+        key = ((request.channel_id or "default").strip().lower(), request.session_id or "")
+        return key not in bindings and lookup(*key) is None
+
+    async def _compensate_governed_preparation(self, request, governed, owns_new_scope) -> None:
+        if (not owns_new_scope or governed is None
+                or self._submission_guard.outcome(governed) not in {"prepared", "rejected"}):
+            return
+        cleanup = getattr(self._agent_manager, "cleanup_session_runtime", None)
+        if callable(cleanup):
+            failures = await compensate_owned((lambda: cleanup(
+                channel_id=request.channel_id or "default", session_id=request.session_id or "",
+            ),))
+            for failure in failures:
+                logger.error("Owned request preparation compensation failed: %s", failure)
 
     @property
     def agent_manager(self) -> AgentManager:
@@ -956,11 +1152,17 @@ class AgentRuntime:
             self._session_provision_prepares += 1
 
         prepared: PreparedSessionProvision[SessionForkResult] | None = None
+        governed = None
         try:
-            prepared = await self._session_provisioner.prepare_session_fork(
-                provision_input
-            )
+            governed = self._prepare_governed_provision(provision_input)
+            prepared = await self._session_provisioner.prepare_session_fork(provision_input)
+            if governed is not None:
+                self._governed_provisions[prepared] = governed
             return prepared
+        except BaseException:
+            if governed is not None:
+                self._submission_guard.reject(governed)
+            raise
         finally:
             self._session_provision_prepares -= 1
             if prepared is not None:
@@ -976,11 +1178,17 @@ class AgentRuntime:
             self._session_provision_prepares += 1
 
         prepared: PreparedSessionProvision[SessionCreateResult] | None = None
+        governed = None
         try:
-            prepared = await self._session_provisioner.prepare_session_create(
-                provision_input
-            )
+            governed = self._prepare_governed_provision(provision_input)
+            prepared = await self._session_provisioner.prepare_session_create(provision_input)
+            if governed is not None:
+                self._governed_provisions[prepared] = governed
             return prepared
+        except BaseException:
+            if governed is not None:
+                self._submission_guard.reject(governed)
+            raise
         finally:
             self._session_provision_prepares -= 1
             if prepared is not None:
@@ -996,11 +1204,17 @@ class AgentRuntime:
             self._session_provision_prepares += 1
 
         prepared: PreparedSessionProvision[SessionSwitchResult] | None = None
+        governed = None
         try:
-            prepared = await self._session_provisioner.prepare_session_switch(
-                provision_input
-            )
+            governed = self._prepare_governed_provision(provision_input)
+            prepared = await self._session_provisioner.prepare_session_switch(provision_input)
+            if governed is not None:
+                self._governed_provisions[prepared] = governed
             return prepared
+        except BaseException:
+            if governed is not None:
+                self._submission_guard.reject(governed)
+            raise
         finally:
             self._session_provision_prepares -= 1
             if prepared is not None:
@@ -1016,12 +1230,27 @@ class AgentRuntime:
         """Commit a prepared Session operation before Runtime shutdown."""
         async with self._lifecycle_lock:
             self._require_started()
+        governed = self._governed_provisions.get(prepared)
+        if governed is not None:
+            try:
+                self._submission_guard.begin_submission(
+                    governed, generation=self._governance_generation(governed.session_id),
+                )
+            except GovernanceError as exc:
+                if (prepared.state is SessionProvisionState.PREPARED
+                        and self._submission_guard.outcome(governed) == "rejected"):
+                    failures = await compensate_owned((lambda: self.abort_session_provision(prepared),))
+                    for failure in failures:
+                        exc.add_note(f"owned provision compensation failed: {failure}")
+                raise
         try:
             result = await self._session_provisioner.commit_session_provision(
                 prepared,
                 timing=timing,
                 context=context,
             )
+            if governed is not None:
+                self._submission_guard.accepted(governed)
             if isinstance(result, SessionCreateResult):
                 mode = result.canonical_mode
                 work_mode = result.work_mode
@@ -1052,6 +1281,9 @@ class AgentRuntime:
             self._require_started()
         try:
             await self._session_provisioner.abort_session_provision(prepared)
+            governed = self._governed_provisions.pop(prepared, None)
+            if governed is not None:
+                self._submission_guard.reject(governed)
         finally:
             self._discard_finalized_session_provision(prepared)
 
@@ -1128,6 +1360,12 @@ class AgentRuntime:
         from jiuwenswarm.runtime.request import prepare_chat_turn
 
         prepare_kwargs: dict[str, Any] = {"sync_metadata": sync_metadata}
+        identity = self._governance_identity(request)
+        project_id = self._governance_project(request)
+        if identity is not None and project_id:
+            decision = self._submission_guard.check_access(project_id, identity, "execute")
+            if decision is not None and decision.revision > 0:
+                prepare_kwargs["trusted_subject_id"] = identity.subject_id
         if agent_execution is not None:
             prepare_kwargs.update(
                 agent_definition=agent_execution.definition.to_dict(),
@@ -1161,6 +1399,7 @@ class AgentRuntime:
             raise RuntimeStateError("runtime is already closed")
         from jiuwenswarm.runtime.request import cancel_request
 
+        request = self._governance_owned_request(request)
         response = await cancel_request(
             self._agent_manager,
             request,
@@ -1385,6 +1624,7 @@ class AgentRuntime:
     ) -> list[RuntimeEvent]:
         """Execute one non-streaming request and return Runtime events."""
         await self.start()
+        request = self._governance_owned_request(request)
         if self._is_session_input_request(request):
             async with aclosing(self.stream(
                 request, trigger_hook=trigger_hook, on_control_event=on_control_event,
@@ -1436,6 +1676,8 @@ class AgentRuntime:
     ) -> list[RuntimeEvent]:
         from jiuwenswarm.runtime.events import RuntimeEvent
 
+        governed = self._prepare_governed_request(request)
+        owns_new_scope = self._owns_new_preparation_scope(request, governed)
         if trigger_hook:
             await self._trigger_before_chat_request_hook(request)
         channel_id = request.channel_id or "default"
@@ -1510,10 +1752,13 @@ class AgentRuntime:
                         events=events,
                         handler=on_control_event,
                     )
+            self._commit_governed_request(governed, request)
             if self.uses_session_runtime(request):
                 response = await agent.execute_message(request)
             else:
                 response = await agent.process_message(request)
+            if governed is not None:
+                self._submission_guard.accepted(governed)
             event = RuntimeEvent.from_agent_message(
                 response,
                 request_id=request.request_id,
@@ -1541,6 +1786,8 @@ class AgentRuntime:
                 )
             )
         finally:
+            if governed is not None:
+                self._submission_guard.reject(governed)
             plan_error: BaseException | None = None
             admission_error: BaseException | None = None
             end_error: BaseException | None = None
@@ -1576,6 +1823,7 @@ class AgentRuntime:
                         succeeded=activity_execution_succeeded,
                     )
 
+            await self._compensate_governed_preparation(request, governed, owns_new_scope)
             primary_error: BaseException | None = cancellation or execution_error
             if primary_error is not None:
                 self._log_suppressed_cleanup_error(
@@ -1650,7 +1898,7 @@ class AgentRuntime:
         if not isinstance(answer, InteractionAnswerInput):
             raise TypeError("answer must be an InteractionAnswerInput")
         await self.start()
-        request = answer.to_agent_request()
+        request = self._governance_owned_request(answer.to_agent_request())
         await self._require_owned_single_agent_session(request)
         if not answer.resumes_interrupted_turn:
             return await self.answer_interaction(
@@ -1687,7 +1935,7 @@ class AgentRuntime:
         if not isinstance(answer, InteractionAnswerInput):
             raise TypeError("answer must be an InteractionAnswerInput")
         await self.start()
-        request = answer.to_agent_request()
+        request = self._governance_owned_request(answer.to_agent_request())
         await self._require_owned_single_agent_session(request)
         if not answer.resumes_interrupted_turn:
             events = await self.answer_interaction(
@@ -1811,6 +2059,7 @@ class AgentRuntime:
     ) -> AsyncIterator[RuntimeEvent]:
         """Execute one request and yield the shared Runtime event stream."""
         await self.start()
+        request = self._governance_owned_request(request)
         from jiuwenswarm.runtime.context import (
             reset_runtime_context,
             set_runtime_context,
@@ -1922,6 +2171,8 @@ class AgentRuntime:
     ) -> AsyncIterator[RuntimeEvent]:
         from jiuwenswarm.runtime.events import RuntimeEvent
 
+        governed = self._prepare_governed_request(request)
+        owns_new_scope = self._owns_new_preparation_scope(request, governed)
         if trigger_hook:
             await self._trigger_before_chat_request_hook(request)
         channel_id = request.channel_id or "default"
@@ -2013,9 +2264,12 @@ class AgentRuntime:
                     work_mode=(request.params or {}).get("work_mode"),
                 )
             )
+            self._commit_governed_request(governed, request)
             response_stream = agent.process_message_stream(request)
             try:
                 async for chunk in response_stream:
+                    if governed is not None and self._submission_guard.outcome(governed) == "unknown":
+                        self._submission_guard.accepted(governed)
                     event = RuntimeEvent.from_agent_message(
                         chunk,
                         request_id=request.request_id,
@@ -2071,6 +2325,8 @@ class AgentRuntime:
         except Exception as exc:  # noqa: BLE001
             error = exc
         finally:
+            if governed is not None:
+                self._submission_guard.reject(governed)
             plan_error: BaseException | None = None
             admission_error: BaseException | None = None
             end_error: BaseException | None = None
@@ -2115,6 +2371,7 @@ class AgentRuntime:
                         succeeded=activity_execution_succeeded,
                     )
 
+            await self._compensate_governed_preparation(request, governed, owns_new_scope)
             primary_error: BaseException | None = (
                 generator_exit or cancellation or error
             )
@@ -2172,6 +2429,8 @@ class AgentRuntime:
         """Borrow the actual owner; an ingress channel is not an Agent identity."""
         from jiuwenswarm.runtime.events import RuntimeEvent
 
+        governed = self._prepare_governed_request(request)
+
         lookup = getattr(self._agent_manager, "get_agent_for_session_nowait", None)
         agent = lookup(owner_channel, request.session_id) if callable(lookup) else None
         if agent is None:
@@ -2179,8 +2438,11 @@ class AgentRuntime:
         deliver = getattr(agent, "deliver_session_input", None)
         if not callable(deliver):
             raise RuntimeError("active agent does not support supplemental input")
+        self._commit_governed_request(governed, request)
         async with aclosing(deliver(request)) as stream:
             async for chunk in stream:
+                if governed is not None and self._submission_guard.outcome(governed) == "unknown":
+                    self._submission_guard.accepted(governed)
                 event = RuntimeEvent.from_agent_message(
                     chunk, request_id=request.request_id, channel_id=request.channel_id,
                     session_id=request.session_id, default_agent_ref=request.agent_ref,
@@ -2251,6 +2513,8 @@ class AgentRuntime:
         """Inject control input without opening another Session work turn."""
         from jiuwenswarm.runtime.events import RuntimeEvent
 
+        governed = self._prepare_governed_request(request)
+
         channel_id = request.channel_id or "default"
         await self._clear_pending_interaction(
             request.session_id or "default",
@@ -2281,9 +2545,12 @@ class AgentRuntime:
             and isinstance(card_id, str) and 0 < len(card_id.strip()) <= 128
         )
         events: list[RuntimeEvent] = []
+        self._commit_governed_request(governed, request)
         response_stream = deliver(request)
         try:
             async for chunk in response_stream:
+                if governed is not None and self._submission_guard.outcome(governed) == "unknown":
+                    self._submission_guard.accepted(governed)
                 event = RuntimeEvent.from_agent_message(
                     chunk,
                     request_id=request.request_id,
@@ -2317,6 +2584,8 @@ class AgentRuntime:
         """Deliver to the active Agent while forwarding each observation."""
         from jiuwenswarm.runtime.events import RuntimeEvent
 
+        governed = self._prepare_governed_request(request)
+
         channel_id = request.channel_id or "default"
         await self._clear_pending_interaction(
             request.session_id or "default",
@@ -2329,9 +2598,12 @@ class AgentRuntime:
         deliver = getattr(agent, "deliver_control_input", None)
         if not callable(deliver):
             raise RuntimeError("active agent does not accept control input")
+        self._commit_governed_request(governed, request)
         response_stream = deliver(request)
         try:
             async for chunk in response_stream:
+                if governed is not None and self._submission_guard.outcome(governed) == "unknown":
+                    self._submission_guard.accepted(governed)
                 event = RuntimeEvent.from_agent_message(
                     chunk,
                     request_id=request.request_id,
@@ -2462,6 +2734,7 @@ class AgentRuntime:
         """Delete one persisted Session through the shared Runtime boundary."""
         if self._closed:
             raise RuntimeStateError("runtime is already closed")
+        self._authorize_session_mutation(session_id, channel_id)
         result = await self._session_provisioner.delete_session(
             channel_id=channel_id,
             session_id=session_id,
@@ -2479,6 +2752,21 @@ class AgentRuntime:
         """Delete a Team exclusively through the Runtime business boundary."""
         if self._closed:
             raise RuntimeStateError("runtime is already closed")
+        from jiuwenswarm.server.runtime.team_binding_store import (
+            TeamBindingStoreError, get_team_binding_store, validate_team_name,
+        )
+        try:
+            normalized = validate_team_name(team_name)
+        except TeamBindingStoreError:
+            # Keep the existing typed invalid-name response.
+            normalized = ""
+        if normalized:
+            binding = get_team_binding_store().get(normalized)
+            session_ids = self._session_provisioner._inventory_team_session_ids(
+                normalized, binding_session_ids=binding.session_ids if binding else (),
+            )
+            for session_id in session_ids:
+                self._authorize_session_mutation(session_id, channel_id)
         return await self._session_provisioner.delete_team(
             team_name=team_name,
             channel_id=channel_id,
@@ -2601,6 +2889,8 @@ class AgentRuntime:
                     self._checkpointer_started = False
             self._started = False
             self._closed = True
+            self._submission_guard.clear()
+            self._governed_provisions.clear()
             if cleanup_errors:
                 raise cleanup_errors[0]
 

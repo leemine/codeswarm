@@ -11,7 +11,14 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any
+from typing import Any, Callable
+from contextvars import ContextVar
+from contextlib import ExitStack, contextmanager
+
+from jiuwenswarm.governance.contracts import TrustedIdentity
+from jiuwenswarm.server.runtime.session.project_access import (
+    ProjectAccessStore, ProjectAccessDenied, ProjectRevisionConflict,
+)
 
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse
 from jiuwenswarm.common.schema.message import ReqMethod
@@ -35,6 +42,84 @@ from jiuwenswarm.server.runtime.session.session_info import to_session_info
 from jiuwenswarm.server.runtime.session.work_mode import resolve_request_work_mode
 
 logger = logging.getLogger(__name__)
+
+_actor: ContextVar[str] = ContextVar('project_api_actor', default='')
+_scope: ContextVar[tuple[str, str] | None] = ContextVar('project_api_scope', default=None)
+
+
+def _paths_overlap(left: str, right: str) -> bool:
+    left, right = os.path.realpath(left), os.path.realpath(right)
+    try:
+        return os.path.commonpath([left, right]) in {left, right}
+    except ValueError:
+        return False
+
+
+@contextmanager
+def _project_access_guard(project_id: str, action: str):
+    """Authorize the ID and every protected workspace it aliases, under IO lock."""
+    store = ProjectAccessStore()
+    with store._locked():
+        ids = {project_id}
+        record = store._record(project_id) if project_id else None
+        directory = record.get('project_dir') if record else None
+        if directory:
+            for project in project_store.list_projects(include_hidden=True, cache_bust=True):
+                if (project.project_dir and _paths_overlap(directory, project.project_dir)
+                        and store.is_protected(project.project_id)):
+                    ids.add(project.project_id)
+        with ExitStack() as guards:
+            for pid in sorted(ids):
+                guards.enter_context(store.guard(pid, _actor.get(), action))
+            yield
+
+
+def _call_project_scoped(project_id: str, action: str, fn: Any, *args: Any, **kwargs: Any):
+    with _project_access_guard(project_id, action):
+        return fn(*args, **kwargs)
+
+
+def _can_read_project(project_id: str) -> bool:
+    store = ProjectAccessStore()
+    # An unregistered legacy ID retains its previous default-project projection.
+    # Persisted orphan ACLs still participate in authorization.
+    if not store.is_protected(project_id) and not store._record(project_id):
+        return True
+    try:
+        with _project_access_guard(project_id, 'read'):
+            return True
+    except ProjectAccessDenied:
+        return False
+
+
+def _visible_sessions() -> list[dict[str, Any]]:
+    # Directory-only legacy metadata must not become public after its registry
+    # entry is deleted. With ambiguous provenance, use the retained protected
+    # IDs conservatively; do not invent a permanent directory ACL.
+    projects = project_store.list_projects(include_hidden=True, cache_bust=True)
+    store = ProjectAccessStore()
+    unreadable_history = any(
+        not store.authorize(pid, _actor.get(), 'read').allowed
+        for pid in store.protected_ids()
+    )
+    result = []
+    for item in collect_all_sessions_metadata():
+        project_id = str(item.get('project_id') or '')
+        if not _can_read_project(project_id):
+            continue
+        directory = item.get('project_dir')
+        visible = True
+        if isinstance(directory, str) and directory:
+            matches = [p for p in projects if p.project_dir and _paths_overlap(directory, p.project_dir)]
+            if any(not _can_read_project(p.project_id) for p in matches):
+                visible = False
+            elif (unreadable_history and not store.is_protected(project_id)
+                  and not any(store.is_protected(p.project_id) for p in matches)):
+                visible = False
+        if visible:
+            result.append(item)
+    return result
+
 
 
 def _attribute_session_project(
@@ -130,7 +215,7 @@ def _load_project_info(params: dict[str, Any]) -> tuple[dict[str, Any] | None, s
         "last_message_at": None,
         "last_user_message_at": None,
     }
-    for session in collect_all_sessions_metadata():
+    for session in _visible_sessions():
         if session.get("channel_id") != "web" or session.get("pinned") or session.get("cron_id"):
             continue
         if _attribute_session_project(session, visible_project_ids) != project_id:
@@ -155,7 +240,7 @@ def _load_project_info(params: dict[str, Any]) -> tuple[dict[str, Any] | None, s
 
 def _load_pinned_sessions() -> dict[str, Any]:
     """Return the Web projection of pinned sessions from this user's directory."""
-    sessions = collect_all_sessions_metadata()
+    sessions = _visible_sessions()
     pinned = [
         session
         for session in sessions
@@ -219,7 +304,7 @@ def _load_project_sessions(
             return None, "project not found", "NOT_FOUND"
 
     matched: list[dict[str, Any]] = []
-    for session in collect_all_sessions_metadata():
+    for session in _visible_sessions():
         if session.get("pinned") or session.get("cron_id") or session.get("channel_id") != "web":
             continue
         if _attribute_session_project(session, visible_project_ids) != project_id:
@@ -258,7 +343,7 @@ def _load_project_cron_sessions(
         if project is None:
             return None, "project not found", "NOT_FOUND"
     matched: list[dict[str, Any]] = []
-    for session in collect_all_sessions_metadata():
+    for session in _visible_sessions():
         if session.get("pinned") or not session.get("cron_id"):
             continue
         if _attribute_session_project(session, visible_project_ids) != project_id:
@@ -299,7 +384,7 @@ def _load_project_list(
         work_mode = candidate
 
     all_projects = project_store.list_projects(include_hidden=True, cache_bust=True)
-    projects = [p for p in all_projects if work_mode is None or (p.work_mode or DEFAULT_WEB_WORK_MODE) == work_mode]
+    projects = [p for p in all_projects if _can_read_project(p.project_id) and (work_mode is None or (p.work_mode or DEFAULT_WEB_WORK_MODE) == work_mode)]
     visible_project_ids = {project.project_id for project in all_projects}
     stats: dict[str, dict[str, Any]] = {}
 
@@ -309,7 +394,7 @@ def _load_project_list(
             {"session_count": 0, "last_message_at": None, "last_user_message_at": None},
         )
 
-    for session in collect_all_sessions_metadata():
+    for session in _visible_sessions():
         if session.get("channel_id") != "web" or session.get("pinned") or session.get("cron_id"):
             continue
         entry = stats_for(_attribute_session_project(session, visible_project_ids))
@@ -415,6 +500,15 @@ def _pin_project(
 def _create_project(
     params: dict[str, Any], channel_id: str
 ) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    # Keep alias checks, registry creation and owner initialization under the
+    # same authority lock as migration and ACL changes.
+    with ProjectAccessStore()._locked():
+        return _create_project_locked(params, channel_id)
+
+
+def _create_project_locked(
+    params: dict[str, Any], channel_id: str
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
     """Create/restore a project using this AgentServer's injected directory."""
     name = str(params.get("name") or "").strip()
     if not name:
@@ -428,11 +522,33 @@ def _create_project(
     work_mode, mode_error = resolve_request_work_mode(params, channel_id)
     if mode_error is not None:
         return None, f"invalid work_mode: {params.get('work_mode')!r}", mode_error
-    if not project_dir:
+    needs_directory = not project_dir
+    if needs_directory:
         try:
             project_dir = project_store.resolve_default_project_dir(name, work_mode)
         except ValueError as exc:
             return None, str(exc), "BAD_REQUEST"
+
+    # A different work mode or child directory must not create an unprotected
+    # alias for an existing governed workspace. Resolve symlinks before comparing.
+    candidate = os.path.realpath(project_dir)
+    authority = ProjectAccessStore()
+    for existing in project_store.list_projects(cache_bust=True):
+        if not existing.project_dir:
+            continue
+        if not _actor.get() and not authority.is_protected(existing.project_id):
+            continue
+        root = os.path.realpath(existing.project_dir)
+        try:
+            overlaps = os.path.commonpath([candidate, root]) in {candidate, root}
+        except ValueError:
+            overlaps = False
+        if overlaps:
+            # Even an owner cannot create a second ACL authority for the same
+            # workspace. Existing cross-mode legacy projects retain their IDs.
+            return None, "project directory overlaps a protected workspace", "FORBIDDEN"
+
+    if needs_directory:
         try:
             os.makedirs(project_dir, exist_ok=True)
         except OSError as exc:
@@ -440,7 +556,7 @@ def _create_project(
 
     try:
         project, restored = project_store.create_project_checked(
-            name, project_dir, work_mode
+            name, project_dir, work_mode, owner_id=_actor.get() or None
         )
     except project_store.ProjectDirConflict:
         return None, "project_dir already exists", "CONFLICT"
@@ -1255,7 +1371,17 @@ async def _run_threaded(
     统一异常映射：函数抛错 → ``INTERNAL_ERROR``。
     """
     try:
-        result = await asyncio.to_thread(fn, *args, **fn_kwargs)
+        def invoke():
+            scope = _scope.get()
+            if scope:
+                project_id, action = scope
+                return _call_project_scoped(project_id, action, fn, *args, **fn_kwargs)
+            # Keep inventory filtering stable with concurrent ACL revocations.
+            with ProjectAccessStore()._locked():
+                return fn(*args, **fn_kwargs)
+        result = await asyncio.to_thread(invoke)
+    except ProjectAccessDenied:
+        return build_error_response(request, "project permission required", code="FORBIDDEN")
     except LifecycleError as exc:
         return build_error_response(
             request, str(exc), code=exc.code, extra=exc.details
@@ -1302,6 +1428,9 @@ class ProjectAdapter(GatewayAdapter):
 
     methods: frozenset[str] = frozenset(
         {
+            "project.extensions.get",
+            "project.extensions.update",
+            "project.acl.update",
             ReqMethod.PROJECT_INFO.value,
             ReqMethod.PROJECT_PINNED_SESSIONS.value,
             ReqMethod.PROJECT_GET_SESSIONS.value,
@@ -1326,7 +1455,66 @@ class ProjectAdapter(GatewayAdapter):
         }
     )
 
+    def __init__(self, identity_resolver: Callable[[AgentRequest], TrustedIdentity | None] | None = None):
+        self._identity_resolver = identity_resolver
+
     async def handle(self, request: AgentRequest) -> AgentResponse:
+        identity = self._identity_resolver(request) if self._identity_resolver else None
+        if identity is not None and not isinstance(identity, TrustedIdentity):
+            return build_error_response(request, "trusted identity required", code="FORBIDDEN")
+        actor = identity.actor_id if identity else ''
+        token = _actor.set(actor)
+        scope_token = _scope.set(None)
+        try:
+            params = _request_params(request)
+            method = getattr(request.req_method, 'value', request.req_method)
+            project_id = str(params.get('project_id') or '').strip()
+            store = ProjectAccessStore()
+            if method in {'project.extensions.get', 'project.extensions.update', 'project.acl.update'}:
+                if not project_id or is_default_project_id(project_id):
+                    return build_error_response(request, "registered project_id required", code="BAD_REQUEST")
+                try:
+                    if method == 'project.extensions.get':
+                        payload = await asyncio.to_thread(_call_project_scoped, project_id, 'read', store.get, project_id, actor)
+                    elif method == 'project.extensions.update':
+                        payload = await asyncio.to_thread(_call_project_scoped, project_id, 'write', store.update, project_id, actor, goal=params.get('goal'), extensions=params.get('extensions'))
+                    else:
+                        revision = await asyncio.to_thread(_call_project_scoped, project_id, 'admin', store.replace_acl, project_id, actor, acl=params.get('acl'), expected_revision=params.get('expected_revision'))
+                        payload = {'acl_revision': revision}
+                    return _ok_response(request, payload)
+                except ProjectAccessDenied:
+                    return build_error_response(request, "project permission required", code="FORBIDDEN")
+                except ProjectRevisionConflict as exc:
+                    return build_error_response(request, str(exc), code="CONFLICT")
+                except (ValueError, TypeError) as exc:
+                    return build_error_response(request, str(exc), code="BAD_REQUEST")
+            if method == 'project.cron.resolve_binding' and not project_id and params.get('project_dir'):
+                mode, error = resolve_request_work_mode(params, channel_id=request.channel_id)
+                if error is None:
+                    project = project_store.get_project_by_dir_and_mode(str(params['project_dir']), mode, cache_bust=True)
+                    project_id = project.project_id if project else ''
+            read_methods = {
+                'project.info', 'project.get_sessions', 'project.get_cron_sessions',
+                'project.git.status', 'project.git.diff_status',
+                'project.git.turn_diff_list', 'project.git.turn_diff',
+            }
+            action = 'read' if method in read_methods else ('execute' if method == 'project.cron.resolve_binding' else 'write')
+            if project_id and not is_default_project_id(project_id):
+                # Missing projects retain the original NOT_FOUND response; a
+                # persisted extension keeps deleted project history protected.
+                if store.is_protected(project_id) or store._record(project_id):
+                    try:
+                        with _project_access_guard(project_id, action):
+                            pass
+                    except ProjectAccessDenied:
+                        return build_error_response(request, f"project {action} permission required", code="FORBIDDEN")
+                    _scope.set((project_id, action))
+            return await self._handle(request)
+        finally:
+            _scope.reset(scope_token)
+            _actor.reset(token)
+
+    async def _handle(self, request: AgentRequest) -> AgentResponse:
         method = request.req_method
         params = _request_params(request)
         if method not in {ReqMethod.PROJECT_LIST, ReqMethod.PROJECT_INFO, ReqMethod.PROJECT_PINNED_SESSIONS,

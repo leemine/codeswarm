@@ -1106,11 +1106,20 @@ class AgentWebSocketServer:
             *,
             ping_interval: float | None = 30.0,
             ping_timeout: float | None = 300.0,
+            trusted_identity_resolver: Any = None,
     ) -> None:
         self._host = host
         self._port = port
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
+        from jiuwenswarm.governance.host_identity import local_instance_identity
+
+        local_identity = local_instance_identity(host, get_agent_root_dir())
+        self._trusted_identity_resolver = (
+            trusted_identity_resolver
+            if trusted_identity_resolver is not None
+            else lambda _request: local_identity
+        )
         self._server: Any = None
         # 当前 Gateway 连接，用于 send_push 主动推送
         self._current_ws: Any = None
@@ -1142,7 +1151,7 @@ class AgentWebSocketServer:
             SessionAdapter(),
             WorkspaceFileAdapter(),
             MemoryAdapter(),
-            ProjectAdapter(),
+            ProjectAdapter(identity_resolver=self._resolve_trusted_identity),
             HarmonyOSAdapter(),
             ConfigAdapter(),
         ):
@@ -1950,7 +1959,7 @@ class AgentWebSocketServer:
                     SessionAdapter(),
                     WorkspaceFileAdapter(),
                     MemoryAdapter(),
-                    ProjectAdapter(),
+                    ProjectAdapter(identity_resolver=self._resolve_trusted_identity),
                     HarmonyOSAdapter(),
                     ConfigAdapter(),
                 ):
@@ -2048,7 +2057,18 @@ class AgentWebSocketServer:
             participant_registry=registry,
             resource_lease=lease,
             team_execution_controller=get_team_manager(None),
+            trusted_identity_resolver=self._resolve_trusted_identity,
         )
+
+    def _resolve_trusted_identity(self, request: object):
+        """Resolve from host composition, never from routing or wire metadata."""
+        from jiuwenswarm.governance.contracts import TrustedIdentity
+
+        resolver = getattr(self, "_trusted_identity_resolver", None)
+        identity = resolver(request) if resolver is not None else None
+        if identity is not None and not isinstance(identity, TrustedIdentity):
+            raise TypeError("host identity resolver must return TrustedIdentity or None")
+        return identity
 
     # ---------- 连接处理 ----------
 
@@ -2319,6 +2339,27 @@ class AgentWebSocketServer:
 
         pending_chat_request: tuple[AgentRuntime, str, str] | None = None
         try:
+            from jiuwenswarm.governance.project_boundary import (
+                ProjectAccessDenied,
+                authorize_resource_request,
+            )
+
+            try:
+                authorize_resource_request(request, self._resolve_trusted_identity(request))
+            except ProjectAccessDenied as exc:
+                response = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": str(exc), "code": exc.code},
+                    metadata=request.metadata,
+                    agent_ref=request.agent_ref,
+                )
+                async with send_lock:
+                    await send_wire_payload(
+                        ws, encode_agent_response_for_wire(response, response_id=request.request_id)
+                    )
+                return
             if request.req_method is not None and request.req_method.value.startswith("assets.publish."):
                 await self._handle_asset_publish(ws, request, send_lock)
                 return

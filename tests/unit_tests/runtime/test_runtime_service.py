@@ -1212,7 +1212,7 @@ async def test_cancel_resolves_same_composed_mode_and_project_as_execution() -> 
 
 
 @pytest.mark.asyncio
-async def test_cancel_resolves_project_id_inside_target_runtime(monkeypatch) -> None:
+async def test_cancel_resolves_project_id_inside_target_runtime(monkeypatch, tmp_path) -> None:
     class RecordingManager(FakeAgentManager):
         def __init__(self) -> None:
             super().__init__()
@@ -1226,11 +1226,11 @@ async def test_cancel_resolves_project_id_inside_target_runtime(monkeypatch) -> 
         "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
         lambda *_args, **_kwargs: {},
     )
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.project_store.get_project_dir_by_id",
-        lambda project_id: (
-            "D:/workspace/project-from-id" if project_id == "project-a" else ""
-        ),
+    from jiuwenswarm.server.runtime.session import project_store
+
+    monkeypatch.setattr(project_store, "_projects_file", lambda: tmp_path / "projects.json")
+    project = project_store.create_project(
+        "Legacy cancel", "D:/workspace/project-from-id", "code",
     )
     manager = RecordingManager()
     runtime = AgentRuntime(agent_manager=manager, initializer=AsyncMock())
@@ -1243,7 +1243,7 @@ async def test_cancel_resolves_project_id_inside_target_runtime(monkeypatch) -> 
             "intent": "cancel",
             "mode": "agent",
             "work_mode": "code",
-            "project_id": "project-a",
+            "project_id": project.project_id,
         },
     )
 
@@ -3337,8 +3337,32 @@ async def test_agent_server_stop_replaces_runtime_after_closed_cleanup_error(
 
 @pytest.mark.asyncio
 async def test_agent_server_start_restores_remote_service_after_stop(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ) -> None:
+    # This transport-restart test starts real optional lifecycle services. Keep
+    # their local storage isolated and disable the unrelated login-config fetch.
+    monkeypatch.setenv("JIUWENSWARM_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("JIUWENSWARM_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("JIUWENSWARM_CONFIG_URL", "off")
+    from jiuwenswarm.common import utils as runtime_paths
+
+    # common.utils can be imported before this test and cache the previous
+    # instance paths. Environment changes alone do not reset those caches.
+    config_dir = tmp_path / "data" / "config"
+    config_dir.mkdir(parents=True)
+    config_file = config_dir / "config.yaml"
+    config_file.write_text("models:\n  defaults: []\nsandbox:\n  enabled: false\n")
+    for name, value in {
+        "_user_home": tmp_path / "home",
+        "_workspace_base_dir": tmp_path / "data",
+        "_initialized": False,
+        "_config_dir": None,
+        "_workspace_dir": None,
+        "_root_dir": None,
+    }.items():
+        monkeypatch.setattr(runtime_paths, name, value)
+    assert runtime_paths.get_agent_root_dir() == tmp_path / "data" / "agent"
+    assert runtime_paths.get_config_file() == config_file
     from jiuwenswarm.server import agent_ws_server as server_module
     from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
     class FakeWebSocketServer:
@@ -3378,31 +3402,43 @@ async def test_agent_server_start_restores_remote_service_after_stop(
     first_runtime.start = AsyncMock()
     first_runtime.close = AsyncMock(wraps=first_runtime.close)
 
-    await server.start()
-    await server._checkpointer_warmup_task
-    await server.stop()
+    try:
+        await server.start()
+        await server._checkpointer_warmup_task
+        await server.stop()
 
-    recovered_runtime = server.get_runtime()
-    recovered_manager = server.get_agent_manager()
-    recovered_runtime.start = AsyncMock()
-    recovered_runtime.close = AsyncMock(wraps=recovered_runtime.close)
+        recovered_runtime = server.get_runtime()
+        recovered_manager = server.get_agent_manager()
+        recovered_runtime.start = AsyncMock()
+        recovered_runtime.close = AsyncMock(wraps=recovered_runtime.close)
 
-    await server.start()
-    await server._checkpointer_warmup_task
+        await server.start()
+        await server._checkpointer_warmup_task
 
-    assert len(listeners) == 2
-    assert listeners[0].closed is True
-    listeners[0].wait_closed.assert_awaited_once_with()
-    first_runtime.start.assert_awaited_once_with()
-    first_runtime.close.assert_awaited_once_with()
-    assert recovered_runtime is not first_runtime
-    assert recovered_manager is not first_manager
-    assert recovered_runtime.agent_manager is recovered_manager
-    recovered_runtime.start.assert_awaited_once_with()
-    assert server._server is listeners[1]
-    assert install_runtime_push_handler.call_count == 2
-    restore_runtime_push_handler.assert_called_once()
+        assert len(listeners) == 2
+        assert listeners[0].closed is True
+        listeners[0].wait_closed.assert_awaited_once_with()
+        first_runtime.start.assert_awaited_once_with()
+        first_runtime.close.assert_awaited_once_with()
+        assert recovered_runtime is not first_runtime
+        assert recovered_manager is not first_manager
+        assert recovered_runtime.agent_manager is recovered_manager
+        recovered_runtime.start.assert_awaited_once_with()
+        assert server._server is listeners[1]
+        assert install_runtime_push_handler.call_count == 2
+        restore_runtime_push_handler.assert_called_once()
 
-    await server.stop()
-    recovered_runtime.close.assert_awaited_once_with()
-    assert listeners[1].closed is True
+        await server.stop()
+        recovered_runtime.close.assert_awaited_once_with()
+        assert listeners[1].closed is True
+        assert server._checkpointer_warmup_task is None
+        assert server._mcp_prewarm_task is None
+        assert server._login_credential_refresh_task is None
+        assert server._personal_context_start_task is None
+        assert server._asset_start_task is None
+        assert server._archive_service is None
+    finally:
+        # An assertion failure after either start must still release the owned
+        # listener and background services before pytest closes its event loop.
+        if server._server is not None:
+            await server.stop()

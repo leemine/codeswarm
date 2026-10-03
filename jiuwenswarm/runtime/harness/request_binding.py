@@ -55,6 +55,7 @@ def bind_admitted_request_execution(
     project_dir: str | None,
     *,
     session_metadata: dict[str, Any] | None = None,
+    trusted_subject_id: str | None = None,
 ) -> AdmittedExecutionRoute | None:
     """Pin the server-owned selection before an Agent or MCP child is built.
 
@@ -124,7 +125,8 @@ def bind_admitted_request_execution(
     )
     channel_id = str(getattr(request, "channel_id", "") or "").strip() or "default"
     subject = str(
-        getattr(request, "user_id", "")
+        trusted_subject_id
+        or getattr(request, "user_id", "")
         or session_metadata.get("user_id")
         or f"{channel_id}:{session_id}"
     ).strip()
@@ -134,16 +136,33 @@ def bind_admitted_request_execution(
         host_session_id=session_id,
         workspace=str(runtime_paths.runtime_workspace_root),
     )
+    # A live Session remains authoritative even if its recovery file vanished.
+    # Reject a changed scope before creating an archive or inserting a binding.
+    remembered = getattr(agent_manager, "_session_execution_bindings", None)
+    current = remembered.get((channel_id, session_id)) if isinstance(remembered, dict) else None
+    if current is not None and current.cache_key != prospective_binding.cache_key:
+        raise ExecutionRecoveryUnavailableError("execution Binding changed")
     surface = None
     if mode is not None:
+        surface_metadata = session_metadata
+        if trusted_subject_id is not None:
+            # validate_surface_request above already checked the persisted routing
+            # identity against surface_creation. Bind its execution scope to the
+            # host identity without rewriting history/UI user_id. Recovery and
+            # the live Binding still reject an existing execution subject change.
+            surface_metadata = {**session_metadata, "user_id": subject}
+            creation = session_metadata.get("surface_creation")
+            if isinstance(creation, dict):
+                surface_metadata["surface_creation"] = {**creation, "user_id": subject}
         identity = build_surface_identity(
-            metadata=session_metadata, binding=prospective_binding,
+            metadata=surface_metadata, binding=prospective_binding,
             paths=runtime_paths, channel_id=channel_id,
         )
         surface = EffectiveSurfaceSnapshot(identity, mode)
         # Product context and Provider permissions are compiled by the
         # adapter after the current host policy switches are known.
         surface.validate_mode(mode, require_policy=False, topology=identity.topology)
+
     recovery = SessionExecutionRecovery(
         session_id=session_id,
         execution_profile_id=selected_profile_id,

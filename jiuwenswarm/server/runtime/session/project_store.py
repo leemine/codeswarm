@@ -807,6 +807,8 @@ def create_project_checked(
     name: str,
     project_dir: str,
     work_mode: str = DEFAULT_WEB_WORK_MODE,
+    *,
+    owner_id: str | None = None,
 ) -> tuple[Project, bool]:
     """原子创建项目，同一 work_mode 内检查目录和名称冲突。
 
@@ -830,6 +832,8 @@ def create_project_checked(
         work_mode: 工作模式,``"code"`` / ``"work"``(非法值兜底为 ``"work"``)。
             默认 ``"work"`` 保持与旧调用方兼容(旧数据绝大多数为 work 模式)。
     """
+    if owner_id is not None and (not isinstance(owner_id, str) or not owner_id.strip() or owner_id != owner_id.strip()):
+        raise ValueError("owner_id must be normalized")
     # 统一校验 name 可作为目录名(所有创建入口的兜底,含非法字符/保留名时抛 ValueError)
     validate_project_dir_name(name)
     mode = _normalize_work_mode_value(work_mode)
@@ -875,10 +879,17 @@ def create_project_checked(
             updated_at=now,
             work_mode=mode,
         )
-        projects.append(proj.to_dict())
+        record = proj.to_dict()
+        if owner_id is not None:
+            record["access_managed"] = True
+        projects.append(record)
         return proj, False
 
-    return _mutate(_do)
+    project, restored = _mutate(_do)
+    if owner_id is not None:
+        from jiuwenswarm.server.runtime.session.project_access import ProjectAccessStore
+        ProjectAccessStore().initialize(project.project_id, owner_id)
+    return project, restored
 
 
 def save_project(project: Project) -> Project:
@@ -891,7 +902,7 @@ def save_project(project: Project) -> Project:
         d["updated_at"] = _now()
         for i, p in enumerate(projects):
             if p.get("project_id") == project.project_id:
-                projects[i] = d
+                projects[i] = {**p, **d}
                 return project
         projects.append(d)
         return project

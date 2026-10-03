@@ -331,6 +331,7 @@ async def prepare_chat_turn(
     metadata_sync: Callable[..., str | None] = sync_chat_request_metadata,
     agent_definition: dict[str, Any] | None = None,
     agent_definition_fingerprint: str | None = None,
+    trusted_subject_id: str | None = None,
 ) -> tuple[str, str | None, Any]:
     """Resolve session semantics and select an agent from the shared manager."""
     params = request.params if isinstance(request.params, dict) else {}
@@ -519,6 +520,7 @@ async def prepare_chat_turn(
                 request,
                 admitted_project_dir,
                 session_metadata=session_metadata,
+                **({"trusted_subject_id": trusted_subject_id} if trusted_subject_id is not None else {}),
             )
         )
     if agent_definition is not None:

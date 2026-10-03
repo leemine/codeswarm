@@ -78,6 +78,7 @@ class EngineAgentAdapter:
         self._heartbeat_bridge = HeartbeatRuntimeBridge()
         self._subagent_runtime: ExternalSubagentRuntime | None = None
         self._browser_admission: ExternalBrowserAdmission | None = None
+        self._work_research_enabled = False
         self._session: ExecutionSession | None = None
         self._heartbeat_stopped_session: ExecutionSession | None = None
         self._projection = ExternalEventProjection(
@@ -160,8 +161,15 @@ class EngineAgentAdapter:
         self._compile_cold_surface_policy()
         self._surface.validate_mode(raw_mode)
         self._surface.validate_mode(self._surface.initial_mode)
+        # Freeze the research profile from the validated product Surface; later
+        # request parameters and child role names cannot widen Code into Work.
+        work_research_enabled = self._surface.initial_mode in {
+            "agent.work.normal", "agent.work.plan",
+        }
+
         if self._session is not None:
             raise RuntimeError("External execution instance already exists")
+        self._work_research_enabled = work_research_enabled
         self._session = self._build_session()
 
     def _build_session(self) -> ExecutionSession:
@@ -201,6 +209,7 @@ class EngineAgentAdapter:
                 replace(self._route, surface=self._surface),
                 write_output=self._projection.project_product_chunk,
                 parent_session=self._parent_session,
+                work_research_enabled=self._work_research_enabled,
                 additional_tools=[
                     *self._goal_runtime.tools(),
                     *self._heartbeat_bridge.build_tools(

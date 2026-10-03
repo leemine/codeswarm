@@ -30,6 +30,7 @@ from jiuwenswarm.runtime.harness.context_bridge import (
 )
 from jiuwenswarm.runtime.harness.execution_session import ExecutionSession
 from jiuwenswarm.runtime.harness.external_subagent_profiles import (
+    RESEARCH_SUBAGENT_TYPE,
     ExternalSubagentExecutionKind,
     ExternalSubagentProfile,
     validate_external_subagent_request,
@@ -173,6 +174,7 @@ class ExternalSubagentExecutionFactory:
         browser_artifact_sink: BrowserArtifactSink | None = None,
         browser_decision_id_for: BrowserDecisionId | None = None,
         event_observer_factory=None,
+        work_research_enabled: bool = False,
     ) -> None:
         binding = parent_route.bound.binding
         if (
@@ -227,6 +229,12 @@ class ExternalSubagentExecutionFactory:
         self._browser_admit = browser_admit
         self._browser_artifact_sink = browser_artifact_sink
         self._browser_decision_id_for = browser_decision_id_for
+        # A frozen Surface owns product behavior; the flag supports older routes.
+        self._work_research_enabled = (
+            self._work_mode == "work"
+            if self._work_mode is not None
+            else work_research_enabled
+        )
         self._live: dict[str, ExternalSubagentExecution] = {}
         self._cleanup_pending: dict[str, ExecutionSession] = {}
         self._reserved: set[str] = set()
@@ -355,6 +363,15 @@ class ExternalSubagentExecutionFactory:
                 f"Display name: {request.display_name}.\n"
                 f"Role: {request.role}."
             )
+            if (
+                self._work_research_enabled
+                and profile.subagent_type == RESEARCH_SUBAGENT_TYPE
+            ):
+                from jiuwenswarm.agents.harness.work.research import (
+                    work_research_instructions,
+                )
+
+                child_prompt += f"\n{work_research_instructions()}"
             if browser_resources is not None:
                 child_prompt += f"\n{browser_resources.system_prompt}"
             context_value = dataclasses.replace(

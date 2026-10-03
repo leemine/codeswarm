@@ -159,3 +159,11 @@ def test_generic_profile_rejects_browser_capabilities(
             subagent_type=GENERAL_PURPOSE_SUBAGENT_TYPE,
             browser_capabilities=browser_capabilities,
         )
+
+
+def test_work_catalog_exposes_research_without_changing_legacy_catalog() -> None:
+    assert "research_agent" not in render_external_subagent_catalog()
+    catalog = render_external_subagent_catalog(work_research_enabled=True)
+    assert "research_agent" in catalog
+    assert "cited report" in catalog
+    assert "browser_agent" not in catalog
