@@ -29,7 +29,7 @@ def free_port():
         return sock.getsockname()[1]
 
 
-async def run(root):
+async def run(root, *, browser_probe=None):
     root.mkdir(mode=0o700)
     repo = Path(__file__).resolve().parents[2]
     data = root / "data"
@@ -75,7 +75,10 @@ async def run(root):
     access.replace_acl(
         project.project_id,
         "alice",
-        acl={"alice": ["read", "admin"], "bob": ["read", "admin"]},
+        acl={
+            "alice": ["read", "execute", "admin"],
+            "bob": ["read", "execute", "admin"],
+        },
         expected_revision=1,
     )
     auth = configured_authenticator()
@@ -172,6 +175,9 @@ async def run(root):
                             "direction": "gateway-agent",
                             "id": frame.get("request_id"),
                             "method": frame.get("method"),
+                            "assertion_actor": frame.get("_organization_assertion", {})
+                            .get("claims", {})
+                            .get("actor"),
                         }
                     )
                     await agent.send(raw)
@@ -269,6 +275,20 @@ async def run(root):
             )
             await start("jiuwenswarm.gateway.app_gateway", web_port, gateway_env)
             await wait_log("app_gateway.log", "startup stage=web_channel_listening")
+            if browser_probe is not None:
+                result["ui"] = "real browser probe started"
+                result.update(
+                    await browser_probe(
+                        root=root,
+                        repo=repo,
+                        web_port=web_port,
+                        tokens=tokens,
+                        sessions=sessions,
+                        env=env,
+                        children=children,
+                    )
+                )
+                return
             clients = {
                 actor: await stack.enter_async_context(
                     httpx.AsyncClient(

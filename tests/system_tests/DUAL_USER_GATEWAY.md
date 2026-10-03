@@ -50,3 +50,32 @@ trusted authentication, transport and persistent sharing boundaries. It does not
 claim real Provider execution, browser UI, Team behavior, full activity recovery,
 remote deployment, credential resource isolation, or session-creation publication
 acceptance. The result records the exact swarm commit and installed core Git source.
+
+## Actual browser variant
+
+`_dual_user_browser_probe.py` reuses the private service fixture and additionally
+starts the actual web application, serving an existing production frontend build.
+It requires Playwright and a local `google-chrome` executable. Record the build's
+source commit/tree separately; the probe records the served index checksum.
+
+```sh
+PYTHONPATH=. timeout 290s .venv/bin/python tests/system_tests/_dual_user_browser_probe.py --root /tmp/codeswarm-dual-browser-unique-run --dist /absolute/path/to/frontend/dist
+```
+
+Two isolated browser contexts log in through the actual login form. Alice opens
+her own Session, creates a persistent share in the owner dialog, and revokes it.
+Bob uses the sidebar inbox and read-only viewer; refresh preserves the fixed
+snapshot, and refresh after revocation removes cached content. A separate tab
+using Bob's context attempts Alice's owner URL with forged routing metadata and
+must show an unavailable page without private content. The owner Session switch
+must also succeed, verifying identity survives the Gateway's background queue.
+The fixture explicitly grants project execute ACL to both users, but grants no
+tool/process resources and never submits a model request.
+
+The browser variant records screenshots, visible page text, page errors, and
+credential-free RPC summaries. It does not record cookies, login bodies, raw
+frames, or a browser trace. Its internal deadline is 240 seconds; all three owned
+service processes and the browser are closed on exit. Preserve the result, logs,
+PNG screenshots and `browser-*.json` evidence, never the private auth file.
+Unopened organization bootstrap RPCs may remain explicitly denied; this slice is
+not a claim of complete application, Provider, Team or session-creation acceptance.
