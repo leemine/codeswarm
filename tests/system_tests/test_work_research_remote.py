@@ -4,6 +4,10 @@
 RUN_WORK_RESEARCH_REMOTE=1 with WORK_RESEARCH_API_BASE / WORK_RESEARCH_API_KEY
 and optionally WORK_RESEARCH_MODEL. Credentials are passed to the existing
 Provider configuration; the test does not log or persist them itself.
+
+OpenCode explicitly requests an 8192-token output budget and requires a core
+that supports OpenCodeModelConfig.max_output_tokens. Running with a local core
+candidate is joint source validation, not locked dependency acceptance.
 """
 
 from __future__ import annotations
@@ -338,6 +342,8 @@ async def test_work_research_real_external_cited_artifact(
             "turn_idle_retries": 0,
         }
     else:
+        model["max_output_tokens"] = 8192
+        trace.mark("model_configured", max_output_tokens=model["max_output_tokens"])
         cli = Path(
             os.environ.get(
                 "WORK_RESEARCH_OPENCODE_CLI",
