@@ -40,4 +40,3 @@ async def test_research_does_not_change_parent_context_or_cold_start(tmp_path, m
     assert context == expected
     session.start.assert_awaited_once()
     assert "Work research parent acceptance" not in context.system_prompt
-
