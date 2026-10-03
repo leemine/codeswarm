@@ -24,6 +24,38 @@ def test_actual_opencode_report_rejects_compound_claim_wrong_line():
     _check_local_index_locator(report.replace("[source-a.md:3]", "[source-a.md:3-4]"))
 
 
+@pytest.mark.parametrize(
+    "citation",
+    [
+        "source-a.md:4",
+        "source-a.md:L4",
+        "source-a.md, L4",
+        "source-a.md L4",
+        "source-a.md line 4",
+        "source-a.md:3-4",
+        "source-a.md:L3-L4",
+        "source-a.md, L3–L4",
+        "`source-a.md`:4",
+    ],
+)
+def test_local_index_locator_accepts_supported_syntax(citation):
+    _check_local_index_locator(f"All 12 documents were indexed locally [{citation}].")
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "All documents were indexed locally [source-a.md:3]. Network was untested [source-a.md, L4].",
+        "All documents were indexed locally [source-a.md]. Network was untested [source-a.md, L4].",
+        "All documents were indexed locally. Network was untested [source-a.md, L4].",
+        "All documents were indexed locally [source-a.md:3-9].",
+    ],
+)
+def test_local_index_locator_does_not_borrow_or_accept_invalid_range(claim):
+    with pytest.raises(AssertionError):
+        _check_local_index_locator(claim)
+
+
 @pytest.mark.parametrize("status", ["failed", "cancelled"])
 def test_failed_child_cannot_become_a_successful_delivery(tmp_path, status):
     assert _native_wait_problem({"statuses": {"child": status}}, tmp_path)

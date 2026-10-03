@@ -64,3 +64,11 @@ Native 成功调用时与最终源码均为 wait 240000ms；曾在编辑期间�
 同时撤销此前“OpenCode 原报告全部引用人工核对正确/三份报告质量均通过”的结论。旧 OpenCode 报告 Findings 首段把“all indexed locally”连同检索耗时引用为 `[source-a.md:3]`，本地索引事实实际在第 4 行；旧 gate 只检查 network ledger，漏过该复合事实。原报告不改写；新增 canary 检查本地索引断言的相邻定位必须包含第 4 行，原始真实报告作为固定反例，L3-L4 引用作为正例。原执行/父终结/清理成功仍成立，质量验收追溯改记失败。新增 `test_research_canary_guards.py` 覆盖真实误引、失败/空结果/缺产物、实际父工具表面、真实 shell 与 fs 拒绝。未来报告仍须人工核对；此夹具检查不是通用语义评测器，不以手工更正旧报告替代新 live。
 
 该窄修定向回归结果：60 passed / 3 skipped（远端未启用）/ 1 既有弃用警告，5.43 秒；日志与 XML 为 `/tmp/r1-12-closure/guards-final.{log,xml}`。第一轮空 allowlist 拒绝负例为 1 failed / 4 passed，14.74 秒，保留 `/tmp/r1-12-closure/guards.{log,xml}`；这是测试配置预期与既有 API 语义不符，不在本轮宣称或修复 core 缺陷。最终远端验证由主集成树运行；本增量目前状态为待真实验证。
+
+### 引用语法与提示契约修正
+
+集成 `86e79bb3` 的 Native 复验完成产物生成、读回、父 answer 和清理，但 pytest 在 132.48 秒失败：报告网络事实使用合法的 `[source-a.md, L4]`，旧 regex 不识别逗号加 L；索引事实自身只附 `[source-a.md]`，随后一句的网络引用不能倒借给它。原任务仅要求 adjacent citations，而新增 gate 要求每个索引事实精确行号，二者契约不一致。本次失败记为提示/gate 契约与语法不匹配，不记为模型明确误引第 3 行，也不改成 live 通过。
+
+窄修在代表任务中明确每项事实后给文件名及精确行定位；合句包含不同行的事实时分引或给覆盖范围，行号必须从原文读取，不把正确答案写进提示。仅针对本次已知“indexed locally”事实，gate 检查它之后最近的 source-a 引用，支持 `file:4`、`file:L4`、`file, L4`、`file L4`、`file line 4` 及 `3-4`/`L3-L4` 范围；不跳过缺行号/错误定位去借下一句的正确引用。保留旧 OpenCode 原始误引反例，增加 9 种语法正例和跨句/无定位/超出真实来源范围反例，不扩展为通用语义解析器。新增要求不追溯冒称旧报告满足，也不以手工改报告替代 live；本增量没有远端调用，由最终集成树重新验收。
+
+引用窄修最终定向回归：73 passed / 3 skipped（远端关闭）/ 1 既有弃用警告，5.56 秒；`/tmp/r1-12-closure/citation-final.{log,xml}`。ruff/diff whitespace 检查通过，真实验证状态仍为待最终集成复验。

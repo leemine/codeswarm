@@ -97,16 +97,25 @@ def _check_local_index_locator(report: str) -> None:
     findings = report.split("## Sources", 1)[0]
     for match in re.finditer(r"indexed locally", findings, re.I):
         adjacent = findings[match.end() :].split("\n", 1)[0]
-        citation = re.search(
-            r"source-a\.md[`*]?\s*(?::|L|lines?\s+)([34])(?:\s*[-–]\s*L?([34]))?",
-            adjacent,
+        # The first reference after this fact owns its locator. Do not skip a
+        # filename-only/wrong reference and borrow a later sentence's good one.
+        citation = re.search(r"`?source-a\.md`?", adjacent, re.I)
+        assert citation is not None, (
+            "Local indexing claim lacks an adjacent source-a citation"
+        )
+        assert not re.search(r"[.!?]\s+\S", adjacent[: citation.start()]), (
+            "Local indexing claim cannot borrow a later sentence's citation"
+        )
+        locator = re.match(
+            r"\s*(?:[:,]\s*L?\s*|L\s*|lines?\s+)(\d+)(?:\s*[-–]\s*L?(\d+))?\b",
+            adjacent[citation.end() :],
             re.I,
         )
-        assert citation is not None, (
+        assert locator is not None, (
             "Local indexing claim lacks an adjacent source-a line locator"
         )
-        first, last = int(citation[1]), int(citation[2] or citation[1])
-        assert first <= 4 <= last, (
+        first, last = int(locator[1]), int(locator[2] or locator[1])
+        assert 1 <= first <= 4 <= last <= 4, (
             "Local indexing claim is on source-a.md line 4, not line 3"
         )
 
@@ -173,6 +182,11 @@ _RESEARCH_TASK = (
     "four-line synthetic field logs, not user documents. Read both original files with tools. "
     "Write research-report.md (at most 300 words) with Scope, Findings, Limitations and Sources, "
     "adjacent citations, both numeric observations and the comparability caveat. "
+    "Put a source filename plus exact line locator immediately after every factual claim "
+    "(file:line, file:Lline or file, Lline are acceptable). If a sentence combines facts "
+    "from different lines, cite each fact separately or give the covering line range. "
+    "A later sentence's citation does not locate an earlier claim. Read the original "
+    "numbered lines to determine every locator; do not guess. "
     + _EVIDENCE_REQUEST
     + " Read back and verify both outputs. Use only these sources, no web searches. "
     "Do not restate the complete report in your final reply: return paths and verification "
