@@ -305,7 +305,11 @@ def _native_research_parent(model, root, operation, spec, trace_rail):
     )
 
 
-_RUN_BUDGET_S = 360
+# The initial child retains its original bound. Only an observed completed
+# delivery enables the separately bounded parent acceptance/one-revision phase.
+_FIRST_DELIVERY_BUDGET_S = 360
+_ACCEPTANCE_BUDGET_S = 240
+_RUN_BUDGET_S = _FIRST_DELIVERY_BUDGET_S + _ACCEPTANCE_BUDGET_S
 _CLEANUP_BUDGET_S = 30
 _RESEARCH_TASK = (
     "Compare the two recorded retrieval runs in source-a.md and source-b.md: what do they "
@@ -320,8 +324,10 @@ _RESEARCH_TASK = (
     "numbered lines to determine every locator; do not guess. "
     + _EVIDENCE_REQUEST
     + " Preserve research-review-input.json with the final sources/claims/question tool input "
-    "and research-audit.json with checked_claim_ids, input_fingerprint and unresolved_issues. "
-    + " Read back and verify both outputs. Use only these sources, no web searches. "
+    "without changing or summarizing its schema (retain source text and all claim refs), "
+    "and research-audit.json with checked_claim_ids, the exact last tool-returned "
+    "input_fingerprint and unresolved_issues. "
+    + " Read back and verify all four outputs. Use only these sources, no web searches. "
     "Do not restate the complete report in your final reply: return paths and verification "
     "in at most 40 words. Batch independent source reads when supported."
 )
@@ -359,6 +365,23 @@ class _ResearchTrace:
         self.parent_final_text = ""
         self.spawned_child_ids = set()
         self.parent_revision_targets = []
+        self.execution_timeout = None
+        self.execution_started = None
+        self.first_delivery_seconds = None
+
+    def enable_acceptance_budget(self, child_ids):
+        if self.first_delivery_seconds is not None or self.execution_timeout is None:
+            return
+        if len(self.spawned_child_ids) != 1 or child_ids != self.spawned_child_ids:
+            return
+        now = asyncio.get_running_loop().time()
+        if now > self.execution_started + _FIRST_DELIVERY_BUDGET_S:
+            return
+        self.first_delivery_seconds = round(now - self.execution_started, 3)
+        self.execution_timeout.reschedule(min(
+            self.execution_started + _RUN_BUDGET_S, now + _ACCEPTANCE_BUDGET_S,
+        ))
+        self.mark("first_child_completed", acceptance_budget_seconds=_ACCEPTANCE_BUDGET_S)
 
     def observe_parent_control(self, tool, arguments, result):
         name = tool.rsplit(".", 1)[-1]
@@ -366,6 +389,24 @@ class _ResearchTrace:
             self.spawned_child_ids.update(re.findall(
                 r"\b[\w-]+_sub_[\w-]+\b", json.dumps(result, default=str),
             ))
+        elif name.endswith("subagent_wait"):
+            data = getattr(result, "data", result)
+            completed = set()
+            if isinstance(data, dict) and isinstance(data.get("statuses"), dict):
+                completed = {sid for sid, status in data["statuses"].items() if status == "completed"}
+            else:
+                # External adapters project the host's rendered tool result.
+                # Read only its status header, before child-authored result text.
+                if isinstance(data, dict):
+                    data = data.get("content", data.get("text", ""))
+                if isinstance(data, list):
+                    data = "\n".join(part.get("text", "") for part in data if isinstance(part, dict))
+                if isinstance(data, str):
+                    header = data.split("\nresult:", 1)[0]
+                    completed.update(re.findall(
+                        r"(?:^|\n)subagent_id: ([\w-]+)\nstatus: completed(?:\n|$)", header,
+                    ))
+            self.enable_acceptance_budget(completed)
         elif name.endswith("subagent_send_input"):
             try:
                 args = json.loads(arguments) if isinstance(arguments, str) else arguments
@@ -413,7 +454,7 @@ class _ResearchTrace:
         seen = set()
         children = set()
         while True:
-            for name in ("research-report.md", "research-evidence.json"):
+            for name in ("research-report.md", "research-evidence.json", "research-review-input.json", "research-audit.json"):
                 if name not in seen and (self.root / name).exists():
                     seen.add(name)
                     self.mark("artifact_observed", artifact=name)
@@ -448,6 +489,9 @@ class _ResearchTrace:
                     "provider": self.provider,
                     "outcome": self.outcome,
                     "execution_budget_seconds": _RUN_BUDGET_S,
+                    "first_delivery_budget_seconds": _FIRST_DELIVERY_BUDGET_S,
+                    "acceptance_budget_seconds": _ACCEPTANCE_BUDGET_S,
+                    "first_delivery_seconds": self.first_delivery_seconds,
                     "cleanup_budget_seconds": _CLEANUP_BUDGET_S,
                     "report_word_budget": 300,
                     "child_reply_word_budget": 40,
@@ -644,7 +688,9 @@ async def test_work_research_real_external_cited_artifact(
         watcher = asyncio.create_task(trace.watch(runtime))
         adapter.select_execution_for_request(request)
         trace.mark("execution_start")
-        async with asyncio.timeout(_RUN_BUDGET_S):
+        trace.execution_started = asyncio.get_running_loop().time()
+        async with asyncio.timeout(_FIRST_DELIVERY_BUDGET_S) as deadline:
+            trace.execution_timeout = deadline
             async for chunk in adapter.process_message_stream_impl(
                 request, {"query": query}
             ):
@@ -828,7 +874,9 @@ async def test_work_research_real_native_cited_artifact(tmp_path: Path, monkeypa
         spec.rails.append(Trace("child"))
         parent = _native_research_parent(model, root, operation, spec, Trace("parent"))
         trace.mark("execution_start", model_max_tokens=8192)
-        async with asyncio.timeout(_RUN_BUDGET_S):
+        trace.execution_started = asyncio.get_running_loop().time()
+        async with asyncio.timeout(_FIRST_DELIVERY_BUDGET_S) as deadline:
+            trace.execution_timeout = deadline
             result = await Runner.run_agent(
                 parent,
                 {

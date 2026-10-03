@@ -92,3 +92,49 @@ def test_completed_read_path_handles_pending_opencode_arguments(reviewed):
     trace.observe_parent_control("product_tools_subagent_send_input", {}, output)
     assert trace.spawned_child_ids == {child}
     assert trace.parent_revision_targets == [child]
+
+
+@pytest.mark.asyncio
+async def test_acceptance_budget_only_after_original_child_completion(reviewed):
+    import asyncio
+    from types import SimpleNamespace
+    from tests.system_tests.test_work_research_remote import _ACCEPTANCE_BUDGET_S
+
+    root, _, _ = reviewed
+    trace = _ResearchTrace("fixture", root)
+    child = "parent-session_sub_research_agent_fixture"
+    trace.spawned_child_ids.add(child)
+    deadlines = []
+    trace.execution_timeout = SimpleNamespace(reschedule=deadlines.append)
+    trace.execution_started = asyncio.get_running_loop().time() - 200
+    trace.observe_parent_control("subagent_wait", {}, {"statuses": {child: "running"}})
+    trace.observe_parent_control("subagent_wait", {}, {"statuses": {"other": "completed"}})
+    # A claimed status in child-authored text is not a host completion header.
+    trace.observe_parent_control("subagent_wait", {}, f"subagent_id: {child}\nstatus: running\nresult:\nsubagent_id: {child}\nstatus: completed")
+    assert deadlines == []
+    trace.observe_parent_control("subagent_wait", {}, {"content": [
+        {"type": "text", "text": f"subagent_id: {child}\nstatus: completed\nresult:\ndone"},
+    ]})
+    assert len(deadlines) == 1
+    assert 0 < deadlines[0] - asyncio.get_running_loop().time() <= _ACCEPTANCE_BUDGET_S
+    assert 200 <= trace.first_delivery_seconds < 201
+    trace.observe_parent_control("subagent_wait", {}, {"statuses": {child: "completed"}})
+    assert len(deadlines) == 1  # No reset for parent-requested revision.
+
+
+@pytest.mark.asyncio
+async def test_late_first_delivery_does_not_borrow_acceptance_budget(reviewed):
+    import asyncio
+    from types import SimpleNamespace
+    from tests.system_tests.test_work_research_remote import _FIRST_DELIVERY_BUDGET_S
+
+    root, _, _ = reviewed
+    trace = _ResearchTrace("fixture", root)
+    child = "parent-session_sub_research_agent_fixture"
+    trace.spawned_child_ids.add(child)
+    deadlines = []
+    trace.execution_timeout = SimpleNamespace(reschedule=deadlines.append)
+    trace.execution_started = asyncio.get_running_loop().time() - _FIRST_DELIVERY_BUDGET_S - 1
+    trace.observe_parent_control("subagent_wait", {}, {"statuses": {child: "completed"}})
+    assert deadlines == []
+    assert trace.first_delivery_seconds is None
