@@ -363,10 +363,12 @@ async def test_work_research_real_external_cited_artifact(
     )
     route = _route(root, spec)
     adapter = EngineAgentAdapter(route)
+    # OpenCode MCP requests have a 60s deadline; leave room for the reply.
+    wait_ms = 45000 if provider == "opencode" else 60000
     query = (
         "Use product subagent_spawn exactly once with subagent_type research_agent and pass "
         "the entire assignment below. Your role is only to delegate and wait. "
-        "Then use subagent_wait with the exact returned ID and timeout_ms=60000; "
+        f"Then use subagent_wait with the exact returned ID and timeout_ms={wait_ms}; "
         "if still running wait again. When completed, return ONLY the two artifact paths, "
         "without opening files yourself or repeating the report. Assignment: "
         + _RESEARCH_TASK

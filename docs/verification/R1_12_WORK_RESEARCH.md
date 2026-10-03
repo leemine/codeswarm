@@ -82,3 +82,15 @@ Native 成功调用时与最终源码均为 wait 240000ms；曾在编辑期间�
 这是新的生产政策改动，不能把 `3f4ecb1c` 的 Native 成功沿用为新政策成功；由主线在最终集成版本核源、stable 及三 Provider live 重新留证。本增量未自行调用远端。
 
 共用政策更新后的定向回归：76 passed / 3 skipped（远端关闭）/ 1 既有弃用警告，5.04 秒；`/tmp/r1-12-closure/policy-final.{log,xml}`。checker 先行回归为同数量 5.18 秒（paraphrase-final）。ruff/diff 检查通过；未运行新的真实模型验证。
+
+### OpenCode 等待期限与固定模型预算的实证
+
+主线 `b75ab79e` 的新政策 Native（约 115 秒）与 Codex（约 150 秒）live 和独立人工审阅均通过。这些成功属于该运行 SHA，不能冒称随后提交已运行。相同版本 OpenCode 本次为 TimeoutError，1 failed / 2 deselected，373.54 秒；保留 `/tmp/r1-closure/research-policy-final/opencode/run.{log,xml}`，不改记环境未运行。
+
+只读检查本任务 OpenCode SQLite 的 message/part 元数据：child 先完成 glob、两次 read，第三次模型在 01:25:11.068–01:26:00.591 UTC 返回 finish=length，正文 output=0、reasoning=4096，没有 write 产物。父每轮 subagent_wait 的 60 秒等待均遇到 MCP -32001 Request timed out，而非正常 running 返回。锁 core 的 OpenCodeModelConfig 只支持 model/api_base/api_key/provider；options.py 将输出限制固定为 4096，mapping.py 只对 completed 且 finish=stop 设 final_id，harness.py 要求 idle+final_id 才完成。当前没有可配置 token/reasoning 字段，本轮不修改锁 core 的预算或 length 完成出口。
+
+仅把本 canary 的 OpenCode 单次 wait 改为 45000ms，为 MCP 60 秒请求期限留余量；Codex 60000ms、Native 240000ms 保持不变，模型/政策/360 秒整体预算不变。这能避免已确认的等待期限冲突，不能声称解决 child 的 length 耗尽。主线只对 OpenCode 再做一次有界复验；若再次 length 或真实失败，明确保留 OpenCode 研究验证待验证及已有失败证据，不扩大 core/锁范围。
+
+脱敏证据为 `/tmp/r1-12-closure/opencode-limit-evidence.json`：只包含两 scope 的消息完成时间、finish、token 数、工具名/状态/时间和固定 core 源码行号/hash；不包含正文、思考文本、工具参数/输出、完整配置、环境或凭据。本增量未运行真实模型。
+
+等待参数窄修回归：21 passed / 3 skipped（远端关闭），3.46 秒，`/tmp/r1-12-closure/opencode-wait.{log,xml}`；ruff/diff 检查通过。
