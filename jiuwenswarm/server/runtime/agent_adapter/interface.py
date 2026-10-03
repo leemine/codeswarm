@@ -4964,6 +4964,10 @@ class JiuWenSwarm:
             return bool(has_runtime())
         return bool(has_runtime(session_id))
 
+    def owns_native_tool_session(self, execution, agent, session) -> bool:
+        check = getattr(self._adapter, "owns_native_tool_session", None)
+        return callable(check) and check(execution, agent, session) is True
+
     def owns_external_execution(self, session_id: str | None = None) -> bool:
         """Return whether this facade is the isolated root for one External binding."""
         route = self._runtime_execution_route

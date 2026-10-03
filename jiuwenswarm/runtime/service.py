@@ -313,6 +313,31 @@ class _StoredProjectAuthority:
         return ProjectAccessStore().authorize(project_id, actor_id, action)
 
 
+class _StoredResourceAuthority:
+    def authorize_resource(self, project_id, identity, request):
+        from jiuwenswarm.server.runtime.session.project_access import ProjectAccessStore
+        return ProjectAccessStore().authorize_resource(project_id, identity, request)
+
+    def resource_grants(self, project_id, identity):
+        from jiuwenswarm.server.runtime.session.project_access import ProjectAccessStore
+        return ProjectAccessStore().resource_grants(project_id, identity)
+
+
+class _CurrentNativeToolResources:
+    def __init__(self, authority, owns_session):
+        self._authority = authority
+        self._owns_session = owns_session
+
+    def resources_for_tool(self, execution, operation):
+        from jiuwenswarm.governance.native_tool_resources import NativeToolResourceResolver
+        if execution.provider_id != "native":
+            raise GovernanceError("Provider resource mapping unavailable")
+        # Reload visible reference metadata; ResourceGuard independently checks
+        # every actual grant immediately before the concrete tool runs.
+        grants = self._authority.resource_grants(execution.project_id, execution.identity)
+        return NativeToolResourceResolver(grants, owns_session=self._owns_session).resources_for_tool(execution, operation)
+
+
 class AgentRuntime:
     """Own the existing ``AgentManager`` and its in-memory resources.
 
@@ -358,7 +383,7 @@ class AgentRuntime:
         self._explicit_identity_resolver = trusted_identity_resolver
         self._explicit_project_authorizer = project_authorizer
         self._explicit_resource_authorizer = resource_authorizer
-        self._resource_authorizer = resource_authorizer
+        self._resource_authorizer = resource_authorizer or _StoredResourceAuthority()
         self._tool_resource_resolver = tool_resource_resolver
         self._trusted_identity_resolver = trusted_identity_resolver
         self._submission_guard = SubmissionGuard(project_authorizer or _StoredProjectAuthority())
@@ -479,6 +504,15 @@ class AgentRuntime:
         resolver = self._tool_resource_resolver
         if resolver is None and callable(getattr(self._resource_authorizer, "resources_for_tool", None)):
             resolver = self._resource_authorizer
+        if resolver is None and isinstance(self._resource_authorizer, _StoredResourceAuthority):
+            def owns_session(execution, agent, session):
+                if not is_current():
+                    return False
+                lookup = getattr(self._agent_manager, "get_agent_for_session_nowait", None)
+                owner = lookup(request.channel_id or "default", session_id) if callable(lookup) else None
+                check = getattr(owner, "owns_native_tool_session", None)
+                return callable(check) and check(execution, agent, session) is True
+            resolver = _CurrentNativeToolResources(self._resource_authorizer, owns_session)
         return {
             provider: BoundToolResourceAuthority(
                 ResourceExecutionContext(project_id, identity, session_id, str(Path(workspace).resolve()), provider),
@@ -3736,7 +3770,7 @@ class AgentRuntime:
         self._submission_guard = SubmissionGuard(
             projects or self._explicit_project_authorizer or _StoredProjectAuthority()
         )
-        self._resource_authorizer = resources or self._explicit_resource_authorizer
+        self._resource_authorizer = resources or self._explicit_resource_authorizer or _StoredResourceAuthority()
 
     async def _rollback_start(self) -> None:
         """Undo partially initialized owned dependencies after start failure."""

@@ -103,9 +103,21 @@ class NativeExecutionSession:
         self._closed = False
         self._exit_state = ExecutionExitState.NOT_STARTED
         self._lifecycle_lock = asyncio.Lock()
+        self._tool_owner = None
+
+        async def register_owner(instance, session):
+            if self._tool_owner is not None:
+                raise RuntimeError("Native tool owner already registered")
+            if before_start is not None:
+                await before_start(instance, session)
+            inner = instance.react_agent
+            if inner is None or session.get_session_id() != bound.binding.host_session_id:
+                raise RuntimeError("Native tool owner does not match the Binding")
+            self._tool_owner = (instance, inner, session, bound.binding)
+
         hooks = NativeHostHooks(
             create_session=session_factory,
-            before_start=before_start,
+            before_start=register_owner,
             dispatch_input=self._dispatch,
         )
         harness = DeepAgentHarness(
@@ -156,8 +168,24 @@ class NativeExecutionSession:
                     raise ExecutionExitUnconfirmedError(
                         [("provider", cleanup_error)]
                     ) from start_error
+                self._tool_owner = None
                 raise
             self._exit_state = ExecutionExitState.RUNNING
+
+    def owns_tool_session(self, execution, agent, session) -> bool:
+        """Exact objects owned by this live Native Binding, never an ID prefix."""
+        owner = self._tool_owner
+        if owner is None or self._closing or self._closed or self._exit_state is not ExecutionExitState.RUNNING:
+            return False
+        outer, inner, actual_session, binding = owner
+        return (
+            agent is inner and session is actual_session
+            and outer.react_agent is inner and self.engine.binding is binding
+            and execution.provider_id == "native"
+            and execution.session_id == binding.host_session_id
+            and execution.identity.subject_id == binding.subject_id
+            and str(Path(execution.workspace).resolve()) == binding.workspace
+        )
 
     @property
     def closed(self) -> bool:
@@ -198,6 +226,7 @@ class NativeExecutionSession:
             self._turn_requests.clear()
             self._goal_handoffs.clear()
             self._terminal_turns.clear()
+            self._tool_owner = None
             self._closed = True
             self._exit_state = ExecutionExitState.EXIT_CONFIRMED
 
