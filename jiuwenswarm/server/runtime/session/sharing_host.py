@@ -205,6 +205,44 @@ class SharingHostService:
             self._storage._save(data)
             return epoch
 
+    def compensate_owner_registration(
+        self, session_id: str, owner: TrustedIdentity, *,
+        expected_revision: int, expected_epoch: int,
+    ) -> int:
+        """Atomically tombstone exactly one failed publication reservation.
+
+        The receipt is only the trusted identity and two persisted CAS values.
+        A completed receipt is idempotent; a newer reservation, even by the same
+        actor, is never modified. Session files remain for controlled recovery.
+        """
+        self.store._session(session_id)
+        identity = self.store._identity(owner)
+        expected_revision = _component(expected_revision, positive=True)
+        expected_epoch = _component(expected_epoch, positive=True)
+        retired_revision = _component(expected_revision + 1, positive=True)
+        retired_epoch = _component(expected_epoch + 1, positive=True)
+        with self._storage._locked():
+            data = self._storage._load()
+            record = self.store._section(data)['owners'].get(session_id)
+            if not isinstance(record, dict) or record.get('identity') != identity:
+                raise SessionSharingConflict('owner reservation changed before compensation')
+            source = record.get('source')
+            if not isinstance(source, dict) or type(source.get('schema_version')) is not int or source['schema_version'] != 1:
+                raise SessionSharingDenied('owner reservation source unavailable')
+            revision = _component(record.get('revision'), positive=True)
+            epoch = _component(source.get('epoch'), positive=True)
+            if (record.get('retired') is True and revision == retired_revision
+                    and source.get('active') is False and epoch == retired_epoch
+                    and source.get('history') is None):
+                return retired_revision
+            _, current_owner, source = self._record(data, session_id)
+            if current_owner != owner or revision != expected_revision or epoch != expected_epoch:
+                raise SessionSharingConflict('owner reservation changed before compensation')
+            source.update(active=False, epoch=retired_epoch, history=None)
+            record.update(retired=True, revision=retired_revision)
+            self._storage._save(data)
+            return retired_revision
+
     def source_epoch(self, session_id: str) -> int:
         """Host-only persisted CAS token, including an invalidated source."""
         with self._storage._locked():

@@ -394,3 +394,81 @@ def test_owner_revision_rejects_invalidated_source_then_advances(setup):
         host.owner_revision('session', ALICE)
     host.activate_source('session', pid, expected_epoch=epoch)
     assert host.owner_revision('session', ALICE) > old
+
+
+def test_compensation_is_one_atomic_save_and_idempotent(setup, monkeypatch):
+    host, access, _, session, _, _, _ = setup
+    before = copy.deepcopy(access._load())
+    saves = []
+    original = access._save
+    def save(data):
+        saves.append(copy.deepcopy(data))
+        original(data)
+    monkeypatch.setattr(access, '_save', save)
+    assert host.compensate_owner_registration('session', ALICE, expected_revision=1, expected_epoch=1) == 2
+    assert len(saves) == 1
+    record = access._load()['session_sharing']['owners']['session']
+    assert record['retired'] is True and record['revision'] == 2
+    assert record['source']['active'] is False and record['source']['epoch'] == 2
+    assert record['source']['history'] is None
+    assert access._load()['projects'] == before['projects']
+    assert not host.owner_current('session', ALICE)
+    assert (session / 'metadata.json').exists() and (session / 'history.jsonl').exists()
+    assert host.compensate_owner_registration('session', ALICE, expected_revision=1, expected_epoch=1) == 2
+    assert len(saves) == 1
+
+
+def test_compensation_write_failure_can_retry_without_partial_state(setup, monkeypatch):
+    host, access, _, _, _, _, _ = setup
+    before = copy.deepcopy(access._load())
+    original = access._save
+    def fail(data):
+        raise OSError('disk unavailable before atomic replacement')
+    monkeypatch.setattr(access, '_save', fail)
+    with pytest.raises(OSError):
+        host.compensate_owner_registration('session', ALICE, expected_revision=1, expected_epoch=1)
+    assert access._load() == before
+    monkeypatch.setattr(access, '_save', original)
+    assert host.compensate_owner_registration('session', ALICE, expected_revision=1, expected_epoch=1) == 2
+
+
+def test_compensation_uncertain_post_replace_error_is_idempotent(setup, monkeypatch):
+    host, access, _, _, _, _, _ = setup
+    original = access._save
+    def save_then_fail(data):
+        original(data)
+        raise OSError('directory fsync failed after atomic replacement')
+    monkeypatch.setattr(access, '_save', save_then_fail)
+    with pytest.raises(OSError):
+        host.compensate_owner_registration('session', ALICE, expected_revision=1, expected_epoch=1)
+    monkeypatch.setattr(access, '_save', lambda *_: pytest.fail('idempotent receipt rewrote authority'))
+    assert host.compensate_owner_registration('session', ALICE, expected_revision=1, expected_epoch=1) == 2
+
+
+@pytest.mark.parametrize('change', ['identity', 'revision', 'epoch', 'new_owner'])
+def test_compensation_never_touches_changed_or_new_reservation(setup, change):
+    host, access, pid, _, _, _, _ = setup
+    actor, revision, epoch = ALICE, 1, 1
+    if change == 'identity':
+        actor = BOB
+    elif change == 'revision':
+        revision = 2
+    elif change == 'epoch':
+        host.invalidate_source('session', expected_epoch=1)
+    else:
+        host.compensate_owner_registration('session', ALICE, expected_revision=1, expected_epoch=1)
+        host.register_owner_and_source('session', ALICE, pid, expected_owner_revision=2)
+    before = copy.deepcopy(access._load())
+    with pytest.raises((SessionSharingDenied, SessionSharingConflict)):
+        host.compensate_owner_registration('session', actor, expected_revision=revision, expected_epoch=epoch)
+    assert access._load() == before
+
+
+@pytest.mark.parametrize('revision,epoch', [(True, 1), (1, True), (0, 1), (1, 0),
+                                          ((1 << 64) - 1, 1), (1, (1 << 64) - 1)])
+def test_compensation_revision_components_are_strict_and_bounded(setup, revision, epoch):
+    host, access, _, _, _, _, _ = setup
+    before = copy.deepcopy(access._load())
+    with pytest.raises(SessionSharingDenied):
+        host.compensate_owner_registration('session', ALICE, expected_revision=revision, expected_epoch=epoch)
+    assert access._load() == before
