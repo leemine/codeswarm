@@ -2921,6 +2921,7 @@ class AgentRuntime:
         deliver = getattr(agent, "deliver_session_input", None)
         if not callable(deliver):
             raise RuntimeError("active agent does not support supplemental input")
+        self._capture_native_session_input_control(request)
         self._commit_governed_request(governed, request)
         async with aclosing(deliver(request)) as stream:
             async for chunk in stream:
@@ -2932,6 +2933,48 @@ class AgentRuntime:
                 )
                 await self._mark_pending_interaction(event)
                 yield event
+
+    def _capture_native_session_input_control(self, request):
+        """Keep input credentials separate from the original Native authority."""
+        from jiuwenswarm.runtime.session_input import SessionInputMode
+        if resolve_session_input_mode(request.params) is not SessionInputMode.STEER:
+            return
+        captured = self._session_coordinator.native_session_input_admission(
+            request.session_id, request.request_id)
+        if captured is None:
+            return
+        admission, check_input = captured
+        native = admission.native
+        identity = self._governance_identity(request)
+        project_id = self._governance_project(request)
+        decision = self._submission_guard.check_access(project_id, identity, 'execute')
+        host = self._organization_session_host
+        owner_revision = host.owner_revision(request.session_id, identity) if host is not None else None
+        session_id, request_id, channel_id = request.session_id, request.request_id, request.channel_id
+        params = request.params
+        query = params.get('query') if isinstance(params, dict) else None
+        input_mode = resolve_session_input_mode(params)
+        context = copy_context()
+
+        def check_host():
+            if (self._closed or request.session_id != session_id or request.request_id != request_id
+                    or request.channel_id != channel_id or request.params is not params
+                    or params.get('query') != query or resolve_session_input_mode(params) != input_mode
+                    or self._governance_identity(request) != identity
+                    or identity is None or native.engine.binding.subject_id != identity.subject_id
+                    or self._governance_project(request) != project_id
+                    or self._organization_session_host is not host
+                    or (host is not None and host.owner_revision(session_id, identity) != owner_revision)):
+                raise GovernanceError('original Native supplemental request changed')
+            self._require_session_owner(session_id, request)
+            if self._submission_guard.check_access(project_id, identity, 'execute') != decision:
+                raise GovernanceError('original Native supplemental authorization changed')
+        def check():
+            check_input()
+            context.run(check_host)
+        check()
+        request._native_steer_control = native.capture_steer_control(
+            source=admission.source, request_id=request_id, check_current=check)
 
     async def _deliver_control(
         self,

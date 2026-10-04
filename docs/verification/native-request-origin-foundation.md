@@ -66,10 +66,19 @@ Provider 取消 fence 与 producer 实际收到 cancel 分别记录。调度入�
 
 `NativeExecutionSession.capture_steer_control(*, source, request_id, check_current)` 同步返回 live-only `NativeSteerControl`。`source` 必须是原 parent admission 的同一 ExecutionOrigin，不能凭相同 host_value 或最新 active Turn 冒认。capability 固定原 Native、Binding、HostRequest、PendingTurn 与 ActiveInteractionRound；`request_id` 是临时 SESSION_INPUT 的真实请求 ID。copy/deepcopy 保留对象身份，禁止 pickle。`check_current(native, request_id)` 同步复核这些引用并调用宿主原 checker；checker 必须返回 None，不接受异步授权。
 
-Runtime 负责在首 await 前从原 SESSION_INPUT task/handle 定位 parent，捕获原临时凭据及其 Project execute 检查，并仅用私有 `request._native_steer_control` 传入 adapter。checker 在 core 原 admission 子任务中执行，须校验捕获的原 input task 是否仍存活，不能把 current_task 当成 input task，也不能借当前环境主体替换根凭据。本片不修改 Runtime/Coordinator，不自行打开组织 STEER。
+Runtime 负责在首 await 前从原 SESSION_INPUT task/handle 定位 parent，捕获原临时凭据及其 Project execute 检查，并仅用私有 `request._native_steer_control` 传入 adapter。checker 在 core 原 admission 子任务中执行，须校验捕获的原 input task 是否仍存活，不能把 current_task 当成 input task，也不能借当前环境主体替换根凭据。后续 Runtime 接线见下节；仅 Native capability 组件本身不自行打开组织 STEER。
 
 `send_request(request, *, control=...)` 对受管 STEER 只允许精确 request_id 的一次 attempt。临时 entry 沿用原 guarded tool/model/MCP/artifact 引用，不建立 lifecycle、Turn 或输出所有者，不重写 `_turn_requests`。向 SDK 注入的是原 entry token。经原 NativeHarness.send(STEER) 调用，避开 IO 旧 STEER→AUTO 回退；原 output router/observer 保持唯一消费者。权限 guard 前后和 SDK 实际入队前重验；guard 未发送、重复发送或改变 query/request/mode 均不能伪装为正常成功。
 
 core 必须提供 `DeepAgent._send_owned_steer(expected_round, request, *, check_current)`：复用原两把输入锁、锁后检验原 Round/source 及当前临时授权，然后只向原 steer queue 写入；不进入 keep-open/new-Round fallback。缺少该端口明确拒绝。宿主没有直接拿 SDK 锁或写 SDK 队列。取消/失败后能力失效，shield 保留的旧 admission 子任务也须通过最终 checker，不能凭调用者 Cancel ACK 宣称未投递。未知结果不自动重试或改投新 Turn；原根执行的权限与生命周期保持。
 
 新增 `test_native_steer_control.py` 使用真实 core DeepAgent/TaskLoop/NativeHarness 与实际新入队端口，React/Session IO 合成。17 例覆盖合法原队列、原 token/资源闭包、两锁等待期间身份失效、同来源新 Round、caller cancellation、旧 capability/replay、缺 core 端口、guard 丢弃/改参/重复及 adapter prepare 后重验。与旧 Native/adapter/session_input 相邻测试共107通过（6.73s）；这是 core-owned-steer draft + swarm 源码联合验证，不是正式锁验收或真实渠道 STEER 证明。命令/来源/日志见 `/tmp/r2b-native-steer-tests`。既有 stable 的 runtime/harness discover/command 已包含此新文件，未增加预算或历史白名单。Goal/EOF、后台独立授权和 Team 不属于本片。
+
+
+## Runtime 原临时输入与根执行分离接线
+
+原 Coordinator 在 SESSION_INPUT producer 首次 dispatch 前固定实际 input handle/task/principal 与原 parent Native admission。检查原 record/generation、registry identity、parent linkage、任务完成/取消及原凭据有效性；core admission 子任务执行 checker 时仍检查捕获的 input task，不使用当前 task 冒认。Runtime 固定原请求 ID/Session/channel、params 引用/query/mode、可信身份、Project、组织 host/source owner revision 和原 execute decision。跨锁期间 source epoch 或 ACL revision 变化即拒绝，即使相同用户仍被允许 execute。
+
+capability 在实际 _stream_session_input_started→facade→cached child 入口传递；既有 facade 合法补齐 equipment 字段不受整个 params 哈希限制。根 tool/model/MCP/artifact 闭包及 principal 不被临时输入替换，无新 Turn、资源重装配或队列。原根执行退出、输入 producer 结束、改变 query/mode、凭据撤销和 Binding 更换都不能向后来 Round 回退。
+
+正式测试文件 test_native_steer_host.py 的18项与 Native capability17项，在 core941d9375 联合源码环境35 passed / 1既有Authlib warning（9.02s）；其中一项通过真实 Coordinator.stream_session_input、Runtime、facade、cached adapter、Native 和实际 core steer queue。React 与 IO 为合成组件，没有外部模型或真实权限对抗。新增18项在 stable discover 与 command 两侧显式登记。两项 owner epoch/ACL revision 红测试与修复证据在 /tmp/r2b-native-steer-host-review；正式锁定配对、完整 stable 与真实渠道尚待集成。
