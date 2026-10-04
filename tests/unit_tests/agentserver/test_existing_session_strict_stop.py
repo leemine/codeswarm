@@ -124,7 +124,7 @@ async def test_core_stop_timeout_keeps_original_owner_until_owned_tool_exits(mon
     scheduler = object.__new__(TaskScheduler)
     scheduler._running = True
     scheduler._running_tasks = {'synthetic-tool': (object(), tool)}
-    scheduler._owned_execution_tasks = {tool}
+    scheduler._owned_execution_tasks = {'synthetic-tool': tool}
     scheduler._stopping_tasks = set()
     scheduler._lock = asyncio.Lock()
     scheduler._scheduler_task = None
