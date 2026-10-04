@@ -149,6 +149,8 @@ class SessionRequestPermit:
     workspace_download: object | None = None
     goal_read_route: object | None = None
     goal_read_result: object | None = None
+    goal_mutation_route: object | None = None
+    goal_mutation_result: object | None = None
 
     def allows_cleanup(self, method: str, params: dict, identity: TrustedIdentity,
                        envelope_session: str | None = None) -> bool:
@@ -174,6 +176,13 @@ class SessionRequestPermit:
                 self.goal_read_route.check()
             if self.goal_read_result is not None:
                 self.goal_read_result.final_check()
+            if self.goal_mutation_route is not None:
+                self.goal_mutation_route.check()
+            if self.goal_mutation_result is not None:
+                if (self.goal_mutation_route is None
+                        or self.goal_mutation_result.final_check() is not None):
+                    return False
+                self.goal_mutation_route.check()
             if self.workspace_download is not None:
                 self.workspace_download.check()
             if self.inventory_revision is not None and _inventory_revision(self.host) != self.inventory_revision:
@@ -204,6 +213,10 @@ class SessionRequestPermit:
 
 def admit_session_request(method: str, params: dict, *, identity_resolver: Callable,
                           host, envelope_session: str | None = None) -> SessionRequestPermit:
+    if method == 'command.goal' and type(params) is dict and params.get('action', 'get') != 'get':
+        from .goal_mutation import admit_goal_mutation
+        return admit_goal_mutation(params, identity_resolver=identity_resolver,
+                                   host=host, envelope_session=envelope_session)
     identity = identity_resolver()
     if not isinstance(identity, TrustedIdentity) or not isinstance(params, dict):
         raise SessionSharingDenied('authenticated request required')
@@ -342,6 +355,29 @@ def delivery_authorized():
         return True
     permit = _delivery.get()
     return isinstance(permit, SessionRequestPermit) and permit.revalidate()
+
+
+def bind_goal_mutation_delivery(session_id, identity, result):
+    """Retain only the local Runtime receipt; never accept a wire callback."""
+    from jiuwenswarm.runtime.native_goal_mutation import NativeGoalMutationDelivery
+    if type(result) is not NativeGoalMutationDelivery:
+        raise TypeError('Actual Native Goal mutation result required')
+    if result.session_id != session_id or result.identity != identity:
+        raise SessionSharingDenied('Original Goal mutation result differs')
+    permit = _delivery.get()
+    if permit is not None and (
+            permit.method != 'command.goal' or permit.identity != identity
+            or len(permit.owners) != 1 or permit.owners[0][0] != session_id
+            or permit.goal_mutation_route is None or permit.goal_mutation_result is not None
+            or not permit.revalidate()):
+        raise SessionSharingDenied('Original Goal mutation delivery permit unavailable')
+    if result.final_check() is not None:
+        raise SessionSharingDenied('Goal mutation result check failed')
+    if permit is None:  # A direct Runtime result does not authorize wire delivery.
+        return
+    if _delivery.get() is not permit or not permit.revalidate():
+        raise SessionSharingDenied('Original Goal mutation delivery permit changed')
+    _delivery.set(replace(permit, goal_mutation_result=result))
 
 
 _inventory_identity = ContextVar('organization_inventory_identity', default=None)
