@@ -26,7 +26,7 @@ async def test_idle_control_does_not_allocate_or_execute(goal_case, hot, action)
         record = c.outer.goal_manager.peek()
     seen = (len(c.http), len(c.side_effects), c.native._native._first_managed_turn,
             c.outer._interaction_output, dict(c.native._requests))
-    cap = capture_idle_goal_control(c.native, expected_record=record,
+    cap = capture_idle_goal_control(c.native, request_id='idle-controller', expected_record=record,
                                    previous=old, check_current=lambda: None)
     result = await getattr(cap, action)()
     cap.check_result()
@@ -70,7 +70,7 @@ async def test_controller_callback_cannot_retarget_original_host(goal_case, chan
             n._native = object()
     try:
         with pytest.raises(PermissionError):
-            capture_idle_goal_control(n, expected_record=record, previous=None, check_current=checker)
+            capture_idle_goal_control(n, request_id='idle-controller', expected_record=record, previous=None, check_current=checker)
         assert not c.http and not c.side_effects
     finally:
         n.engine = originals[0]
@@ -103,7 +103,7 @@ async def test_hot_control_requires_actual_retained_host_receipt(goal_case, chan
         barrier.cleanup = asyncio.get_running_loop().create_future()
     try:
         with pytest.raises(PermissionError):
-            capture_idle_goal_control(c.native, expected_record=c.outer.goal_manager.peek(),
+            capture_idle_goal_control(c.native, request_id='idle-controller', expected_record=c.outer.goal_manager.peek(),
                                       previous=old, check_current=lambda: None)
         assert c.native._requests == {} and c.side_effects == ['goal']
     finally:
@@ -119,7 +119,7 @@ async def test_idle_commit_and_final_ack_recheck_new_controller(goal_case, monke
     def checker():
         if not live[0]:
             raise PermissionError('new controller revoked')
-    cap = capture_idle_goal_control(c.native, expected_record=record, previous=None, check_current=checker)
+    cap = capture_idle_goal_control(c.native, request_id='idle-controller', expected_record=record, previous=None, check_current=checker)
     await cap.pause()
     live[0] = False
     with pytest.raises(PermissionError):
@@ -130,7 +130,7 @@ async def test_idle_commit_and_final_ack_recheck_new_controller(goal_case, monke
 @pytest.mark.asyncio
 async def test_stop_invalidates_previously_captured_idle_controller(goal_case):
     c = goal_case
-    cap = capture_idle_goal_control(c.native, expected_record=persisted(c),
+    cap = capture_idle_goal_control(c.native, request_id='idle-controller', expected_record=persisted(c),
                                    previous=None, check_current=lambda: None)
     await c.native.stop()
     with pytest.raises(PermissionError):
@@ -161,7 +161,7 @@ async def test_actual_commit_wait_revalidates_fixed_host_facts(goal_case, monkey
     monkeypatch.setattr(store, 'commit', commit)
     running = None
     try:
-        cap = capture_idle_goal_control(c.native, expected_record=c.outer.goal_manager.peek(),
+        cap = capture_idle_goal_control(c.native, request_id='idle-controller', expected_record=c.outer.goal_manager.peek(),
                                        previous=old, check_current=check)
         running = asyncio.create_task(cap.clear())
         await asyncio.wait_for(entered.wait(), 1)
@@ -196,7 +196,7 @@ async def test_host_caller_cancel_preserves_one_original_idle_commit(goal_case, 
         entered.set()
         await release.wait()
     monkeypatch.setattr(c.outer.goal_manager._store, 'commit', commit)
-    cap = capture_idle_goal_control(c.native, expected_record=persisted(c),
+    cap = capture_idle_goal_control(c.native, request_id='idle-controller', expected_record=persisted(c),
                                    previous=None, check_current=lambda: None)
     running = asyncio.create_task(cap.clear())
     try:
@@ -223,6 +223,55 @@ async def test_missing_original_pending_never_falls_back_to_latest_host_map(goal
     owner, _, _ = await submit(c, persisted(c))
     assert owner.bound[0]._entry.terminal_notified and c.native._requests == {}
     with pytest.raises(RuntimeError):
-        capture_idle_goal_control(c.native, expected_record=c.outer.goal_manager.peek(),
+        capture_idle_goal_control(c.native, request_id='idle-controller', expected_record=c.outer.goal_manager.peek(),
                                   previous=None, check_current=lambda: None)
     assert c.side_effects == ['goal']
+
+
+@pytest.mark.asyncio
+async def test_facade_checker_pins_request_and_goal_postfacts(goal_case):
+    c = goal_case
+    cap = capture_idle_goal_control(c.native, request_id='idle-controller',
+                                   expected_record=persisted(c), previous=None, check_current=lambda: None)
+    assert cap.request_id == 'idle-controller' and cap.agent is c.outer and cap.native is c.native
+    cap.check_current()
+    await cap.pause()
+    cap.check_current()
+    record = c.outer.goal_manager.peek()
+    record.touch(bump_revision=True)
+    c.outer.goal_manager._store.save(record)
+    with pytest.raises(PermissionError):
+        cap.check_current()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['request_id', 'checker'])
+async def test_temporary_checker_cannot_change_control_request_id(goal_case, change):
+    c = goal_case
+    reenter = [False]
+    cap = None
+    def checker():
+        if reenter[0]:
+            object.__setattr__(cap, change, 'replacement' if change == 'request_id' else lambda: None)
+    cap = capture_idle_goal_control(c.native, request_id='idle-controller',
+                                   expected_record=persisted(c), previous=None, check_current=checker)
+    reenter[0] = True
+    with pytest.raises(PermissionError):
+        await cap.clear()
+    assert c.outer.goal_manager.peek() is not None
+
+
+@pytest.mark.asyncio
+async def test_registered_but_not_sent_host_request_prevents_cold_idle_control(goal_case):
+    from jiuwenswarm.runtime.harness.native_session import _HostRequest
+    c = goal_case
+    record = persisted(c)
+    unknown = _HostRequest()
+    c.native._requests['not-yet-sent'] = unknown
+    try:
+        with pytest.raises(PermissionError, match='unconfirmed producer'):
+            capture_idle_goal_control(c.native, request_id='idle-controller',
+                                      expected_record=record, previous=None, check_current=lambda: None)
+        assert c.native._requests['not-yet-sent'] is unknown
+    finally:
+        c.native._requests.pop('not-yet-sent')

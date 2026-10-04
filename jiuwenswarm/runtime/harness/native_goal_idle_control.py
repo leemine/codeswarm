@@ -22,11 +22,13 @@ class NativeIdleGoalControl:
     previous: NativeOwnedTurn | None
     previous_facts: Any
     checker: Callable[[], None]
+    request_id: str
     selector: Any = None
     _bridge: Any = field(init=False)
 
     def __post_init__(self):
-        object.__setattr__(self, '_bridge', lambda: self.check_current())
+        request_id, checker = self.request_id, self.checker
+        object.__setattr__(self, '_bridge', lambda: self._check_host_current(request_id, checker))
 
     def _check_static(self):
         n, owner = self.native, self.tool_owner
@@ -41,6 +43,13 @@ class NativeIdleGoalControl:
                 or self.agent.goal_manager is not self.manager):
             raise PermissionError('original idle Native Goal host target changed')
         old = self.previous
+        old_token = None if old is None else old._pending.content.metadata.get(_REQUEST_KEY)
+        if (any(token != old_token or old is None or entry is not old._entry
+                for token, entry in n._requests.items())
+                or any(old is None or turn_id != old.turn_id or token != old_token
+                       for turn_id, token in n._turn_requests.items())
+                or n._goal_handoffs):
+            raise PermissionError('idle Goal host still has an unconfirmed producer')
         if old is None:
             return
         (entry, pending, lifecycle, source, content, request, terminal, kind,
@@ -63,10 +72,19 @@ class NativeIdleGoalControl:
         confirmed.result()
         cleanup.result()
 
+    def _check_host_current(self, request_id, checker):
+        if self.request_id != request_id or self.checker is not checker:
+            raise PermissionError('idle Goal controller request changed')
+        self._check_static()
+        _sync_callback(checker)
+        self._check_static()
+        if self.request_id != request_id or self.checker is not checker:
+            raise PermissionError('idle Goal controller request changed')
+
     def check_current(self):
-        self._check_static()
-        _sync_callback(self.checker)
-        self._check_static()
+        # Core rechecks pre/post Goal facts and calls only the private host
+        # bridge above; the public facade checker must not recurse into itself.
+        self.selector.check()
 
     async def _apply(self, action):
         self._check_static()
@@ -95,13 +113,14 @@ class NativeIdleGoalControl:
         raise TypeError('idle Native Goal controls cannot be serialized')
 
 
-def capture_idle_goal_control(native, *, expected_record, previous, check_current):
+def capture_idle_goal_control(native, *, request_id, expected_record, previous, check_current):
     """Only explicit controller authority and an original retained exit handle.
 
     Runtime owns principal/owner/resource checks in the synchronous callback.
     No new lifecycle, host request, Pending, source or output lease is created.
     """
-    if not callable(check_current) or not native._require_execution_origin:
+    if (not callable(check_current) or not native._require_execution_origin
+            or type(request_id) is not str or not request_id.strip()):
         raise PermissionError('idle Goal control requires an explicit managed controller')
     engine, harness = native.engine, native._native
     binding, agent, session = engine.binding, harness.agent, harness._agent_session
@@ -121,7 +140,7 @@ def capture_idle_goal_control(native, *, expected_record, previous, check_curren
                  entry.terminal_event, entry.terminal_kind, barrier,
                  getattr(barrier, 'confirmed', None), getattr(barrier, 'cleanup', None))
     cap = NativeIdleGoalControl(native, engine, binding, harness, agent, session, owner,
-                               manager, previous, facts, check_current)
+                               manager, previous, facts, check_current, request_id)
     cap._check_static()  # No callback: host references are fixed before core capture.
     selector = capture(expected_record=expected_record,
                        previous_turn=None if previous is None else previous._pending,
