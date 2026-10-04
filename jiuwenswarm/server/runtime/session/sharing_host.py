@@ -44,9 +44,9 @@ class SharingHostService:
     a persistent known subject in the current authority, independently of token
     logout, expiry or revocation. Source ownership never depends on an active
     credential. Request authentication remains the host's separate boundary.
-    Both callbacks must avoid network IO and history/lifecycle locks. Initial
-    actions are exactly view/read and manage/read+admin. Further actions require
-    separate future host policies; none are implied by view or manage.
+    Both callbacks must avoid network IO and history/lifecycle locks. Source actions are view/read, manage/read+admin, and execute only when the
+    owner also has current project execute. Target execution and resource use
+    remain independent checks; other actions are never inferred.
     """
     def __init__(self, directory: Callable[[TrustedIdentity, str], TrustedIdentity | None], *,
                  known_actor: Callable[[TrustedIdentity], bool], storage=None):
@@ -106,6 +106,11 @@ class SharingHostService:
         if (admin.allowed is True and admin.project_id == project_id and admin.actor_id == owner.actor_id
                 and admin.action == 'admin' and type(admin.revision) is int and admin.revision == acl_revision):
             actions.add('manage')
+            execute = self._storage._decision(data, project_id, owner.actor_id, 'execute')
+            if (execute.allowed is True and execute.project_id == project_id
+                    and execute.actor_id == owner.actor_id and execute.action == 'execute'
+                    and type(execute.revision) is int and execute.revision == acl_revision):
+                actions.add('execute')
         return frozenset(actions), acl_revision
 
     def _live_binding(self, data, session_id, owner, project_id):

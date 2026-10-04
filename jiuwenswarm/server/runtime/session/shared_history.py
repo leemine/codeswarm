@@ -25,6 +25,15 @@ MAX_PAGE_SCAN_BYTES = 4 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 
 
+def visible_conversation_text(record: dict[str, Any]) -> bool:
+    """The shared viewer/continuation text projection, excluding tool events."""
+    role, event = record.get('role'), record.get('event_type')
+    return ((role == 'user' and event in (None, ''))
+            or (role == 'assistant' and event in (None, '', 'chat.final'))) and (
+        isinstance(record.get('content'), str) and bool(record['content'].strip())
+    )
+
+
 class SharedHistoryLimit(ValueError):
     """The history exceeds the bounded compiler/page reader's supported size."""
 

@@ -11,7 +11,7 @@ from jiuwenswarm.common.schema.agent import AgentResponse
 from jiuwenswarm.governance.contracts import TrustedIdentity
 from jiuwenswarm.governance.session_sharing import SessionHistoryRange, SessionSharingDenied
 from jiuwenswarm.server.runtime.session.history_io import run_history_io
-from jiuwenswarm.server.runtime.session.shared_history import read_shared_history_page
+from jiuwenswarm.server.runtime.session.shared_history import read_shared_history_page, visible_conversation_text
 from .base import GatewayAdapter, build_error_response
 
 
@@ -25,8 +25,7 @@ class SharedHistoryAdapter(GatewayAdapter):
 
     @staticmethod
     def _visible(record):
-        return (record.get('role') in {'user', 'assistant'}
-                and isinstance(record.get('content'), str) and bool(record['content'].strip()))
+        return visible_conversation_text(record)
 
     def _read(self, request):
         params = request.params
