@@ -51,8 +51,10 @@ def _capture_goal_route(session_id, params, check_owner, validate, *, model_hint
         if any(type(value) is not str or not value for value in values):
             raise SessionSharingDenied('Explicit Goal Session routing required')
         channel, mode, work_mode, project, profile, revision, fingerprint = values
+        from jiuwenswarm.common.mode_matrix import deprecate_mode, is_single_agent_mode
         from jiuwenswarm.runtime.service import AgentRuntime
-        if not AgentRuntime._is_single_agent_session_mode(mode, work_mode=work_mode):
+        if (not is_single_agent_mode(deprecate_mode(mode))
+                or not AgentRuntime._is_single_agent_session_mode(mode, work_mode=work_mode)):
             raise SessionSharingDenied('Native Goal reading requires Single')
         catalog = load_execution_catalog(get_config())
         spec = catalog.source(explicit_profile_id=profile).resolve() if catalog else None
@@ -65,6 +67,11 @@ def _capture_goal_route(session_id, params, check_owner, validate, *, model_hint
             work_mode=params.get('work_mode', work_mode))[:2]
         if requested_mode != original_mode:
             raise SessionSharingDenied('Goal mode hint conflicts with original Session')
+        # The existing history writer persists the Web alias ("agent") while
+        # preparation may persist "agent.work.normal". Pin the same Runtime
+        # mode semantics, retaining the separate work profile and all routing
+        # facts; ordinary history must not invalidate its own output permit.
+        values = (channel, original_mode, work_mode, project, profile, revision, fingerprint)
         for key, expected in (('session_id', session_id), ('project_id', project)):
             if key in params and params[key] != expected:
                 raise SessionSharingDenied('Goal routing hint conflicts with original Session')

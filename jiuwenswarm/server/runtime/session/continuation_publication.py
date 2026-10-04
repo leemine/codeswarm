@@ -155,13 +155,23 @@ def prepare_registration(host, session_id, owner, project_id, *, previous, epoch
 
 
 def _metadata(session_id, publication, proof):
+    from jiuwenswarm.common.mode_matrix import deprecate_mode, is_single_agent_mode
+    from jiuwenswarm.runtime.request import resolve_agent_request_mode
+
     metadata = lifecycle.raw_metadata(session_id)
+    target = publication['target_snapshot']
+    # Original history may persist the equivalent Web mode alias. Compare the
+    # existing execution semantics without relaxing the fixed Work/Code profile.
+    same_mode = (type(metadata.get('mode')) is str and bool(metadata['mode'])
+                 and is_single_agent_mode(deprecate_mode(metadata['mode']))
+                 and resolve_agent_request_mode(metadata['mode'], work_mode=metadata.get('work_mode'))[:2]
+                 == resolve_agent_request_mode(target['mode'], work_mode=target['work_mode'])[:2])
     if (metadata.get('project_id') != proof.request.target_project_id
             or metadata.get('execution_profile_id') != publication['execution_profile_id']
             or metadata.get('execution_config_fingerprint') != publication['config_fingerprint']
             or metadata.get('model', '') != proof.request.model_name
             or any(metadata.get(key) != publication['target_snapshot'][key]
-                   for key in ('project_dir', 'work_mode', 'mode'))):
+                   for key in ('project_dir', 'work_mode')) or not same_mode):
         raise SessionSharingDenied('continuation target configuration changed')
 
 

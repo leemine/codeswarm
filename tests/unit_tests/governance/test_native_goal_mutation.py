@@ -290,3 +290,49 @@ def test_direct_result_checks_receipt_without_creating_wire_permit(mutation_deli
             mutation_delivery_type('owned', identity, lambda: checked.append(True)))
         assert session_boundary._delivery.get() is None
     assert checked == [True]
+
+
+@pytest.mark.parametrize('initial_mode', ['agent.work.normal', 'agent'])
+@pytest.mark.parametrize('action', ['get', 'set', 'resume', 'pause', 'clear'])
+async def test_original_usage_history_preserves_same_mode_delivery(case, monkeypatch, initial_mode, action):
+    from jiuwenswarm.server.runtime.session import session_history
+    f = case
+    allow_execute(f)
+    monkeypatch.setattr(session_history, 'get_agent_sessions_dir', session_metadata.get_agent_sessions_dir)
+    # This fixture reuses its Session id under a fresh tmp root. Isolate the
+    # production process cache so an earlier fixture cannot supply its project.
+    monkeypatch.setattr(session_metadata, '_METADATA_CACHE', {})
+    monkeypatch.setattr(session_metadata, '_METADATA_CACHE_GENERATIONS', {})
+    metadata = session_metadata.get_session_metadata(f.sid, cache_bust=True, enable_writeback=False,
+                                                    infer_defaults=False)
+    metadata['mode'] = initial_mode
+    session_metadata._write_metadata_sync(f.sid, metadata)
+    params = parameters(f, action)
+    permit = admit_session_request('command.goal', params, identity_resolver=f.bob.identity, host=f.host)
+    assert permit.revalidate()
+    session_history.append_history_record(session_id=f.sid, role='assistant', content='',
+        event_type='context.usage', channel_id='web', mode='agent', request_id='goal-usage',
+        timestamp=1.0, extra={'context_window': {}, 'parts': {}})
+    assert session_metadata.flush_pending_writes()
+    current = session_metadata.get_session_metadata(f.sid, cache_bust=True, enable_writeback=False,
+                                                   infer_defaults=False)
+    assert current['mode'] == 'agent'
+    (permit.goal_read_route or permit.goal_mutation_route).check()
+    assert permit.revalidate()
+
+
+@pytest.mark.parametrize('change', [
+    {'mode': 'agent.plan'}, {'mode': 'agent.unknown'}, {'mode': 'agent.code.normal'}, {'mode': 'team.work.normal'},
+    {'work_mode': 'code'}, {'execution_profile_id': 'replacement'},
+    {'execution_config_revision': 'replacement'}, {'execution_config_fingerprint': 'replacement'},
+    {'channel_id': 'tui'}, {'model': 'replacement'},
+])
+async def test_semantic_mode_compatibility_does_not_allow_route_changes(case, change):
+    f = case
+    allow_execute(f)
+    permit = admit_session_request('command.goal', parameters(f), identity_resolver=f.bob.identity, host=f.host)
+    metadata = session_metadata.get_session_metadata(f.sid, cache_bust=True, enable_writeback=False,
+                                                    infer_defaults=False)
+    metadata.update(change)
+    session_metadata._write_metadata_sync(f.sid, metadata)
+    assert not permit.revalidate()

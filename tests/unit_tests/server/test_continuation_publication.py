@@ -475,7 +475,8 @@ async def test_retired_continuation_cannot_lose_token_tombstone_via_ordinary_rec
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('field,value', [('mode', 'agent.code.normal'), ('work_mode', 'code'),
+@pytest.mark.parametrize('field,value', [('mode', 'agent.code.normal'), ('mode', 'agent.plan'), ('mode', 'team.work.normal'),
+                                        ('mode', None), ('mode', ''), ('mode', 'agent.unknown'), ('work_mode', 'code'),
                                         ('project_dir', '/another/workspace')])
 async def test_original_target_workspace_and_mode_remain_bound(setup, field, value):
     with make_scope(setup) as scope:
@@ -501,3 +502,24 @@ async def test_corrupt_persisted_model_target_is_rejected(setup, field, value):
     data['session_sharing']['owners']['target-session']['continuation']['target_snapshot'][field] = value
     setup.access._save(data)
     assert not new_host(setup).owner_current('target-session', BOB)
+
+
+@pytest.mark.asyncio
+async def test_original_usage_history_keeps_committed_continuation_owner(setup, monkeypatch):
+    from jiuwenswarm.server.runtime.session import session_metadata, session_history
+    monkeypatch.setattr(session_metadata, 'get_agent_sessions_dir', lambda: setup.tmp_path / 'sessions')
+    monkeypatch.setattr(session_metadata, '_METADATA_CACHE', {})
+    monkeypatch.setattr(session_metadata, '_METADATA_CACHE_GENERATIONS', {})
+    with make_scope(setup) as scope:
+        directory = register(setup, scope)
+        scope.write_seed()
+        scope.commit()
+    epoch = setup.host.owner_revision('target-session', BOB)
+    session_history.append_history_record(session_id='target-session', role='assistant', content='',
+        event_type='context.usage', channel_id='web', mode='agent', request_id='goal-usage',
+        timestamp=1.0, extra={'context_window': {}, 'parts': {}})
+    assert session_metadata.flush_pending_writes()
+    assert json.loads((directory / 'metadata.json').read_text())['mode'] == 'agent'
+    assert new_host(setup).owner_current('target-session', BOB)
+    assert setup.host.owner_revision('target-session', BOB) == epoch
+    assert publication.read_seed(setup.host, 'target-session', BOB) == scope.seed
