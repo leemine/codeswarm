@@ -3001,6 +3001,13 @@ class JiuWenSwarm:
     def _capture_native_goal_request(self, request):
         """Capture one Runtime-injected control without allocating any executor."""
         if not hasattr(request, '_native_goal_control'):
+            route = getattr(request, '_execution_route', None)
+            if (isinstance(route, AdmittedExecutionRoute) and route.provider_id != 'native'
+                    and getattr(request, '_bound_execution', None) is route.bound):
+                # Runtime already admitted this immutable External route. Its
+                # original adapter still validates selection before mutation;
+                # a shared resource bundle is not Native control provenance.
+                return None
             params = request.params if isinstance(request.params, dict) else {}
             if str(params.get('action', 'get') or 'get').strip().lower() != 'get':
                 from jiuwenswarm.governance.organization_auth import configured_authenticator

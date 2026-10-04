@@ -271,3 +271,44 @@ async def test_initial_dispatch_rechecks_original_source_and_operation(goal_case
     await asyncio.wait_for(c.admission.bound[0]._entry.terminal_event.wait(), 10)
     assert denied == [True] and not c.models and not c.tools
     assert c.outer.goal_manager.peek() is None
+
+
+@pytest.mark.asyncio
+async def test_unscoped_managed_goal_root_does_not_allocate_or_mutate(control_case):
+    c = control_case
+    root = object.__new__(JiuWenSwarmDeepAdapter)
+    root._is_session_scoped_adapter = False
+    root._session_adapters = {'goal-session': c.child}
+    root._instance = None
+    root._get_or_create_session_adapter = AsyncMock(side_effect=AssertionError('must not allocate'))
+    with pytest.raises(PermissionError):
+        await root._dispatch_goal_control(action='set', objective='new', session_id='goal-session')
+    root._get_or_create_session_adapter.assert_not_called()
+    assert c.outer.goal_manager.peek().objective == 'goal objective'
+
+
+@pytest.mark.asyncio
+async def test_initial_goal_copies_caller_arguments_before_lifecycle_callback(goal_case):
+    from dataclasses import replace
+    from jiuwenswarm.governance.tool_context import tool_authority_scope
+    c = goal_case
+    child = _initial_adapter(c)
+    kwargs = {'objective': 'original objective', 'max_attempts': 1}
+    actual = []
+    async def dispatch(**operation):
+        actual.append(dict(operation))
+        return await child._dispatch_goal_control(session_id='goal-session', **operation)
+    c.native._goal_dispatcher = dispatch
+    factory = c.bundle.native_lifecycle_factory
+    def capture(native, request):
+        kwargs.update(objective='late caller mutation', max_attempts=9)
+        return factory(native, request)
+    bundle = replace(c.bundle, native_lifecycle_factory=capture)
+    with tool_authority_scope(None, provider_authorizers=bundle):
+        _, result = await c.native.submit_goal('set', request=c.request, **kwargs)
+    await asyncio.wait_for(result, 3)
+    await asyncio.wait_for(c.admission.bound[0]._entry.terminal_event.wait(), 4)
+    assert actual == [{'action': 'set', 'objective': 'original objective', 'max_attempts': 1}]
+    assert kwargs['objective'] == 'late caller mutation'
+    assert c.outer.goal_manager.peek().objective == 'original objective'
+    assert c.error is None and c.side_effects == ['goal']

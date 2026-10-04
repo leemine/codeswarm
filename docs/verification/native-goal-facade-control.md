@@ -15,3 +15,11 @@ active set/resume 与 get/pause/clear 都投影一次原格式快照、确认或
 来源：Swarm `17a006d1` 后的初始来源候选；正式 core `6dce7ab4` 环境配独立 core F37 `876eb058bb643c081ea4750d7c965c48a8f9d971` 源码，以及主工作树的 `native_goal_control.py` 私有模块覆盖。这是联合源码验证，**不是正式新锁安装、stable 或实际 Runtime UI 验收**。来源/hash、命令和日志在 `/tmp/r2b-native-goal-facade-evidence/`。新文件须由集成方追加既有 Goal stable shard 的 command/discover 列表，不删旧项。
 
 触及的 Native Session、facade 和新增测试 ruff 通过；DeepAdapter 全文件与 baseline 同为 71 个既有 E402，未扩大格式化；`git diff --check` 通过。保留首轮确认 ACK 拒绝（主 cap 已修）、旧池化夹具缺缓存字段（只读 lookup 已兼容）和错误假设 lifecycle/source 必须同对象的失败记录。未修改 Runtime、Coordinator、锁或公共事件协议。
+
+## External 兼容复核
+
+独立复核发现，共享 Runtime 资源 bundle 包含 Native lifecycle factory、或组织认证已开启时，最初 guard 会把合法 External Goal 控制也拒绝。真实 Engine/ExecutionSession/GoalManager/SerializedTurnHarness 组合中，OpenCode/Codex 的 pause/clear unary/stream 八例先全部失败，失败点确为 Native admission 检查。
+
+窄修仅接受请求的原 `AdmittedExecutionRoute`，其 Provider 非 Native 且 `_bound_execution is route.bound` 时跳过 Native 专属检查，之后仍执行原 External adapter 的选择/绑定验证。用户 mode/provider 字符串、仿制 route、缺原 bound 不构成豁免；另一真实 Binding 仍被 Engine 拒绝，不改动旧 Goal。八个允许控制均不发送新的 Provider Turn，不代表 Codex mandatory native tool 或任何真实 Provider 出口通过。
+
+新增十二个 External 回归和两个 Native 回归（unscoped root 无分配、生命周期回调修改 caller kwargs 后仍消费原快照），与原 facade/Goal 测试合并 **172 passed / 9.03s**。正式 core 环境与 F37/主 cap overlay 的验证限制不变；详见 `external-red.log`、`external-compatibility.log`。初始来源生产证明无须放宽。
