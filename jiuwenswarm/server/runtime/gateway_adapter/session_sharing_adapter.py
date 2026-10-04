@@ -31,11 +31,13 @@ class SessionSharingAdapter(GatewayAdapter):
 
     def __init__(self, store: SessionSharingStore, *, identity_resolver: Callable,
                  target_resolver: Callable[[TrustedIdentity, str], TrustedIdentity | None],
-                 compile_history: Callable[[str, TrustedIdentity, str | None], SessionHistoryRange]):
+                 compile_history: Callable[[str, TrustedIdentity, str | None], SessionHistoryRange],
+                 after_mutation=None):
         self.store = store
         self.identity_resolver = identity_resolver
         self.target_resolver = target_resolver
         self.compile_history = compile_history
+        self.after_mutation = after_mutation
 
     def _identity(self, request):
         identity = self.identity_resolver(request)
@@ -142,7 +144,16 @@ class SessionSharingAdapter(GatewayAdapter):
 
     async def handle(self, request):
         try:
-            return await run_history_io(self._dispatch, request)
+            result = await run_history_io(self._dispatch, request)
+            method = getattr(request.req_method, 'value', request.req_method)
+            if self.after_mutation is not None and method in {'session.share.update', 'session.share.revoke'}:
+                try:
+                    await self.after_mutation()
+                except Exception:
+                    return build_error_response(request,
+                        'Sharing changed; execution exit remains unconfirmed. Refresh and retry cleanup.',
+                        code='EXIT_UNCONFIRMED')
+            return result
         except SessionSharingConflict:
             return build_error_response(request, 'Sharing revision changed; refresh and retry.', code='CONFLICT')
         except (SessionSharingDenied, PermissionError):

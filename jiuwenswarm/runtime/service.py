@@ -501,6 +501,11 @@ class AgentRuntime:
         from jiuwenswarm.runtime.continuation_execution import capture_continuation_execution
         continuation = capture_continuation_execution(self, request)
         request._continuation_execution = continuation
+        if continuation is not None:
+            from jiuwenswarm.runtime.continuation_revocation import ContinuationRevocation
+            retained = ContinuationRevocation(self, continuation)
+            request._continuation_revocation = self._session_coordinator.watch_session_authority(session_id,
+                generation=continuation._generation, authority=retained)
         generation = self._governance_generation(session_id)
         host_context = copy_context()
 
@@ -1712,12 +1717,16 @@ class AgentRuntime:
                 agent_definition=agent_execution.definition.to_dict(),
                 agent_definition_fingerprint=agent_execution.fingerprint,
             )
-        return await prepare_chat_turn(
+        prepared = await prepare_chat_turn(
             self._agent_manager,
             request,
             channel_id,
             **prepare_kwargs,
         )
+        retained = getattr(request, '_continuation_revocation', None)
+        if retained is not None:
+            retained.bind_owner(continuation, prepared[2])
+        return prepared
 
     def prepare_session_cleanup(self, request):
         """Pin owner and execution facts before a host awaits dispatch."""

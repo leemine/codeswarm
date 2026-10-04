@@ -211,10 +211,10 @@ class SharingHostService:
         with self._storage._locked():
             return self._cleanup_owner_stamp_locked(self._storage._load(), session_id, identity)
 
-    def _cleanup_owner_stamp_locked(self, data, session_id, identity):
+    def _cleanup_owner_stamp_locked(self, data, session_id, identity, *, require_known_actor=True):
         record, owner, source = self._record(data, session_id, active=False)
         if (not isinstance(identity, TrustedIdentity) or identity != owner
-                or self._known_actor(identity) is not True):
+                or require_known_actor and self._known_actor(identity) is not True):
             raise SessionSharingDenied('trusted cleanup owner required')
         publication = record.get('continuation')
         if publication is not None:
@@ -246,13 +246,21 @@ class SharingHostService:
         both sides of the same owner check under the existing sidecar lock; no
         lifecycle/history lock or await is introduced here.
         """
+        return self._cleanup_owner_binding(session_id, identity, expected_stamp=expected_stamp)
+
+    def _cleanup_owner_binding(self, session_id, identity, *, expected_stamp, require_known_actor=True):
+        # Only an already captured Runtime stop capability may omit the live
+        # directory check. It still cannot read, execute, publish or rebind.
+        def stamp(data):
+            return self._cleanup_owner_stamp_locked(data, session_id, identity,
+                require_known_actor=require_known_actor)
         with self._storage._locked():
             data = self._storage._load()
-            if self._cleanup_owner_stamp_locked(data, session_id, identity) != expected_stamp:
+            if stamp(data) != expected_stamp:
                 raise SessionSharingDenied('original cleanup owner changed')
             binding = _metadata_cleanup_binding(lifecycle.raw_metadata(session_id))
             if (binding['project_id'] != expected_stamp[2]
-                    or self._cleanup_owner_stamp_locked(data, session_id, identity) != expected_stamp
+                    or stamp(data) != expected_stamp
                     or _metadata_cleanup_binding(lifecycle.raw_metadata(session_id)) != binding):
                 raise SessionSharingDenied('cleanup target binding changed')
             return tuple(binding.items())

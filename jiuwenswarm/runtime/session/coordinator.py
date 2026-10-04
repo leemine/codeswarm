@@ -46,6 +46,10 @@ class _SessionRecord:
     external_owner: str | None = None
     execution_changed: asyncio.Event = field(default_factory=asyncio.Event)
     resource_close_task: asyncio.Task | None = field(default=None, repr=False)
+    authority_watch: object | None = field(default=None, repr=False)
+    authority_task: asyncio.Task | None = field(default=None, repr=False)
+    authority_close_started: bool = False
+    authority_error: Exception | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.control_ready.set()
@@ -78,6 +82,69 @@ class RuntimeSessionCoordinator:
         self._control_claims: set[tuple[str, int, str, str]] = set()
         self._accepting = True
         self._lock = asyncio.Lock()
+
+    def watch_session_authority(self, session_id, *, generation, authority, interval=1.0):
+        """Keep one captured stop capability on the original Session record.
+
+        This monitor submits no work and consumes no Provider events. Rechecks
+        use the existing durable authority; only the original close path stops
+        work and releases resources. A new generation never inherits the watch.
+        """
+        record = self._require_open_session(session_id)
+        self._require_generation(record, generation)
+        authority.check_authority()
+        if record.authority_watch is not None:
+            if record.authority_watch.scope != authority.scope:
+                raise RuntimeError("Session authority changed within its original generation")
+            return record.authority_watch
+        record.authority_watch = authority
+
+        async def monitor():
+            while self._sessions.get(session_id) is record and record.state is not RuntimeSessionState.CLOSED:
+                try:
+                    await self._revalidate_session_authority(record)
+                except Exception as exc:
+                    # Retain the unconfirmed exit for explicit callers/status;
+                    # retry only this same generation and close capability.
+                    record.authority_error = exc
+                if record.state is RuntimeSessionState.CLOSED:
+                    break
+                changed = record.execution_changed
+                try:
+                    await asyncio.wait_for(changed.wait(), timeout=interval)
+                except TimeoutError:
+                    pass
+        record.authority_task = asyncio.create_task(monitor())
+        record.authority_task.add_done_callback(self._consume_task)
+        return authority
+
+    async def _revalidate_session_authority(self, record):
+        if (self._sessions.get(record.session_id) is not record
+                or record.state is RuntimeSessionState.CLOSED or record.authority_watch is None):
+            return
+        authority = record.authority_watch
+        if not record.authority_close_started:
+            if record.state is RuntimeSessionState.QUIESCING:
+                return  # Another original close owns this fence and its retry.
+            try:
+                authority.check_authority()
+                return
+            except PermissionError:
+                pass
+            authority.check_owner()
+            record.authority_close_started = True
+        authority.check_owner()
+        result = await self.close_session(record.session_id, generation=record.generation,
+            release_resources=authority.release, wait_timeout=self._cancel_timeout)
+        if result.timed_out:
+            raise SessionCloseTimeoutError(record.session_id, result.timed_out)
+        record.authority_error = None
+
+    async def revalidate_session_authorities(self):
+        # Explicit sharing mutations wait for the original resources to exit.
+        # Cross-process changes and expiry are also observed by the same monitor.
+        for record in tuple(self._sessions.values()):
+            await self._revalidate_session_authority(record)
 
     def external_execution_owner(self, session_id: str, request_id: str) -> SessionExecutionHandle:
         """Resolve authority from the original registry, never request metadata."""
@@ -992,6 +1059,10 @@ class RuntimeSessionCoordinator:
             await self._scheduler.close(wait_timeout=self._cancel_timeout)
         except BaseException as exc:
             errors.append(exc)
+        for record in records:
+            if record.state is RuntimeSessionState.CLOSED and record.authority_task is not None:
+                record.authority_task.cancel()
+                await asyncio.gather(record.authority_task, return_exceptions=True)
         if errors:
             raise errors[0]
 
