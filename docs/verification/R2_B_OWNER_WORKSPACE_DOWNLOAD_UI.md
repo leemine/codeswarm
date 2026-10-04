@@ -10,13 +10,15 @@ Browser retrieval uses same-origin credentials, same-origin mode, no cache and n
 
 Desktop retrieval also happens in the authenticated browser. It calls the existing blob-save transaction, never the legacy Python URL downloader. Optional save guards check before and after asynchronous preparation and before append/commit; a stale transaction is aborted using its original transfer ID. Browser object URLs are released. These checks reject a stale UI operation; they cannot retract already downloaded or saved bytes. Unmodified legacy callers retain their previous API and behavior.
 
+The ToolPanel overview entry also reads the same organization context: organization clicks open the existing artifact panel, while legacy desktop clicks retain their native browser behavior. Two actual ToolPanel click tests cover both modes.
+
 Organization previews in this panel currently show a download instruction, including when a previously selected artifact is revisited. They cannot enter path-only preview or the desktop file browser. Ordinary Workspace downloads are the only newly wired surface. Temporary/sealed files, shared-history attachments, trace exports and Git exports remain unavailable. Organization preview restoration and the full capability-preservation exit remain **pending**, not completed by these notices. Shared-history text rendering is unchanged.
 
 ## Verification and limits
 
 From `jiuwenswarm/channels/web/frontend`:
 
-- `npm run test:owner-artifact-download`: 15 passing real React/jsdom and routing/save behavior cases. Covers allowed browser and desktop saves, fixed Session routing, rejected URLs/parameters, stale body responses, Session/connection/identity invalidation, original desktop abort, unavailable path artifacts, preview gating, generic failure feedback and unchanged legacy URL save.
+- `npm run test:owner-artifact-download`: 17 passing real React/jsdom and routing/save behavior cases. Covers allowed browser and desktop saves, fixed Session routing, rejected URLs/parameters, stale body responses, Session/connection/identity invalidation, original desktop abort, unavailable path artifacts, preview gating, generic failure feedback and unchanged legacy URL save.
 - `npm run test:desktop-save`: 11 passing cases, including existing desktop transactions and guarded browser-picker behavior.
 - `npm run test:artifact-collection`: 5 passing cases.
 - `npm run test:i18n-locales`: 4 passing cases.

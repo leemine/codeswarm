@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 await build({
   entryPoints: [
     'src/components/ArtifactsPanel/index.tsx',
+    'src/components/ToolPanel/index.tsx',
     'src/components/ArtifactsPanel/ArtifactOwnerContext.tsx',
     'src/components/ArtifactsPanel/ownerDownload.ts',
     'src/services/webClient.ts',
@@ -21,7 +22,9 @@ await build({
     {
       name: 'decorative-svg',
       setup(builder) {
-        builder.onResolve({ filter: /\.svg\?react$/ }, ({ path }) => ({ path, namespace: 'svg-stub' }));
+        builder.onResolve({ filter: /\.css$/ }, ({ path }) => ({ path, namespace: 'css-stub' }));
+      builder.onLoad({ filter: /.*/, namespace: 'css-stub' }, () => ({ contents: '', loader: 'js' }));
+      builder.onResolve({ filter: /\.svg\?react$/ }, ({ path }) => ({ path, namespace: 'svg-stub' }));
         builder.onLoad({ filter: /.*/, namespace: 'svg-stub' }, () => ({
           contents: 'export default function SvgStub() { return null; }',
           loader: 'js',

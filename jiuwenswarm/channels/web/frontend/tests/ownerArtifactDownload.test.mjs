@@ -19,7 +19,7 @@ const base = '../node_modules/.cache/owner-artifact-download/';
 const { OwnerDownloadScope, ownerDownloadUrl } = await import(base + 'components/ArtifactsPanel/ownerDownload.js');
 const { ArtifactOwnerContext } = await import(base + 'components/ArtifactsPanel/ArtifactOwnerContext.js');
 const { ArtifactList } = await import(base + 'components/ArtifactsPanel/index.js');
-const { useChatStore } = await import(base + 'stores/index.js');
+const { useChatStore, useSessionStore } = await import(base + 'stores/index.js');
 const { webClient } = await import(base + 'services/webClient.js');
 const en = JSON.parse(readFileSync(new URL('../src/i18n/locales/en.json', import.meta.url), 'utf8'));
 await i18next.use(initReactI18next).init({ lng: 'en', resources: { en: { translation: en } } });
@@ -342,4 +342,31 @@ test('owner button reports a generic refusal without exposing the HTTP error bod
     await act(async () => document.querySelector('[data-testid="artifact-list-item-download"]').click());
     assert.deepEqual(alerts, [en.artifacts.ownerDownloadFailed]);
   } finally { window.alert = oldAlert; }
+});
+
+for (const organizationAuth of [true, false]) test(`overview artifact entry respects organization=${organizationAuth}`, async () => {
+  const { ToolPanel } = await import(base + 'components/ToolPanel/index.js');
+  window.matchMedia = () => ({ matches: true, addEventListener() {}, removeEventListener() {} });
+  const runtime = useChatStore.getState().runtimes.owner;
+  runtime.messages[0].fileItems[0].name = 'report.md';
+  runtime.toolExecutions = new Map();
+  useSessionStore.getState().ensureRuntime('owner');
+  const navigation = [], selection = [], tabs = [];
+  window.jiuwenDesktop = { browser: { navigate: async (...args) => navigation.push(args) } };
+  root = createRoot(document.getElementById('root'));
+  try {
+    const noop = () => {};
+    await act(async () => root.render(React.createElement(ArtifactOwnerContext.Provider, { value: { organizationAuth, sessionId: 'owner' } }, React.createElement(ToolPanel, {
+      sessionId: 'owner', teamAreaExpanded: false, teamAreaActiveTab: 'overview', teamAreaActiveDetailTab: 'members',
+      singleAgentPanelExpanded: false, singleAgentPanelActiveTab: 'tools', setTeamAreaExpanded: noop,
+      setTeamAreaActiveTab: noop, setTeamAreaActiveDetailTab: noop, setTeamAreaSelectedMemberId: noop,
+      setTeamAreaSelectedArtifactId: noop, setSingleAgentPanelExpanded: noop,
+      setSingleAgentPanelActiveTab: value => tabs.push(value), setSingleAgentPanelSelectedArtifactId: value => selection.push(value),
+    }))));
+    const item = document.querySelector('[data-testid="tool-panel-artifacts"] [data-testid="team-area-task-planning-task-row"]');
+    assert.ok(item);
+    await act(async () => item.click());
+    if (organizationAuth) { assert.equal(navigation.length, 0); assert.equal(selection.length, 1); assert.deepEqual(tabs, ['artifacts']); }
+    else { assert.equal(navigation.length, 1); assert.equal(selection.length, 0); }
+  } finally { delete window.jiuwenDesktop; }
 });
