@@ -17,7 +17,7 @@ def current_scope():
 
 
 class ContinuationPublication:
-    def __init__(self, host, compiler, seed: ContinuationSeed, config_fingerprint: str):
+    def __init__(self, host, compiler, seed: ContinuationSeed, config_fingerprint: str, *, target_snapshot: dict):
         if not isinstance(seed, ContinuationSeed) or compiler.host is not host:
             raise TypeError('matching host compiler and immutable seed required')
         if (not isinstance(config_fingerprint, str) or len(config_fingerprint) != 64
@@ -25,6 +25,8 @@ class ContinuationPublication:
             raise ValueError('exact configuration fingerprint required')
         self.host, self.compiler, self.seed = host, compiler, seed
         self.config_fingerprint = config_fingerprint
+        from jiuwenswarm.server.runtime.session.continuation_publication import validate_target_snapshot
+        self.target_snapshot = validate_target_snapshot(target_snapshot)
         self.publication_id = secrets.token_hex(32)
         self.session_id = None
         self._active = False

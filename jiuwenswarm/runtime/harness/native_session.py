@@ -308,7 +308,7 @@ class NativeExecutionSession:
                 return False
             return await authority(operation) is True and current()
 
-        async def guarded_model(binding, target):
+        async def guarded_model(binding, target, *, model_entry_fingerprint=None):
             from jiuwenswarm.governance.resources import ResourceAccessDenied
             active = self._native.active_turn
             def current():
@@ -320,7 +320,9 @@ class NativeExecutionSession:
                 )
             if model_authority is None or not current():
                 raise ResourceAccessDenied("model execution authority unavailable")
-            headers = await model_authority(binding, target, native_session=self)
+            kwargs = ({'model_entry_fingerprint': model_entry_fingerprint}
+                      if model_entry_fingerprint is not None else {})
+            headers = await model_authority(binding, target, native_session=self, **kwargs)
             if not current():
                 raise ResourceAccessDenied("model execution authority changed")
             return headers

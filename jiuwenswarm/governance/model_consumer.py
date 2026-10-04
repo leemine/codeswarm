@@ -17,6 +17,7 @@ from .tool_context import current_model_authorizer, current_tool_authorizer
 @dataclass(frozen=True, slots=True)
 class NativeModelRequestAuthority:
     binding: ModelCredentialBinding
+    model_entry_fingerprint: str | None = None
 
     def bind_for_call(self):
         authority = current_model_authorizer()
@@ -27,7 +28,9 @@ class NativeModelRequestAuthority:
             try:
                 if current_model_authorizer() is not authority:
                     raise ResourceAccessDenied('model request authority changed')
-                headers = await authority(self.binding, target)
+                kwargs = ({'model_entry_fingerprint': self.model_entry_fingerprint}
+                          if self.model_entry_fingerprint is not None else {})
+                headers = await authority(self.binding, target, **kwargs)
                 if current_model_authorizer() is not authority:
                     raise ResourceAccessDenied('model request authority changed')
                 return headers
@@ -38,22 +41,22 @@ class NativeModelRequestAuthority:
         return authorize
 
 
-def model_request_authority(config):
+def model_request_authority(config, *, model_entry_fingerprint=None):
     """Select mandatory governance only from host state, never a wire flag."""
     from .organization_auth import configured_authenticator
     if (configured_authenticator() is None and current_model_authorizer() is None
             and current_tool_authorizer() is None):
         return None
-    return NativeModelRequestAuthority(ModelCredentialBinding.from_config(config))
+    return NativeModelRequestAuthority(ModelCredentialBinding.from_config(config), model_entry_fingerprint)
 
 
-def runtime_model_kwargs(model_client_config, model_config=None, *, binding_config=None):
+def runtime_model_kwargs(model_client_config, model_config=None, *, binding_config=None, model_entry_fingerprint=None):
     """Keep model factories on the same mandatory host request boundary.
 
     The explicit host catalog metadata must survive until this point. A typed
     client config or a literal API key alone is not a credential grant.
     """
-    authority = model_request_authority(binding_config)
+    authority = model_request_authority(binding_config, model_entry_fingerprint=model_entry_fingerprint)
     result = {'model_client_config': model_client_config}
     if model_config is not None:
         result['model_config'] = model_config

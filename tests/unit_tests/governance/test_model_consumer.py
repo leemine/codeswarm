@@ -140,3 +140,28 @@ def test_organization_catalog_never_decrypts_or_resolves_login_environment(monke
     assert 'synthetic-header-secret' not in repr(entries)
     assert 'PRIVATE_KEY' not in repr(entries)
     assert raw['models']['defaults'][0]['model_client_config']['api_key'] == '${PRIVATE_KEY}'
+
+
+@pytest.mark.asyncio
+async def test_original_entry_fingerprint_reaches_same_http_authority():
+    binding = ModelCredentialBinding('model', 'https://model.example/v1')
+    fingerprint = 'e' * 64
+    authority = AsyncMock(return_value={'Authorization': 'Bearer synthetic'})
+    with tool_authority_scope(None, provider_authorizers=ExecutionResourceAuthorities({}, authority)):
+        request = object()
+        call = NativeModelRequestAuthority(binding, fingerprint).bind_for_call()
+        await call(request)
+        authority.assert_awaited_once_with(binding, request, model_entry_fingerprint=fingerprint)
+
+
+def test_entry_fingerprint_ignores_key_rotation_but_pins_destination_reference_and_settings():
+    from jiuwenswarm.governance.model_credentials import model_entry_fingerprint
+    client = {'model_name': 'model', 'api_base': 'https://model.example/v1',
+              'credential_reference': 'account:bob', 'api_key': 'synthetic-old'}
+    original = model_entry_fingerprint(client, {'temperature': 0.1})
+    assert model_entry_fingerprint({**client, 'api_key': 'synthetic-new'}, {'temperature': 0.1}) == original
+    for change in ({'api_base': 'https://other.example/v1'}, {'credential_reference': 'account:alice'}):
+        assert model_entry_fingerprint({**client, **change}, {'temperature': 0.1}) != original
+    assert model_entry_fingerprint(client, {'temperature': 0.9}) != original
+    with pytest.raises(ResourceAccessDenied):
+        model_entry_fingerprint(client, {'custom_headers': {'Authorization': 'synthetic'}})

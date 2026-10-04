@@ -317,6 +317,8 @@ class PreparedSessionProvision(Generic[_ResultT]):
     __slots__ = (
         "_abort_hook",
         "_commit_attempt_is_terminal",
+        "_abort_on_commit_error",
+        "_committed_probe",
         "_commit_context",
         "_commit_hook",
         "_commit_timing",
@@ -337,6 +339,8 @@ class PreparedSessionProvision(Generic[_ResultT]):
         ) = None,
         abort_hook: Callable[[], Awaitable[None]] | None = None,
         commit_attempt_is_terminal: bool = False,
+        abort_on_commit_error: Callable[[], bool] | None = None,
+        committed_probe: Callable[[], bool] | None = None,
     ) -> None:
         self._owner_token = owner_token
         self._result = result
@@ -345,6 +349,8 @@ class PreparedSessionProvision(Generic[_ResultT]):
         self._commit_hook = commit_hook
         self._abort_hook = abort_hook
         self._commit_attempt_is_terminal = commit_attempt_is_terminal
+        self._abort_on_commit_error = abort_on_commit_error
+        self._committed_probe = committed_probe
         self._state = SessionProvisionState.PREPARED
         self._finalize_lock = asyncio.Lock()
 
@@ -404,7 +410,24 @@ class PreparedSessionProvision(Generic[_ResultT]):
             if self._commit_hook is not None:
                 try:
                     await self._commit_hook(self._commit_context or context)
-                except BaseException:
+                except BaseException as primary:
+                    if self._abort_on_commit_error is not None and self._abort_on_commit_error():
+                        # This operation declares its business commit incomplete.
+                        # Preserve the existing abort receipt when cleanup fails;
+                        # a later owner retry must not repeat publication.
+                        self._state = SessionProvisionState.ABORTING
+                        try:
+                            if self._abort_hook is not None:
+                                await self._abort_hook()
+                        except BaseException as cleanup:
+                            primary.add_note('commit compensation incomplete: ' + type(cleanup).__name__)
+                        else:
+                            self._state = SessionProvisionState.ABORTED
+                            self._commit_context = None
+                            self._commit_hook = None
+                            self._abort_hook = None
+                            self._abort_on_commit_error = None
+                        raise
                     if self._commit_attempt_is_terminal:
                         self._state = SessionProvisionState.COMMITTED
                         self._commit_context = None
@@ -416,6 +439,27 @@ class PreparedSessionProvision(Generic[_ResultT]):
             self._commit_hook = None
             self._abort_hook = None
             return self._result
+
+    async def reconcile_commit_for_owner(self, owner_token: object) -> bool:
+        """Settle a declared ambiguous durable commit using its original receipt."""
+        self._assert_owner(owner_token)
+        if self._committed_probe is None:
+            return self._state is SessionProvisionState.COMMITTED
+        if self._finalize_lock.locked():
+            return False  # Preserve fail-fast shutdown while an owner is active.
+        async with self._finalize_lock:
+            if self._state is SessionProvisionState.COMMITTED:
+                return True
+            if (self._state not in {SessionProvisionState.COMMITTING, SessionProvisionState.ABORTING}
+                    or self._committed_probe is None or self._committed_probe() is not True):
+                return False
+            self._state = SessionProvisionState.COMMITTED
+            self._commit_context = None
+            self._commit_hook = None
+            self._abort_hook = None
+            self._abort_on_commit_error = None
+            self._committed_probe = None
+            return True
 
     async def abort_for_owner(self, owner_token: object) -> None:
         """Abort through the capability held by the owning Provisioner."""
@@ -899,6 +943,11 @@ class RuntimeSessionProvisioner:
                 }
                 and self._is_prewarm_model_eligible(provision_input.model_name)
             )
+            from jiuwenswarm.governance.continuation_publication import current_scope
+            continuation = current_scope()
+            if continuation is not None:
+                continuation._require()
+                prewarm_eligible = False
 
             if explicit_tui_session:
                 session_id = requested_session_id
@@ -1100,6 +1149,10 @@ class RuntimeSessionProvisioner:
     ) -> PreparedSessionProvision[SessionCreateResult]:
         finalized = False
         claim_released = False
+        from jiuwenswarm.governance.continuation_publication import current_scope
+        continuation = current_scope()
+        if continuation is not None:
+            continuation._require()
 
         async def release_resources() -> None:
             nonlocal finalized, claim_released
@@ -1137,10 +1190,31 @@ class RuntimeSessionProvisioner:
                 raise primary_error
             finalized = True
 
+        business_committed = False
+
         async def commit_create(
             context: SessionProvisionCommitContext,
         ) -> None:
+            nonlocal business_committed
             try:
+                if continuation is not None:
+                    continuation._require()
+                    check = getattr(continuation, '_before_runtime_commit', None)
+                    if not callable(check):
+                        raise SessionProvisionError('continuation target admission missing')
+                    check()
+                    try:
+                        continuation.commit()
+                    except BaseException:
+                        # A storage wrapper may report failure after atomic save.
+                        # Only exact original receipt facts can settle that write.
+                        try:
+                            from jiuwenswarm.server.runtime.session.continuation_publication import confirms_committed
+                            business_committed = confirms_committed(continuation)
+                        except Exception:
+                            pass  # Keep the original error and retryable receipt.
+                        raise
+                    business_committed = True
                 self._completed_session_deletes.pop(result.session_id, None)
                 if switch_context is not None:
                     task = asyncio.create_task(
@@ -1158,12 +1232,19 @@ class RuntimeSessionProvisioner:
                 if external_lock is not None and external_lock.locked():
                     external_lock.release()
 
+        def committed_probe():
+            from jiuwenswarm.server.runtime.session.continuation_publication import confirms_committed
+            return confirms_committed(continuation)
+
         return self._stage_session_provision(
             result,
-            commit_timing=SessionProvisionCommitTiming.AFTER_RESULT_DELIVERY,
+            commit_timing=(SessionProvisionCommitTiming.BEFORE_RESULT_DELIVERY
+                           if continuation is not None else SessionProvisionCommitTiming.AFTER_RESULT_DELIVERY),
             commit_hook=commit_create,
             abort_hook=release_resources,
             commit_attempt_is_terminal=True,
+            abort_on_commit_error=(lambda: not business_committed) if continuation is not None else None,
+            committed_probe=committed_probe if continuation is not None else None,
         )
 
     @staticmethod
@@ -1665,6 +1746,8 @@ class RuntimeSessionProvisioner:
         ) = None,
         abort_hook: Callable[[], Awaitable[None]] | None = None,
         commit_attempt_is_terminal: bool = False,
+        abort_on_commit_error: Callable[[], bool] | None = None,
+        committed_probe: Callable[[], bool] | None = None,
     ) -> PreparedSessionProvision[_ResultT]:
         """Build an owned lease after an operation-specific prepare succeeds.
 
@@ -1681,7 +1764,12 @@ class RuntimeSessionProvisioner:
             commit_hook=commit_hook,
             abort_hook=abort_hook,
             commit_attempt_is_terminal=commit_attempt_is_terminal,
+            abort_on_commit_error=abort_on_commit_error,
+            committed_probe=committed_probe,
         )
+
+    async def reconcile_committed_provision(self, prepared):
+        return await prepared.reconcile_commit_for_owner(self._provision_owner_token)
 
     async def commit_session_provision(
         self,

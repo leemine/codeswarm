@@ -31,7 +31,7 @@ _CLAIM = ContextVar('runtime_session_create_claim', default=None)
 
 
 @contextmanager
-def session_create_claim_scope(resolver, provision_input):
+def session_create_claim_scope(resolver, provision_input, *, continuation_input=None):
     """Bind the complete normalized input to one trusted live Runtime task."""
     identity = resolver()
     if not isinstance(identity, TrustedIdentity):
@@ -40,6 +40,8 @@ def session_create_claim_scope(resolver, provision_input):
     for key in ('cwd', 'project_dir'):
         if isinstance(inputs.get(key), os.PathLike):
             inputs[key] = os.fsdecode(inputs[key])
+    if continuation_input is not None:
+        inputs = {'create': inputs, 'continuation': asdict(continuation_input)}
     serialized = json.dumps(inputs, sort_keys=True, separators=(',', ':'), allow_nan=False)
     claim = _Claim(identity, hashlib.sha256(serialized.encode()).hexdigest(), resolver, asyncio.current_task())
     if claim.task is None:

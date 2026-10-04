@@ -6,7 +6,7 @@ credentials, copy historical events, run tools or change the current UI Session.
 
 `ContinuationInput.from_wire(params)` accepts exactly the source Session/share,
 expected share revision, create token, target project, execution profile, Single
-mode and optional title. No identity, directory, range, cursor, native Session,
+mode, explicit model selection and optional title. No identity, directory, range, cursor, native Session,
 credential or arbitrary metadata may be asserted through this input. Session
 allocation and token scoping still belong to Runtime/AgentManager.
 
@@ -54,7 +54,7 @@ until its integrated and real execution milestones pass.
 
 ## Persistent publication owner boundary
 
-`ContinuationPublication(host, compiler, seed, config_fingerprint)` is a one-use
+`ContinuationPublication(host, compiler, seed, config_fingerprint, target_snapshot=...)` is a one-use
 lexical synchronous context manager owned by the current asyncio Task. During
 its scope, the existing `register_owner_and_source` attaches a pending
 `continuation` record beside `source` in the original owner sidecar, only for
@@ -118,3 +118,72 @@ A retired owner containing continuation provenance permanently reserves that
 Session ID: ordinary registration cannot overwrite it and discard its token
 tombstone. New continuations use new random IDs. Existing non-continuation
 retired owner recreation retains its previous behavior.
+
+
+## Runtime creation and consumption integration
+
+`AgentRuntime.continue_session(ContinuationInput)` uses the existing provisioner,
+claim-token lock and owner publication. It compiles the complete source before
+allocation, selects an explicit eligible Native Single profile/model and checks
+recipient project read/execute, canonical workspace/read and credential/use.
+Prewarm is disabled for this transaction. The original nonsecret model binding
+and full entry fingerprints, workspace, work mode and canonical mode are stored
+in the same publication record. Current catalog defaults cannot replace them.
+
+Creation flushes metadata, atomically writes the seed and commits publication
+inside the original provision receipt's finalize lock before returning success.
+Failure before business commit invokes the original abort finalizer. A temporary
+compensation outage retains ABORTING and the receipt for owned retry; confirmed
+business commit forbids old-receipt deletion. Unknown disk-write outcomes retain the original receipt until its exact nonce,
+proof, seed, metadata and original owner/source epoch prove the write committed.
+That fact check can settle the original receipt on same-token retry or shutdown;
+it never grants source access or deletes a committed target. A still-unreadable
+or mismatched outcome remains pending and prevents completed shutdown.
+The full trusted identity and complete normalized source/target inputs scope the
+original create token. Retrying a committed token checks the original durable
+record and returns that same target; changing inputs conflicts.
+
+`ContinuationExecution` is private per-admitted-request state. It freezes the
+original Runtime execution ID and Session generation and rejects cancellation,
+terminal state, replacement generation and a different request identity. Its
+checks also reread original source/owner proof and target catalogs/grants.
+`ContinuationContext` carries the bounded plaintext seed into the original
+Single adapter route. Under the existing adapter lock, new/rebuilt contexts get
+source seed plus the target's own history before the current request. Existing
+contexts are only revalidated, never appended to; the seed is not rewritten into
+the target's conversation history. Failed/late context construction removes only
+its newly created default context and propagates denial.
+
+The primary model branch builds the exact approved metadata entry without
+legacy name/default/cache/login fallback. Its immutable entry fingerprint flows
+through the existing Native model request authority. Each actual credential use
+checks the original binding and entry plus the live original Runtime/source
+facts before and after awaited resolution. This is catalog/factory selection
+integrity, not a new policy for arbitrary model sampling parameters.
+
+## RPC and final local delivery
+
+`session.share.continuation.options` accepts exactly source session/share,
+expected revision and target project. It returns only currently eligible profile,
+provider, canonical mode, model selection and display label combinations. No
+credential reference, endpoint, key or seed is projected. `session.share.continue`
+accepts the exact `ContinuationInput` fields and returns safe target Session
+metadata plus `continued_from`; it does not send a chat Turn or subscribe to the
+source Session.
+
+Both source permissions must belong to the same original share/range/revision.
+AgentServer checks a private result guard after its send lock. At the Gateway,
+the existing queued frame carries a new local guard compiled from the same
+persisted host sidecar, original request and current full principal. It rechecks
+the committed target owner, original input/token, target configuration/resources
+and source permission immediately before websocket delivery. The response itself
+does not carry a grant and cannot reconstruct a callback. Remote authorities
+without the same authoritative local state are outside this combination.
+
+Deterministic transaction, context, consumer and delivery tests plus ordinary
+Native loopback evidence establish separate slices. UI, final locked candidate
+stable and full real Provider/channel stories remain explicit delivery gates.
+The initial target selector supports configured Native normal Single with empty
+provider configuration and API-key OpenAI Chat Completions metadata only. This
+does not open Codex/OpenCode continuation, Team continuation, autonomous child
+models, full activity restoration, Swarmflow or remote deployment.

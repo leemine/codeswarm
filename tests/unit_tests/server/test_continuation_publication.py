@@ -14,17 +14,19 @@ from tests.unit_tests.server import test_continuation_source as source_tests
 setup = source_tests.setup
 ALICE, BOB = source_tests.ALICE, source_tests.BOB
 FINGERPRINT = 'a' * 64
+TARGET = {'model_binding_fingerprint': 'b' * 64, 'model_entry_fingerprint': 'c' * 64,
+          'project_dir': '/synthetic/workspace', 'work_mode': 'work', 'mode': 'agent.work.normal'}
 
 
 def make_scope(setup):
-    return ContinuationPublication(setup.host, setup.compiler, setup.compiler.compile(setup.request), FINGERPRINT)
+    return ContinuationPublication(setup.host, setup.compiler, setup.compiler.compile(setup.request), FINGERPRINT, target_snapshot=TARGET)
 
 
 def register(setup, scope, sid='target-session'):
     assert setup.host.register_owner_and_source(sid, scope.seed.proof.identity, setup.target.project_id) == 1
     directory = setup.tmp_path / 'sessions' / sid
     directory.mkdir()
-    metadata = {'project_id': setup.target.project_id, 'execution_profile_id': setup.request.execution_profile_id,
+    metadata = {**{key: TARGET[key] for key in ('project_dir', 'work_mode', 'mode')}, 'project_id': setup.target.project_id, 'execution_profile_id': setup.request.execution_profile_id,
                 'execution_config_fingerprint': FINGERPRINT, 'model': getattr(setup.request, 'model_name', '')}
     (directory / 'metadata.json').write_text(json.dumps(metadata))
     return directory
@@ -336,11 +338,11 @@ async def test_committed_two_generation_chain_and_source_cycle_reject(setup):
     request = replace(setup.request, session_id='target-session', share_id=grant['share_id'],
                       target_project_id=setup.source.project_id, create_token='second')
     seed = compiler.compile(request)
-    with ContinuationPublication(setup.host, compiler, seed, FINGERPRINT) as second:
+    with ContinuationPublication(setup.host, compiler, seed, FINGERPRINT, target_snapshot=TARGET) as second:
         setup.host.register_owner_and_source('second-session', ALICE, setup.source.project_id)
         second_dir = setup.tmp_path / 'sessions/second-session'
         second_dir.mkdir()
-        (second_dir / 'metadata.json').write_text(json.dumps({'project_id': setup.source.project_id,
+        (second_dir / 'metadata.json').write_text(json.dumps({**{key: TARGET[key] for key in ('project_dir', 'work_mode', 'mode')}, 'project_id': setup.source.project_id,
             'execution_profile_id': request.execution_profile_id, 'execution_config_fingerprint': FINGERPRINT,
             'model': request.model_name}))
         second.write_seed()
@@ -398,7 +400,7 @@ async def test_same_actor_token_is_atomic_reservation_across_publication_scopes(
     request = replace(setup.request, title='different') if changed_input else setup.request
     seed = setup.compiler.compile(request)
     before = copy.deepcopy(setup.access._load())
-    with ContinuationPublication(setup.host, setup.compiler, seed, FINGERPRINT) as second:
+    with ContinuationPublication(setup.host, setup.compiler, seed, FINGERPRINT, target_snapshot=TARGET) as second:
         with pytest.raises(SessionSharingConflict, match='token already reserved'):
             setup.host.register_owner_and_source('another-target', BOB, setup.target.project_id)
         assert second.session_id is None
@@ -419,7 +421,7 @@ async def test_identical_token_different_full_identity_does_not_conflict(setup):
     compiler = ContinuationCompiler(setup.host, identity_resolver=lambda: carol, project_authorizer=setup.access)
     request = replace(setup.request, share_id=grant['share_id'])
     seed = compiler.compile(request)
-    with ContinuationPublication(setup.host, compiler, seed, FINGERPRINT) as second:
+    with ContinuationPublication(setup.host, compiler, seed, FINGERPRINT, target_snapshot=TARGET) as second:
         register(setup, second, 'carol-target')
         second.write_seed()
         second.commit()
@@ -432,7 +434,7 @@ async def test_second_concurrent_task_cannot_win_same_token_registration(setup):
     ready, continue_second = asyncio.Event(), asyncio.Event()
     seed = setup.compiler.compile(setup.request)
     async def first():
-        with ContinuationPublication(setup.host, setup.compiler, seed, FINGERPRINT) as scope:
+        with ContinuationPublication(setup.host, setup.compiler, seed, FINGERPRINT, target_snapshot=TARGET) as scope:
             register(setup, scope)
             ready.set()
             await continue_second.wait()
@@ -470,3 +472,32 @@ async def test_retired_continuation_cannot_lose_token_tombstone_via_ordinary_rec
     setup.host.register_owner_and_source('ordinary', BOB, setup.target.project_id)
     setup.host.compensate_owner_registration('ordinary', BOB, expected_revision=1, expected_epoch=1)
     assert setup.host.register_owner_and_source('ordinary', BOB, setup.target.project_id, expected_owner_revision=2) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field,value', [('mode', 'agent.code.normal'), ('work_mode', 'code'),
+                                        ('project_dir', '/another/workspace')])
+async def test_original_target_workspace_and_mode_remain_bound(setup, field, value):
+    with make_scope(setup) as scope:
+        directory = register(setup, scope)
+        scope.write_seed()
+        scope.commit()
+    assert publication.read_target_snapshot(setup.host, 'target-session', BOB) == TARGET
+    metadata = json.loads((directory / 'metadata.json').read_text())
+    metadata[field] = value
+    (directory / 'metadata.json').write_text(json.dumps(metadata))
+    assert not new_host(setup).owner_current('target-session', BOB)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field,value', [('model_binding_fingerprint', 'invalid'),
+                                        ('model_entry_fingerprint', None), ('extra', 'unknown')])
+async def test_corrupt_persisted_model_target_is_rejected(setup, field, value):
+    with make_scope(setup) as scope:
+        register(setup, scope)
+        scope.write_seed()
+        scope.commit()
+    data = setup.access._load()
+    data['session_sharing']['owners']['target-session']['continuation']['target_snapshot'][field] = value
+    setup.access._save(data)
+    assert not new_host(setup).owner_current('target-session', BOB)

@@ -488,6 +488,9 @@ class AgentRuntime:
         if not workspace:
             return {}  # Bound but unavailable: every Provider remains denied.
         session_id = request.session_id or "default"
+        from jiuwenswarm.runtime.continuation_execution import capture_continuation_execution
+        continuation = capture_continuation_execution(self, request)
+        request._continuation_execution = continuation
         generation = self._governance_generation(session_id)
         host_context = copy_context()
 
@@ -499,6 +502,12 @@ class AgentRuntime:
         def is_current():
             if self._closed or self._governance_generation(session_id) != generation:
                 return False
+            if self._organization_session_host is not None and not self._organization_session_host.owner_current(
+                session_id, current_identity(),
+            ):
+                return False
+            if continuation is not None:
+                continuation.check()
             current = self._session_coordinator.snapshot_session(session_id)
             if current is None:
                 return False  # No owner/generation proof is not execution authority.
@@ -550,6 +559,7 @@ class AgentRuntime:
             resource_authorizer=self._resource_authorizer,
             current_identity=current_identity, is_current_execution=is_current,
             owns_execution=owns_model_execution, credential_decoder=decode_model_credential,
+            binding_checker=continuation.check_model if continuation is not None else None,
         )
         return ExecutionResourceAuthorities({
             provider: BoundToolResourceAuthority(
@@ -699,7 +709,13 @@ class AgentRuntime:
             return await operation(provision_input)
         check = self._publication_identity_check(provision_input)
         from jiuwenswarm.governance.session_claim import session_create_claim_scope
-        claim_scope = (session_create_claim_scope(check, provision_input)
+        from jiuwenswarm.governance.continuation_publication import current_scope
+        publication = current_scope()
+        continuation_input = None
+        if publication is not None:
+            publication._require()
+            continuation_input = publication.seed.proof.request
+        claim_scope = (session_create_claim_scope(check, provision_input, continuation_input=continuation_input)
                        if isinstance(provision_input, SessionCreateInput) else nullcontext())
         with self._owner_publication.scope(check), claim_scope:
             prepared = await operation(provision_input)
@@ -1393,6 +1409,29 @@ class AgentRuntime:
         """Return the bounded status record for queued Session work."""
         return self._session_coordinator.get_execution(execution_id)
 
+    async def _reconcile_continuation_result(self, session_id):
+        """Settle this Runtime's original receipt after a durable commit retry."""
+        self._require_started()
+        for prepared in tuple(self._pending_session_provisions):
+            if prepared.result.session_id != session_id:
+                continue
+            if await self._session_provisioner.reconcile_committed_provision(prepared):
+                governed = self._governed_provisions.get(prepared)
+                if governed is not None:
+                    self._submission_guard.accepted(governed)
+                self._discard_finalized_session_provision(prepared)
+        await self._register_session(session_id=session_id, channel_id='web')
+
+    async def continuation_options(self, params):
+        """Offer only currently authorized continuation catalog combinations."""
+        from jiuwenswarm.runtime.continuation import continuation_options
+        return await continuation_options(self, params)
+
+    async def continue_session(self, request):
+        """Create a private Session from bounded, currently authorized shared text."""
+        from jiuwenswarm.runtime.continuation import continue_session
+        return await continue_session(self, request)
+
     async def prepare_session_fork(
         self,
         provision_input: SessionForkInput,
@@ -1630,6 +1669,17 @@ class AgentRuntime:
         # This host-only attribute is never decoded from transport params or
         # metadata. Clear a reused request before considering a new Turn.
         request._project_content_snapshot = None
+        request._continuation_context = None
+        from jiuwenswarm.runtime.continuation_execution import (
+            capture_continuation_execution, require_continuation_execution,
+        )
+        continuation = getattr(request, '_continuation_execution', None)
+        if continuation is None:
+            continuation = capture_continuation_execution(self, request)
+            request._continuation_execution = continuation
+        if continuation is not None:
+            require_continuation_execution(continuation, self)
+            request._continuation_context = await continuation.make_context()
         identity = self._governance_identity(request)
         project_id = self._governance_project(request)
         if identity is not None and project_id:
@@ -3121,6 +3171,21 @@ class AgentRuntime:
         Runtime releases only its non-owning application-resource lease. The
         application composition root remains responsible for shared shutdown.
         """
+        # Only operations with an explicit original durable-commit probe can
+        # reconcile here. This neither chooses commit for a prepared operation
+        # nor aborts it, and does not require still-valid source read authority.
+        # Do not wait on a receipt lock while holding Runtime's lifecycle lock.
+        reconcile = getattr(self._session_provisioner, 'reconcile_committed_provision', None)
+        if callable(reconcile):
+            for prepared in tuple(self._pending_session_provisions):
+                try:
+                    if await reconcile(prepared):
+                        governed = self._governed_provisions.get(prepared)
+                        if governed is not None:
+                            self._submission_guard.accepted(governed)
+                        self._discard_finalized_session_provision(prepared)
+                except Exception:
+                    pass  # Unproven outcomes remain pending and fail closed below.
         async with self._lifecycle_lock:
             if self._closed:
                 return

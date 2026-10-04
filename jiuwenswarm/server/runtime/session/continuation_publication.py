@@ -25,7 +25,7 @@ MAX_SEED_FILE_BYTES = 8 * 1024 * 1024
 MAX_SOURCE_DEPTH = 8
 _CHAIN = ContextVar('continuation_source_chain', default=())
 _FIELDS = {'schema_version', 'state', 'publication_id', 'proof', 'seed_digest',
-           'config_fingerprint', 'execution_profile_id'}
+           'config_fingerprint', 'execution_profile_id', 'target_snapshot'}
 
 
 def _exact(value, keys):
@@ -88,12 +88,29 @@ def _parse_proof(value):
         parent, value['parent_revision'], value['target_revision'])
 
 
+def validate_target_snapshot(value):
+    """Strict nonsecret facts approved before allocation; never rebuilt from defaults."""
+    _exact(value, {'model_binding_fingerprint', 'model_entry_fingerprint',
+                   'project_dir', 'work_mode', 'mode'})
+    for key in ('model_binding_fingerprint', 'model_entry_fingerprint'):
+        _hex(value[key])
+    from pathlib import Path
+    root = value['project_dir']
+    if (not isinstance(root, str) or not root or not Path(root).is_absolute()
+            or '${' in root or '\x00' in root or len(root) > 32768
+            or value['work_mode'] not in ('work', 'code')
+            or value['mode'] != 'agent.' + value['work_mode'] + '.normal'):
+        raise SessionSharingDenied('invalid continuation target snapshot')
+    return dict(value)
+
+
 def _publication(value):
     _exact(value, _FIELDS)
     if type(value['schema_version']) is not int or value['schema_version'] != 1 or value['state'] not in ('pending', 'committed'):
         raise SessionSharingDenied('unsupported continuation publication')
     for field in ('publication_id', 'seed_digest', 'config_fingerprint'):
         _hex(value[field])
+    validate_target_snapshot(value['target_snapshot'])
     proof = parse_proof(value['proof'])
     if value['execution_profile_id'] != proof.request.execution_profile_id:
         raise SessionSharingDenied('continuation profile mismatch')
@@ -103,7 +120,7 @@ def _publication(value):
 def _scope_record(scope):
     return {'schema_version': 1, 'state': 'pending', 'publication_id': scope.publication_id,
             'proof': asdict(scope.seed.proof), 'seed_digest': scope.seed.digest,
-            'config_fingerprint': scope.config_fingerprint,
+            'config_fingerprint': scope.config_fingerprint, 'target_snapshot': dict(scope.target_snapshot),
             'execution_profile_id': scope.seed.proof.request.execution_profile_id}
 
 
@@ -138,7 +155,9 @@ def _metadata(session_id, publication, proof):
     if (metadata.get('project_id') != proof.request.target_project_id
             or metadata.get('execution_profile_id') != publication['execution_profile_id']
             or metadata.get('execution_config_fingerprint') != publication['config_fingerprint']
-            or metadata.get('model', '') != proof.request.model_name):
+            or metadata.get('model', '') != proof.request.model_name
+            or any(metadata.get(key) != publication['target_snapshot'][key]
+                   for key in ('project_dir', 'work_mode', 'mode'))):
         raise SessionSharingDenied('continuation target configuration changed')
 
 
@@ -182,6 +201,25 @@ def _owned_publication(host, session_id, identity, *, require_committed):
         # JSON values are detached from the temporary sidecar snapshot.
         return json.loads(json.dumps(publication))
 
+
+
+def read_approval(host, session_id, identity):
+    """Read current original facts, or None for an ordinary owned Session."""
+    with host._storage._locked():
+        record, owner, _, _ = host._current(host._storage._load(), session_id)
+        if owner != identity:
+            raise SessionSharingDenied('owned Session required')
+        publication = record.get('continuation')
+        if publication is None:
+            return None
+        if publication['state'] != 'committed':
+            raise SessionSharingDenied('committed continuation required')
+        return json.loads(json.dumps(publication))
+
+
+def read_target_snapshot(host, session_id, identity):
+    """Return original committed configuration facts after current owner checks."""
+    return _owned_publication(host, session_id, identity, require_committed=True)['target_snapshot']
 
 
 def _safe_platform():
@@ -313,6 +351,34 @@ def commit(scope):
             return
         record['continuation']['state'] = 'committed'
         host._storage._save(data)
+
+
+def confirms_committed(scope):
+    """Reconcile only this owned transaction's disk outcome, never grant access.
+
+    Unlike an owner permission check, this receipt probe does not require a still
+    live source share. It proves the original publication write occurred; it may
+    not authorize result delivery, execution, or mutation of another record.
+    """
+    _without_sidecar_lock(scope.host)
+    if scope.session_id is None or not scope._used:
+        return False
+    expected = _scope_record(scope)
+    expected['state'] = 'committed'
+    host = scope.host
+    def same_record():
+        with host._storage._locked():
+            record, owner, source = host._record(host._storage._load(), scope.session_id)
+            return (owner == scope.seed.proof.identity and record['revision'] == 1
+                    and source['epoch'] == 1
+                    and source['project_id'] == scope.seed.proof.request.target_project_id
+                    and record.get('continuation') == expected)
+    if not same_record():
+        return False
+    seed = _read_file(scope.session_id)
+    _matches(seed, expected)
+    _metadata(scope.session_id, expected, seed.proof)
+    return same_record()
 
 
 def read_seed(host, session_id, identity):

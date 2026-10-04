@@ -19,6 +19,7 @@ from jiuwenswarm.governance.contracts import AuthorizationDecision, TrustedIdent
 from jiuwenswarm.governance.model_credentials import (
     ModelCredentialBinding,
     configured_model_metadata,
+    model_entry_fingerprint,
 )
 from jiuwenswarm.governance.resources import (
     ResourceAccessDenied,
@@ -66,41 +67,16 @@ def _checksum(value):
     ).hexdigest()
 
 
-def _metadata_only(value):
-    """Reject unresolved or secret-bearing configuration without echoing it."""
-    if isinstance(value, dict):
-        forbidden = {
-            "api_key",
-            "secret",
-            "password",
-            "token",
-            "authorization",
-            "custom_headers",
-            "headers",
-            "credentials",
-            "env",
-        }
-        for key, item in value.items():
-            if not isinstance(key, str) or key.lower() in forbidden:
-                raise ValueError("unsupported model metadata")
-            _metadata_only(item)
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            _metadata_only(item)
-    elif isinstance(value, str):
-        if "${" in value:
-            raise ValueError("unresolved model metadata")
-    elif value is not None and type(value) not in (bool, int, float):
-        raise ValueError("unsupported model metadata")
-
-
 class ContinuationTargets:
     """Read host catalogs and current managed authority; keep no mutable approval."""
 
     def __init__(
         self,
-        runtime,
+        runtime=None,
         *,
+        identity_resolver=None,
+        project_access=None,
+        resource_authorizer=None,
         catalog_source=None,
         model_entries_source=None,
         project_store=None,
@@ -112,13 +88,18 @@ class ContinuationTargets:
         if project_store is None:
             from jiuwenswarm.server.runtime.session import project_store
         self._marker = object()
-        self._runtime = runtime
+        self._identity = identity_resolver or (runtime._governance_identity if runtime is not None else None)
+        self._project_access = project_access or (runtime._submission_guard.check_access if runtime is not None else None)
+        self._resources = resource_authorizer if resource_authorizer is not None else (
+            runtime._resource_authorizer if runtime is not None else None)
+        if not callable(self._identity) or not callable(self._project_access) or self._resources is None:
+            raise TypeError('explicit target identity, project and resource authorities required')
         self._catalog_source = catalog_source
         self._model_entries_source = model_entries_source or configured_model_metadata
         self._projects = project_store
 
     def _project_decision(self, project_id, identity, action):
-        decision = self._runtime._submission_guard.check_access(
+        decision = self._project_access(
             project_id, identity, action
         )
         if not isinstance(decision, AuthorizationDecision):
@@ -184,12 +165,7 @@ class ContinuationTargets:
             raise ValueError("ambiguous model binding")
         # Never store/read the api_key value or raw entry in a target. Include
         # all retained request settings so an unchanged name cannot hide drift.
-        metadata = {
-            "client": {key: value for key, value in config.items() if key != "api_key"},
-            "request": request_config,
-        }
-        _metadata_only(metadata)
-        return binding, _checksum(asdict(binding)), _checksum(metadata)
+        return binding, _checksum(asdict(binding)), model_entry_fingerprint(config, request_config)
 
     def select(self, request: ContinuationInput) -> ContinuationTarget:
         try:
@@ -202,7 +178,7 @@ class ContinuationTargets:
         if type(request) is not ContinuationInput:
             raise ValueError("continuation input required")
         request.__post_init__()
-        identity = self._runtime._governance_identity(request)
+        identity = self._identity(request)
         if type(identity) is not TrustedIdentity:
             raise ValueError("trusted identity required")
         identity.__post_init__()
@@ -244,7 +220,7 @@ class ContinuationTargets:
         ):
             raise ValueError("unsupported continuation execution configuration")
         binding, binding_fingerprint, entry_fingerprint = self._model(request)
-        authority = self._runtime._resource_authorizer
+        authority = self._resources
         grants = authority.resource_grants(pid, identity)
         revision = grants.get("resource_revision")
         if type(revision) is not int or revision < 1:
@@ -282,7 +258,7 @@ class ContinuationTargets:
         # No sidecar lock spans these independent reads or any await. Reject
         # detectable drift now; Runtime revalidates again at actual publication.
         if (
-            self._runtime._governance_identity(request) != identity
+            self._identity(request) != identity
             or self._project(pid) != (root, work_mode)
             or self._project_decision(pid, identity, "read") != read
             or self._project_decision(pid, identity, "execute") != execute

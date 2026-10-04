@@ -59,6 +59,33 @@ def configured_model_metadata():
     return _infer_is_default(result)
 
 
+def model_entry_fingerprint(client, request):
+    """Checksum the exact nonsecret factory entry; never the API key value."""
+    def validate(value):
+        if isinstance(value, dict):
+            forbidden = {'api_key', 'secret', 'password', 'token', 'authorization',
+                         'custom_headers', 'headers', 'credentials', 'env'}
+            for key, item in value.items():
+                if not isinstance(key, str) or key.lower() in forbidden:
+                    raise ResourceAccessDenied('unsupported model metadata')
+                validate(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                validate(item)
+        elif isinstance(value, str):
+            if '${' in value:
+                raise ResourceAccessDenied('unresolved model metadata')
+        elif value is not None and type(value) not in (bool, int, float):
+            raise ResourceAccessDenied('unsupported model metadata')
+    if not isinstance(client, dict) or not isinstance(request, dict):
+        raise ResourceAccessDenied('model entry metadata required')
+    metadata = {'client': {key: value for key, value in client.items() if key != 'api_key'},
+                'request': request}
+    validate(metadata)
+    return hashlib.sha256(json.dumps(metadata, sort_keys=True, separators=(',', ':'),
+                                     ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class ModelCredentialBinding:
     model: str
@@ -159,7 +186,7 @@ class ConfiguredModelCredentialResolver:
 class NativeModelCredentialAuthority:
     def __init__(self, execution: ResourceExecutionContext, *, resource_authorizer,
                  current_identity, is_current_execution, owns_execution=None, config_source=None,
-                 credential_decoder=None):
+                 credential_decoder=None, binding_checker=None):
         self.execution = execution
         self._resources = resource_authorizer
         self._identity = current_identity
@@ -167,8 +194,9 @@ class NativeModelCredentialAuthority:
         self._config_source = config_source
         self._owns_execution = owns_execution
         self._credential_decoder = credential_decoder
+        self._binding_checker = binding_checker
 
-    async def __call__(self, binding: ModelCredentialBinding, target, *, native_session=None):
+    async def __call__(self, binding: ModelCredentialBinding, target, *, native_session=None, model_entry_fingerprint=None):
         try:
             if (type(binding) is not ModelCredentialBinding or self.execution.provider_id != 'native'
                     or target.method != 'POST' or target.url != binding.destination
@@ -177,6 +205,8 @@ class NativeModelCredentialAuthority:
                     or target.operation not in {'invoke', 'stream'}):
                 raise ResourceAccessDenied('model request target mismatch')
             def current():
+                if self._binding_checker is not None:
+                    self._binding_checker(binding, model_entry_fingerprint)
                 return (self._current() is True and self._owns_execution is not None
                         and self._owns_execution(self.execution, native_session) is True)
             if self._identity() != self.execution.identity or not current():
