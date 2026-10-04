@@ -8,16 +8,20 @@ serialization and durable history never contain permission handoff objects.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import logging
 import uuid
 from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable
 
+from openjiuwen.core.controller.schema.execution_origin import ExecutionOrigin
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.harness.engine import HarnessEngine
 from openjiuwen.harness.schema.interaction import InputDispatchMode, SendInputRequest
 from openjiuwen.harness_protocol import (
+    AbortMode,
     DeliveryMode,
     HarnessContext,
     HarnessEvent,
@@ -46,8 +50,66 @@ from jiuwenswarm.runtime.harness.output_router import TurnOutputRouter
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
 
+logger = logging.getLogger(__name__)
+
 _REQUEST_KEY = "native.host_request"
 _TERMINAL = {TurnEventKind.FINISHED, TurnEventKind.FAILED, TurnEventKind.ABORTED}
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class NativeRequestLifecycle:
+    """Host-only admission; source identity never comes from serialized input."""
+
+    source: ExecutionOrigin
+    on_bound: Callable[[NativeOwnedTurn], None]
+    on_terminal: Callable[[NativeOwnedTurn, TurnEventKind], None]
+    on_not_admitted: Callable[[], None] | None = None
+
+    def __post_init__(self):
+        if type(self.source) is not ExecutionOrigin:
+            raise TypeError("Native lifecycle requires an original ExecutionOrigin")
+        if not callable(self.on_bound) or not callable(self.on_terminal):
+            raise TypeError("Native lifecycle callbacks must be callable")
+        if self.on_not_admitted is not None and not callable(self.on_not_admitted):
+            raise TypeError("Native rejection callback must be callable")
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, _memo):
+        return self
+
+    def __reduce__(self):
+        raise TypeError("Native lifecycle references cannot be serialized")
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class NativeOwnedTurn:
+    """Exact live references; not an execution state machine or wire receipt."""
+
+    source: ExecutionOrigin
+    request_id: str | None
+    turn_id: str
+    _native: NativeExecutionSession
+    _entry: _HostRequest
+    _pending: Any
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, _memo):
+        return self
+
+    def __reduce__(self):
+        raise TypeError("Native lifecycle references cannot be serialized")
+
+
+def _sync_callback(callback, *args):
+    value = callback(*args)
+    if inspect.iscoroutine(value):
+        value.close()
+    if value is not None:
+        raise TypeError("Native lifecycle callback must synchronously return None")
 
 
 @dataclass(slots=True)
@@ -70,6 +132,14 @@ class _HostRequest:
     control_terminal: Callable | None = field(default=None, repr=False)
     artifact_issuer_factory: Any = field(default=None, repr=False)
     guarded_artifact_issuer: Any = field(default=None, repr=False)
+    lifecycle: NativeRequestLifecycle | None = field(default=None, repr=False)
+    owned: NativeOwnedTurn | None = field(default=None, repr=False)
+    bound_notified: bool = False
+    terminal_kind: TurnEventKind | None = None
+    terminal_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    terminal_notified: bool = False
+    receipt_seen: bool = False
+    not_admitted: bool = False
 
 
 class NativeExecutionSession:
@@ -91,6 +161,7 @@ class NativeExecutionSession:
         dispatch_guard: Callable[..., Awaitable[Any]] | None = None,
         goal_dispatcher: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         event_observer: Callable[[HarnessEvent], Awaitable[None]] | None = None,
+        require_execution_origin: bool = False,
     ) -> None:
         bound.binding.validate_spec(bound.spec)
         if bound.spec.provider_id != "native":
@@ -106,6 +177,9 @@ class NativeExecutionSession:
             raise UnsupportedHarnessCapabilityError(
                 "Native host assembly does not support explicit execution authorization"
             )
+        if type(require_execution_origin) is not bool:
+            raise TypeError("require_execution_origin must be bool")
+        self._require_execution_origin = require_execution_origin
         self._after_stop = after_stop
         self._dispatch_guard = dispatch_guard
         self._goal_dispatcher = goal_dispatcher
@@ -138,6 +212,7 @@ class NativeExecutionSession:
             create_session=session_factory,
             before_start=register_owner,
             dispatch_input=self._dispatch,
+            capture_execution_origin=self._capture_execution_origin if require_execution_origin else None,
         )
         harness = DeepAgentHarness(
             agent_factory,
@@ -155,6 +230,135 @@ class NativeExecutionSession:
             event_observer=self._observe,
         )
         self._output_router: TurnOutputRouter | None = None
+
+    def _capture_lifecycle(self, request):
+        from jiuwenswarm.governance.tool_context import submitted_native_lifecycle_factory
+
+        factory = submitted_native_lifecycle_factory()
+        if not self._require_execution_origin:
+            if factory is not None:
+                raise PermissionError("Legacy Native session cannot accept managed admission")
+            return None
+        if factory is None:
+            raise PermissionError("Native admission requires its original host source")
+        lifecycle = factory(self, request)
+        if inspect.iscoroutine(lifecycle):
+            lifecycle.close()
+        if type(lifecycle) is not NativeRequestLifecycle:
+            raise TypeError("Native admission requires a synchronous lifecycle")
+        try:
+            lifecycle.source._check_current()
+        except BaseException:
+            try:
+                if lifecycle.on_not_admitted is not None:
+                    _sync_callback(lifecycle.on_not_admitted)
+            except BaseException:
+                logger.warning("Native non-admission notification failed; original submission remains unresolved")
+            raise
+        return lifecycle
+
+    def _capture_execution_origin(self, content):
+        token = content.metadata.get(_REQUEST_KEY)
+        entry = self._requests.get(token) if isinstance(token, str) else None
+        if self._closing or self._closed or entry is None or entry.lifecycle is None:
+            raise PermissionError("Native original request source is unavailable")
+        try:
+            entry.lifecycle.source._check_current()
+        except BaseException:
+            self._not_admitted(entry)
+            raise
+        return entry.lifecycle.source
+
+    @staticmethod
+    def _not_admitted(entry):
+        if entry.lifecycle is not None and not entry.not_admitted:
+            try:
+                if entry.lifecycle.on_not_admitted is not None:
+                    _sync_callback(entry.lifecycle.on_not_admitted)
+            except BaseException:
+                logger.warning("Native non-admission notification failed; original submission remains unresolved")
+                return
+            entry.not_admitted = True
+
+    def _failed_submission(self, token):
+        entry = self._requests.get(token)
+        # Arbitrary await/cancellation is not proof of non-admission. Preserve
+        # a managed entry, including an already-bound Turn, for exact cleanup.
+        if entry is not None and (entry.lifecycle is None or entry.not_admitted):
+            self._requests.pop(token, None)
+
+    def _check_same_origin(self, lifecycle, entry):
+        if (lifecycle is None or entry is None or entry.lifecycle is None
+                or lifecycle.source.host_value is not entry.lifecycle.source.host_value):
+            raise PermissionError("Native control cannot replace the original source")
+        entry.lifecycle.source._check_current()
+        lifecycle.source._check_current()
+
+    def _active_entry(self):
+        active = self._native.active_turn
+        token = active.content.metadata.get(_REQUEST_KEY) if active is not None else None
+        return self._requests.get(token)
+
+    def capture_owned_request_turn(self, *, token: str, turn_id: str) -> NativeOwnedTurn:
+        entry = self._requests.get(token)
+        if entry is None or entry.lifecycle is None:
+            raise PermissionError("Native owned request is unavailable")
+        owned = entry.owned
+        if owned is not None:
+            if owned.turn_id != turn_id or owned._native is not self:
+                raise PermissionError("Native owned Turn was replaced")
+        else:
+            pending = self._native._capture_owned_turn(turn_id)
+            if pending is None or pending.content.metadata.get(_REQUEST_KEY) != token:
+                raise PermissionError("Native original Turn cannot be proven")
+            owned = NativeOwnedTurn(entry.lifecycle.source,
+                                    entry.request.request_id if entry.request is not None else None,
+                                    turn_id, self, entry, pending)
+            entry.owned = owned
+        self._turn_requests[turn_id] = token
+        self._notify_lifecycle_bound(entry)
+        return owned
+
+    async def abort_owned_request_turn(self, owned: NativeOwnedTurn) -> None:
+        """Wait for the original Provider barrier AND its sole observer terminal."""
+        if (type(owned) is not NativeOwnedTurn or owned._native is not self
+                or owned._entry.owned is not owned):
+            raise PermissionError("Native exit requires its original owned Turn")
+        entry = owned._entry
+        if entry.terminal_kind is None:
+            await self._native._abort_owned_turn(owned._pending, mode=AbortMode.FORCE)
+            # A queued fence returns before its serialized ABORTED event. A
+            # bounded caller can retry this same handle; no current-Turn fallback.
+            await asyncio.wait_for(entry.terminal_event.wait(), RESOURCE_STOP_TIMEOUT_S)
+        self._notify_lifecycle_terminal(entry)
+
+    @staticmethod
+    def _notify_lifecycle_bound(entry):
+        if not entry.bound_notified:
+            _sync_callback(entry.lifecycle.on_bound, entry.owned)
+            entry.bound_notified = True
+
+    @staticmethod
+    def _notify_lifecycle_terminal(entry):
+        if entry.lifecycle is not None and entry.terminal_kind is not None and not entry.terminal_notified:
+            NativeExecutionSession._notify_lifecycle_bound(entry)
+            _sync_callback(entry.lifecycle.on_terminal, entry.owned, entry.terminal_kind)
+            entry.terminal_notified = True
+
+    def _check_terminal_exit(self, entry, kind):
+        pending = entry.owned._pending
+        barrier = pending._exit
+        if barrier is not None and barrier.confirmed.done():
+            barrier.confirmed.result()
+            return
+        # Serialized queued abort/stop never entered the Provider body. A
+        # generic producer terminal without either proof is still unknown.
+        if (kind is TurnEventKind.ABORTED
+                and (pending.abort_requested or self._native._stopping)
+                and not pending._execution_done.is_set()
+                and not pending._admissions and pending._stream is None):
+            return
+        raise ExecutionExitUnconfirmedError([("native_turn", RuntimeError("Original Native Turn exit is unconfirmed"))])
 
     async def start(self, context: HarnessContext) -> None:
         async with self._lifecycle_lock:
@@ -319,17 +523,26 @@ class NativeExecutionSession:
             self._output_router.abandon(turn_id)
 
     async def _send(self, content: HarnessInput, *, immediate: bool = False) -> SendReceipt:
+        async def send_and_bind():
+            receipt = await self.io.send(content, immediate=immediate)
+            token = content.metadata.get(_REQUEST_KEY)
+            entry = self._requests.get(token)
+            if entry is not None and entry.lifecycle is not None:
+                # Bind before TurnOutputRouter's finally can suspend on its
+                # mailbox lock. Accepted work must survive caller cancellation.
+                self._remember_turn(receipt, token)
+            return receipt
+
         if self._output_router is None:
-            return await self.io.send(content, immediate=immediate)
-        return await self._output_router.submit(
-            lambda: self.io.send(content, immediate=immediate)
-        )
+            return await send_and_bind()
+        return await self._output_router.submit(send_and_bind)
 
     def _register_host_request(self, **kwargs):
         from jiuwenswarm.governance.tool_context import (
             submitted_tool_authorizer, submitted_model_authorizer, submitted_mcp_authorizer,
             submitted_artifact_issuer_factory,
         )
+        lifecycle = self._capture_lifecycle(kwargs.get("request"))
         token = uuid.uuid4().hex
         authority = submitted_tool_authorizer()
         model_authority = submitted_model_authorizer()
@@ -339,7 +552,7 @@ class NativeExecutionSession:
         self._mcp_resource_governed = self._mcp_resource_governed or mcp_authority is not None
         self._model_resource_governed = self._model_resource_governed or model_authority is not None
         self._resource_governed = self._resource_governed or authority is not None
-        entry = _HostRequest(**kwargs, authority=authority, model_authority=model_authority,
+        entry = _HostRequest(**kwargs, lifecycle=lifecycle, authority=authority, model_authority=model_authority,
                              mcp_authority=mcp_authority, artifact_issuer_factory=artifact_factory)
 
         async def guarded(operation):
@@ -494,6 +707,8 @@ class NativeExecutionSession:
         query = request.inputs.get("query")
         if not isinstance(query, str) or not query.strip():
             raise ValueError("Native user input must be non-empty text")
+        if self._require_execution_origin and request.mode is InputDispatchMode.STEER:
+            raise UnsupportedHarnessCapabilityError("Managed Native STEER requires an original control owner selector")
         token = self._register_host_request(request=request)
         content = HarnessInput(content=query, metadata={_REQUEST_KEY: token})
         try:
@@ -501,7 +716,7 @@ class NativeExecutionSession:
                 content, immediate=request.mode is InputDispatchMode.STEER
             )
         except BaseException:
-            self._requests.pop(token, None)
+            self._failed_submission(token)
             raise
         # STEER is dispatched immediately and owns no additional Turn entry.
         if token in self._requests:
@@ -529,6 +744,12 @@ class NativeExecutionSession:
             or entry.answered.intersection(ids)
         ):
             return False
+        if self._require_execution_origin:
+            if entry.lifecycle is None:
+                raise PermissionError("Native continuation lacks its original source")
+            entry.lifecycle.source._check_current()
+        else:
+            self._capture_lifecycle(request)  # A cached legacy Session cannot upgrade silently.
         entry.resumes.append(request)
         entry.answered.update(ids)
         try:
@@ -554,15 +775,17 @@ class NativeExecutionSession:
         async def operation(agent):
             return await self._goal_dispatcher(action=action, **kwargs)
 
+        if self._require_execution_origin and self._native.active_turn is not None:
+            raise UnsupportedHarnessCapabilityError("Managed Native active Goal control requires an original owner selector")
         result = asyncio.get_running_loop().create_future()
         token = self._register_host_request(goal=operation, result=result)
         try:
             receipt = await self._send(
                 HarnessInput(content="", metadata={_REQUEST_KEY: token}),
-                immediate=True,
+                immediate=not self._require_execution_origin,
             )
         except BaseException:
-            self._requests.pop(token, None)
+            self._failed_submission(token)
             result.cancel()
             raise
         if self._output_router is not None and receipt.accepted_mode is not DeliveryMode.STEER:
@@ -591,6 +814,17 @@ class NativeExecutionSession:
         return receipt, result
 
     def _remember_turn(self, receipt: SendReceipt, token: str) -> None:
+        entry = self._requests.get(token)
+        if entry is not None and entry.lifecycle is not None:
+            entry.receipt_seen = True
+            if receipt.accepted_mode is DeliveryMode.STEER:
+                return
+            self.capture_owned_request_turn(token=token, turn_id=receipt.turn_id)
+            if entry.terminal_kind is not None:
+                self._notify_lifecycle_terminal(entry)
+                self._requests.pop(token, None)
+                self._turn_requests.pop(receipt.turn_id, None)
+            return
         # A fast terminal event can be observed before send() returns its receipt.
         if receipt.turn_id in self._terminal_turns:
             entry = self._requests.pop(token, None)
@@ -606,6 +840,8 @@ class NativeExecutionSession:
         GoalManager remains their locking/validation authority. In particular,
         get retains its existing nonblocking peek behavior.
         """
+        if self._require_execution_origin:
+            raise UnsupportedHarnessCapabilityError("Managed Native Goal control requires an original owner selector")
         if action not in {"get", "pause", "clear"} or self._goal_dispatcher is None:
             raise ValueError("control_goal only accepts get/pause/clear")
         if self._native.agent is None:
@@ -620,7 +856,7 @@ class NativeExecutionSession:
                 HarnessInput(content="", metadata={_REQUEST_KEY: token})
             )
         except BaseException:
-            self._requests.pop(token, None)
+            self._failed_submission(token)
             raise
         self._remember_turn(receipt, token)
         return receipt
@@ -638,6 +874,10 @@ class NativeExecutionSession:
             raise ValueError(
                 "Native host request is missing or belongs to another execution"
             )
+        if entry.lifecycle is not None:
+            entry.lifecycle.source._check_current()
+            if default_request.mode is InputDispatchMode.STEER:
+                self._check_same_origin(entry.lifecycle, self._active_entry())
         if entry.attach_goal:
             return True
         if entry.goal is not None and not resuming:
@@ -668,6 +908,8 @@ class NativeExecutionSession:
                 raise RuntimeError(
                     "Native turn was cancelled before host input dispatch"
                 )
+            if entry.lifecycle is not None:
+                entry.lifecycle.source._check_current()
             if self._resource_governed or self._model_resource_governed or self._mcp_resource_governed or self._artifact_resource_governed:
                 inputs = dict(host_request.inputs)
                 run = dict(inputs.get('run') or {})
@@ -690,13 +932,32 @@ class NativeExecutionSession:
         return True
 
     async def _observe(self, event: HarnessEvent) -> None:
+        if self._require_execution_origin and isinstance(event.event, TurnLifecycleEvent):
+            pending = self._native._capture_owned_turn(event.turn_id)
+            token = pending.content.metadata.get(_REQUEST_KEY) if pending is not None else self._turn_requests.get(event.turn_id)
+            entry = self._requests.get(token)
+            if entry is not None and entry.lifecycle is not None and not entry.bound_notified:
+                self.capture_owned_request_turn(token=token, turn_id=event.turn_id)
         if (
             isinstance(event.event, TurnLifecycleEvent)
             and event.event.kind in _TERMINAL
         ):
             self._terminal_turns.append(event.turn_id)
             token = self._turn_requests.pop(event.turn_id, None)
-            entry = self._requests.pop(token, None)
+            entry = self._requests.get(token)
+            if entry is not None and entry.lifecycle is not None:
+                if entry.owned is None or entry.owned.turn_id != event.turn_id:
+                    raise PermissionError("Native terminal lacks its original owned Turn")
+                self._check_terminal_exit(entry, event.event.kind)
+                entry.terminal_kind = event.event.kind
+                entry.terminal_event.set()
+                self._notify_lifecycle_terminal(entry)
+                # _remember_turn must consume the exact original entry even
+                # when terminal is delivered before send returns its receipt.
+                if entry.owned is not None and entry.receipt_seen:
+                    self._requests.pop(token, None)
+            else:
+                self._requests.pop(token, None)
             if entry is not None and entry.control_terminal is not None:
                 entry.control_terminal(event.event.kind)
             if (
@@ -714,6 +975,8 @@ class NativeExecutionSession:
 
     async def _attach_active_goal_after_eof(self) -> None:
         """Keep a replacement Goal running if the previous lease reached EOF."""
+        if self._require_execution_origin:
+            raise UnsupportedHarnessCapabilityError("Managed Native Goal handoff requires an explicit service admission")
         if self._closing or self._goal_dispatcher is None:
             return
         current = await self._goal_dispatcher(action="get")
@@ -728,12 +991,12 @@ class NativeExecutionSession:
                 HarnessInput(content="", metadata={_REQUEST_KEY: token})
             )
         except HarnessStateError:
-            self._requests.pop(token, None)
+            self._failed_submission(token)
             if not self._closing:
                 raise
             return
         except BaseException:
-            self._requests.pop(token, None)
+            self._failed_submission(token)
             raise
         self._remember_turn(receipt, token)
 

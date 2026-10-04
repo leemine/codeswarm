@@ -12485,8 +12485,11 @@ class JiuWenSwarmDeepAdapter:
             agent_factory(None)
             return await self._dispatch_goal_control(**kwargs)
 
+        from jiuwenswarm.governance.tool_context import submitted_native_lifecycle_factory
+
         execution = NativeExecutionSession(
             bound, agent_factory=agent_factory,
+            require_execution_origin=submitted_native_lifecycle_factory() is not None,
             session_factory=session_factory, before_start=before_start, after_stop=after_stop,
             dispatch_guard=dispatch_guard,
             goal_dispatcher=goal_dispatcher,
