@@ -30,9 +30,9 @@ def _request(session_id: str | None) -> AgentRequest:
     )
 
 
-async def _call(request: AgentRequest) -> AgentResponse:
+async def _call(request: AgentRequest, manager=None) -> AgentResponse:
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
-    server._agent_manager = SimpleNamespace()
+    server._agent_manager = manager or SimpleNamespace()
     captured: dict[str, AgentResponse] = {}
 
     def _encode(response, response_id=None):  # noqa: ARG001
@@ -74,7 +74,7 @@ async def test_native_code_manifest_uses_persisted_surface():
 
 
 @pytest.mark.asyncio
-async def test_external_manifest_comes_from_admitted_adapter():
+async def test_external_manifest_comes_from_existing_adapter():
     manifest = replace(
         compile_native_ui_capability_manifest(RuntimeSurface.WORK),
         provider_id="codex",
@@ -90,17 +90,15 @@ async def test_external_manifest_comes_from_admitted_adapter():
                 "execution_profile_id": "codex-work",
             },
         ),
-        patch(
-            "jiuwenswarm.runtime.request.prepare_chat_turn",
-            new=AsyncMock(return_value=("agent", None, agent)),
-        ) as prepare,
+        patch("jiuwenswarm.runtime.request.prepare_chat_turn", new=AsyncMock(
+            side_effect=AssertionError("read must not construct"))) as prepare,
     ):
-        response = await _call(_request("external-work"))
+        response = await _call(_request("external-work"), SimpleNamespace(
+            get_agent_for_session_nowait=lambda channel, sid: agent))
 
     assert response.ok is True
     assert response.payload["surface_capabilities"] == manifest.record()
-    prepare.assert_awaited_once()
-    assert prepare.await_args.kwargs["sync_metadata"] is False
+    prepare.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -130,12 +128,12 @@ async def test_bound_external_team_manifest_comes_from_existing_adapter(mode):
             "team_name": "team", "execution_profile_id": "codex",
         }),
         patch("jiuwenswarm.runtime.request.prepare_chat_turn", new=AsyncMock(
-            return_value=("team", None, agent))) as prepare,
+            side_effect=AssertionError("read must not construct"))) as prepare,
     ):
-        response = await _call(_request("external-team"))
+        response = await _call(_request("external-team"), SimpleNamespace(
+            get_agent_for_session_nowait=lambda channel, sid: agent))
     assert response.ok and response.payload["surface_capabilities"] == manifest.record()
-    assert prepare.await_args.kwargs["sync_metadata"] is False
-    assert prepare.await_args.args[1].params == {"mode": mode, "work_mode": "code"}
+    prepare.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -145,3 +143,34 @@ async def test_native_team_manifest_does_not_require_external_binding():
     }):
         response = await _call(_request("native-team"))
     assert response.ok and response.payload["surface_capabilities"]["provider_id"] == "native"
+
+
+def test_cold_catalog_projection_has_no_runtime_or_workspace_side_effects(tmp_path):
+    from openjiuwen.harness.engine.config import config_fingerprint
+    from jiuwenswarm.runtime.harness.cold_surface_manifest import cold_surface_manifest
+    from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
+    from jiuwenswarm.runtime.harness.surface import creation_surface
+
+    config = {'permissions': {'enabled': True}, 'execution': {
+        'default_profile_id': 'oc', 'profiles': {'oc': {
+            'provider_id': 'opencode', 'config_revision': 'frozen',
+            'provider_config': {'model': {'model': 'synthetic', 'api_base': 'https://model.invalid/v1'}},
+        }}}}
+    spec = load_execution_catalog(config).source().resolve()
+    metadata = {'session_id': 'cold', 'channel_id': 'web', 'user_id': 'bob',
+        'project_dir': str(tmp_path / 'not-allocated'), 'mode': 'agent.work.normal',
+        'work_mode': 'work', 'execution_profile_id': 'oc',
+        'execution_config_revision': spec.config_revision,
+        'execution_config_fingerprint': config_fingerprint(spec)}
+    metadata['surface_creation'] = creation_surface(metadata)
+    manifest = cold_surface_manifest(metadata, config=config, channel_id='web',
+        session_id='cold', browser_available=False)
+    assert manifest.provider_id == 'opencode'
+    assert not (tmp_path / 'not-allocated').exists()
+    for key in ('execution_config_revision', 'execution_config_fingerprint'):
+        with pytest.raises(ValueError, match='execution configuration changed'):
+            cold_surface_manifest({**metadata, key: 'drift'}, config=config,
+                channel_id='web', session_id='cold', browser_available=False)
+    with pytest.raises(ValueError, match='Surface'):
+        cold_surface_manifest({**metadata, 'work_mode': 'code'}, config=config,
+            channel_id='web', session_id='cold', browser_available=False)

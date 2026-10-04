@@ -4915,24 +4915,19 @@ class AgentWebSocketServer:
                     profile_id = metadata.get("execution_profile_id")
                     manifest = None
                     if isinstance(profile_id, str) and profile_id.strip():
-                        probe = AgentRequest(
-                            request_id=f"{request.request_id}:surface-capabilities",
-                            channel_id=request.channel_id,
-                            session_id=session_id,
-                            req_method=ReqMethod.SURFACE_CAPABILITIES_GET,
-                            params={"mode": mode, "work_mode": metadata.get("work_mode", "work")},
-                            user_id=str(getattr(request, "user_id", "") or ""),
-                        )
-                        from jiuwenswarm.runtime.request import prepare_chat_turn
-
-                        _, _, agent = await prepare_chat_turn(
-                            self._agent_manager,
-                            probe,
-                            request.channel_id,
-                            sync_metadata=False,
-                        )
+                        lookup = getattr(self._agent_manager, "get_agent_for_session_nowait", None)
+                        agent = lookup(request.channel_id, session_id) if callable(lookup) else None
                         adapter = getattr(agent, "_adapter", None)
                         manifest = getattr(adapter, "ui_capability_manifest", None)
+                        if manifest is None:
+                            from jiuwenswarm.common.config import get_config
+                            from jiuwenswarm.runtime.harness.cold_surface_manifest import cold_surface_manifest
+                            from jiuwenswarm.runtime.harness.external_browser_admission import browser_runtime_enabled
+
+                            manifest = cold_surface_manifest(
+                                metadata, config=get_config(), channel_id=request.channel_id,
+                                session_id=session_id, browser_available=browser_runtime_enabled(os.environ),
+                            )
 
                     if manifest is None:
                         from openjiuwen.harness_protocol import RuntimeSurface
