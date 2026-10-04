@@ -4,6 +4,15 @@
   "python_requires": ">=3.11,<3.14",
   "bootstrap": [
     {
+      "id": "codeswarm.web.dependencies",
+      "workdir": "jiuwenswarm/channels/web/frontend",
+      "command": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 1200
+    },
+    {
       "id": "codeswarm.python.test-dependencies",
       "workdir": ".",
       "command": ["{uv}", "sync", "--locked", "--group", "test"],
@@ -25,6 +34,60 @@
   "profiles": {
     "mvp": {
       "suites": [
+    {
+      "id": "codeswarm.web.governance",
+      "owner": "web",
+      "tier": "contract",
+      "runner": "web-scripts",
+      "workdir": "jiuwenswarm/channels/web/frontend",
+      "capabilities": [
+        "filesystem",
+        "dom"
+      ],
+      "required": true,
+      "shard_timeout_seconds": 180,
+      "discover": {
+        "command": [
+          "{python}",
+          "{repo}/tools/run_web_scripts.py",
+          "--package",
+          "{repo}/jiuwenswarm/channels/web/frontend/package.json",
+          "--only",
+          "test:shared-history",
+          "--only",
+          "test:session-continuation",
+          "--only",
+          "test:desktop-save",
+          "--only",
+          "test:codex-governed-availability",
+          "--only",
+          "test:owner-artifact-download",
+          "--list"
+        ],
+        "parser": "web-scripts-json",
+        "timeout_seconds": 30
+      },
+      "command": [
+        "{python}",
+        "{repo}/tools/run_web_scripts.py",
+        "--package",
+        "{repo}/jiuwenswarm/channels/web/frontend/package.json",
+        "--only",
+        "test:shared-history",
+        "--only",
+        "test:session-continuation",
+        "--only",
+        "test:desktop-save",
+        "--only",
+        "test:codex-governed-availability",
+        "--only",
+        "test:owner-artifact-download",
+        "--junit",
+        "{junit}",
+        "--script-timeout",
+        "30"
+      ]
+    },
         "codeswarm.python.acp",
         "codeswarm.browser.unit",
         "codeswarm.tui.contract"
@@ -52,7 +115,8 @@
         "codeswarm.tui.contract",
         "codeswarm.python.goal-heartbeat-lifecycle",
         "codeswarm.python.governance-projects",
-        "codeswarm.python.governance-continuation"
+        "codeswarm.python.governance-continuation",
+        "codeswarm.web.governance"
       ],
       "retention_days": 30
     },

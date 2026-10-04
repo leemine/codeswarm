@@ -53,8 +53,9 @@ jobs:
           PYCORE
       - name: Warm legacy pysbd bytecode
         run: .venv/bin/python -W 'ignore:invalid escape sequence:SyntaxWarning' -c 'import pysbd'
-      - name: Install Browser and TUI dependencies
+      - name: Install Web, Browser and TUI dependencies
         run: |
+          npm ci --prefix jiuwenswarm/channels/web/frontend
           npm ci --prefix jiuwenswarm/channels/browser/frontend
           npm ci --prefix jiuwenswarm/channels/tui/frontend
       - name: Build TUI contract fixture
