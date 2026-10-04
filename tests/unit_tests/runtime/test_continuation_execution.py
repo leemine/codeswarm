@@ -27,6 +27,8 @@ BOB, ALICE = transactions.BOB, transactions.ALICE
 async def capture(tx):
     result = await transactions.create(tx)
     request = SimpleNamespace(session_id=result.session_id, request_id='private-turn-1', params={})
+    tx.owned_execution = tx.runtime.begin_detached_native_turn(
+        result.session_id, 'synthetic-native-turn', request.request_id)
     return request, capture_continuation_execution(tx.runtime, request)
 
 
@@ -260,3 +262,123 @@ async def test_adapter_resolves_original_policy_before_login_cache_or_name_fallb
                             params={}, _continuation_execution=policy)
     with pytest.raises(ResourceAccessDenied):
         adapter._resolve_model_for_request(other)
+
+
+async def end_original_turn(tx, request, change):
+    from openjiuwen.harness_protocol import TurnEventKind
+    coordinator = tx.runtime._session_coordinator
+    execution = tx.owned_execution
+    if change == 'cancel_requested':
+        owner = coordinator.external_execution_owner(request.session_id, request.request_id)
+        await coordinator.request_external_execution_cancel(owner)
+        snapshot = coordinator.get_execution(execution.execution_id)
+        assert snapshot.cancellation_requested and not snapshot.state.terminal
+    elif change == 'cancel':
+        result = await coordinator.cancel_execution(request.session_id,
+            execution_id=execution.execution_id, generation=execution.generation)
+        assert result.cancelled == 1
+    elif change == 'terminal':
+        assert tx.runtime.finish_detached_native_turn(
+            request.session_id, execution.execution_id, TurnEventKind.FINISHED)
+    elif change == 'generation':
+        await coordinator.close_session(request.session_id, generation=execution.generation)
+        new_session = await coordinator.register_session(request.session_id, 'web')
+        assert new_session.generation != execution.generation
+        replacement = tx.runtime.begin_detached_native_turn(
+            request.session_id, 'later-turn', request.request_id)
+        assert replacement.execution_id != execution.execution_id
+    else:
+        raise AssertionError(change)
+
+
+@pytest.mark.asyncio
+async def test_capture_requires_actual_coordinator_owned_admission(transaction):
+    tx = transaction
+    result = await transactions.create(tx)
+    request = SimpleNamespace(session_id=result.session_id, request_id='never-admitted', params={})
+    with pytest.raises(ResourceAccessDenied):
+        capture_continuation_execution(tx.runtime, request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['cancel_requested', 'cancel', 'terminal', 'generation'])
+async def test_old_execution_checker_cannot_borrow_later_admission(transaction, change):
+    tx = transaction
+    request, policy = await capture(tx)
+    assert tx.runtime._session_coordinator.get_execution(tx.owned_execution.execution_id).state.value == 'running'
+    await end_original_turn(tx, request, change)
+    with pytest.raises(ResourceAccessDenied):
+        policy.check()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['cancel_requested', 'cancel', 'terminal', 'generation'])
+async def test_seed_read_await_cannot_publish_context_after_admission_ends(transaction, monkeypatch, change):
+    import threading
+    from jiuwenswarm.runtime import continuation_execution
+    tx = transaction
+    request, policy = await capture(tx)
+    original = continuation_execution.read_seed
+    entered, release = threading.Event(), threading.Event()
+    def delayed(*args):
+        seed = original(*args)
+        entered.set()
+        if not release.wait(5):
+            raise RuntimeError('test seed barrier timed out')
+        return seed
+    monkeypatch.setattr(continuation_execution, 'read_seed', delayed)
+    pending = asyncio.create_task(policy.make_context())
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        await end_original_turn(tx, request, change)
+    finally:
+        release.set()
+    with pytest.raises(ResourceAccessDenied):
+        await pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['cancel_requested', 'cancel', 'terminal', 'generation'])
+async def test_late_warmup_clears_installed_context_when_original_turn_ends(transaction, change):
+    from unittest.mock import AsyncMock
+    from jiuwenswarm.agents.harness.common import session_ops_service
+    from jiuwenswarm.governance.continuation_context import ContinuationContextDenied
+    tx = transaction
+    request, policy = await capture(tx)
+    handle = await policy.make_context()
+    entered, release = asyncio.Event(), asyncio.Event()
+    pool = []
+    async def create(**kwargs):
+        pool.append(kwargs['history_messages'])
+        entered.set()
+        await release.wait()
+    async def clear(**kwargs):
+        pool.clear()
+    engine = SimpleNamespace(get_context=lambda **_: pool[0] if pool else None,
+        create_context=AsyncMock(side_effect=create), clear_context=AsyncMock(side_effect=clear))
+    deep = SimpleNamespace(_loop_session=SimpleNamespace(get_session_id=lambda: request.session_id),
+        react_agent=SimpleNamespace(context_engine=engine, _config=SimpleNamespace(context_processors=[])))
+    pending = asyncio.create_task(session_ops_service.warmup_session_context(
+        deep_agent=deep, session_id=request.session_id, history_before_request_id=request.request_id,
+        continuation_context=handle))
+    await entered.wait()
+    assert pool
+    try:
+        await end_original_turn(tx, request, change)
+    finally:
+        release.set()
+    with pytest.raises(ContinuationContextDenied):
+        await pending
+    assert pool == []
+    engine.clear_context.assert_awaited_once_with(context_id='default_context_id', session_id=request.session_id)
+
+
+@pytest.mark.asyncio
+async def test_same_execution_waiting_for_control_retains_original_policy(transaction):
+    tx = transaction
+    request, policy = await capture(tx)
+    assert await tx.runtime.observe_detached_native_turn(request.session_id,
+        tx.owned_execution.execution_id, {'event_type': 'chat.ask_user_question', 'request_id': 'question-1'})
+    assert tx.runtime._session_coordinator.get_execution(tx.owned_execution.execution_id).state.value == 'waiting_for_control'
+    assert policy.check() is None
+    assert await policy.make_context() is not None
