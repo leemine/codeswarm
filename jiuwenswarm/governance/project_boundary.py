@@ -66,6 +66,7 @@ def _referenced_values(value: Any, keys: frozenset[str]) -> set[str]:
 
 def authorize_resource_request(
     request: Any, identity: TrustedIdentity | None, *, access_store: Any = None,
+    session_permit: Any = None,
 ) -> None:
     """Re-read current ACL before dispatch; missing identity never grants access.
 
@@ -77,7 +78,20 @@ def authorize_resource_request(
     if not method.startswith(_RESOURCE_PREFIXES):
         return
     from .organization_auth import configured_authenticator
-    from .session_boundary import SHARE_METHODS
+    from .session_boundary import SHARE_METHODS, SessionRequestPermit, is_cleanup_request
+    if configured_authenticator() is not None:
+        params = request.params if isinstance(request.params, dict) else {}
+        try:
+            cleanup = is_cleanup_request(method, params)
+        except PermissionError as exc:
+            raise ProjectAccessDenied('invalid cleanup request') from exc
+        if cleanup:
+            if (not isinstance(session_permit, SessionRequestPermit)
+                    or not session_permit.allows_cleanup(method, params, identity, request.session_id)):
+                raise ProjectAccessDenied('exact current cleanup permit required')
+            # The original owner may stop its existing work despite source/ACL
+            # revocation. This does not authorize content or a new execution.
+            return
     if configured_authenticator() is not None and (method in SHARE_METHODS or method == "session.list"):
         # Persistent sharing evaluates the source owner's current project ACL;
         # a recipient does not inherit project membership. Session inventory

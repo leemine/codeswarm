@@ -26,6 +26,8 @@ OWNER_METHODS = frozenset({
     'session.rewind_and_restore', 'session.rewind_compact', 'session.rewind_context',
     'session.restore_files', 'session.rebind_project', 'surface.capabilities.get',
 })
+CLEANUP_METHODS = frozenset({'chat.cancel', 'chat.interrupt', 'session.stop', 'session.delete'})
+
 SHARE_METHODS = frozenset({
     'session.share.list', 'session.share.create', 'session.share.update',
     'session.share.revoke', 'session.share.history.get',
@@ -92,6 +94,38 @@ def parse_continuation_options(params):
     return dict(params)
 
 
+def is_cleanup_request(method: str, params: dict) -> bool:
+    """Classify pure cleanup only; routing hints never establish authority.
+
+    Pause/resume/supplement retain the normal owner/execution path. In particular,
+    a cancel envelope may not smuggle new input into a cleanup-only decision.
+    """
+    if method not in CLEANUP_METHODS:
+        return False
+    if type(params) is not dict:
+        raise SessionSharingDenied('cleanup parameters required')
+    intent = params.get('intent', 'cancel')
+    if isinstance(intent, str) and method in {'chat.cancel', 'chat.interrupt'} and intent in {'pause', 'resume', 'supplement'}:
+        return False
+    if intent != 'cancel':
+        raise SessionSharingDenied('pure cancel intent required')
+    fields = {'session_id', 'intent', 'target_request_id', 'mode', 'team',
+              'work_mode', 'project_dir', 'project_id', 'trusted_dirs'}
+    if set(params) - fields:
+        raise SessionSharingDenied('cleanup cannot carry execution parameters')
+    for key, value in params.items():
+        if key == 'team':
+            valid = type(value) is bool
+        elif key == 'trusted_dirs':
+            valid = (type(value) is list and len(value) <= 100
+                     and all(isinstance(item, str) and len(item) <= 32768 for item in value))
+        else:
+            valid = isinstance(value, str) and len(value) <= 32768
+        if not valid:
+            raise SessionSharingDenied('invalid cleanup routing hint')
+    return True
+
+
 @dataclass(frozen=True)
 class SessionRequestPermit:
     identity: TrustedIdentity
@@ -105,12 +139,35 @@ class SessionRequestPermit:
     continuation_input: ContinuationInput | None = None
     continuation_options: tuple[tuple[str, object], ...] | None = None
 
+    cleanup: tuple[str, tuple] | None = None
+    cleanup_params: str | None = None
+
+    def allows_cleanup(self, method: str, params: dict, identity: TrustedIdentity,
+                       envelope_session: str | None = None) -> bool:
+        """Consume this exact local permit, never a method-based ACL exemption."""
+        try:
+            if (self.cleanup is None or self.identity != identity or self.method != method
+                    or not is_cleanup_request(method, params)):
+                return False
+            sid = _session(params.get('session_id') or envelope_session)
+            if envelope_session and envelope_session != sid:
+                return False
+            return (sid == self.cleanup[0]
+                    and json.dumps(params, sort_keys=True, separators=(',', ':')) == self.cleanup_params
+                    and self.revalidate())
+        except Exception:
+            return False
+
     def revalidate(self) -> bool:
         try:
             if self.identity_resolver() != self.identity:
                 return False
             if self.inventory_revision is not None and _inventory_revision(self.host) != self.inventory_revision:
                 return False
+            if self.cleanup is not None:
+                session_id, stamp = self.cleanup
+                if self.host.cleanup_owner_stamp(session_id, self.identity) != stamp:
+                    return False
             for session_id, epoch in self.owners:
                 if (not self.host.owner_current(session_id, self.identity)
                         or self.host.owner_revision(session_id, self.identity) != epoch):
@@ -133,6 +190,7 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
     if not isinstance(identity, TrustedIdentity) or not isinstance(params, dict):
         raise SessionSharingDenied('authenticated request required')
     owners = []
+    cleanup = None
     share = None
     share_actions = ('view',)
     continuation_input = None
@@ -142,7 +200,10 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
         sid = _session(sid)
         if envelope_session and envelope_session != sid:
             raise SessionSharingDenied('conflicting Session references')
-    if method in OWNER_METHODS:
+    if is_cleanup_request(method, params):
+        sid = _session(sid or envelope_session)
+        cleanup = (sid, host.cleanup_owner_stamp(sid, identity))
+    elif method in OWNER_METHODS:
         sid = _session(sid or envelope_session)
         owners.append((sid, host.owner_revision(sid, identity)))
         # These old routes may carry a second private stream or restore path.
@@ -179,7 +240,8 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
         raise SessionSharingDenied('organization method requires an explicit policy')
     permit = SessionRequestPermit(identity, identity_resolver, host, tuple(owners), share,
                                   _inventory_revision(host) if method in INVENTORY_METHODS else None, method,
-                                  share_actions, continuation_input, continuation_options)
+                                  share_actions, continuation_input, continuation_options, cleanup,
+                                  json.dumps(params, sort_keys=True, separators=(',', ':')) if cleanup else None)
     if not permit.revalidate():
         raise SessionSharingDenied('Session authorization denied')
     return permit

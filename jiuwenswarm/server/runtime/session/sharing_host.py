@@ -175,6 +175,43 @@ class SharingHostService:
                 raise SessionSharingDenied('current Session owner required')
             return _revision(source['epoch'], *facts[1:])
 
+    def cleanup_owner_stamp(self, session_id: str, identity: TrustedIdentity) -> tuple:
+        """Opaque cleanup-only ownership facts; NEVER general owner authority.
+
+        This deliberately does not consult source shares or project read/execute
+        grants. It permits only stopping existing work or entering the original
+        deletion protocol; callers must separately pin Runtime execution identity.
+        A blocked lifecycle remains blocked: this port never registers, unblocks,
+        or restores a Session. Pending publications cannot be cleaned by callers.
+        """
+        with self._storage._locked():
+            record, owner, source = self._record(self._storage._load(), session_id, active=False)
+            if (not isinstance(identity, TrustedIdentity) or identity != owner
+                    or self._known_actor(identity) is not True):
+                raise SessionSharingDenied('trusted cleanup owner required')
+            publication = record.get('continuation')
+            if publication is not None:
+                from .continuation_publication import _publication
+                proof = _publication(publication)
+                if (publication['state'] != 'committed' or proof.identity != owner
+                        or proof.request.target_project_id != source['project_id']):
+                    raise SessionSharingDenied('committed cleanup target required')
+            metadata = lifecycle.raw_metadata(session_id)
+            if not metadata or metadata.get('project_id') != source['project_id']:
+                raise SessionSharingDenied('cleanup target binding changed')
+            session_state = lifecycle.state('session', session_id)
+            project_state = lifecycle.state('project', source['project_id'])
+            if session_state.get('deleted') or project_state.get('deleted'):
+                raise SessionSharingDenied('cleanup target was deleted')
+            # Current lifecycle facts, not a restoration of the registration's
+            # old generation. An in-progress block can still stop its old work;
+            # deletion retries remain owned by the original Provisioner.
+            return (record['revision'], source['epoch'], source['project_id'],
+                    source['session_generation'], source['project_generation'],
+                    _component(session_state.get('generation', 0)),
+                    _component(project_state.get('generation', 0)),
+                    bool(session_state.get('blocked')), bool(project_state.get('blocked')))
+
     def register_owner_and_source(self, session_id: str, owner: TrustedIdentity, project_id: str, *,
                                   expected_owner_revision: int = 0) -> int:
         """Host-only prepublish registration; one sidecar save and no history IO.
