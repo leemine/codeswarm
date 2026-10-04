@@ -376,10 +376,15 @@ class VerifiedDownloadAssetOwner:
                 if not name.endswith(".json") or name.startswith("."):
                     continue
                 try:
-                    if "workspace_origin" in _read_sidecar_at(fd, name):
+                    payload = _read_sidecar_at(fd, name)
+                    legacy_keys = {"asset_id", "sealed_path", "expires_at",
+                                   "size_bytes", "content_digest", "state"}
+                    if "workspace_origin" in payload or set(payload) != legacy_keys:
                         return True
                 except (OSError, ValueError):
-                    continue
+                    # A restarted owner cannot classify an unreadable record as
+                    # legacy. The conservative FD branch retains unknown files.
+                    return True
             return False
         finally:
             os.close(fd)
@@ -414,6 +419,9 @@ class VerifiedDownloadAssetOwner:
                             raise ValueError("download_asset_registration_mismatch")
                         if "workspace_origin" in payload:
                             _registration_digest(payload)
+                        elif set(payload) != {"asset_id", "sealed_path", "expires_at",
+                                              "size_bytes", "content_digest", "state"}:
+                            raise ValueError("download_asset_registration_unknown")
                         records.append((name, payload))
                     except (KeyError, OSError, TypeError, ValueError):
                         # Unknown registration ownership is retained, never reset.

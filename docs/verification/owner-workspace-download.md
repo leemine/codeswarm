@@ -348,3 +348,20 @@ changing `_VALID_RUNTIME_MODES`. Re-enabling automatic approval or exposing a
 new manual sealed product option requires a separate authorized product change
 and its UI acceptance. The already-open ordinary owner Workspace download UI
 remains separate and does not prove this currently disabled sealed composition.
+
+### Restart with an unreadable registration
+
+A fresh owner has no in-memory root stamp. Review found that a sole corrupt
+sidecar could previously be misclassified as a legacy-only directory, causing
+legacy cleanup to delete unknown assets. Three red tests reproduced this with
+invalid JSON, an oversized record and a symlinked registration. Classification
+now routes any unreadable or unknown-shape record through conservative FD
+cleanup; that branch retains the files if registration ownership cannot be
+validated. Tests also cover valid JSON with missing fields and a partially
+removed provenance object. Known valid legacy sidecars retain their old branch.
+No persistence marker, new database or recovery authority was added.
+
+After this restart correction, the same affected command passes **248 tests**
+in 37.55 seconds on the same core33d5/source-overlay environment. Evidence:
+`/tmp/r2b-sealed-artifacts/restart-frozen-affected.log`; the earlier 243-pass
+result remains evidence for the preceding candidate only.

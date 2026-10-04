@@ -615,3 +615,39 @@ async def test_governed_prune_retains_unknown_registration_and_files(sealed, fie
     before = {p.name: p.read_bytes() for p in c.asset_owner.root.iterdir()}
     c.asset_owner.prune(now=asset.expires_at + 10000)
     assert {p.name: p.read_bytes() for p in c.asset_owner.root.iterdir()} == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "corruption",
+    ["invalid_json", "oversized", "symlink", "missing_schema", "missing_origin"],
+)
+async def test_restart_with_sole_unreadable_sidecar_retains_unknown_assets(
+    sealed, corruption
+):
+    c = sealed
+    asset = await _delivered_asset(c)
+    sidecar = next(c.asset_owner.root.glob("*.json"))
+    if corruption == "invalid_json":
+        sidecar.write_text("{broken")
+    elif corruption == "oversized":
+        sidecar.write_text(" " * 65537)
+    elif corruption == "missing_schema":
+        sidecar.write_text("{}")
+    elif corruption == "missing_origin":
+        payload = json.loads(sidecar.read_text())
+        del payload["workspace_origin"]
+        sidecar.write_text(json.dumps(payload))
+    else:
+        original = sidecar.with_name(".original-registration")
+        sidecar.rename(original)
+        sidecar.symlink_to(original)
+    root = c.asset_owner.root
+    before = {p.name: p.read_bytes() for p in root.iterdir()}
+    owner = VerifiedDownloadAssetOwner(root=root, start_sweeper=False)
+    try:
+        assert owner._governed_root is None
+        owner.prune(now=asset.expires_at + 10000)
+        assert {p.name: p.read_bytes() for p in root.iterdir()} == before
+    finally:
+        owner.close()
