@@ -110,6 +110,7 @@ class _SendFileRuntimeEnvelope:
     team_workspace_root: str | None
     require_execution_authorization: bool
     asset_owner: VerifiedDownloadAssetOwner | None
+    artifact_issuer: Any = None
 
 
 # Session-level dedup for send_file_to_user. Compression may drop prior tool
@@ -392,7 +393,8 @@ class SendFileToolkit:
         owns_execution_grant = self._require_execution_authorization
         envelope: _SendFileRuntimeEnvelope | None = None
         try:
-            envelope = self._snapshot_runtime_envelope()
+            envelope = self._snapshot_runtime_envelope(
+                abs_file_path_list=abs_file_path_list, target_channels=target_channels)
             return await self._send_file_with_envelope(
                 envelope,
                 abs_file_path_list=abs_file_path_list,
@@ -521,9 +523,28 @@ class SendFileToolkit:
             raise RuntimeError("Browser Artifact acknowledgement was not persisted")
         await wait_for_history_receipt(receipt)
 
-    def _snapshot_runtime_envelope(self) -> _SendFileRuntimeEnvelope:
+    def _snapshot_runtime_envelope(self, *, abs_file_path_list=None, target_channels=None) -> _SendFileRuntimeEnvelope:
         """Freeze every mutable host field before the first await."""
 
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        artifact_issuer = None
+        if configured_authenticator() is not None:
+            from openjiuwen.core.foundation.tool import current_tool_execution
+            from jiuwenswarm.governance.tool_context import current_native_execution_slice
+            from jiuwenswarm.governance.workspace_artifact_origin import validate_send_file_origin
+            from jiuwenswarm.governance.workspace_download import WorkspaceArtifactIssuer, WorkspaceDownloadDenied
+            if self._require_execution_authorization:
+                raise WorkspaceDownloadDenied('sealed artifact source is not supported')
+            bound = current_native_execution_slice()
+            factory = getattr(bound, 'artifact_issuer_factory', None)
+            origin = dict(source_execution=current_tool_execution(), execution_slice=bound,
+                toolkit=self, actual_paths=self._normalize_requested_paths(abs_file_path_list),
+                target_channels=tuple(self._normalize_target_channels(target_channels)),
+                session_id=self.session_id, channel_id=self.channel_id, workspace=self._resolve_project_dir())
+            check = validate_send_file_origin(**origin)
+            artifact_issuer = factory(**origin)
+            if type(artifact_issuer) is not WorkspaceArtifactIssuer or not check():
+                raise WorkspaceDownloadDenied('artifact execution issuer unavailable')
         asset_owner = self._asset_owner
         if self._require_execution_authorization:
             if asset_owner is None:
@@ -547,6 +568,7 @@ class SendFileToolkit:
             team_workspace_root=self._team_workspace_root,
             require_execution_authorization=(self._require_execution_authorization),
             asset_owner=asset_owner,
+            artifact_issuer=artifact_issuer,
         )
 
     async def _send_file_with_envelope(
@@ -562,6 +584,10 @@ class SendFileToolkit:
         target_channel_list = SendFileToolkit._normalize_target_channels(
             target_channels
         )
+        if envelope.artifact_issuer is not None:
+            # No default human/member routing or cross-channel delivery in the
+            # initial organization Workspace download contract.
+            target_channel_list = [envelope.channel_id]
         if target_channel_list:
             logger.info(
                 "[SendFileToolkit] send_file target_channels=%s session_id=%s",
@@ -854,6 +880,9 @@ class SendFileToolkit:
         artifact_metadata_by_path: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         files_payload: list[dict[str, Any]] = []
+        if envelope.artifact_issuer is not None and envelope.require_execution_authorization:
+            from jiuwenswarm.governance.workspace_download import WorkspaceDownloadDenied
+            raise WorkspaceDownloadDenied('sealed artifact source is not supported')
         if envelope.require_execution_authorization:
             from jiuwenswarm.agents.harness.common.tools.web_file_download import (
                 build_verified_asset_download_info,
@@ -901,6 +930,7 @@ class SendFileToolkit:
                     base_name,
                     envelope.session_id,
                     user_id=envelope.user_id,
+                    **({'artifact_issuer': envelope.artifact_issuer} if envelope.artifact_issuer is not None else {}),
                 )
                 files_payload.append(
                     {
@@ -914,6 +944,9 @@ class SendFileToolkit:
                     }
                 )
         except Exception as download_err:
+            if envelope.artifact_issuer is not None:
+                from jiuwenswarm.governance.workspace_download import WorkspaceDownloadDenied
+                raise WorkspaceDownloadDenied('artifact download publication denied') from None
             logger.warning(
                 "[SendFileToolkit] 生成下载信息失败，回退到基础模式: %s",
                 download_err,
