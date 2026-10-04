@@ -3236,6 +3236,23 @@
     }
   },
   "sessionSharing": {
+    "continuation": {
+      "savedRequest": "Saved request: {{project}} · {{profile}} · {{model}} · {{title}}",
+      "title": "Continue in a private conversation",
+      "scope": "Use the approved shared text as context in your own project. Your resource permissions are checked separately. No message is sent automatically.",
+      "open": "Continue with authorization",
+      "project": "Your target project",
+      "selectProject": "Select a project",
+      "option": "Authorized execution and model",
+      "selectOption": "Select an available combination",
+      "name": "New conversation title (optional)",
+      "empty": "No authorized Native Single combination is currently available for this project.",
+      "create": "Create private conversation",
+      "retry": "Retry the same request",
+      "newInput": "Start a new request",
+      "unknown": "The result is unknown; the conversation may already exist. Retry uses the same request. Starting a new request may create another conversation.",
+      "failed": "Access or navigation could not be verified. No conversation was opened. Refresh your choices to make a new request."
+    },
     "viewerTitle": "Shared history · Read only",
     "viewerLimits": "Fixed main-conversation snapshot, newest first. Text only; media, tool output and links are not loaded. This viewer does not change your active session.",
     "viewerRefresh": "Refresh history",

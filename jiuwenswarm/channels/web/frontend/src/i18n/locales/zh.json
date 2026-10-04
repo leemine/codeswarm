@@ -3222,6 +3222,23 @@
     }
   },
   "sessionSharing": {
+    "continuation": {
+      "savedRequest": "原请求：{{project}} · {{profile}} · {{model}} · {{title}}",
+      "title": "在私有会话中继续",
+      "scope": "以获准共享的文本作为上下文，在你自己的项目中继续。资源权限会独立核验，不会自动发送消息。",
+      "open": "授权继续执行",
+      "project": "你的目标项目",
+      "selectProject": "选择项目",
+      "option": "已授权的执行配置与模型",
+      "selectOption": "选择可用组合",
+      "name": "新会话标题（可选）",
+      "empty": "此项目当前没有获准的 Native Single 组合。",
+      "create": "创建私有会话",
+      "retry": "重试同一请求",
+      "newInput": "开始新请求",
+      "unknown": "结果未知，会话可能已经创建。重试会沿用同一请求；开始新请求可能创建另一会话。",
+      "failed": "无法核验权限或完成切换，未打开会话。请刷新选项后开始新请求。"
+    },
     "viewerTitle": "共享历史 · 只读",
     "viewerLimits": "固定的主会话历史快照，最新消息在前。仅显示文本，不加载媒体、工具输出或链接；不会切换你的活动会话。",
     "viewerRefresh": "刷新历史",

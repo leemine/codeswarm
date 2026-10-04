@@ -9,6 +9,8 @@ import {
   type SharedSessionTarget,
 } from '../../services/sessionSharingApi';
 import './ShareSessionDialog.css';
+import { ContinuationPane, type OnContinued } from './ContinuationPane';
+import type { ContinuationAttempts } from '../state/continueSharedSession';
 
 function localDateTime(time: number): string {
   const date = new Date(time);
@@ -19,10 +21,14 @@ export function ShareSessionDialog({
   sessionId,
   onClose,
   onOpenSharedSession,
+  onContinued,
+  continuationAttempts,
 }: {
   sessionId?: string;
   onClose: () => void;
   onOpenSharedSession?: (target: SharedSessionTarget) => void;
+  onContinued?: OnContinued;
+  continuationAttempts?: ContinuationAttempts;
 }) {
   const { t } = useTranslation();
   const [managed, setManaged] = useState<SessionShare[]>([]);
@@ -36,6 +42,8 @@ export function ShareSessionDialog({
   const [expires, setExpires] = useState(() => localDateTime(Date.now() + 86400000));
   const [editing, setEditing] = useState<SessionShare | null>(null);
   const generation = useRef(0);
+  const localAttempts = useRef<ContinuationAttempts>(new Map());
+  const [continuing, setContinuing] = useState<SessionShare | null>(null);
 
   async function refresh() {
     const current = ++generation.current;
@@ -44,6 +52,7 @@ export function ShareSessionDialog({
     setManaged([]);
     setReceived([]);
     setCanCreate(false);
+    setContinuing(null);
     const [owned, all] = await Promise.allSettled([
       sessionId ? sessionSharingApi.list(sessionId) : Promise.resolve(null),
       sessionSharingApi.list(),
@@ -267,6 +276,15 @@ export function ShareSessionDialog({
         {!loading && !error && !received.length && (
           <p data-testid="multi-session-sharing-received-empty">{t('sessionSharing.receivedEmpty')}</p>
         )}
+        {continuing && onContinued && (
+          <ContinuationPane
+            key={`${continuing.share_id}:${continuing.revision}`}
+            share={continuing}
+            onContinued={onContinued}
+            attempts={continuationAttempts ?? localAttempts.current}
+            onCancel={() => setContinuing(null)}
+          />
+        )}
         <ul data-testid="multi-session-sharing-received-list">
           {received.map((share) => (
             <li key={share.share_id} data-testid="multi-session-sharing-received-item" data-variant={share.share_id}>
@@ -277,6 +295,20 @@ export function ShareSessionDialog({
                 {t('sessionSharing.expiry')}:{' '}
                 {share.expires_at ? new Date(share.expires_at * 1000).toLocaleString() : t('sessionSharing.noExpiry')}
               </span>
+              {onContinued &&
+                share.state === 'active' &&
+                share.actions?.includes('view') &&
+                share.actions.includes('execute') &&
+                (!share.expires_at || share.expires_at > Date.now() / 1000) && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setContinuing(share)}
+                    data-testid="multi-session-sharing-continue"
+                  >
+                    {t('sessionSharing.continuation.open')}
+                  </button>
+                )}
               {onOpenSharedSession && share.state === 'active' && share.actions?.includes('view') && (
                 <button
                   type="button"

@@ -1,7 +1,8 @@
 import { SharedHistoryDialog } from './multi-session/dialogs/SharedHistoryDialog';
 import { onOrganizationCredentialChange } from './services/organizationCredentialEvents';
 import { ShareSessionDialog } from './multi-session/dialogs/ShareSessionDialog';
-import type { SharedSessionTarget } from './services/sessionSharingApi';
+import type { SharedSessionTarget, ContinuedSession, ContinuationInput } from './services/sessionSharingApi';
+import { prepareContinuedConversation, type ContinuationAttempts } from './multi-session/state/continueSharedSession';
 import { AssetPublishHost } from './components/AssetPublishDrawer';
 // Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
@@ -417,10 +418,12 @@ function AppContent({
   const [restartModalOpen, setRestartModalOpen] = useState(false);
   const [restartSuccess, setRestartSuccess] = useState(false);
   const [sharingInboxOpen, setSharingInboxOpen] = useState(false);
+  const continuationAttempts = useRef<ContinuationAttempts>(new Map());
   const [sharingDialogSessionId, setSharingDialogSessionId] = useState<string | null>(null);
   const [sharedHistoryTarget, setSharedHistoryTarget] = useState<SharedSessionTarget | null>(null);
   useEffect(() => {
     return onOrganizationCredentialChange(() => {
+      continuationAttempts.current.clear();
       setSharedHistoryTarget(null);
       setSharingDialogSessionId(null);
       setSharingInboxOpen(false);
@@ -3325,6 +3328,58 @@ function AppContent({
     [performSessionRestore],
   );
 
+  const handleSharedContinuation = useCallback(
+    (result: ContinuedSession, input: Readonly<ContinuationInput>, isCurrent: () => boolean): Promise<void> => {
+      const previousSessionId = sessionIdRef.current;
+      const current = () => isCurrent() && sessionIdRef.current === previousSessionId;
+      const queued = sessionRestoreQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          const metadata = await prepareContinuedConversation(request, result, input, current, {
+            session_id: previousSessionId,
+            mode: useSessionStore.getState().getRuntime(previousSessionId)?.mode ?? mode,
+            view_id: sessionViewIdRef.current,
+          });
+          if (!current()) return;
+          // This new private conversation starts idle. Do not copy the source or
+          // pending composer equipment/state and do not invoke chat.send.
+          const registered = registerCreatedConversation(
+            result.session_id,
+            {
+              mode: result.mode,
+              selectedModelName: result.model_name,
+              projectDir: result.project_dir,
+              persistSession: true,
+            },
+            Date.now(),
+            result.title,
+            result,
+          );
+          Object.assign(registered, metadata);
+          useChatStore.getState().setProcessing(result.session_id, false);
+          useChatStore.getState().setThinking(result.session_id, false);
+          upsertSessionMetadata(registered, { setCurrent: true });
+          useWorkspaceStore.getState().upsertSession(registered, { isNew: true });
+          sessionIdsCreatedInThisPageRef.current.add(result.session_id);
+          continuationAttempts.current.delete(
+            JSON.stringify([input.session_id, input.share_id, input.expected_revision]),
+          );
+          sessionIdRef.current = result.session_id;
+          setSessionId(result.session_id);
+          setChatWelcomeVariant(null);
+          setActiveNav('chat');
+          navigate({ kind: 'chat-session', sessionId: result.session_id });
+          setHistoryBootstrapKey((key) => key + 1);
+          setSharingDialogSessionId(null);
+          setSharingInboxOpen(false);
+          requestComposerFocus();
+        });
+      sessionRestoreQueueRef.current = queued.catch(() => undefined);
+      return queued;
+    },
+    [mode, navigate, request, requestComposerFocus, upsertSessionMetadata],
+  );
+
   const handleOpenContinuedFromSession = useCallback(
     (sourceSessionId: string): void => {
       const sessionStore = useSessionStore.getState();
@@ -4241,9 +4296,11 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
       {/* 登录弹窗：默认不显示，由 requestLogin() 等事件唤起 */}
       {organizationAuth && (sharingDialogSessionId || sharingInboxOpen) && (
         <ShareSessionDialog
-          key={sharingDialogSessionId ?? 'inbox'}
+          key={`${sharingDialogSessionId ?? 'inbox'}:${sessionId}`}
           sessionId={sharingDialogSessionId ?? undefined}
           onClose={() => { setSharingDialogSessionId(null); setSharingInboxOpen(false); }}
+          onContinued={handleSharedContinuation}
+          continuationAttempts={continuationAttempts.current}
           onOpenSharedSession={(target) => {
             setSharingDialogSessionId(null);
             setSharingInboxOpen(false);

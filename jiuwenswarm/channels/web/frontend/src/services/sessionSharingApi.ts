@@ -1,4 +1,112 @@
 import { webRequest } from './webClient';
+import { SESSION_CREATE_TIMEOUT_MS } from '../multi-session/state/createConversationSession';
+
+export interface ContinuationOptionsInput extends SharedSessionTarget {
+  expected_revision: number;
+  target_project_id: string;
+}
+export interface ContinuationOption {
+  execution_profile_id: string;
+  provider_id: 'native';
+  mode: 'agent.work.normal' | 'agent.code.normal';
+  model_name: string;
+  label: string;
+}
+export interface ContinuationInput extends ContinuationOptionsInput {
+  create_token: string;
+  execution_profile_id: string;
+  model_name: string;
+  mode: ContinuationOption['mode'];
+  title: string;
+}
+export interface ContinuedSession {
+  session_id: string;
+  project_id: string;
+  project_dir: string;
+  work_mode: 'work' | 'code';
+  mode: ContinuationOption['mode'];
+  execution_profile_id: string;
+  model_name: string;
+  title: string;
+  persist_session: true;
+  continued_from: { session_id: string; share_id: string; revision: number };
+}
+const validText = (value: unknown, maximum = 200, empty = false): value is string =>
+  typeof value === 'string' &&
+  value.length <= maximum &&
+  (empty || value.length > 0) &&
+  value === value.trim() &&
+  !/[\x00-\x1f]/.test(value);
+const onlyKeys = (value: unknown, keys: string[]): boolean =>
+  Boolean(
+    value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.keys(value).every((key) => keys.includes(key)),
+  );
+const validMode = (mode: unknown) => mode === 'agent.work.normal' || mode === 'agent.code.normal';
+
+export function continuationRequest(input: ContinuationInput): Readonly<ContinuationInput> {
+  if (
+    !validText(input.session_id) ||
+    !validText(input.share_id) ||
+    !validText(input.target_project_id) ||
+    !Number.isSafeInteger(input.expected_revision) ||
+    input.expected_revision < 1 ||
+    !validText(input.create_token) ||
+    !validText(input.execution_profile_id) ||
+    !validText(input.model_name) ||
+    !/^.+#\d+$/.test(input.model_name) ||
+    !validMode(input.mode) ||
+    !validText(input.title, 100, true)
+  )
+    throw new Error('Invalid continuation input');
+  return Object.freeze({
+    session_id: input.session_id,
+    share_id: input.share_id,
+    expected_revision: input.expected_revision,
+    target_project_id: input.target_project_id,
+    create_token: input.create_token,
+    execution_profile_id: input.execution_profile_id,
+    model_name: input.model_name,
+    mode: input.mode,
+    title: input.title,
+  });
+}
+
+export function validateContinuedSession(value: ContinuedSession, input: ContinuationInput): ContinuedSession {
+  if (
+    !onlyKeys(value, [
+      'session_id',
+      'project_id',
+      'project_dir',
+      'work_mode',
+      'mode',
+      'execution_profile_id',
+      'model_name',
+      'title',
+      'persist_session',
+      'continued_from',
+    ]) ||
+    !validText(value.session_id) ||
+    value.session_id === input.session_id ||
+    value.project_id !== input.target_project_id ||
+    !validText(value.project_dir, 4096) ||
+    value.mode !== input.mode ||
+    value.work_mode !== (input.mode === 'agent.code.normal' ? 'code' : 'work') ||
+    value.execution_profile_id !== input.execution_profile_id ||
+    value.model_name !== input.model_name ||
+    !validText(value.title, 100, true) ||
+    (input.title !== '' && value.title !== input.title) ||
+    value.persist_session !== true ||
+    !onlyKeys(value.continued_from, ['session_id', 'share_id', 'revision']) ||
+    value.continued_from?.session_id !== input.session_id ||
+    value.continued_from.share_id !== input.share_id ||
+    value.continued_from.revision !== input.expected_revision
+  )
+    throw new Error('Invalid continuation response');
+  return value;
+}
 
 export const sharingActions = ['view', 'discuss', 'execute', 'approve', 'download', 'manage'] as const;
 export type SharingAction = (typeof sharingActions)[number];
@@ -29,6 +137,46 @@ export interface SharedHistoryPage extends SharedSessionTarget {
   read_only: true;
 }
 export const sessionSharingApi = {
+  continuationOptions: async (input: ContinuationOptionsInput): Promise<ContinuationOption[]> => {
+    const params = {
+      session_id: input.session_id,
+      share_id: input.share_id,
+      expected_revision: input.expected_revision,
+      target_project_id: input.target_project_id,
+    };
+    const value = await webRequest<ContinuationOptionsInput & { options: ContinuationOption[] }>(
+      'session.share.continuation.options',
+      params,
+    );
+    if (
+      !onlyKeys(value, [...Object.keys(params), 'options']) ||
+      Object.entries(params).some(([key, expected]) => value[key as keyof ContinuationOptionsInput] !== expected) ||
+      !Array.isArray(value.options) ||
+      value.options.length > 1000 ||
+      value.options.some(
+        (option) =>
+          !onlyKeys(option, ['execution_profile_id', 'provider_id', 'mode', 'model_name', 'label']) ||
+          !validText(option.execution_profile_id) ||
+          option.provider_id !== 'native' ||
+          !validMode(option.mode) ||
+          !validText(option.model_name) ||
+          !/^.+#\d+$/.test(option.model_name) ||
+          !validText(option.label, 500),
+      ) ||
+      new Set(value.options.map((row) => JSON.stringify([row.execution_profile_id, row.mode, row.model_name]))).size !==
+        value.options.length
+    ) {
+      throw new Error('Invalid continuation options response');
+    }
+    return value.options;
+  },
+  continueSession: async (input: ContinuationInput): Promise<ContinuedSession> => {
+    const request = continuationRequest(input);
+    return validateContinuedSession(
+      await webRequest<ContinuedSession>('session.share.continue', request, { timeoutMs: SESSION_CREATE_TIMEOUT_MS }),
+      request,
+    );
+  },
   history: async (target: SharedSessionTarget, cursor?: string): Promise<SharedHistoryPage> => {
     const page = await webRequest<SharedHistoryPage>('session.share.history.get', {
       session_id: target.session_id,
