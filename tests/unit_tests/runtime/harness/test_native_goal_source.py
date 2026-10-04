@@ -268,7 +268,8 @@ async def test_managed_initial_goal_requires_real_request_and_keeps_resume_attac
 @pytest.mark.asyncio
 @pytest.mark.parametrize('stage', ['outer', 'iteration'])
 @pytest.mark.parametrize('change', ['request', 'context', 'binding'])
-async def test_goal_proof_rechecks_facts_after_last_source_callback(goal_case, stage, change):
+@pytest.mark.parametrize('reenter_at', [1, 3])
+async def test_goal_proof_rechecks_facts_after_last_source_callback(goal_case, stage, change, reenter_at):
     from dataclasses import replace
     from jiuwenswarm.governance.resources import ResourceAccessDenied
     c = goal_case
@@ -281,7 +282,7 @@ async def test_goal_proof_rechecks_facts_after_last_source_callback(goal_case, s
         def mutate():
             nonlocal count
             count += 1
-            if count == 3:  # strict capture, Round check, final source check
+            if count == reenter_at:  # strict capture, Round check, final source check
                 if change == 'request':
                     entry.request = replace(request)
                 elif change == 'context':
@@ -293,7 +294,7 @@ async def test_goal_proof_rechecks_facts_after_last_source_callback(goal_case, s
         try:
             with pytest.raises(ResourceAccessDenied):
                 c.native._execution_slice_for(ctx)
-            assert count == 3
+            assert count >= reenter_at
             checks.append(True)
         finally:
             c.admission.check_hook = None

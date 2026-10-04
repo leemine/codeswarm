@@ -16,3 +16,7 @@ Goal 工作由既有 GoalManager/EventManager 自动派生，不带普通输入�
 测试覆盖缺/异/失活来源、两个阶段的继承子 Task、错 token/revision、畸形 GoalRecord、原 entry 替换、最后一个 source checker 同步改变请求/参数/Binding、原 Task 输入和 scheduler 登记变化。与旧 Native、来源、scope、模型消费者合并共 122 项通过；ruff/diff 检查通过。既有 stable `codeswarm.python.execution-construction` 已 discover/运行整个 `tests/unit_tests/runtime/harness`，新增文件自动纳入，不增加白名单。
 
 来源是 Swarm `17a006d1` 隔离候选源码配正式非 editable core `6dce7ab486035d7334e5e37c8b166ea7c8711b58`，Python 3.13。该运行时中实际 iteration Task 等于原 scheduler wrapper；不据此声称未经验证的其他运行时调度形态可用。原始诊断曾错误推断 `wait_for` 创建了不同执行 Task；实际身份诊断纠正为枚举/RunContext 解析错误，最终不需要也不依赖额外 core 接缝。完整命令、失败分类与来源在 `/tmp/r2b-native-goal-source-evidence/`。全候选 stable、Runtime/facade 初始 Goal 接线及真实必要验收由集成关口执行。
+
+## 独立复核后的来源修正
+
+捕获开始只读当前来源和所有原对象，第一轮静态检查之后才调用严格 live-source checker，避免第一次回调重入就把替换目标采为原事实。第 1 次及第 3 次 checker 的同步替换均被测试覆盖（该文件现 33 项）。允许原普通 user Pending 经独立获准的 live Goal control 转为 Goal：原 `entry.goal` 可以是 None，但其原值、Pending/record/work/Task/source 的精确证明保持不变。该调整不自行开放 facade/control 权限。

@@ -816,7 +816,7 @@ class NativeExecutionSession:
 
         denied = "Native Goal execution source unavailable"
         try:
-            source = _capture_live_execution_origin()
+            source = current_execution_origin()
             owner, pending = self._tool_owner, self._native.active_turn
             if not self._require_execution_origin or source is None or owner is None or pending is None:
                 raise ResourceAccessDenied(denied)
@@ -824,7 +824,7 @@ class NativeExecutionSession:
             inputs = ctx.inputs
             token = pending.content.metadata.get(_REQUEST_KEY)
             entry = self._requests.get(token)
-            if entry is None or entry.goal is None or entry.request is None or entry.lifecycle is None:
+            if entry is None or entry.request is None or entry.lifecycle is None:
                 raise ResourceAccessDenied(denied)
             request, lifecycle, owned, goal = entry.request, entry.lifecycle, entry.owned, entry.goal
             if owned is None:
@@ -915,6 +915,8 @@ class NativeExecutionSession:
                 )
 
             if not same_facts():
+                raise ResourceAccessDenied(denied)
+            if _capture_live_execution_origin() is not source:
                 raise ResourceAccessDenied(denied)
             agent._check_owned_round(round_owner)
             source._check_current()
