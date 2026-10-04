@@ -9,7 +9,6 @@ import asyncio
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import asdict
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
 
@@ -489,6 +488,8 @@ class WebSocketAgentServerClient(AgentServerClient):
             await self.connect(uri)
 
     async def _send_wire_payload(self, payload: dict[str, Any]) -> None:
+        from jiuwenswarm.governance.workspace_download import check_workspace_send
+        check_workspace_send(self, payload)
         ws = self._ws
         if ws is None:
             raise RuntimeError("未连接 AgentServer，请先调用 connect(uri)")
@@ -518,6 +519,8 @@ class WebSocketAgentServerClient(AgentServerClient):
         *,
         timeout: float | None = None,
     ) -> AgentResponse:
+        from jiuwenswarm.governance.workspace_download import check_workspace_send
+        check_workspace_send(self, envelope.to_dict())
         await self._ensure_connected_for_request()
         # 非流式 API 必须与 AgentServer 的 unary 路径一致；忽略信封上误带的 is_stream=True。
         envelope.is_stream = False

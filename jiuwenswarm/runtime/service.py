@@ -508,6 +508,13 @@ class AgentRuntime:
                 generation=continuation._generation, authority=retained)
         generation = self._governance_generation(session_id)
         host_context = copy_context()
+        original_request_id = request.request_id
+        original_channel_id = request.channel_id or "default"
+        original_snapshot = self._session_coordinator.snapshot_session(session_id)
+        original_execution_ids = frozenset(item.execution_id for item in
+            (original_snapshot.executions if original_snapshot is not None else ())
+            if item.request_id == original_request_id and not item.state.terminal
+            and not item.cancellation_requested)
 
         def current_identity():
             # An MCP/server task must not accidentally borrow another browser's
@@ -528,7 +535,8 @@ class AgentRuntime:
                 return False  # No owner/generation proof is not execution authority.
             if current.state in {RuntimeSessionState.QUIESCING, RuntimeSessionState.CLOSED}:
                 return False
-            return any(item.request_id == request.request_id and not item.state.terminal
+            return any(item.execution_id in original_execution_ids
+                       and item.request_id == original_request_id and not item.state.terminal
                        and not item.cancellation_requested for item in current.executions)
 
         resolver = self._tool_resource_resolver
@@ -539,14 +547,14 @@ class AgentRuntime:
                 if not is_current():
                     return False
                 lookup = getattr(self._agent_manager, "get_agent_for_session_nowait", None)
-                owner = lookup(request.channel_id or "default", session_id) if callable(lookup) else None
+                owner = lookup(original_channel_id, session_id) if callable(lookup) else None
                 check = getattr(owner, "owns_native_tool_session", None)
                 return callable(check) and check(execution, agent, session) is True
             def owns_external_session(execution, provider_session_id):
                 if not is_current():
                     return False
                 lookup = getattr(self._agent_manager, "get_agent_for_session_nowait", None)
-                owner = lookup(request.channel_id or "default", session_id) if callable(lookup) else None
+                owner = lookup(original_channel_id, session_id) if callable(lookup) else None
                 check = getattr(owner, "owns_external_tool_session", None)
                 return callable(check) and check(execution, provider_session_id) is True
             resolver = _CurrentNativeToolResources(
@@ -558,7 +566,7 @@ class AgentRuntime:
             if not is_current():
                 return False
             lookup = getattr(self._agent_manager, "get_agent_for_session_nowait", None)
-            owner = lookup(request.channel_id or "default", session_id) if callable(lookup) else None
+            owner = lookup(original_channel_id, session_id) if callable(lookup) else None
             check = getattr(owner, "owns_native_model_session", None)
             return callable(check) and check(execution, native_session) is True
         def decode_model_credential(value):
@@ -582,13 +590,27 @@ class AgentRuntime:
             current_identity=current_identity, is_current_execution=is_current,
             owns_execution=owns_model_execution, credential_decoder=decode_model_credential,
         )
+        from jiuwenswarm.governance.artifact_authority import NativeArtifactAuthority
+        def owns_artifact_tool(execution, agent, session):
+            if not is_current():
+                return False
+            lookup = getattr(self._agent_manager, "get_agent_for_session_nowait", None)
+            owner = lookup(original_channel_id, session_id) if callable(lookup) else None
+            check = getattr(owner, "owns_native_tool_session", None)
+            return callable(check) and check(execution, agent, session) is True
+        artifact_factory = NativeArtifactAuthority(
+            model_authority.execution, host=self._organization_session_host,
+            current_identity=current_identity, is_current_execution=is_current,
+            owns_execution=owns_model_execution, owns_tool=owns_artifact_tool,
+        )
         return ExecutionResourceAuthorities({
             provider: BoundToolResourceAuthority(
                 ResourceExecutionContext(project_id, identity, session_id, str(Path(workspace).resolve()), provider),
                 authorizer=self._resource_authorizer, resolver=resolver,
                 current_identity=current_identity, is_current_execution=is_current,
             ) for provider in ("native", "codex", "opencode")
-        }, model_authorizer=model_authority, mcp_authorizer=mcp_authority)
+        }, model_authorizer=model_authority, mcp_authorizer=mcp_authority,
+           artifact_issuer_factory=artifact_factory)
 
     @property
     def extension_registry(self) -> Any | None:

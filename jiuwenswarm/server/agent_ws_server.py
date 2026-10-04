@@ -1159,7 +1159,8 @@ class AgentWebSocketServer:
         self._adapter_registry = AdapterRegistry()
         for adapter in (
             SessionAdapter(),
-            WorkspaceFileAdapter(),
+            WorkspaceFileAdapter(sharing_host=self._organization_session_host,
+                identity_resolver=self._resolve_trusted_identity),
             MemoryAdapter(),
             ProjectAdapter(identity_resolver=self._resolve_trusted_identity),
             HarmonyOSAdapter(),
@@ -1979,7 +1980,8 @@ class AgentWebSocketServer:
                 self._adapter_registry = AdapterRegistry()
                 for adapter in (
                     SessionAdapter(),
-                    WorkspaceFileAdapter(),
+                    WorkspaceFileAdapter(sharing_host=self._organization_session_host,
+                identity_resolver=self._resolve_trusted_identity),
                     MemoryAdapter(),
                     ProjectAdapter(identity_resolver=self._resolve_trusted_identity),
                     HarmonyOSAdapter(),

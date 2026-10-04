@@ -111,6 +111,29 @@ class NativeToolResourceResolver:
             or self._owns_session(execution, proof.agent, session) is not True
         ):
             raise ValueError("Native operation has no matching owned Session")
+        if tool.tool_name == "send_file_to_user":
+            from openjiuwen.core.foundation.tool.function.function import LocalFunction
+            from jiuwenswarm.agents.harness.common.tools.send_file_to_user import SendFileToolkit
+            from jiuwenswarm.agents.harness.common.rails.permissions.generated_artifact_delivery import (
+                normalize_send_file_paths, normalize_send_file_target_channels,
+            )
+            executor = proof.executor
+            toolkit = getattr(getattr(executor, "_func", None), "__self__", None)
+            if (type(executor) is not LocalFunction or not has_native_invoke(executor, LocalFunction)
+                    or type(toolkit) is not SendFileToolkit
+                    or getattr(executor._func, "__func__", None) is not SendFileToolkit.send_file
+                    or toolkit.session_id != execution.session_id
+                    or str(Path(toolkit._resolve_project_dir()).resolve()) != execution.workspace
+                    or set(tool.arguments) - {"abs_file_path_list", "target_channels"}):
+                raise ValueError("unsupported Native artifact executor")
+            paths = normalize_send_file_paths(tool.arguments.get("abs_file_path_list"))
+            channels = normalize_send_file_target_channels(tool.arguments.get("target_channels"))
+            if not paths or channels not in ((), (toolkit.channel_id,)):
+                raise ValueError("artifact destination is outside its original channel")
+            uses = [self._use("tool", "native:send_file_to_user", "invoke")]
+            for path in paths:
+                uses.extend(self._workspace_use(execution.workspace, path, ("read",)))
+            return self._checked_uses(proof, uses)
         expected = _TOOLS.get(tool.tool_name)
         executor = proof.executor
         if (

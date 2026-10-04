@@ -11,6 +11,7 @@ import os
 import math
 import stat
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -184,6 +185,8 @@ class WorkspaceArtifactIssuer:
     _source: _Source
     _origin: Callable
     _paths: tuple[str, ...]
+    _revision: int
+    _decisions: tuple
 
     @classmethod
     def capture(
@@ -210,18 +213,17 @@ class WorkspaceArtifactIssuer:
             identity = identity_resolver()
             if not isinstance(identity, TrustedIdentity):
                 _deny()
-            source, _ = _source(host, identity, session_id)
+            source, revision = _source(host, identity, session_id)
             binding = dict(source.binding)
             if (
                 binding["channel_id"] != channel_id
                 or binding["project_dir"] != workspace
             ):
                 _deny()
-            for path in actual_paths:
-                _decision(host, source, path)
+            decisions = tuple(_decision(host, source, path) for path in actual_paths)
             if source_check() is not True or identity_resolver() != identity:
                 _deny()
-            return cls(host, identity_resolver, source, source_check, actual_paths)
+            return cls(host, identity_resolver, source, source_check, actual_paths, revision, decisions)
         except Exception:
             raise WorkspaceDownloadDenied("artifact source unavailable") from None
 
@@ -235,9 +237,11 @@ class WorkspaceArtifactIssuer:
             ):
                 _deny()
             current, revision = _source(self._host, self._source.identity, session_id)
-            if current != self._source:
+            if current != self._source or revision != self._revision:
                 _deny()
-            decision = _decision(self._host, current, path)
+            decision = self._decisions[self._paths.index(path)]
+            if _decision(self._host, current, path) != decision:
+                _deny()
             with _open(dict(current.binding)["project_dir"], path) as (_, root, file):
                 proof = {
                     "schema_version": 1,
@@ -469,3 +473,56 @@ class WorkspaceDownloadPermit:
             return data
         except Exception:
             raise WorkspaceDownloadDenied("owner Workspace download denied") from None
+
+
+def capture_workspace_request(host, identity_resolver, session_id, params):
+    """Compile the exact bounded consumer; path and authority are never inputs."""
+    from jiuwenswarm.agents.harness.common.tools.web_file_download import validate_file_download_token
+    if (type(params) is not dict or set(params) != {'token', 'offset', 'limit'}
+            or type(params['offset']) is not int or params['offset'] < 0
+            or type(params['limit']) is not int
+            or not 1 <= params['limit'] <= MAX_DOWNLOAD_CHUNK_BYTES):
+        raise WorkspaceDownloadDenied('invalid Workspace download request')
+    permit = WorkspaceDownloadPermit.capture(host, identity_resolver, session_id,
+        params['token'], token_validator=validate_file_download_token)
+    if params['offset'] > permit.size:
+        raise WorkspaceDownloadDenied('invalid Workspace download range')
+    return permit
+
+
+# Private per-call transport proof. No serialized request field can install it.
+_workspace_send_guard = ContextVar('workspace_download_send_guard', default=None)
+
+
+@dataclass
+class _WorkspaceSendGuard:
+    check: Callable
+    active: bool = True
+    request_id: str | None = None
+
+    def consume(self, client, wire):
+        request_id = wire.get('request_id')
+        if (not self.active or not isinstance(request_id, str) or not request_id
+                or (self.request_id is not None and self.request_id != request_id)):
+            raise WorkspaceDownloadDenied('original download request ended or changed')
+        self.check(client, wire)
+        self.request_id = request_id
+
+
+@contextmanager
+def workspace_send_scope(guard):
+    owner = _WorkspaceSendGuard(guard)
+    marker = _workspace_send_guard.set(owner)
+    try:
+        yield
+    finally:
+        owner.active = False
+        _workspace_send_guard.reset(marker)
+
+
+def check_workspace_send(client, wire):
+    guard = _workspace_send_guard.get()
+    if guard is not None:
+        guard.consume(client, wire)
+    elif wire.get('method') == 'file.download_workspace_chunk':
+        raise WorkspaceDownloadDenied('original local download transport required')

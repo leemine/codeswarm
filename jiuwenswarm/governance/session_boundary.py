@@ -145,6 +145,7 @@ class SessionRequestPermit:
     cleanup: tuple[str, tuple] | None = None
     cleanup_params: str | None = None
     deletion_receipt: object | None = None
+    workspace_download: object | None = None
 
     def allows_cleanup(self, method: str, params: dict, identity: TrustedIdentity,
                        envelope_session: str | None = None) -> bool:
@@ -166,6 +167,8 @@ class SessionRequestPermit:
         try:
             if self.identity_resolver() != self.identity:
                 return False
+            if self.workspace_download is not None:
+                self.workspace_download.check()
             if self.inventory_revision is not None and _inventory_revision(self.host) != self.inventory_revision:
                 return False
             if self.cleanup is not None:
@@ -198,6 +201,7 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
     if not isinstance(identity, TrustedIdentity) or not isinstance(params, dict):
         raise SessionSharingDenied('authenticated request required')
     owners = []
+    workspace_download = None
     cleanup = None
     deletion_receipt = None
     share = None
@@ -222,6 +226,11 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
                 cleanup = (sid, None)
         else:
             cleanup = (sid, host.cleanup_owner_stamp(sid, identity))
+    elif method == 'file.download_workspace_chunk':
+        from .workspace_download import capture_workspace_request
+        sid = _session(sid or envelope_session)
+        workspace_download = capture_workspace_request(host, identity_resolver, sid, params)
+        owners.append((sid, host.owner_revision(sid, identity)))
     elif method in OWNER_METHODS:
         sid = _session(sid or envelope_session)
         owners.append((sid, host.owner_revision(sid, identity)))
@@ -260,7 +269,7 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
     permit = SessionRequestPermit(identity, identity_resolver, host, tuple(owners), share,
                                   _inventory_revision(host) if method in INVENTORY_METHODS else None, method,
                                   share_actions, continuation_input, continuation_options, cleanup,
-                                  json.dumps(params, sort_keys=True, separators=(',', ':')) if cleanup else None, deletion_receipt)
+                                  json.dumps(params, sort_keys=True, separators=(',', ':')) if cleanup else None, deletion_receipt, workspace_download)
     if not permit.revalidate():
         raise SessionSharingDenied('Session authorization denied')
     return permit

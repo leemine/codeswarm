@@ -85,6 +85,17 @@ def authorize_resource_request(
             cleanup = is_cleanup_request(method, params)
         except PermissionError as exc:
             raise ProjectAccessDenied('invalid cleanup request') from exc
+        if method == 'file.download_workspace_chunk':
+            if (not isinstance(session_permit, SessionRequestPermit)
+                    or session_permit.identity != identity
+                    or session_permit.method != method
+                    or session_permit.workspace_download is None
+                    or session_permit.workspace_download.session_id != request.session_id
+                    or not session_permit.revalidate()):
+                raise ProjectAccessDenied('Workspace download authorization required')
+            # The exact consumer already checked execute + workspace/read on
+            # its original Binding, including both actor and subject grants.
+            return
         if cleanup:
             if (not isinstance(session_permit, SessionRequestPermit)
                     or not session_permit.allows_cleanup(method, params, identity, request.session_id)):

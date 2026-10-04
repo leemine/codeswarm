@@ -356,7 +356,9 @@ async def test_file_surface_denies_tokens_ranges_unknown_routes_before_container
                 assert response.status_code == 403, (method, route, response.text)
                 assert response.headers["cache-control"] == "no-store"
                 if method != "HEAD":
-                    assert response.json()["code"] == CODE
+                    assert response.json()["code"] == (
+                        "FORBIDDEN" if route == "/file-api/download" and method == "GET" else CODE
+                    )
         assert (await client.get("/health")).status_code == 200
     router.authenticate_http.assert_not_called()
 

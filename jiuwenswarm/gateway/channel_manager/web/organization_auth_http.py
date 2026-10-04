@@ -49,8 +49,16 @@ class OrganizationAuthenticationMiddleware:
             nonlocal ended, started
             if ended:
                 return
+            denial_status = 401
+            denial_message = "organization credential expired or revoked"
             try:
                 principal.identity()
+                denial_status = 403
+                denial_message = "Workspace download authorization changed"
+                from .workspace_download_http import GUARD_KEY
+                guard = scope.get(GUARD_KEY)
+                if guard is not None:
+                    guard()
             except Exception:
                 ended = True
                 if scope["type"] == "websocket":
@@ -61,8 +69,9 @@ class OrganizationAuthenticationMiddleware:
                     )
                 else:
                     await JSONResponse(
-                        {"error": "organization credential expired or revoked"},
-                        status_code=401,
+                        {"error": denial_message},
+                        status_code=denial_status,
+                        headers={"Cache-Control": "no-store"},
                     )(scope, receive, send)
                 return
             if message["type"] == "http.response.start":

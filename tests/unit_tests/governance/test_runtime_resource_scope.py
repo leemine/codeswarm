@@ -25,7 +25,7 @@ async def test_runtime_resource_callback_binds_identity_and_owned_generation(tmp
     access = ProjectAccessStore()
     access.initialize(project.project_id, 'alice')
     state = SimpleNamespace(identity=TrustedIdentity('alice', 'alice', 'host'), allowed=True, calls=0)
-    execution = SimpleNamespace(request_id='r', state=SessionExecutionState.RUNNING, cancellation_requested=False)
+    execution = SimpleNamespace(execution_id='original-execution', request_id='r', state=SessionExecutionState.RUNNING, cancellation_requested=False)
     snapshot = SimpleNamespace(generation=1, state=RuntimeSessionState.ACTIVE, executions=(execution,))
     def authorize(pid, identity, request):
         state.calls += 1
@@ -90,7 +90,7 @@ async def test_default_runtime_maps_only_exact_owned_opencode_session(tmp_path, 
     ]):
         access.register_resource(project.project_id, ResourceDefinition(rid, kind, reference),
                                  owner_subject_id='alice', actions=actions, expected_revision=revision)
-    execution = SimpleNamespace(request_id='r', state=SessionExecutionState.RUNNING, cancellation_requested=False)
+    execution = SimpleNamespace(execution_id='original-execution', request_id='r', state=SessionExecutionState.RUNNING, cancellation_requested=False)
     snapshot = SimpleNamespace(generation=1, state=RuntimeSessionState.ACTIVE, executions=(execution,))
     owner = SimpleNamespace(owns_external_tool_session=lambda actual, sid: actual.session_id == 'private' and sid == 'native-issued')
     manager = SimpleNamespace(get_agent_for_session_nowait=lambda channel, sid: owner if (channel, sid) == ('web', 'private') else None)

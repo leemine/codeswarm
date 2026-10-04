@@ -62,8 +62,8 @@ new path/file after capture.
 
 ## Limits and integration requirements
 
-All existing organization HTTP 403 gates remain. No new enum, URL credential or
-public protocol was added. Sharing fixed text grants no attachments. Sealed assets
+The foundation originally kept every organization HTTP gate closed. The integration
+below now opens only its exact owner download consumer; all other gates remain. Sharing fixed text grants no attachments. Sealed assets
 in /tmp, skills, arbitrary path-only fallback, trajectory and Git exports stay
 closed. Organization require_execution_authorization=True currently selects the
 existing sealed-asset path, whose Workspace provenance is not yet available; this
@@ -99,3 +99,80 @@ args/target/slice mismatches. Affected regression: 147 passed (including 48 new 
 Local source tests use `/tmp/r2b-core-3a3b575f-locked-venv/bin/python` and this
 worktree's source. They are not a fresh swarm non-editable lock installation or CI.
 No new real adversarial Provider probe, HTTP service or user credential was used.
+
+
+## Runtime and local delivery integration candidate
+
+Main Codex integrates the original Runtime resource scope into Native's existing
+HostRequest and per-invocation slice. The real ToolExecution/LocalFunction proof
+reaches the existing send_file envelope before its first await. The issuer keeps
+original Runtime execution IDs and request/channel IDs, complete identity,
+Native Session/Turn/request entry, original tool invoke decision, owner revision
+and each original Workspace resource decision. Ending an old admission, replacing
+its request or revoking/regranting a resource cannot lend that old issuer new
+authority; a new valid producing operation can capture a fresh issuer.
+
+One explicit consumer `file.download_workspace_chunk` is added to the existing
+ReqMethod and WorkspaceFileAdapter. Wire parameters are exactly token, integer
+offset and integer limit (1–65536); the original Session comes from the envelope.
+SessionRequestPermit captures the full owner Workspace permit before dispatch.
+ProjectBoundary accepts only that exact local permit, whose existing ResourceGuard
+requires Project execute and Workspace/read. AgentServer injects the original
+SharingHost and identity resolver on both construction and rebuild. Each offloaded
+read is checked after return and by the original final delivery guard. No generic
+file permission, local fallback or URL-derived principal is accepted.
+
+Only `/file-api/download` GET/HEAD is opened for organization mode, including
+single Range and bounded inline safe media. Explicit session_id and existing HMAC
+token are required; extra/duplicate selectors are rejected. The original Gateway
+uses independent current credentials and obtains every bounded chunk from the
+AgentServer. A fixed permit is rechecked after each await, and the existing actual
+ASGI send guard checks headers and each body. The static app_web proxy goes only
+to its configured Gateway, rechecks the same local source before headers and each
+bounded read/write, and never falls back to local path or token routing. Partial
+streams end with the advertised Content-Length unmet, so clients cannot report
+complete success. Already delivered bytes cannot be withdrawn. This requires the
+current same-host metadata/secret/filesystem deployment and makes no remote claim.
+
+Source overlay against formally installed core3a3b: 533 affected governance,
+Native and organization boundary tests passed (`/tmp/r2b-artifact-affected-final.log`);
+108 old file proxy, verified download, Smart Approval and WebSocket tests passed
+(`/tmp/r2b-artifact-legacy.log`). Independent actual Runtime→Native→ToolExecution
+review found tool-revoke, mutable request rebinding and grant-revival gaps; retained
+red cases and 65 passing component/download tests plus 143 compatibility tests are
+in `/tmp/r2b-artifact-authority-review/README.md`. The 14 delivery tests use real
+permits/readers/Adapter/HTTP middleware with synthetic transport, not real browser
+or Provider acceptance. One initial ASGI test expected a normal return after stream
+abort; it now models a deployed transport without propagating server exceptions
+and still asserts zero buffered bytes and no later read. No production guard was
+relaxed. Two old Runtime mocks lacked actual execution_id; those fixture fields
+were added, and the exact newly scoped download error code was updated while all
+old forbidden route assertions remain.
+
+UI, exact integrated source installation/stable and real normal owner download
+validation remain pending. Smart Approval sealed assets still lack original
+Workspace provenance and are not opened by this candidate. No scope here closes
+R1-13C/R2-B4, Team, Codex native mandatory authorization or complete activity restore.
+
+
+Independent delivery review retained two further red cases and fixes. Static
+BaseHTTPRequestHandler success headers are explicitly discarded when permission
+fails before flush; after flush begins, errors only close the connection. The
+Gateway pins exact local WebSocket client/URI/peer/socket and rechecks after its
+send-lock wait, before signing and sending. A private per-call guard captures the
+original request ID, actively expires at scope exit (including copied contexts),
+and is never serialized. The static proxy also verifies its configured Gateway
+and connected peer are loopback. Remote/unknown clients are refused before any
+chunk request. Existing fallback remains denied. The real E2A/signature/codec/
+Adapter composition uses only an in-memory socket bridge and preserves failures
+in `/tmp/r2b-workspace-download-review/README.md`. Initial 29 delivery/composition
+tests and 52 old client/E2A/auth tests passed; final scoped-lifetime tests and full
+integrated stable are still recorded separately. Browser UI and actual local
+transport downloads must be validated at the final candidate before completion.
+
+Final independent E2A review: 18 passed in 6.23s, including original eight
+composition cases plus scope normal/error/cancellation exit, copied contexts,
+waiting child replay, timeout child within live scope, fixed original request ID
+and actual final wire ID replacement. Evidence:
+`/tmp/r2b-workspace-download-review/e2a-scope-final.log`. No real socket/Provider
+was used for these counterexamples.
