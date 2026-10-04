@@ -218,3 +218,36 @@ passed outside the sandbox with task-private config. All attempts are retained.
 This correction does not claim a new real UI pass. The integration owner must
 rerun the same ordinary authenticated download story and final stable gate on
 the integrated commit. No adversarial or external Provider probe was run here.
+
+## Signed AgentServer admission correction (2026-10-04)
+
+The ordinary UI run at swarm `380befb1d19f39f76a89cc020646411ed466832e`
+with formal core `2d3db9c314af2bb426537c34290b986341d16698` reached the enabled
+Artifacts download button after a real Native file publication, but no browser
+download completed. The signed `file.download_workspace_chunk` request was
+rejected before adapter dispatch: its strict three-field params contain only
+`token`, `offset`, and `limit`, while the original Session selector lives in the
+E2A envelope. Generic admission previously forwarded that selector only when
+params also contained `session_id`.
+
+Only this exact method now forwards the original envelope selector to the
+existing Session boundary. The params schema, signature verification, owner and
+artifact authority, final delivery guard, and all other method handling are
+unchanged. Earlier E2A composition tests reconstructed admission inside their
+socket fixture and thus did not cover this actual AgentServer entry point.
+
+Six new tests enter `_handle_message` with real signed E2A, codec, admission,
+owner/resource sidecars, issuer and WorkspaceFileAdapter. The legitimate request
+returns fixture bytes; wrong/missing Session, an extra param, unsigned and
+modified signed messages are rejected without reaching the adapter. Before the
+fix only the legitimate case failed; after it, all six pass. The affected six
+modules total **163 passed** with formally installed core above and candidate
+swarm source, using `pytest --no-cov -q` (no core source overlay).
+
+Evidence: `/tmp/r2b-owner-download-admission/{red.log,affected.log}`. The initial
+sandboxed green run stalled on the actual threaded file read and hit its bounded
+timeout; the unchanged test suite passed outside that sandbox in 19.25 seconds.
+The real UI failure and successful owned-process cleanup remain at
+`/tmp/r2b-owner-download-ui-run-380befb1/result.json`. This patch still requires
+integration stable and the ordinary UI story on the new candidate; no new real
+Provider, delayed-operation or revocation probe was run for this fix.

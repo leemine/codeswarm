@@ -264,3 +264,69 @@ async def test_actual_client_final_wire_cannot_replace_bound_request_id(wire_dow
     assert response.status_code == 403
     assert f.state.requests == [] and f.state.responses == []
     assert not f.client._message_queues
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['none', 'wrong_session', 'missing_session', 'unknown_param', 'unsigned', 'tampered'])
+async def test_actual_agentserver_message_admits_only_signed_original_workspace_session(setup, monkeypatch, change):
+    """Use the real inbound entry, not a test-side reconstruction of admission."""
+    import base64
+    from jiuwenswarm.common.schema.message import ReqMethod
+    from jiuwenswarm.gateway.routing.agent_client import parse_agent_server_wire_unary
+
+    s = setup
+    monkeypatch.setattr(WebFileDownloadManager, '_instance', s.manager)
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = s.host
+    server._trusted_identity_resolver = lambda _: current_identity()
+    server._adapter_registry = AdapterRegistry()
+    adapter = WorkspaceFileAdapter(sharing_host=s.host, identity_resolver=server._resolve_trusted_identity)
+    consumed, sent, closed = [], [], []
+    original_handle = adapter.handle
+
+    async def record_handle(request):
+        consumed.append(request)
+        return await original_handle(request)
+
+    monkeypatch.setattr(adapter, 'handle', record_handle)
+    server._adapter_registry.register(adapter)
+
+    class Socket:
+        async def send(self, data):
+            sent.append(json.loads(data))
+        async def close(self, **kwargs):
+            closed.append(kwargs)
+
+    params = {'token': s.token(), 'offset': 0, 'limit': 7}
+    sid = 'alice-session'
+    if change == 'wrong_session':
+        sid = 'bob-session'
+    elif change == 'missing_session':
+        sid = None
+    elif change == 'unknown_param':
+        params['session_id'] = sid
+    wire = E2AEnvelope(request_id='owner-chunk', channel='web', user_id='forged-routing-user',
+        method=ReqMethod.FILE_DOWNLOAD_WORKSPACE_CHUNK.value, session_id=sid, params=params).to_dict()
+    if change != 'unsigned':
+        with authenticated_scope(s.alice):
+            wire = s.auth.sign(wire)
+    if change == 'tampered':
+        wire['params']['limit'] = 6
+    await server._handle_message(Socket(), json.dumps(wire), asyncio.Lock())
+    assert current_identity() is None
+    if change in {'unsigned', 'tampered'}:
+        assert closed == [{'code': 1008, 'reason': 'authentication required'}]
+        assert not sent and not consumed
+        return
+    assert not closed and len(sent) == 1
+    response = parse_agent_server_wire_unary(sent[0])
+    if change == 'none':
+        assert response.ok is True
+        assert base64.b64decode(response.payload['data']) == b'fixture'
+        assert len(consumed) == 1
+        assert consumed[0].req_method is ReqMethod.FILE_DOWNLOAD_WORKSPACE_CHUNK
+        assert consumed[0].session_id == 'alice-session'
+        assert set(consumed[0].params) == {'token', 'offset', 'limit'}
+    else:
+        assert response.ok is False and response.payload['code'] == 'FORBIDDEN'
+        assert 'data' not in response.payload and not consumed

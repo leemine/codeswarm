@@ -2419,7 +2419,12 @@ class AgentWebSocketServer:
                 permit = admit_session_request(
                     request.req_method.value if request.req_method else "",
                     request.params or {}, identity_resolver=lambda: self._resolve_trusted_identity(request),
-                    host=host, envelope_session=(request.session_id if (request.params or {}).get("session_id") else None),
+                    host=host, envelope_session=(
+                        request.session_id
+                        if request.req_method == ReqMethod.FILE_DOWNLOAD_WORKSPACE_CHUNK
+                        or (request.params or {}).get("session_id")
+                        else None
+                    ),
                 )
                 set_delivery_permit(permit)
                 from jiuwenswarm.server.runtime.session.rewind_authority import REWIND_METHODS, capture_rewind_authority
