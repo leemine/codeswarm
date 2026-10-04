@@ -26,6 +26,7 @@ from .sharing_audit import (
     SharingAuditBounds, SharingAuditFacts, SharingAuditError, SharingAuditWriteResult,
     SharingAuditContext, AuditResultCallback, append_sharing_audit,
     audit_context as checked_audit_context, notify_audit_result, source_project,
+    audit_query_params, validated_sharing_audit, project_audit_event,
 )
 
 
@@ -386,3 +387,41 @@ class SessionSharingStore:
             return [self._listing_record(section, record, owner, source)
                     for record in section['shares'].values()
                     if isinstance(record, dict) and record.get('session_id') == session_id]
+
+
+    def query_audit(self, session_id: str, identity: TrustedIdentity, *, owner_guard, limit: int = 50) -> dict:
+        """Read confirmed source-session history under the original sidecar lock.
+
+        The injected live guard must verify current project/source/lifecycle and
+        original credential. A registered owner alone never authorizes a read.
+        No history file, share grant or client-provided range is consulted.
+        """
+        audit_query_params({'session_id': session_id, 'limit': limit})
+        identity_data = self._identity(identity)
+        if not callable(owner_guard):
+            raise SessionSharingDenied('current owner guard required')
+        with self._storage._locked():
+            revision = owner_guard()
+            if type(revision) is not int or revision < 1:
+                raise SessionSharingDenied('current owner revision required')
+            data = self._storage._load()
+            owner = self._section(data)['owners'].get(session_id)
+            if (not isinstance(owner, dict) or owner.get('retired') is not False
+                    or owner.get('identity') != identity_data or type(owner.get('revision')) is not int
+                    or owner['revision'] < 1):
+                raise SessionSharingDenied('current Session owner required')
+            section = validated_sharing_audit(data)
+            selected = []
+            for event in reversed(section['events']):
+                facts = event['facts']
+                if facts['source_session_id'] == session_id and facts['owner_revision'] == owner['revision']:
+                    selected.append(event)
+                    if len(selected) > limit:
+                        break
+            result = {'session_id': session_id, 'events': [project_audit_event(e) for e in selected[:limit]],
+                      'has_more': len(selected) > limit,
+                      'coverage': 'confirmed_mutations_and_publications_only'}
+            current_revision = owner_guard()
+            if type(current_revision) is not int or current_revision != revision:
+                raise SessionSharingDenied('owner revision changed')
+            return result

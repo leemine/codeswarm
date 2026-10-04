@@ -18,7 +18,7 @@ class ProjectAccessDenied(PermissionError):
 
 
 _READ_METHODS = frozenset({
-    "session.list", "session.archived.list", "session.get_metadata",
+    "session.share.audit.list", "session.list", "session.archived.list", "session.get_metadata",
     "session.preview", "session.plan_status", "history.get",
     "history.list_turns", "files.list", "files.get", "file.download_verified_chunk",
     "path.get", "path.select_directory", "path.select_files", "document.formats",

@@ -16,10 +16,11 @@ from jiuwenswarm.governance.session_sharing import (
 )
 from jiuwenswarm.server.runtime.session.history_io import run_history_io
 from jiuwenswarm.server.runtime.session.session_sharing import SessionSharingStore
-from jiuwenswarm.server.runtime.session.sharing_audit import SharingAuditContext, SharingAuditWriteResult
+from jiuwenswarm.server.runtime.session.sharing_audit import SharingAuditContext, SharingAuditWriteResult, audit_query_params
 from .base import GatewayAdapter, build_error_response
 
 _FIELDS = {
+    'session.share.audit.list': {'session_id', 'limit'},
     'session.share.list': {'session_id'},
     'session.share.create': {'session_id', 'target_actor', 'actions', 'history_scope', 'expires_at', 'parent_share_id'},
     'session.share.update': {'session_id', 'share_id', 'actions', 'expires_at', 'expected_revision'},
@@ -33,12 +34,13 @@ class SessionSharingAdapter(GatewayAdapter):
     def __init__(self, store: SessionSharingStore, *, identity_resolver: Callable,
                  target_resolver: Callable[[TrustedIdentity, str], TrustedIdentity | None],
                  compile_history: Callable[[str, TrustedIdentity, str | None], SessionHistoryRange],
-                 after_mutation=None):
+                 after_mutation=None, audit_owner_revision=None):
         self.store = store
         self.identity_resolver = identity_resolver
         self.target_resolver = target_resolver
         self.compile_history = compile_history
         self.after_mutation = after_mutation
+        self.audit_owner_revision = audit_owner_revision
 
     def _identity(self, request):
         identity = self.identity_resolver(request)
@@ -82,11 +84,51 @@ class SessionSharingAdapter(GatewayAdapter):
                           history_scope='fixed_snapshot')
         return result
 
+    def _audit_query(self, request):
+        from jiuwenswarm.governance.organization_auth import AuthenticatedPrincipal, current_principal
+        from jiuwenswarm.governance.session_boundary import SessionRequestPermit, _delivery
+
+        session_id, limit = audit_query_params(request.params)
+        identity = self._identity(request)
+        principal, permit = current_principal(), _delivery.get()
+        revision_resolver = self.audit_owner_revision
+        if (not isinstance(principal, AuthenticatedPrincipal) or not callable(revision_resolver)
+                or type(permit) is not SessionRequestPermit or getattr(permit.host, 'store', None) is not self.store
+                or permit.identity != identity or permit.method != 'session.share.audit.list'
+                or len(permit.owners) != 1 or permit.owners[0][0] != session_id
+                or permit.share is not None or permit.cleanup is not None or permit.workspace_download is not None):
+            raise SessionSharingDenied('original owner audit permit required')
+        revision = permit.owners[0][1]
+        if type(revision) is not int or revision < 1:
+            raise SessionSharingDenied('current owner revision required')
+        original_request = (request.request_id, request.channel_id, request.session_id,
+                            getattr(request.req_method, 'value', request.req_method), dict(request.params))
+
+        def check():
+            current = (request.request_id, request.channel_id, request.session_id,
+                       getattr(request.req_method, 'value', request.req_method), request.params)
+            if (current != original_request or current[3] != 'session.share.audit.list'
+                    or (request.session_id is not None and request.session_id != session_id)
+                    or _delivery.get() is not permit or current_principal() is not principal
+                    or principal.identity() != identity or self._identity(request) != identity
+                    or not permit.revalidate() or revision_resolver(session_id, identity) != revision):
+                raise SessionSharingDenied('original owner audit request changed')
+            return revision
+
+        check()
+        payload = self.store.query_audit(session_id, identity, owner_guard=check, limit=limit)
+        response = AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
+                                 ok=True, payload=payload)
+        response._delivery_guard = check
+        return response
+
     def _dispatch(self, request):
         method = getattr(request.req_method, 'value', request.req_method)
         params = request.params
         if method not in self.methods or not isinstance(params, dict) or set(params) - _FIELDS[method]:
             raise ValueError('invalid sharing request fields')
+        if method == 'session.share.audit.list':
+            return self._audit_query(request)
         identity = self._identity(request)
         audit_results = []
         audit_context = (SharingAuditContext(identity, request.request_id, method)
@@ -163,6 +205,9 @@ class SessionSharingAdapter(GatewayAdapter):
     async def handle(self, request):
         try:
             result = await run_history_io(self._dispatch, request)
+            guard = getattr(result, '_delivery_guard', None)
+            if guard is not None:
+                guard()
             method = getattr(request.req_method, 'value', request.req_method)
             if self.after_mutation is not None and method in {'session.share.update', 'session.share.revoke'}:
                 try:

@@ -2206,6 +2206,7 @@ class AgentWebSocketServer:
         self._adapter_registry.register(SessionSharingAdapter(
             host.store, identity_resolver=self._resolve_trusted_identity,
             target_resolver=host.target_resolver, compile_history=host.compile_history,
+            audit_owner_revision=host.owner_revision,
             after_mutation=lambda: self._execution_runtime()._session_coordinator.revalidate_session_authorities(),
         ))
         self._adapter_registry.register(ContinuationAdapter(

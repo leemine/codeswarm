@@ -206,6 +206,48 @@ def _validate_event(event):
         raise SharingAuditError('sharing audit event too large')
 
 
+
+def validated_sharing_audit(data: dict) -> dict:
+    """Validate existing history without creating, repairing or authorizing it."""
+    section = data.get(AUDIT_KEY, {'schema_version': 1, 'next_sequence': 1, 'events': []})
+    _exact(section, ('schema_version', 'next_sequence', 'events'))
+    if type(section['schema_version']) is not int or section['schema_version'] != 1 or type(section['events']) is not list:
+        raise SharingAuditError('unsupported sharing audit schema')
+    _integer(section['next_sequence'])
+    if section['next_sequence'] != len(section['events']) + 1:
+        raise SharingAuditError('invalid sharing audit sequence')
+    ids = set()
+    for sequence, old in enumerate(section['events'], 1):
+        _validate_event(old)
+        if old['sequence'] != sequence or old['event_id'] in ids:
+            raise SharingAuditError('invalid sharing audit order')
+        ids.add(old['event_id'])
+    return section
+
+
+def audit_query_params(params: dict) -> tuple[str, int]:
+    """Exact bounded selectors, validated before any Gateway preprocessing."""
+    from .session_history import is_valid_session_id
+    if type(params) is not dict or set(params) - {'session_id', 'limit'}:
+        raise ValueError('invalid sharing audit query')
+    session_id, limit = params.get('session_id'), params.get('limit', 50)
+    if (not isinstance(session_id, str) or not is_valid_session_id(session_id)
+            or type(limit) is not int or not 1 <= limit <= 100):
+        raise ValueError('invalid sharing audit query')
+    return session_id, limit
+
+
+def project_audit_event(event: dict) -> dict:
+    """Owner UI projection; no seed, file bounds, subject, or other Session IDs."""
+    context, facts = event['context'], event['facts']
+    result = {name: event[name] for name in ('sequence', 'event_id', 'recorded_at')}
+    result.update({name: facts[name] for name in
+                   ('action', 'phase', 'result', 'share_id', 'share_revision', 'before_revision', 'after_revision')})
+    result.update(actor_id=context['actor']['actor_id'], target_actor_id=facts['target']['actor_id'],
+                  request_id=context['request_id'], method=context['method'] or 'host_api')
+    return result
+
+
 def append_sharing_audit(data: dict, context: SharingAuditContext, facts: SharingAuditFacts,
                          *, recorded_at: float | None = None) -> SharingAuditWriteResult:
     """Stage an event. Its receipt is publishable only AFTER the caller saves."""
@@ -215,19 +257,7 @@ def append_sharing_audit(data: dict, context: SharingAuditContext, facts: Sharin
         expected_method = 'session.share.' + facts.action
         if context.method is not None and context.method != expected_method:
             raise SharingAuditError('sharing audit method mismatch')
-        section = data.get(AUDIT_KEY, {'schema_version': 1, 'next_sequence': 1, 'events': []})
-        _exact(section, ('schema_version', 'next_sequence', 'events'))
-        if type(section['schema_version']) is not int or section['schema_version'] != 1 or type(section['events']) is not list:
-            raise SharingAuditError('unsupported sharing audit schema')
-        _integer(section['next_sequence'])
-        if section['next_sequence'] != len(section['events']) + 1:
-            raise SharingAuditError('invalid sharing audit sequence')
-        ids = set()
-        for sequence, old in enumerate(section['events'], 1):
-            _validate_event(old)
-            if old['sequence'] != sequence or old['event_id'] in ids:
-                raise SharingAuditError('invalid sharing audit order')
-            ids.add(old['event_id'])
+        section = validated_sharing_audit(data)
         event_id = uuid.uuid4().hex
         _integer(section['next_sequence'] + 1)
         event = {'sequence': section['next_sequence'], 'event_id': event_id,

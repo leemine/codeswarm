@@ -1514,6 +1514,18 @@ class WebChannel(BaseWsChannel):
             ))
             return
 
+        if organization and method == "session.share.audit.list":
+            # Exact owner-only unary read: no files, active route or chat queue.
+            handler = self._method_handlers.get(method)
+            if handler is None:
+                await self.send_response(ws, req_id, ok=False,
+                    error="Audit query unavailable.", code="FORBIDDEN")
+                return
+            await self._invoke_method_handler(_MethodHandlerInvocation(
+                ws, method, req_id, params, permit.owners[0][0], handler,
+            ))
+            return
+
         # ── V2: session_id 解析 ──
         # 请求自带 session_id（如 chat.send）→ 用它更新 ws 路由注册。
         # 请求未带 session_id（如 memory.compute 心跳、updater.check、config.get

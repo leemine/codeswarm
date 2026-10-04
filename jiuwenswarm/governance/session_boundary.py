@@ -19,6 +19,7 @@ from .session_sharing import SessionHistoryRange, SessionSharingDenied
 
 # Deliberately exact: adding a protocol method requires classifying its data.
 OWNER_METHODS = frozenset({
+    'session.share.audit.list',
     'session.get_metadata', 'session.preview', 'session.pin', 'session.color_set',
     'session.rename', 'session.switch', 'session.plan_status', 'session.input.intent',
     'history.get', 'history.list_turns', 'chat.send', 'chat.resume', 'chat.answer',
@@ -29,7 +30,7 @@ OWNER_METHODS = frozenset({
 CLEANUP_METHODS = frozenset({'chat.cancel', 'chat.interrupt', 'session.stop', 'session.delete'})
 
 SHARE_METHODS = frozenset({
-    'session.share.list', 'session.share.create', 'session.share.update',
+    'session.share.audit.list', 'session.share.list', 'session.share.create', 'session.share.update',
     'session.share.revoke', 'session.share.history.get',
     'session.share.continuation.options', 'session.share.continue',
 })
@@ -200,6 +201,9 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
     identity = identity_resolver()
     if not isinstance(identity, TrustedIdentity) or not isinstance(params, dict):
         raise SessionSharingDenied('authenticated request required')
+    if method == 'session.share.audit.list':
+        from jiuwenswarm.server.runtime.session.sharing_audit import audit_query_params
+        audit_query_params(params)
     owners = []
     workspace_download = None
     cleanup = None

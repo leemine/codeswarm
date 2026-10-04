@@ -398,7 +398,26 @@ class BaseWsChannel(BaseWebChannel):
                     if permit.cleanup is not None:
                         raise PermissionError("cleanup permit cannot deliver ordinary data")
                     guard = permit.revalidate
-                    if permit.method in {"session.share.continue", "session.share.continuation.options"}:
+                    if permit.method == "session.share.audit.list":
+                        request_id = data.get("id")
+                        payload = data.get("payload")
+                        if (len(permit.owners) != 1 or not isinstance(payload, dict)
+                                or payload.get("session_id") != permit.owners[0][0]
+                                or principal.identity() != permit.identity):
+                            raise PermissionError("original audit response unavailable")
+                        audit_session = permit.owners[0][0]
+                        audit_response = data
+                        def guard():
+                            try:
+                                return (connection_principal(ws) is principal
+                                        and getattr(ws, "_jiuwen_session_permits", {}).get(request_id) is permit
+                                        and audit_response.get("id") == request_id
+                                        and isinstance(audit_response.get("payload"), dict)
+                                        and audit_response["payload"].get("session_id") == audit_session
+                                        and permit.revalidate())
+                            except Exception:
+                                return False
+                    elif permit.method in {"session.share.continue", "session.share.continuation.options"}:
                         from jiuwenswarm.runtime.continuation_delivery import (
                             capture_continuation_delivery, capture_continuation_options_delivery,
                         )
