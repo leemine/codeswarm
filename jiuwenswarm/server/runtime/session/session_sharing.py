@@ -66,6 +66,8 @@ class SessionSharingStore:
                     or type(old.get('revision')) is not int or old['revision'] < 1
                     or old.get('retired') is not True):
                 raise SessionSharingConflict('Session owner already registered or unavailable')
+            if isinstance(old, dict) and 'deletion' in old:
+                raise SessionSharingConflict('deletion Session IDs cannot be reused')
             revision = old['revision'] if old is not None else 0
             if type(expected_revision) is not int or expected_revision != revision:
                 raise SessionSharingConflict('owner revision changed')

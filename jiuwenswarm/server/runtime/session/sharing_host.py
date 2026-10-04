@@ -212,6 +212,38 @@ class SharingHostService:
                     _component(project_state.get('generation', 0)),
                     bool(session_state.get('blocked')), bool(project_state.get('blocked')))
 
+    def capture_deletion(self, session_id, identity, permit):
+        from .deletion_receipt import capture
+        return capture(self, session_id, identity, permit)
+
+    def begin_deletion(self, capture, operation):
+        from .deletion_receipt import begin
+        return begin(self, capture, operation)
+
+    def resume_deletion(self, session_id, identity, *, identity_resolver):
+        from .deletion_receipt import resume
+        return resume(self, session_id, identity, identity_resolver=identity_resolver)
+
+    def adopt_deletion(self, receipt, operation):
+        from .deletion_receipt import adopt
+        return adopt(self, receipt, operation)
+
+    def check_deletion(self, receipt, *, for_admission=False):
+        from .deletion_receipt import check
+        return check(self, receipt, for_admission=for_admission)
+
+    def commit_deletion(self, receipt):
+        from .deletion_receipt import commit
+        return commit(self, receipt)
+
+    def confirms_deletion(self, receipt):
+        from .deletion_receipt import confirms
+        return confirms(self, receipt)
+
+    def confirm_deletion_for_permit(self, permit) -> bool:
+        from .deletion_receipt import confirm_for_permit
+        return confirm_for_permit(self, permit)
+
     def register_owner_and_source(self, session_id: str, owner: TrustedIdentity, project_id: str, *,
                                   expected_owner_revision: int = 0) -> int:
         """Host-only prepublish registration; one sidecar save and no history IO.
@@ -228,8 +260,8 @@ class SharingHostService:
             old = owners.get(session_id)
             if old is not None and (not isinstance(old, dict) or old.get('retired') is not True):
                 raise SessionSharingConflict('Session owner already registered')
-            if isinstance(old, dict) and 'continuation' in old:
-                raise SessionSharingConflict('continuation Session IDs cannot be reused')
+            if isinstance(old, dict) and ('continuation' in old or 'deletion' in old):
+                raise SessionSharingConflict('continuation/deletion Session IDs cannot be reused')
             previous = _component(old['revision'], positive=True) if old else 0
             if type(expected_owner_revision) is not int or expected_owner_revision != previous:
                 raise SessionSharingConflict('owner revision changed')
