@@ -159,6 +159,10 @@ class ProductToolGateway:
                     or proof.invocation is not invocation
                     or proof.executor is not self._catalog.get(invocation.name)):
                 return False
+            if proof.core_tool:
+                # Original ticket admission precedes callbacks; resource uses
+                # are proven from actual transformed inputs at core's final point.
+                return proof.matches_subject()
             try:
                 allowed = await proof.authorize(proof.operation)
             except Exception:
@@ -243,6 +247,15 @@ class ProductToolGateway:
                 or proof.entered):
             raise PermissionError('Product executor changed before invocation')
         proof.entered = True
+        if proof.core_tool:
+            from openjiuwen.core.foundation.tool import invoke_tool_with_authority
+            return await invoke_tool_with_authority(
+                tool, _mutable_tool_value(invocation.arguments),
+                operation=proof.operation, authorizer=proof.authorize_final,
+                runtime_kwargs=proof.kwargs,
+                is_current=lambda: current_product_executor() is proof and proof.matches_subject(),
+                resolve_executor=lambda: self.executor_for(invocation),
+            )
         return await proof.invoke(_mutable_tool_value(invocation.arguments), **proof.kwargs)
 
 
