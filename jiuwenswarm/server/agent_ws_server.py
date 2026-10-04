@@ -2199,9 +2199,13 @@ class AgentWebSocketServer:
             return
         from jiuwenswarm.server.runtime.gateway_adapter.session_sharing_adapter import SessionSharingAdapter
         from jiuwenswarm.server.runtime.gateway_adapter.shared_history_adapter import SharedHistoryAdapter
+        from jiuwenswarm.server.runtime.gateway_adapter.continuation_adapter import ContinuationAdapter
         self._adapter_registry.register(SessionSharingAdapter(
             host.store, identity_resolver=self._resolve_trusted_identity,
             target_resolver=host.target_resolver, compile_history=host.compile_history,
+        ))
+        self._adapter_registry.register(ContinuationAdapter(
+            runtime_resolver=self._execution_runtime, identity_resolver=self._resolve_trusted_identity,
         ))
         self._adapter_registry.register(SharedHistoryAdapter(
             host.store, identity_resolver=self._resolve_trusted_identity,

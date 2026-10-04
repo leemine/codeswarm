@@ -13,6 +13,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from typing import Callable
 
+from .continuation import ContinuationInput
 from .contracts import TrustedIdentity
 from .session_sharing import SessionHistoryRange, SessionSharingDenied
 
@@ -28,6 +29,7 @@ OWNER_METHODS = frozenset({
 SHARE_METHODS = frozenset({
     'session.share.list', 'session.share.create', 'session.share.update',
     'session.share.revoke', 'session.share.history.get',
+    'session.share.continuation.options', 'session.share.continue',
 })
 GLOBAL_METHODS = frozenset({
     'config.get', 'models.list',
@@ -73,6 +75,23 @@ def _session(value):
     return value
 
 
+def parse_continuation_options(params):
+    """Exact public source/target selectors, without execution or authority data."""
+    fields = {'session_id', 'share_id', 'expected_revision', 'target_project_id'}
+    if type(params) is not dict or set(params) != fields:
+        raise ValueError('invalid continuation options fields')
+    for key in ('session_id', 'share_id', 'target_project_id'):
+        value = params[key]
+        if (not isinstance(value, str) or not value or len(value) > 200
+                or value != value.strip() or any(ord(char) < 32 for char in value)):
+            raise ValueError('invalid continuation options selector')
+    revision = params['expected_revision']
+    if type(revision) is not int or not 1 <= revision < 2 ** 63:
+        raise ValueError('invalid continuation options revision')
+    _session(params['session_id'])
+    return dict(params)
+
+
 @dataclass(frozen=True)
 class SessionRequestPermit:
     identity: TrustedIdentity
@@ -82,6 +101,9 @@ class SessionRequestPermit:
     share: tuple[str, str, int, SessionHistoryRange] | None = None
     inventory_revision: str | None = None
     method: str = ""
+    share_actions: tuple[str, ...] = ('view',)
+    continuation_input: ContinuationInput | None = None
+    continuation_options: tuple[tuple[str, object], ...] | None = None
 
     def revalidate(self) -> bool:
         try:
@@ -95,10 +117,11 @@ class SessionRequestPermit:
                     return False
             if self.share is not None:
                 session_id, share_id, revision, history = self.share
-                decision = self.host.store.authorize(session_id, self.identity, 'view',
-                                                     share_id=share_id, history=history)
-                if not decision.allowed or decision.revision != revision:
-                    return False
+                for action in self.share_actions:
+                    decision = self.host.store.authorize(session_id, self.identity, action,
+                                                         share_id=share_id, history=history)
+                    if decision.allowed is not True or decision.revision != revision:
+                        return False
             return True
         except Exception:
             return False
@@ -111,6 +134,9 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
         raise SessionSharingDenied('authenticated request required')
     owners = []
     share = None
+    share_actions = ('view',)
+    continuation_input = None
+    continuation_options = None
     sid = params.get('session_id')
     if sid is not None:
         sid = _session(sid)
@@ -129,7 +155,13 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
             previous = _session(params['previous_session_id'])
             owners.append((previous, host.owner_revision(previous, identity)))
     elif method in SHARE_METHODS:
-        if method == 'session.share.history.get':
+        if method in {'session.share.history.get', 'session.share.continuation.options', 'session.share.continue'}:
+            if method == 'session.share.continue':
+                continuation_input = ContinuationInput.from_wire(params)
+                share_actions = ('view', 'execute')
+            elif method == 'session.share.continuation.options':
+                continuation_options = tuple(sorted(parse_continuation_options(params).items()))
+                share_actions = ('view', 'execute')
             sid = _session(sid)
             share_id = params.get('share_id')
             records = host.store.list_for_actor(identity)
@@ -137,6 +169,8 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
                            and r.get('target') == asdict(identity)), None)
             if record is None:
                 raise SessionSharingDenied('shared history unavailable')
+            if len(share_actions) > 1 and record.get('revision') != params['expected_revision']:
+                raise SessionSharingDenied('continuation share changed')
             history = SessionHistoryRange(**record['history'])
             decision = host.store.authorize(sid, identity, 'view', share_id=share_id, history=history)
             share = (sid, share_id, decision.revision, history)
@@ -144,7 +178,8 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
     elif method not in GLOBAL_METHODS:
         raise SessionSharingDenied('organization method requires an explicit policy')
     permit = SessionRequestPermit(identity, identity_resolver, host, tuple(owners), share,
-                                  _inventory_revision(host) if method in INVENTORY_METHODS else None, method)
+                                  _inventory_revision(host) if method in INVENTORY_METHODS else None, method,
+                                  share_actions, continuation_input, continuation_options)
     if not permit.revalidate():
         raise SessionSharingDenied('Session authorization denied')
     return permit

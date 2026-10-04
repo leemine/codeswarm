@@ -55,6 +55,8 @@ class ReqMethod(Enum):
     CHANNEL_GET = "channel.get"
 
     SESSION_LIST = "session.list"
+    SESSION_SHARE_CONTINUATION_OPTIONS = "session.share.continuation.options"
+    SESSION_SHARE_CONTINUE = "session.share.continue"
     SESSION_SHARE_HISTORY_GET = "session.share.history.get"
     SESSION_SHARE_LIST = "session.share.list"
     SESSION_SHARE_CREATE = "session.share.create"

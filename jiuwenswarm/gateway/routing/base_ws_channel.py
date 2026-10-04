@@ -324,7 +324,34 @@ class BaseWsChannel(BaseWebChannel):
                         return principal.identity() is not None
                 elif permit is not None:
                     guard = permit.revalidate
-                    if permit.method == "session.create":
+                    if permit.method in {"session.share.continue", "session.share.continuation.options"}:
+                        from jiuwenswarm.runtime.continuation_delivery import (
+                            capture_continuation_delivery, capture_continuation_options_delivery,
+                        )
+                        payload = data.get("payload")
+                        if not isinstance(payload, dict) or principal.identity() != permit.identity:
+                            raise PermissionError("continuation delivery scope unavailable")
+                        if permit.method == "session.share.continue":
+                            if permit.continuation_input is None:
+                                raise PermissionError("continuation input unavailable")
+                            check = capture_continuation_delivery(
+                                permit.host, principal.identity, permit.continuation_input, payload.get("session_id"),
+                            )
+                        else:
+                            if permit.continuation_options is None:
+                                raise PermissionError("continuation options unavailable")
+                            check = capture_continuation_options_delivery(
+                                permit.host, principal.identity, dict(permit.continuation_options), payload,
+                            )
+                        def guard():
+                            try:
+                                if not permit.revalidate():
+                                    return False
+                                check()  # Host checker succeeds with None; exceptions deny.
+                                return permit.revalidate()
+                            except Exception:
+                                return False
+                    elif permit.method == "session.create":
                         # The newly allocated ID comes from the host result, not
                         # the create request. Capture its owner revision before
                         # queuing so revocation cannot revive a buffered result.
