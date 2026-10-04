@@ -80,3 +80,17 @@ behavior tests exercise the existing installed core. Team materialization, core
 retry/HTTP consumption, exact-owner Runtime integration, clean locked-source CI,
 and real Single/Team Provider acceptance remain separate integration gates. This
 slice does not close R1-13C or R2-B by itself.
+
+### Team model catalog boundary
+
+Governed normal/inprocess Team selection uses host catalog metadata only. Login,
+Zen, environment and AgentOS fallback candidates are not added. Explicit member
+bindings must match one catalog entry, including credential reference and encoding;
+the member's request settings remain, while inline key material is replaced by the
+catalog placeholder. Same model/endpoint entries with different references remain
+separate through ModelPool serialization and typed configuration conversion.
+
+This configuration boundary is not a credential grant. Member model construction
+and every actual model call still require the live host factory and independent
+member request authority. Child agents do not inherit a Team member's grant.
+Catalog tests alone do not establish Team UI, scheduling or Provider acceptance.

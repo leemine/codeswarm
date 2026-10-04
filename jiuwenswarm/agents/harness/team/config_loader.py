@@ -219,12 +219,26 @@ def _entry_model_name(entry: dict[str, Any] | None) -> str:
     return str(mcc.get("model_name") or "").strip()
 
 
+def _governed_models() -> bool:
+    from jiuwenswarm.governance.organization_auth import configured_authenticator
+    from jiuwenswarm.governance.tool_context import current_model_authorizer
+    return configured_authenticator() is not None or current_model_authorizer() is not None
+
+
+def _configured_team_models(config_base: dict[str, Any]) -> list[dict[str, Any]]:
+    if _governed_models():
+        from jiuwenswarm.governance.model_credentials import configured_model_metadata
+        return configured_model_metadata()
+    return get_default_models(config_base)
+
+
 def _select_default_model_config(
     configured_entries: list[dict[str, Any]],
     *,
     requested_model_name: str | None = None,
     login_model_entry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    governed = _governed_models()
     requested = (requested_model_name or "").strip()
     if requested:
         # When the caller (chat page) provides a requested model name, prefer
@@ -234,6 +248,10 @@ def _select_default_model_config(
         for item in configured_entries:
             if _entry_model_name(item) == requested:
                 return item
+
+        if governed:
+            from jiuwenswarm.governance.resources import ResourceAccessDenied
+            raise ResourceAccessDenied("team model is not in the host catalog")
 
         # Login-granted models are request-scoped and never written into
         # ``models.defaults``. Match the forwarded entry by name so a
@@ -254,6 +272,9 @@ def _select_default_model_config(
     if configured_entries:
         return configured_entries[0]
 
+    if governed:
+        from jiuwenswarm.governance.resources import ResourceAccessDenied
+        raise ResourceAccessDenied("team host model catalog is empty")
     return {}
 
 
@@ -265,7 +286,7 @@ def _resolve_default_model_config(
 ) -> dict[str, Any]:
     """Resolve the selected model from normalized executable entries."""
     return _select_default_model_config(
-        get_default_models(config_base),
+        _configured_team_models(config_base),
         requested_model_name=requested_model_name,
         login_model_entry=login_model_entry,
     )
@@ -349,7 +370,7 @@ def get_effective_team_model_entries(
     login_model_entry: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Return configured models plus the effective page-selected model."""
-    configured_entries = get_default_models(config_base)
+    configured_entries = _configured_team_models(config_base)
     selected_entry = _select_default_model_config(
         configured_entries,
         requested_model_name=requested_model_name,
@@ -435,6 +456,29 @@ def _build_agent_spec_dict(
     return merged
 
 
+def _bind_governed_member_models(agents: dict, entries: list[dict]) -> None:
+    """Keep each member's explicit catalog binding without carrying a secret.
+
+    A role's inline key is never a grant. Preserve its request settings, but
+    replace client material with the unique catalog metadata for its binding.
+    Actual credential authorization still belongs to each model invocation.
+    """
+    from jiuwenswarm.governance.model_credentials import ModelCredentialBinding
+    from jiuwenswarm.governance.resources import ResourceAccessDenied
+    try:
+        catalog = [(ModelCredentialBinding.from_config(entry["model_client_config"]), entry)
+                   for entry in entries]
+        for agent in agents.values():
+            model = agent["model"]
+            binding = ModelCredentialBinding.from_config(model["model_client_config"])
+            matches = [entry for candidate, entry in catalog if candidate == binding]
+            if len(matches) != 1 or model["model_request_config"].get("model") != binding.model:
+                raise ResourceAccessDenied("team member model catalog binding unavailable")
+            model["model_client_config"] = deepcopy(matches[0]["model_client_config"])
+    except Exception:
+        raise ResourceAccessDenied("team member model catalog binding unavailable") from None
+
+
 def _build_agents_config(
     team_raw: dict[str, Any],
     config_base: dict[str, Any],
@@ -511,6 +555,8 @@ def _build_agents_config(
             completion_timeout=completion_timeout,
         )
 
+    if _governed_models():
+        _bind_governed_member_models(agents, _configured_team_models(config_base))
     return agents
 
 
