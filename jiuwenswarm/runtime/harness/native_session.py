@@ -1450,7 +1450,12 @@ class NativeExecutionSession:
                 and entry.result is not None
                 and not entry.result.done()
             ):
-                entry.result.cancel()
+                if entry.readmission is not None and event.event.kind is not TurnEventKind.ABORTED:
+                    # A denied/failed admission did not cancel its submitting
+                    # producer. Preserve a visible failure for Runtime/UI.
+                    entry.result.set_exception(HarnessStateError("Native Goal readmission ended without an accepted result"))
+                else:
+                    entry.result.cancel()
             if event.turn_id in self._goal_handoffs:
                 self._goal_handoffs.discard(event.turn_id)
                 if event.event.kind is TurnEventKind.FINISHED:

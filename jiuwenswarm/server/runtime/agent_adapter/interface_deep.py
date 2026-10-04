@@ -13455,10 +13455,25 @@ class JiuWenSwarmDeepAdapter:
         native = self._native_execution
         owned = {}
         if getattr(native, "_require_execution_origin", False):
+            if action == "resume":
+                from jiuwenswarm.runtime.context import get_current_runtime
+                from jiuwenswarm.runtime.native_goal_readmission import submit_readmission
+                return await submit_readmission(get_current_runtime(), request, self, inputs, action="resume")
             owned["request"] = SendInputRequest(
                 request_id=request.request_id, inputs=inputs,
             )
         return await native.submit_goal(action, **owned, **kwargs)
+
+    async def _attach_native_goal_request(self, request, inputs):
+        """Explicit idle attachment gets its own Runtime admission."""
+        native = self._native_execution
+        if getattr(native, "_require_execution_origin", False):
+            from jiuwenswarm.runtime.context import get_current_runtime
+            from jiuwenswarm.runtime.native_goal_readmission import submit_readmission
+            receipt, result = await submit_readmission(get_current_runtime(), request, self, inputs, action="attach")
+            await result
+            return receipt
+        return await native.attach_goal()
 
     async def _attach_and_send_inputs(
         self,
@@ -15575,7 +15590,7 @@ class JiuWenSwarmDeepAdapter:
                 else:
                     from openjiuwen.harness_protocol import DeliveryMode
 
-                    receipt = await native_execution.attach_goal()
+                    receipt = await self._attach_native_goal_request(request, inputs)
                     if receipt.accepted_mode is not DeliveryMode.STEER:
                         interaction_stream = _NativeTurnOutput(
                             native_execution, receipt.turn_id
@@ -16771,7 +16786,7 @@ class JiuWenSwarmDeepAdapter:
                 else:
                     from openjiuwen.harness_protocol import DeliveryMode
 
-                    receipt = await native_execution.attach_goal()
+                    receipt = await self._attach_native_goal_request(request, inputs)
                     if receipt.accepted_mode is not DeliveryMode.STEER:
                         interaction_stream = _NativeTurnOutput(
                             native_execution, receipt.turn_id
