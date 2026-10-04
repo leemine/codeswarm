@@ -24,6 +24,10 @@ Safe continuation options now report the validated target Provider instead of
 hardcoding Native. The existing profile/model fields, final delivery checks,
 creation token claim and owner-sidecar publication are reused unchanged. No
 credential reference, endpoint or seed is added to options or result payloads.
+The frontend options decoder accepts only the supported `native` and `opencode`
+Provider ids. Both use the original project/profile/model selector and exact
+returned tuple; Codex and unknown Provider ids are rejected. The frontend does
+not infer capability, substitute profiles, or authorize an omitted candidate.
 
 ## Seed consumption
 
@@ -73,3 +77,12 @@ locked-source pairing, affected stable checks and ordinary independent-login UI
 continuation/seed/model story are required before marking this slice accepted.
 Team, Codex's mandatory native-tool blocker, complete activity recovery and
 remote deployment remain separate and are not closed by this change.
+
+The first real B3 UI attempt on swarm `29fdfea4` / core `835d9ebb` reached a
+successful OpenCode options RPC but exposed the frontend's Native-only decoder.
+It stopped before target creation or any model/CLI operation; owned services
+were cleaned. The decoder follow-up includes actual API decoding and the
+existing selector component submitting an OpenCode tuple, plus Native and
+unknown/Codex rejection regressions. That fix still requires a rebuilt,
+integrated candidate and rerun of the ordinary UI story; component/build checks
+do not replace it.

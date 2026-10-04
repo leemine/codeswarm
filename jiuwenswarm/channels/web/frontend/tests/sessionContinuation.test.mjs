@@ -140,8 +140,12 @@ test('options exact wire method and tuple whitelist; injected secret/unknown row
     assert.deepEqual(await sessionSharingApi.continuationOptions({ ...params, credentials: 'never' }), [option]);
     assert.equal(calls[0][0], 'session.share.continuation.options');
     assert.deepEqual(calls[0][1], params);
+    const openCode = { ...option, execution_profile_id: 'host-opencode', provider_id: 'opencode' };
+    response = { ...params, options: [option, openCode] };
+    assert.deepEqual(await sessionSharingApi.continuationOptions(params), [option, openCode]);
     for (const patch of [
-      { provider_id: 'opencode' },
+      { provider_id: 'codex' },
+      { provider_id: 'unknown' },
       { model_name: 'same-name' },
       { api_key: 'synthetic-secret' },
       { mode: 'team.work.normal' },
@@ -157,6 +161,44 @@ test('options exact wire method and tuple whitelist; injected secret/unknown row
     await assert.rejects(sessionSharingApi.continuationOptions(params));
   } finally {
     webClient.request = original;
+  }
+});
+
+test('original selector decodes and submits an explicit OpenCode option through actual APIs', async () => {
+  const openCode = { ...option, execution_profile_id: 'host-opencode', provider_id: 'opencode' };
+  const calls = [];
+  let opened;
+  await mount({
+    onContinued: async (...args) => {
+      opened = args;
+    },
+  });
+  sessionSharingApi.continuationOptions = originalApi.continuationOptions;
+  webClient.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === 'session.share.continuation.options') return { ...params, options: [openCode] };
+    assert.equal(method, 'session.share.continue');
+    return { ...responseFor(params), execution_profile_id: openCode.execution_profile_id };
+  };
+  try {
+    await choose();
+    assert.equal(find('multi-session-continuation-error'), null);
+    assert.equal(
+      find('multi-session-continuation-option').value,
+      JSON.stringify([openCode.execution_profile_id, openCode.mode, openCode.model_name]),
+    );
+    assert.equal(find('multi-session-continuation-submit').disabled, false);
+    await click('multi-session-continuation-submit');
+    assert.deepEqual(
+      calls.map(({ method }) => method),
+      ['session.share.continuation.options', 'session.share.continue'],
+    );
+    assert.equal(calls[1].params.execution_profile_id, openCode.execution_profile_id);
+    assert.equal(calls[1].params.model_name, openCode.model_name);
+    assert.equal(opened[0].session_id, 'new-private');
+    assert.equal(opened[1].execution_profile_id, openCode.execution_profile_id);
+  } finally {
+    await unmount();
   }
 });
 

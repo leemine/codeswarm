@@ -7,7 +7,7 @@ export interface ContinuationOptionsInput extends SharedSessionTarget {
 }
 export interface ContinuationOption {
   execution_profile_id: string;
-  provider_id: 'native';
+  provider_id: 'native' | 'opencode';
   mode: 'agent.work.normal' | 'agent.code.normal';
   model_name: string;
   label: string;
@@ -391,7 +391,7 @@ export const sessionSharingApi = {
         (option) =>
           !onlyKeys(option, ['execution_profile_id', 'provider_id', 'mode', 'model_name', 'label']) ||
           !validText(option.execution_profile_id) ||
-          option.provider_id !== 'native' ||
+          (option.provider_id !== 'native' && option.provider_id !== 'opencode') ||
           !validMode(option.mode) ||
           !validText(option.model_name) ||
           !/^.+#\d+$/.test(option.model_name) ||
