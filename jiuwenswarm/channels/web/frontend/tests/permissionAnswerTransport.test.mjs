@@ -42,7 +42,7 @@ after(() => dom.window.close());
 
 const { useWebSocket } = await import('../node_modules/.cache/permission-answer-transport/hooks/useWebSocket.js');
 const { AuthorizationPrompt } = await import('../node_modules/.cache/permission-answer-transport/components/InteractionSlot/AuthorizationPrompt.js');
-const { useChatStore, useSessionStore } = await import('../node_modules/.cache/permission-answer-transport/stores/index.js');
+const { useChatStore, useSessionStore, useSubagentStore } = await import('../node_modules/.cache/permission-answer-transport/stores/index.js');
 const { default: i18n } = await import('../node_modules/.cache/permission-answer-transport/i18n/index.js');
 const { webClient } = await import('../node_modules/.cache/permission-answer-transport/services/webClient.js');
 const { evaluatePlanToggle } = await import('../node_modules/.cache/permission-answer-transport/features/planMode/planModeGate.js');
@@ -83,6 +83,7 @@ async function mounted(run) {
     await webClient.disconnect();
     useChatStore.getState().removeRuntime(sessionId);
     useSessionStore.getState().removeRuntime(sessionId);
+    useSubagentStore.getState().removeRuntime(sessionId);
   }
 }
 const prompt = () => document.querySelector('[data-testid="interaction-slot-auth-prompt"]');
@@ -244,3 +245,120 @@ for (const source of ['confirm_interrupt', 'ask_user_interrupt']) {
       assert.equal(prompt(), null);
     }));
 }
+
+async function prepareCancellation(socket) {
+  await deliver(socket, payload());
+  await act(async () => {
+    const chat = useChatStore.getState();
+    chat.setProcessing(sessionId, true);
+    chat.setThinking(sessionId, true);
+    chat.addMessage(sessionId, { id: 'live-answer', role: 'assistant', content: 'Running', timestamp: 'now' });
+    chat.startStreaming(sessionId, 'live-answer');
+    chat.addToTaskQueue(sessionId, 'next queued task');
+    chat.setQueuePaused(sessionId, true);
+    useSubagentStore.getState().ensureRuntime(sessionId);
+    useSubagentStore.getState().applyEvent(sessionId, {
+      event_type: 'chat.subtask_update',
+      session_id: sessionId,
+      subagent: {
+        subagent_id: 'child',
+        parent_session_id: sessionId,
+        subagent_type: 'worker',
+        display_name: 'Child',
+        role: 'worker',
+        task_description: 'working',
+        status: 'running',
+        turn_outcome: null,
+        lifecycle: 'live',
+        can_send_input: true,
+        needs_resume: false,
+        closed_at: null,
+        closed_reason: null,
+        error: null,
+        created_at: Date.now(),
+        updated_at: Date.now(),
+        revision: 1,
+      },
+    });
+  });
+}
+function assertCancellationPending() {
+  const runtime = useChatStore.getState().getRuntime(sessionId);
+  assert.equal(runtime.isProcessing, true);
+  assert.equal(runtime.isThinking, true);
+  assert.equal(runtime.currentStreamId, 'live-answer');
+  assert.equal(runtime.pendingQuestions.length, 1);
+  assert.equal(runtime.taskQueue.length, 1);
+  assert.equal(runtime.queuePaused, true);
+  assert.equal(useSubagentStore.getState().getRuntime(sessionId).subagentsById.child.status, 'running');
+}
+async function cancelResult(socket, success) {
+  await act(async () =>
+    socket.receive({
+      type: 'event',
+      event: 'chat.interrupt_result',
+      payload: { session_id: sessionId, intent: 'cancel', ...(success === undefined ? {} : { success }) },
+    }),
+  );
+}
+
+test('cancel receipt and unsuccessful/unknown results preserve live state; confirmed retry settles it', async () =>
+  mounted(async ({ socket, observed }) => {
+    await prepareCancellation(socket);
+    let pending;
+    await act(async () => {
+      pending = observed.api.cancel(sessionId);
+    });
+    const first = socket.requests.at(-1);
+    assert.equal(first.method, 'chat.interrupt');
+    await respond(socket, first); // Production legacy receipt has accepted, not success.
+    await pending;
+    assertCancellationPending();
+    for (const success of [false, undefined, 'true']) {
+      await cancelResult(socket, success);
+      assertCancellationPending();
+    }
+    await act(async () => {
+      pending = observed.api.cancel(sessionId);
+    });
+    const retry = socket.requests.at(-1);
+    assert.notEqual(retry.id, first.id);
+    await respond(socket, retry);
+    await pending;
+    assertCancellationPending();
+    await cancelResult(socket, true);
+    const runtime = useChatStore.getState().getRuntime(sessionId);
+    assert.equal(runtime.isProcessing, false);
+    assert.equal(runtime.isThinking, false);
+    assert.equal(runtime.currentStreamId, null);
+    assert.equal(runtime.pendingQuestions.length, 0);
+    assert.equal(runtime.taskQueue.length, 1);
+    assert.equal(runtime.queuePaused, true);
+    assert.equal(useSubagentStore.getState().getRuntime(sessionId).subagentsById.child.turn_outcome, 'cancelled');
+    assert.equal(socket.requests.length, 2, 'confirmed cancel never drains pending chat');
+  }));
+
+for (const [name, ok, response] of [
+  ['RPC error', false, { success: true }],
+  ['negative success', true, { success: false }],
+  ['missing success', true, {}],
+  ['legacy explicit success', true, { success: true }],
+])
+  test(`cancel unary ${name} distinguishes receipt from confirmed success`, async () =>
+    mounted(async ({ socket, observed }) => {
+      await prepareCancellation(socket);
+      let pending;
+      await act(async () => {
+        pending = observed.api.cancel(sessionId);
+      });
+      await act(async () => socket.receive({ type: 'res', id: socket.requests.at(-1).id, ok, payload: response }));
+      await pending;
+      if (ok && response.success === true) {
+        assert.equal(useSubagentStore.getState().getRuntime(sessionId).subagentsById.child.turn_outcome, 'cancelled');
+        assert.equal(
+          useChatStore.getState().getRuntime(sessionId).isProcessing,
+          true,
+          'stream settles only on result event',
+        );
+      } else assertCancellationPending();
+    }));

@@ -2013,7 +2013,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const selectedModel = useSessionStore.getState().getEffectiveModelName(sessionId);
           if (selectedModel) params.model_name = selectedModel;
         }
-        await request('chat.interrupt', params);
+        const result = await request<{ success?: unknown } | null>('chat.interrupt', params);
+        // The legacy Gateway acknowledges receipt with accepted:true. Cancellation
+        // is confirmed separately by interrupt_result; receipt alone is not exit.
+        if (intent === 'cancel') return result?.success === true;
         if (intent === 'supplement') {
           // 成功发出后才消费 explicit-entry 标记（与 sendMessage 一致），失败时保留以便重试。
           consumePlanEntryMark(sessionId, String(params.mode));
@@ -4447,6 +4450,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             }
           }
         } else if (resultPayload.intent === 'cancel') {
+          if (resultPayload.success !== true) return;
+          useSubagentStore.getState().markRunningSubagentsCancelled(sessionId);
           if (shouldClearPermissionQuestionsForLifecycleEvent('cancel', resultPayload.success)) {
             useChatStore.getState().clearPermissionQuestions(sessionId);
           }
