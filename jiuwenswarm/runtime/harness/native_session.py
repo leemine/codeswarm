@@ -104,6 +104,68 @@ class NativeOwnedTurn:
         raise TypeError("Native lifecycle references cannot be serialized")
 
 
+@dataclass(frozen=True, eq=False, repr=False)
+class NativeSteerControl:
+    """One live supplemental-input capability for an exact original Round.
+
+    This admits input only. It never replaces the original execution origin or
+    any model/tool/MCP/artifact authority, and is not a resumable wire receipt.
+    """
+
+    _native: NativeExecutionSession
+    _binding: Any
+    _owned: NativeOwnedTurn
+    _round: Any
+    _request_id: str
+    _checker: Callable[[], None]
+    _attempted: bool = False
+    _in_flight: bool = False
+
+    def check_current(self, native, request_id):
+        owned = self._owned
+        entry = owned._entry
+        pending = owned._pending
+        token = pending.content.metadata.get(_REQUEST_KEY)
+        if (native is not self._native or request_id != self._request_id
+                or native.engine.binding is not self._binding
+                or native._closing or native._closed
+                or native._native.active_turn is not pending or pending.abort_requested
+                or native._native._capture_owned_turn(owned.turn_id) is not pending
+                or entry.owned is not owned or native._requests.get(token) is not entry
+                or entry.lifecycle is None or entry.lifecycle.source is not owned.source
+                or entry.terminal_kind is not None):
+            raise PermissionError("Original Native steer target is unavailable")
+        owned.source._check_current()
+        agent = native._native.agent
+        if agent is None or agent._capture_owned_round(pending._origin) is not self._round:
+            raise PermissionError("Original Native steer Round is unavailable")
+        agent._check_owned_round(self._round)
+        if self._round.waiting_for_input:
+            raise PermissionError("Native steer cannot answer a waiting interaction")
+        _sync_callback(self._checker)
+
+    def _claim(self, native, request_id):
+        self.check_current(native, request_id)
+        if self._attempted:
+            raise PermissionError("Native steer control cannot be replayed")
+        object.__setattr__(self, "_attempted", True)
+        object.__setattr__(self, "_in_flight", True)
+
+    def _check_delivery(self, native, request_id):
+        if not self._in_flight:
+            raise PermissionError("Native steer submission has ended")
+        self.check_current(native, request_id)
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, _memo):
+        return self
+
+    def __reduce__(self):
+        raise TypeError("Native steer references cannot be serialized")
+
+
 def _sync_callback(callback, *args):
     value = callback(*args)
     if inspect.iscoroutine(value):
@@ -140,6 +202,8 @@ class _HostRequest:
     terminal_notified: bool = False
     receipt_seen: bool = False
     not_admitted: bool = False
+    steer_control: NativeSteerControl | None = field(default=None, repr=False)
+    steer_delivered: bool = False
 
 
 class NativeExecutionSession:
@@ -318,6 +382,69 @@ class NativeExecutionSession:
         self._turn_requests[turn_id] = token
         self._notify_lifecycle_bound(entry)
         return owned
+
+    def capture_steer_control(self, *, source: ExecutionOrigin, request_id: str,
+                              check_current: Callable[[], None]) -> NativeSteerControl:
+        """Capture only an exact parent source supplied by the Runtime owner."""
+        if (not self._require_execution_origin or type(source) is not ExecutionOrigin
+                or not isinstance(request_id, str) or not request_id.strip()
+                or not callable(check_current)):
+            raise PermissionError("Native steer requires an explicit host control")
+        active = self._native.active_turn
+        entry = self._active_entry()
+        if (active is None or entry is None or entry.lifecycle is None
+                or entry.lifecycle.source is not source or entry.owned is None
+                or entry.owned._pending is not active):
+            raise PermissionError("Native steer original owner does not match")
+        agent = self._native.agent
+        if agent is None or not callable(getattr(agent, "_send_owned_steer", None)):
+            raise UnsupportedHarnessCapabilityError("Native exact Round steering is unavailable")
+        target = agent._capture_owned_round(active._origin)
+        if target is None:
+            raise PermissionError("Native steer original Round is unavailable")
+        control = NativeSteerControl(self, self.engine.binding, entry.owned,
+                                     target, request_id, check_current)
+        control.check_current(self, request_id)
+        return control
+
+    async def _send_managed_steer(self, request, control):
+        if type(control) is not NativeSteerControl:
+            raise UnsupportedHarnessCapabilityError("Managed Native STEER requires an original control owner selector")
+        control._claim(self, request.request_id)
+        token = uuid.uuid4().hex
+        original = control._owned._entry
+        entry = _HostRequest(
+            request=request, steer_control=control,
+            authority=original.authority, guarded_authority=original.guarded_authority,
+            model_authority=original.model_authority, guarded_model_authority=original.guarded_model_authority,
+            mcp_authority=original.mcp_authority, guarded_mcp_authority=original.guarded_mcp_authority,
+            artifact_issuer_factory=original.artifact_issuer_factory,
+            guarded_artifact_issuer=original.guarded_artifact_issuer,
+        )
+        self._requests[token] = entry
+        content = HarnessInput(content=request.inputs["query"], metadata={_REQUEST_KEY: token})
+        async def send():
+            control._check_delivery(self, request.request_id)
+            # HarnessIOAdapter's legacy STEER->AUTO fallback must not create a
+            # replacement Turn for a managed exact-target input.
+            return await self._native.send(content, mode=DeliveryMode.STEER)
+        try:
+            receipt = (await send() if self._output_router is None
+                       else await self._output_router.submit(send))
+            if receipt.accepted_mode is not DeliveryMode.STEER or receipt.turn_id != control._owned.turn_id:
+                raise RuntimeError("Native steer returned a different original Turn")
+            control._check_delivery(self, request.request_id)
+            return receipt
+        except Exception as exc:
+            if entry.steer_delivered:
+                from jiuwenswarm.server.runtime.agent_adapter.session_input import SessionInputDeliveryUnknown
+                raise SessionInputDeliveryUnknown(
+                    "Native steer changed after submission; do not retry automatically"
+                ) from exc
+            raise
+        finally:
+            object.__setattr__(control, "_in_flight", False)
+            self._requests.pop(token, None)
 
     async def abort_owned_request_turn(self, owned: NativeOwnedTurn) -> None:
         """Wait for the original Provider barrier AND its sole observer terminal."""
@@ -700,7 +827,7 @@ class NativeExecutionSession:
                                     mcp_authorizer=entry.guarded_mcp_authority,
                                     artifact_issuer_factory=entry.guarded_artifact_issuer)
 
-    async def send_request(self, request: SendInputRequest) -> SendReceipt:
+    async def send_request(self, request: SendInputRequest, *, control: NativeSteerControl | None = None) -> SendReceipt:
         """Accept a host request without serializing its permission/context objects."""
         if isinstance(request.inputs.get("query"), InteractiveInput):
             raise ValueError("interrupt answers must use answer_request")
@@ -708,7 +835,9 @@ class NativeExecutionSession:
         if not isinstance(query, str) or not query.strip():
             raise ValueError("Native user input must be non-empty text")
         if self._require_execution_origin and request.mode is InputDispatchMode.STEER:
-            raise UnsupportedHarnessCapabilityError("Managed Native STEER requires an original control owner selector")
+            return await self._send_managed_steer(request, control)
+        if control is not None:
+            raise PermissionError("Native steer control cannot authorize another input mode")
         token = self._register_host_request(request=request)
         content = HarnessInput(content=query, metadata={_REQUEST_KEY: token})
         try:
@@ -874,6 +1003,11 @@ class NativeExecutionSession:
             raise ValueError(
                 "Native host request is missing or belongs to another execution"
             )
+        control = entry.steer_control
+        if control is not None:
+            if default_request.mode is not InputDispatchMode.STEER or resuming:
+                raise PermissionError("Native control cannot dispatch another input kind")
+            control._check_delivery(self, entry.request.request_id)
         if entry.lifecycle is not None:
             entry.lifecycle.source._check_current()
             if default_request.mode is InputDispatchMode.STEER:
@@ -902,7 +1036,17 @@ class NativeExecutionSession:
         if request is None:
             raise ValueError("Native request was already dispatched")
 
+        control_dispatched = False
         async def send_if_current(host_request):
+            nonlocal control_dispatched
+            if control is not None:
+                if control_dispatched:
+                    raise PermissionError("Native steer input cannot be dispatched twice")
+                if (host_request.request_id != request.request_id
+                        or host_request.mode is not InputDispatchMode.STEER
+                        or host_request.inputs.get("query") != content.content):
+                    raise PermissionError("Native steer input changed during admission")
+                control_dispatched = True
             active = self._native.active_turn
             if active is None or active.abort_requested:
                 raise RuntimeError(
@@ -910,23 +1054,38 @@ class NativeExecutionSession:
                 )
             if entry.lifecycle is not None:
                 entry.lifecycle.source._check_current()
-            if self._resource_governed or self._model_resource_governed or self._mcp_resource_governed or self._artifact_resource_governed:
+            if control is not None or self._resource_governed or self._model_resource_governed or self._mcp_resource_governed or self._artifact_resource_governed:
                 inputs = dict(host_request.inputs)
                 run = dict(inputs.get('run') or {})
                 context = dict(run.get('context') or {})
                 context.pop(_REQUEST_KEY, None)
                 extra = dict(context.get('extra') or {})
-                extra[_REQUEST_KEY] = token
+                extra[_REQUEST_KEY] = (control._owned._pending.content.metadata[_REQUEST_KEY]
+                                       if control is not None else token)
                 context['extra'] = extra
                 run['context'] = context
                 inputs['run'] = run
                 host_request = replace(host_request, inputs=inputs)
-            await agent.send_input(host_request)
+            if control is not None:
+                control._check_delivery(self, host_request.request_id)
+                sender = getattr(agent, "_send_owned_steer", None)
+                if not callable(sender):
+                    raise UnsupportedHarnessCapabilityError("Native exact Round steering is unavailable")
+                await sender(control._round, host_request,
+                             check_current=lambda: control._check_delivery(self, host_request.request_id))
+                entry.steer_delivered = True
+                control._check_delivery(self, host_request.request_id)
+            else:
+                await agent.send_input(host_request)
 
         if self._dispatch_guard is None:
             await send_if_current(request)
         else:
             await self._dispatch_guard(request, send=send_if_current)
+        if control is not None:
+            if not control_dispatched:
+                raise PermissionError("Native steer input was not dispatched")
+            control._check_delivery(self, request.request_id)
         if default_request.mode is InputDispatchMode.STEER:
             self._requests.pop(token, None)
         return True

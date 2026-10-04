@@ -181,6 +181,41 @@ class RuntimeSessionCoordinator:
         return NativeRequestLifecycle(admission.source, admission.bind, admission.terminal,
                                       on_not_admitted=admission.not_admitted)
 
+    def native_session_input_admission(self, session_id, request_id):
+        """Capture the actual supplemental producer and its original parent."""
+        record = self._require_open_session(session_id)
+        matches = self._registry.select(session_id=session_id, request_id=request_id,
+            generation=record.generation, active_only=True)
+        task = asyncio.current_task()
+        if (len(matches) != 1 or matches[0].work_kind is not SessionWorkKind.SESSION_INPUT
+                or task is None or matches[0].task is not task):
+            raise SessionExecutionEndedError('original supplemental input unavailable')
+        handle = matches[0]
+        parent = self.native_execution_owner(session_id, request_id)
+        admission = parent._native_admission
+        if admission is None:
+            return None  # Existing non-managed inputs keep their original path.
+        principal = handle._execution_authority
+        identity = principal.identity() if principal is not None else None
+
+        def check():
+            if (self._sessions.get(session_id) is not record
+                    or self._registry.get(handle.execution_id) is not handle
+                    or self._registry.get(parent.execution_id) is not parent
+                    or record.generation != handle.generation
+                    or record.state in {RuntimeSessionState.CLOSED, RuntimeSessionState.QUIESCING}
+                    or handle.parent_execution_id != parent.execution_id
+                    or handle.task is not task or task.done() or task.cancelling()
+                    or handle.state.terminal or handle.cancellation_requested
+                    or handle._execution_authority is not principal
+                    or parent._native_admission is not admission):
+                raise SessionExecutionEndedError('original supplemental input ended')
+            if principal is not None and principal.identity() != identity:
+                raise SessionExecutionEndedError('supplemental credential changed')
+            admission.check_current()
+        check()
+        return admission, check
+
     async def _revalidate_native_authorities(self, record):
         stopping, failures, timed_out = [], [], []
         for handle in self._registry.select(session_id=record.session_id,
