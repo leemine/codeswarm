@@ -187,3 +187,28 @@ The initial target selector supports configured Native normal Single with empty
 provider configuration and API-key OpenAI Chat Completions metadata only. This
 does not open Codex/OpenCode continuation, Team continuation, autonomous child
 models, full activity restoration, Swarmflow or remote deployment.
+
+
+## Owner cleanup after source revocation (integration slice)
+
+The cleanup-only owner stamp does not call the continuation source grant, project
+read/execute ACL, or general owner view authority. It pins the original full
+trusted identity, owner revision, source epoch, target binding and lifecycle
+facts. Only pure cancel parameters use this decision. Pause, resume, supplement,
+history, tools, model calls, sharing and downloads retain their normal gates.
+
+AgentServer captures the cleanup request before awaited dispatch. Runtime pins
+the original Coordinator generation and executions and refuses a newer Turn.
+It does not resolve an Agent from project/mode hints or create one for cleanup.
+An optional resource-release phase on the original Coordinator close keeps the
+Session QUIESCING until the existing cached Native owner stops and its recorded
+owned tasks have exited. Concurrent closers join that close; caller cancellation
+cannot abandon it; timeout/failure keeps the fence and cached owner for retry.
+Only then may the original binding/cache bookkeeping be released and an
+`exit_confirmed` cancellation success be returned. This is not a new scheduler.
+
+This slice still needs Gateway/UI integration and exact full validation. Native
+strict host task drainage compensates for the presently observed core scheduler
+stop not joining each execution task; it does not claim a core fix. Other Provider
+strict stop ports, automatic active revocation propagation, permanent-delete
+completion receipts, and the full R2-B4 acceptance story remain open.

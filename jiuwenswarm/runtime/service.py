@@ -1703,6 +1703,11 @@ class AgentRuntime:
             **prepare_kwargs,
         )
 
+    def prepare_session_cleanup(self, request):
+        """Pin owner and execution facts before a host awaits dispatch."""
+        from jiuwenswarm.runtime.session_cleanup import capture_cleanup
+        return capture_cleanup(self, request)
+
     async def cancel_request(
         self,
         request: AgentRequest,
@@ -1715,6 +1720,12 @@ class AgentRuntime:
         # Agent only needs the manager that is already constructed in __init__;
         # forcing start() here would wait on the lifecycle lock and defeat the
         # no-Agent fast-success path used by ESC during first-agent creation.
+        cleanup = self.prepare_session_cleanup(request)
+        if cleanup is not None:
+            if allow_create:
+                raise GovernanceError("cleanup cannot create an Agent")
+            from jiuwenswarm.runtime.session_cleanup import cancel_owned_session
+            return await cancel_owned_session(self, request, cleanup)
         if allow_create:
             # Agent creation can touch Runner/checkpointer-backed resources and
             # therefore retains the normal lifecycle barrier.  Only the

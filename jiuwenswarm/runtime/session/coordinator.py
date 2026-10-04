@@ -45,6 +45,7 @@ class _SessionRecord:
     external_execution: bool = False
     external_owner: str | None = None
     execution_changed: asyncio.Event = field(default_factory=asyncio.Event)
+    resource_close_task: asyncio.Task | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.control_ready.set()
@@ -857,6 +858,51 @@ class RuntimeSessionCoordinator:
         *,
         generation: int | None = None,
         wait_timeout: float | None = None,
+        release_resources: Callable[[], Awaitable[None]] | None = None,
+    ) -> CloseSessionResult:
+        """Close the original generation, keeping admission fenced during release.
+
+        A resource release belongs to the existing close operation. Concurrent
+        closers join it, and cancelling a caller cannot reopen admission while
+        Provider exit remains unconfirmed. Failed release leaves QUIESCING for
+        a subsequent explicit retry.
+        """
+        record = self._sessions.get(session_id)
+        if record is None or (generation is not None and record.generation != generation):
+            return CloseSessionResult(session_id, generation, False)
+        pending = record.resource_close_task
+        if pending is not None and not pending.done():
+            if pending is asyncio.current_task():
+                raise RuntimeError("recursive Session resource close")
+            return await asyncio.shield(pending)
+        if release_resources is None:
+            if pending is not None:
+                return await asyncio.shield(pending)
+            return await self._close_session(session_id, generation=generation, wait_timeout=wait_timeout)
+
+        async def close_resources():
+            result = await self._close_session(
+                session_id, generation=record.generation, wait_timeout=wait_timeout,
+                defer_closed=True,
+            )
+            if result.timed_out:
+                return result
+            await release_resources()
+            if self._sessions.get(session_id) is not record:
+                raise RuntimeError("Session generation changed during resource release")
+            record.state = RuntimeSessionState.CLOSED
+            return result
+
+        # Fence synchronously, before this new task can yield to admission.
+        record.state = RuntimeSessionState.QUIESCING
+        task = asyncio.create_task(close_resources())
+        record.resource_close_task = task
+        task.add_done_callback(self._consume_task)
+        return await asyncio.shield(task)
+
+    async def _close_session(
+        self, session_id: str, *, generation: int | None = None,
+        wait_timeout: float | None = None, defer_closed: bool = False,
     ) -> CloseSessionResult:
         record = self._sessions.get(session_id)
         if record is None or (generation is not None and record.generation != generation):
@@ -908,7 +954,8 @@ class RuntimeSessionCoordinator:
                 True,
                 tuple(dict.fromkeys(timed_out)),
             )
-        if self._sessions.get(session_id) is record:
+        if (self._sessions.get(session_id) is record and not defer_closed
+                and record.resource_close_task is None):
             record.state = RuntimeSessionState.CLOSED
         return CloseSessionResult(session_id, target_generation, True)
 

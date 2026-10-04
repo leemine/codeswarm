@@ -2403,6 +2403,7 @@ class AgentWebSocketServer:
         _strip_untrusted_session_message_context(request)
 
         from jiuwenswarm.governance.organization_auth import configured_authenticator
+        permit = None
         if configured_authenticator() is not None:
             from jiuwenswarm.governance.session_boundary import admit_session_request, set_delivery_permit
             try:
@@ -2415,6 +2416,8 @@ class AgentWebSocketServer:
                     host=host, envelope_session=(request.session_id if (request.params or {}).get("session_id") else None),
                 )
                 set_delivery_permit(permit)
+                if permit.cleanup is not None:
+                    self._execution_runtime().prepare_session_cleanup(request)
             except Exception:
                 response = AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
                     ok=False, payload={"code": "FORBIDDEN", "error": "Session authorization denied."})
@@ -2449,7 +2452,10 @@ class AgentWebSocketServer:
             )
 
             try:
-                authorize_resource_request(request, self._resolve_trusted_identity(request))
+                if permit is None:
+                    authorize_resource_request(request, self._resolve_trusted_identity(request))
+                else:
+                    authorize_resource_request(request, self._resolve_trusted_identity(request), session_permit=permit)
             except ProjectAccessDenied as exc:
                 response = AgentResponse(
                     request_id=request.request_id,
@@ -2821,6 +2827,12 @@ class AgentWebSocketServer:
                 await self._handle_agents_tools_list(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.CHAT_CANCEL:
+                if permit is not None and permit.cleanup is not None:
+                    # Runtime stops only the captured generation and confirms
+                    # Provider resource exit. Never cancel every transport
+                    # stream by Session ID before this authority is consumed.
+                    await self._handle_cancel(ws, request, send_lock, allow_create=False)
+                    return
                 # 中断请求：根据 intent 决定是否取消流式任务
                 sid = request.session_id or "default"
                 intent = request.params.get("intent", "cancel") if isinstance(request.params, dict) else "cancel"
