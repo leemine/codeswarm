@@ -1804,6 +1804,8 @@ class RuntimeSessionProvisioner:
         session_id: str,
         quiesce_session: Callable[..., Awaitable[None]],
         dispose_session: Callable[..., Awaitable[None]],
+        _cleanup_guard: Callable[[], None] | None = None,
+        _cleanup_descriptor: dict | None = None,
     ) -> SessionDeleteResult:
         target = str(session_id or "").strip()
         if not target:
@@ -1813,11 +1815,15 @@ class RuntimeSessionProvisioner:
                 message="session_id is required",
             )
         async with session_delete_lock(target):
+            if _cleanup_guard is not None:
+                _cleanup_guard()
             return await self._delete_session_locked(
                 channel_id=channel_id,
                 session_id=target,
                 quiesce_session=quiesce_session,
                 dispose_session=dispose_session,
+                _cleanup_guard=_cleanup_guard,
+                _cleanup_descriptor=_cleanup_descriptor,
             )
 
     async def _delete_session_locked(
@@ -1827,6 +1833,8 @@ class RuntimeSessionProvisioner:
         session_id: str,
         quiesce_session: Callable[..., Awaitable[None]],
         dispose_session: Callable[..., Awaitable[None]],
+        _cleanup_guard: Callable[[], None] | None = None,
+        _cleanup_descriptor: dict | None = None,
     ) -> SessionDeleteResult:
         """Delete one Session while preserving the established transaction."""
         target = str(session_id or "").strip()
@@ -1885,10 +1893,14 @@ class RuntimeSessionProvisioner:
         # taking a snapshot also prevents a concurrent host reconfiguration
         # from pairing one lifecycle's begin with another one's abort/commit.
         delete_lifecycle = self._delete_lifecycle
+        if _cleanup_guard is not None:
+            _cleanup_guard()
         checkpoint_error = await self._ensure_delete_dependencies(
             target,
             delete_lifecycle=delete_lifecycle,
         )
+        if _cleanup_guard is not None:
+            _cleanup_guard()
         if checkpoint_error is not None:
             return checkpoint_error
 
@@ -1897,9 +1909,8 @@ class RuntimeSessionProvisioner:
             get_session_metadata,
         )
 
-        metadata = get_session_metadata(target) or delete_operation.get(
-            "delete_metadata", {}
-        )
+        metadata = (dict(_cleanup_descriptor) if _cleanup_guard is not None
+                    else get_session_metadata(target) or delete_operation.get("delete_metadata", {}))
         if recovering_delete and not delete_operation.get("delete_metadata"):
             lifecycle_update("session", target, delete_metadata=metadata)
         is_team_session = is_team_mode(metadata.get("mode"))
@@ -1933,6 +1944,8 @@ class RuntimeSessionProvisioner:
         participants = self._participant_registry.snapshot_delete()
         entered_participants = []
         for participant in participants:
+            if _cleanup_guard is not None:
+                _cleanup_guard()
             entered_participants.append(participant)
             try:
                 await participant.before_delete(delete_target)
@@ -1951,6 +1964,8 @@ class RuntimeSessionProvisioner:
                     target,
                     exc,
                 )
+            if _cleanup_guard is not None:
+                _cleanup_guard()
 
         trajectory_prepared = False
         lifecycle_prepared = False
@@ -1963,11 +1978,17 @@ class RuntimeSessionProvisioner:
             # Team and single-agent sessions both own a trajectory database.
             # Draining the ingress joins that session's writer threads, so it
             # must not run on the event loop.
+            if _cleanup_guard is not None:
+                _cleanup_guard()
             await asyncio.to_thread(begin_trajectory_session_delete, target)
             trajectory_prepared = True
+            if _cleanup_guard is not None:
+                _cleanup_guard()
             if delete_lifecycle is not None:
                 await delete_lifecycle.begin_session_delete(target)
                 lifecycle_prepared = True
+                if _cleanup_guard is not None:
+                    _cleanup_guard()
 
             if not session_dir.exists() and recovering_delete:
                 deleted = True
@@ -1982,7 +2003,10 @@ class RuntimeSessionProvisioner:
                 await self._release_participants(
                     tuple(entered_participants),
                     delete_target,
+                    _cleanup_guard=_cleanup_guard,
                 )
+                if _cleanup_guard is not None:
+                    _cleanup_guard()
                 destructive_started = True
                 await team_controller.dispose_after_resource_release(
                     delete_target,
@@ -1997,7 +2021,10 @@ class RuntimeSessionProvisioner:
                 await self._release_participants(
                     tuple(entered_participants),
                     delete_target,
+                    _cleanup_guard=_cleanup_guard,
                 )
+                if _cleanup_guard is not None:
+                    _cleanup_guard()
                 destructive_started = True
                 await dispose_session(
                     channel_id=result.channel_id or "",
@@ -2005,10 +2032,18 @@ class RuntimeSessionProvisioner:
                 )
                 from openjiuwen.core.runner import Runner
 
+                if _cleanup_guard is not None:
+                    _cleanup_guard()
                 await Runner.release(result.session_id)
+                if _cleanup_guard is not None:
+                    _cleanup_guard()
                 deleted = True
             if deleted and session_dir.exists():
+                if _cleanup_guard is not None:
+                    _cleanup_guard()
                 shutil.rmtree(session_dir)
+                if _cleanup_guard is not None:
+                    _cleanup_guard()
             if deleted and recovering_delete:
                 lifecycle_update("session", target, phase="cleanup")
         except BaseException as exc:
@@ -2072,7 +2107,10 @@ class RuntimeSessionProvisioner:
                 trajectory_prepared=trajectory_prepared,
                 lifecycle_prepared=lifecycle_prepared,
                 delete_lifecycle=delete_lifecycle,
+                _cleanup_guard=_cleanup_guard,
             )
+            if _cleanup_guard is not None:
+                _cleanup_guard()
             committed_result = SessionDeleteResult(
                 ok=True,
                 session_id=result.session_id,
@@ -2082,6 +2120,9 @@ class RuntimeSessionProvisioner:
                 deleted=True,
             )
             self.commit_session_delete(committed_result)
+            if _cleanup_guard is not None:
+                await self._notify_delete_committed(
+                    tuple(entered_participants), delete_target, _cleanup_guard=_cleanup_guard)
             if team_controller is not None:
                 team_controller.delete_committed(delete_target)
         except asyncio.CancelledError:
@@ -2112,10 +2153,11 @@ class RuntimeSessionProvisioner:
                 is_team=result.is_team,
                 team_name=result.team_name,
             )
-        await self._notify_delete_committed(
-            tuple(entered_participants),
-            delete_target,
-        )
+        if _cleanup_guard is None:
+            await self._notify_delete_committed(
+                tuple(entered_participants),
+                delete_target,
+            )
         self._completed_session_deletes[target] = committed_result
         return committed_result
 
@@ -2616,11 +2658,16 @@ class RuntimeSessionProvisioner:
     async def _release_participants(
         participants: tuple[object, ...],
         target: SessionLifecycleTarget,
+        *, _cleanup_guard: Callable[[], None] | None = None,
     ) -> None:
         for participant in participants:
+            if _cleanup_guard is not None:
+                _cleanup_guard()
             try:
                 await participant.release_resources(target)
             except Exception as exc:
+                if _cleanup_guard is not None:
+                    raise
                 logger.warning(
                     "Runtime delete participant release failed: "
                     "participant=%s session_id=%s error=%s",
@@ -2628,6 +2675,8 @@ class RuntimeSessionProvisioner:
                     target.descriptor.session_id,
                     exc,
                 )
+            if _cleanup_guard is not None:
+                _cleanup_guard()
 
     @staticmethod
     async def _notify_delete_failed(
@@ -2655,11 +2704,16 @@ class RuntimeSessionProvisioner:
     async def _notify_delete_committed(
         participants: tuple[object, ...],
         target: SessionLifecycleTarget,
+        *, _cleanup_guard: Callable[[], None] | None = None,
     ) -> None:
         for participant in participants:
+            if _cleanup_guard is not None:
+                _cleanup_guard()
             try:
                 await participant.delete_committed(target)
             except Exception as exc:
+                if _cleanup_guard is not None:
+                    raise
                 logger.warning(
                     "Runtime delete participant commit notification failed: "
                     "participant=%s session_id=%s error=%s",
@@ -2667,6 +2721,8 @@ class RuntimeSessionProvisioner:
                     target.descriptor.session_id,
                     exc,
                 )
+            if _cleanup_guard is not None:
+                _cleanup_guard()
 
     async def _commit_delete_observers(
         self,
@@ -2675,7 +2731,10 @@ class RuntimeSessionProvisioner:
         trajectory_prepared: bool,
         lifecycle_prepared: bool,
         delete_lifecycle: SessionDeleteLifecycle | None,
+        _cleanup_guard: Callable[[], None] | None = None,
     ) -> None:
+        if _cleanup_guard is not None:
+            _cleanup_guard()
         if trajectory_prepared:
             try:
                 from jiuwenswarm.observability.session_delete import (
@@ -2695,6 +2754,8 @@ class RuntimeSessionProvisioner:
                     exc,
                 )
                 raise
+        if _cleanup_guard is not None:
+            _cleanup_guard()
         if lifecycle_prepared and delete_lifecycle is not None:
             try:
                 await delete_lifecycle.commit_session_delete(

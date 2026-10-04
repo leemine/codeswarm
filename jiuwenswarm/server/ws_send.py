@@ -147,3 +147,31 @@ async def send_service_ready(ws: Any, *, heartbeat_protocol: int, heartbeat_read
         "status": "ready", "heartbeat_job_owner": "agentserver",
         "heartbeat_job_protocol": heartbeat_protocol, "heartbeat_job_ready": heartbeat_ready,
     }}))
+
+
+async def send_deletion_result(ws: Any, *, authority, request) -> bool:
+    """Send only a confirmed, content-free result of the original Single delete.
+
+    The normal owner permit correctly becomes invalid after retirement. This
+    sink checks that same permit's exact durable deletion facts; it is not a
+    generic permission exemption for responses or Session events.
+    """
+    from jiuwenswarm.runtime.session_delete_authority import OwnedSessionDeletion
+    allowed = False
+    try:
+        if type(authority) is OwnedSessionDeletion and authority.request is request:
+            authority.acknowledge()
+            allowed = authority.host.confirm_deletion_for_permit(authority._permit) is True
+    except Exception:
+        pass
+    payload = ({'session_id': authority.session_id, 'deleted': True, 'exit_confirmed': True}
+               if allowed else {'code': 'DELETE_UNCONFIRMED', 'error': 'Deletion result is unavailable.'})
+    wire = encode_agent_response_for_wire(AgentResponse(
+        request_id=request.request_id, channel_id=request.channel_id,
+        ok=allowed, payload=payload,
+    ), response_id=request.request_id)
+    serialized = json.dumps(wire, ensure_ascii=False)
+    if len(serialized.encode('utf-8')) > AGENT_WS_SEND_BUDGET_BYTES:
+        return await send_wire_payload(ws, _build_oversized_fallback(wire, len(serialized.encode('utf-8'))))
+    await ws.send(serialized)
+    return allowed

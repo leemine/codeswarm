@@ -141,6 +141,7 @@ class SessionRequestPermit:
 
     cleanup: tuple[str, tuple] | None = None
     cleanup_params: str | None = None
+    deletion_receipt: object | None = None
 
     def allows_cleanup(self, method: str, params: dict, identity: TrustedIdentity,
                        envelope_session: str | None = None) -> bool:
@@ -166,7 +167,11 @@ class SessionRequestPermit:
                 return False
             if self.cleanup is not None:
                 session_id, stamp = self.cleanup
-                if self.host.cleanup_owner_stamp(session_id, self.identity) != stamp:
+                if self.deletion_receipt is not None:
+                    if self.method != 'session.delete':
+                        return False
+                    self.host.check_deletion(self.deletion_receipt, for_admission=True)
+                elif self.host.cleanup_owner_stamp(session_id, self.identity) != stamp:
                     return False
             for session_id, epoch in self.owners:
                 if (not self.host.owner_current(session_id, self.identity)
@@ -191,6 +196,7 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
         raise SessionSharingDenied('authenticated request required')
     owners = []
     cleanup = None
+    deletion_receipt = None
     share = None
     share_actions = ('view',)
     continuation_input = None
@@ -202,7 +208,17 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
             raise SessionSharingDenied('conflicting Session references')
     if is_cleanup_request(method, params):
         sid = _session(sid or envelope_session)
-        cleanup = (sid, host.cleanup_owner_stamp(sid, identity))
+        if method == 'session.delete':
+            # A pending or retired exact delete receipt is the only authority
+            # after metadata disappears. It grants no normal owner capability.
+            try:
+                deletion_receipt = host.resume_deletion(sid, identity, identity_resolver=identity_resolver)
+            except SessionSharingDenied:
+                cleanup = (sid, host.cleanup_owner_stamp(sid, identity))
+            else:
+                cleanup = (sid, None)
+        else:
+            cleanup = (sid, host.cleanup_owner_stamp(sid, identity))
     elif method in OWNER_METHODS:
         sid = _session(sid or envelope_session)
         owners.append((sid, host.owner_revision(sid, identity)))
@@ -241,7 +257,7 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
     permit = SessionRequestPermit(identity, identity_resolver, host, tuple(owners), share,
                                   _inventory_revision(host) if method in INVENTORY_METHODS else None, method,
                                   share_actions, continuation_input, continuation_options, cleanup,
-                                  json.dumps(params, sort_keys=True, separators=(',', ':')) if cleanup else None)
+                                  json.dumps(params, sort_keys=True, separators=(',', ':')) if cleanup else None, deletion_receipt)
     if not permit.revalidate():
         raise SessionSharingDenied('Session authorization denied')
     return permit

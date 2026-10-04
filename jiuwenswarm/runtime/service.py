@@ -3095,6 +3095,20 @@ class AgentRuntime:
         """Delete one persisted Session through the shared Runtime boundary."""
         if self._closed:
             raise RuntimeStateError("runtime is already closed")
+        if self._organization_session_host is not None:
+            from jiuwenswarm.common.schema.agent import AgentRequest
+            from jiuwenswarm.server.runtime.session.session_archive import SessionArchiveService
+            from jiuwenswarm.server.runtime.session.lifecycle import LifecycleError
+            request = AgentRequest(request_id='', session_id=session_id, channel_id=channel_id,
+                req_method=ReqMethod.SESSION_DELETE, params={'session_id': session_id})
+            authority = self.prepare_session_deletion(request)
+            try:
+                await SessionArchiveService(self).session(session_id, 'delete', channel_id,
+                                                          _deletion_authority=authority)
+            except LifecycleError as exc:
+                return SessionDeleteResult.failure(session_id, code=exc.code, message=str(exc),
+                    recovery_required=True)
+            return SessionDeleteResult(ok=True, session_id=session_id, channel_id=channel_id, deleted=True)
         self._authorize_session_mutation(session_id, channel_id)
         result = await self._session_provisioner.delete_session(
             channel_id=channel_id,
@@ -3103,6 +3117,20 @@ class AgentRuntime:
             dispose_session=self._dispose_agent_session_after_resource_release,
         )
         return result
+
+    def prepare_session_deletion(self, request, permit=None):
+        from jiuwenswarm.runtime.session_delete_authority import capture_deletion
+        return capture_deletion(self, request, permit)
+
+    async def _delete_owned_session(self, authority):
+        if authority.runtime is not self:
+            raise GovernanceError('deletion belongs to another Runtime')
+        authority.check()
+        return await self._session_provisioner.delete_session(
+            channel_id=authority.channel_id, session_id=authority.session_id,
+            quiesce_session=authority.quiesce, dispose_session=authority.disposed,
+            _cleanup_guard=authority.check, _cleanup_descriptor=authority.descriptor,
+        )
 
     async def delete_team(
         self,

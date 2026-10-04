@@ -2416,7 +2416,9 @@ class AgentWebSocketServer:
                     host=host, envelope_session=(request.session_id if (request.params or {}).get("session_id") else None),
                 )
                 set_delivery_permit(permit)
-                if permit.cleanup is not None:
+                if request.req_method == ReqMethod.SESSION_DELETE:
+                    self._execution_runtime().prepare_session_deletion(request, permit)
+                elif permit.cleanup is not None:
                     self._execution_runtime().prepare_session_cleanup(request)
             except Exception:
                 response = AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
@@ -5716,14 +5718,21 @@ class AgentWebSocketServer:
                 results = []
                 for sid in ids:
                     try:
-                        results.append(await service.session(sid, method.split(".")[1], request.channel_id or ""))
+                        options = {}
+                        deletion = getattr(request, '_deletion_authority', None)
+                        if deletion is not None:
+                            options['_deletion_authority'] = deletion
+                        results.append(await service.session(sid, method.split(".")[1],
+                                                             request.channel_id or "", **options))
                     except lc.LifecycleError as exc:
                         results.append(dict(session_id=sid, ok=False, code=exc.code, error=str(exc), **exc.details))
                 if method == "session.delete" and "session_ids" not in params:
                     ok = results[0]["ok"]
                     # project_id 超出 §5.10.5 单条字段表，但 Gateway 需要
                     # 它发出符合 §5.10.11 契约的 session.deleted 事件。
-                    payload = {"session_id": ids[0], "project_id": results[0].get("project_id", "")} if ok else {
+                    payload = ({"session_id": ids[0], "deleted": True, "exit_confirmed": True}
+                               if ok and getattr(request, '_deletion_authority', None) is not None
+                               else {"session_id": ids[0], "project_id": results[0].get("project_id", "")}) if ok else {
                         key: value for key, value in results[0].items()
                         if key not in {"session_id", "ok"}
                     }
@@ -5748,6 +5757,11 @@ class AgentWebSocketServer:
             metadata=request.metadata,
         )
         async with send_lock:
+            deletion = getattr(request, '_deletion_authority', None)
+            if deletion is not None and resp.ok:
+                from jiuwenswarm.server.ws_send import send_deletion_result
+                await send_deletion_result(ws, authority=deletion, request=request)
+                return True
             await send_wire_payload(ws, encode_agent_response_for_wire(resp, response_id=request.request_id))
         return True
 
