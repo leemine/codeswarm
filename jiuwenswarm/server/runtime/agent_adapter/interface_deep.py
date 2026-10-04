@@ -3279,6 +3279,38 @@ class JiuWenSwarmDeepAdapter:
         control = controls.get(sid)
         return bool(control is not None and control.list_live())
 
+    async def stop_existing_session_adapter(self, session_id: str) -> bool:
+        """Strict owner cleanup; no idle/Heartbeat/permission retention bypass.
+
+        Runtime already prevents new work for this generation. The old object
+        and Binding remain owned until actual Native tasks have exited.
+        """
+        sid = self._session_adapter_key(session_id)
+        if self._is_session_scoped_adapter:
+            if self._session_adapter_key(self._parent_session_id) != sid:
+                return False
+            await self.stop_interaction(require_owned_exit=True)
+            await self.cleanup()
+            return True
+        original = self._session_adapters.get(sid)
+        lock = self._session_adapter_locks.get(sid)
+        if original is None:
+            if lock is not None:
+                raise RuntimeError('Session adapter creation or cleanup is pending')
+            return False
+        if lock is None:
+            raise RuntimeError('existing Session adapter lock unavailable')
+        async with lock:
+            if self._session_adapters.get(sid) is not original:
+                raise RuntimeError('Session adapter changed before stop')
+            await original.stop_interaction(require_owned_exit=True)
+            await original.cleanup()
+            self._drop_session_adapter_cache_entry(sid, remove_lock=False, remove_runtime_state=False)
+        if self._is_session_lock_idle(sid, lock):
+            self._session_adapter_locks.pop(sid, None)
+        self._native_session_routes.pop(sid, None)
+        return True
+
     async def cleanup_session_adapter(self, session_id: str | None) -> bool:
         """Release an idle session-scoped adapter without deleting session history."""
         sid = self._session_adapter_key(session_id)
@@ -12511,22 +12543,72 @@ class JiuWenSwarmDeepAdapter:
             project_dir=project_dir,
         )
 
-    async def stop_interaction(self) -> None:
+    @staticmethod
+    def _native_owned_exit_tasks(agent) -> set:
+        """Only tasks already owned by this Native instance; no global scan."""
+        tasks = set()
+        if agent is None:
+            return tasks
+        for name in ('_interaction_round_task', '_interaction_supervisor_task',
+                     '_interaction_forwarder_task', '_stream_process_task'):
+            task = getattr(agent, name, None)
+            if isinstance(task, asyncio.Task):
+                tasks.add(task)
+        tasks.update(task for task in getattr(agent, '_interaction_emit_tasks', ())
+                     if isinstance(task, asyncio.Task))
+        scheduler = getattr(getattr(agent, 'loop_controller', None), 'task_scheduler', None)
+        for entry in getattr(scheduler, '_running_tasks', {}).values():
+            if isinstance(entry, tuple) and len(entry) == 2 and isinstance(entry[1], asyncio.Task):
+                tasks.add(entry[1])
+        task = getattr(scheduler, '_scheduler_task', None)
+        if isinstance(task, asyncio.Task):
+            tasks.add(task)
+        return tasks
+
+    async def stop_interaction(self, *, require_owned_exit: bool = False) -> None:
         """Stop this adapter's DeepAgent interaction loop if it was started."""
         execution = getattr(self, "_native_execution", None)
         if execution is not None:
             bindings = self._native_execution_bindings
+            pending = set(getattr(self, '_native_pending_exit_tasks', set()))
+            strict = require_owned_exit or bool(pending) or getattr(self, '_native_strict_exit_required', False)
+            native_agent = execution._native.agent if strict else None
+            if strict:
+                self._native_strict_exit_required = True
+                pending.update(self._native_owned_exit_tasks(native_agent))
+                self._native_pending_exit_tasks = pending
             native_stream = getattr(self, "_native_interaction_stream", None)
             if native_stream is not None:
                 await native_stream.dispose()
                 self._native_interaction_stream = None
             await execution.stop()
+            if strict:
+                from jiuwenswarm.runtime.harness.execution_session import ExecutionExitState
+                # The original scheduler can have accepted owned work while
+                # its existing stop was draining. Capture that same object too.
+                pending.update(self._native_owned_exit_tasks(native_agent))
+                self._native_pending_exit_tasks = pending
+                if execution.exit_state is not ExecutionExitState.EXIT_CONFIRMED:
+                    raise RuntimeError('Native provider exit is not confirmed')
+            if pending:
+                from jiuwenswarm.runtime.harness.execution_session import RESOURCE_STOP_TIMEOUT_S
+                if asyncio.current_task() in pending:
+                    raise RuntimeError('Native owned task cannot confirm its own exit')
+                remaining = {task for task in pending if not task.done()}
+                if remaining:
+                    _, remaining = await asyncio.wait(remaining, timeout=RESOURCE_STOP_TIMEOUT_S)
+                if remaining:
+                    raise RuntimeError('Native owned execution tasks have not exited')
+                self._native_pending_exit_tasks = set()
+            self._native_strict_exit_required = False
             self._native_execution = None
             self._native_execution_bindings = None
             bindings.release(execution.engine.binding)
             return
         if self._instance is None:
             return
+        if require_owned_exit:
+            raise RuntimeError('strict Native execution owner unavailable')
         await self._instance.stop()
 
     async def cleanup(self) -> None:

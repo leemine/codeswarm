@@ -849,6 +849,33 @@ class AgentManager:
                 except Exception:
                     logger.exception("[AgentManager] cancel_inflight_work failed")
 
+    async def stop_existing_session_runtime(self, *, channel_id: str = "", session_id: str) -> bool:
+        """Stop exact cached Session owners; never create or select a fallback.
+
+        Runtime must already hold this generation QUIESCING. Cache replacements,
+        unknown stop capability, and retained resources fail closed for retry.
+        """
+        sid = str(session_id or '').strip()
+        if not sid:
+            raise ValueError('existing Session required')
+        channel_key = _normalize_channel_id(channel_id)
+        channel_agents = self.agents.get(channel_key, {})
+        owners = [(key, agent) for key, agent in tuple(channel_agents.items())
+                  if callable(getattr(agent, 'has_session_runtime', None)) and agent.has_session_runtime(sid)]
+        if not owners:
+            return False
+        for key, agent in owners:
+            if self.agents.get(channel_key, {}).get(key) is not agent:
+                raise RuntimeError('Session runtime owner changed before stop')
+            stop = getattr(agent, 'stop_existing_session_runtime', None)
+            if not callable(stop):
+                raise RuntimeError('existing Session has no strict stop port')
+            await stop(sid)
+            if (self.agents.get(channel_key, {}).get(key) is not agent
+                    or agent.has_session_runtime(sid)):
+                raise RuntimeError('Session runtime exit is not confirmed')
+        return True
+
     async def cleanup_session_runtime(self, *, channel_id: str = "", session_id: str) -> bool:
         """Release in-memory runtime for one session across existing channel agents.
 

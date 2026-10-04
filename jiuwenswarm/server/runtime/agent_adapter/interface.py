@@ -4938,6 +4938,24 @@ class JiuWenSwarm:
 
     # ---------- 资源清理 ----------
 
+    async def stop_existing_session_runtime(self, session_id: str) -> bool:
+        """Stop only already-owned processors and the exact existing adapter."""
+        processor_cleaned = await self._session_manager.close_session(session_id)
+        adapter = self._adapter
+        adapter_cleaned = False
+        if adapter is not None:
+            has_runtime = getattr(adapter, 'has_session_runtime', None)
+            if not callable(has_runtime):
+                raise RuntimeError('existing adapter ownership is unavailable')
+            if has_runtime(session_id):
+                stop = getattr(adapter, 'stop_existing_session_adapter', None)
+                if not callable(stop):
+                    raise RuntimeError('existing adapter has no strict stop port')
+                adapter_cleaned = bool(await stop(session_id))
+        if self.has_session_runtime(session_id):
+            raise RuntimeError('Session runtime exit is not confirmed')
+        return processor_cleaned or adapter_cleaned
+
     async def cleanup_session_runtime(self, session_id: str) -> bool:
         """Release in-memory runtime owned by one session while keeping persisted history."""
         processor_cleaned = await self._session_manager.close_session(session_id)
