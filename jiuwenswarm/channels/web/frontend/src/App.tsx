@@ -1,3 +1,4 @@
+import { useSideConversationDeletion } from './multi-session/state/useSideConversationDeletion';
 import { SharedHistoryDialog } from './multi-session/dialogs/SharedHistoryDialog';
 import { onOrganizationCredentialChange } from './services/organizationCredentialEvents';
 import { ShareSessionDialog } from './multi-session/dialogs/ShareSessionDialog';
@@ -76,7 +77,7 @@ import { readAgentTemplateName } from './features/agentIdentity';
 import { normalizeTeamLeaderIdentity } from './features/teamLeaderIdentity';
 import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages, useResponsiveLayout, useResponsivePanelResize } from './hooks';
 import { webRequest } from './services/webClient';
-import { getArchiveErrorCode } from './features/workspace/archivedTaskClient';
+import { archivedTaskClient, getArchiveErrorCode } from './features/workspace/archivedTaskClient';
 import type { WorkflowRun } from './components/teamArea/workflowTypes';
 import { useTeamPanelState } from './features/teamPanelState';
 import { useSingleAgentPanelState } from './features/singleAgentPanelState';
@@ -3439,14 +3440,13 @@ function AppContent({
     useTodoStore.getState().removeRuntime(sideSessionId);
     useHarnessStore.getState().removeRuntime(sideSessionId);
     useGoalStore.getState().removeRuntime(sideSessionId);
-    sideConversationRef.current = null;
-    setSideConversation(null);
   }, [disposeInFlightHistoryHandles]);
 
-  const deleteSideConversation = useCallback(async (sideSessionId: string): Promise<void> => {
-    await request('session.delete', { session_id: sideSessionId });
-    removeSideConversationLocally(sideSessionId);
-  }, [removeSideConversationLocally, request]);
+  const deleteSideConversation = useSideConversationDeletion(
+    sideConversationRef,
+    setSideConversation,
+    removeSideConversationLocally,
+  );
 
   const handleStartSideConversation = useCallback(async (
     sourceSessionId: string,
@@ -3504,7 +3504,7 @@ function AppContent({
     };
     const registered = registerSideConversation(sideSession);
     if (!registered) {
-      await request('session.delete', { session_id: sideSessionId });
+      await archivedTaskClient.deleteSession(sideSessionId);
       throw new Error('invalid side conversation metadata');
     }
 

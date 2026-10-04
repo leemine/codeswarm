@@ -5,7 +5,7 @@ import { FileViewer } from '../AgentPanel/FileViewer';
 import { containsIgnoredDirectory } from '../../features/fileTreeFilters';
 import { isHistoryPreviewFile } from '../../features/historyFilePreview';
 import { webRequest } from '../../services/webClient';
-import { getArchiveErrorCode } from '../../features/workspace/archivedTaskClient';
+import { archivedTaskClient, getArchiveErrorCode } from '../../features/workspace/archivedTaskClient';
 import { useChatStore } from '../../stores/chatStore';
 import { toDisplaySessionTitle } from '../../utils/documentMessage';
 
@@ -269,7 +269,8 @@ export function SessionsPanel({
   const [loadingSessions, setLoadingSessions] = useState(true);
   const [sessionsError, setSessionsError] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
-  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
+  const [deletingSessionIds, setDeletingSessionIds] = useState(new Set<string>());
+  const deletingSessionsRef = useRef(new Set<string>());
   const [files, setFiles] = useState<SessionFileItem[]>([]);
   const [loadingFiles, setLoadingFiles] = useState(false);
   const [filesError, setFilesError] = useState<string | null>(null);
@@ -437,6 +438,7 @@ export function SessionsPanel({
 
   const handleDeleteSession = async (session: SessionItem) => {
     const sessionId = session.session_id;
+    if (deletingSessionsRef.current.has(sessionId)) return;
     const displayLabel = parseSessionDisplayLabel(sessionId, t);
     const isTeamSession = session.mode === 'team' && Boolean(session.team_name);
     const confirmed = window.confirm(
@@ -449,11 +451,12 @@ export function SessionsPanel({
     );
     if (!confirmed) return;
 
-    setDeletingSessionId(sessionId);
+    deletingSessionsRef.current.add(sessionId);
+    setDeletingSessionIds(new Set(deletingSessionsRef.current));
     try {
-      await webRequest('session.delete', { session_id: sessionId });
+      await archivedTaskClient.deleteSession(sessionId);
       await loadSessions();
-      if (selectedSessionId === sessionId) {
+      if (selectedSessionIdRef.current === sessionId) {
         setSelectedFile(null);
       }
     } catch (error) {
@@ -462,7 +465,8 @@ export function SessionsPanel({
         ? t('multiSession.project.errors.deleteSessionBusy')
         : t('sessions.errors.deleteSession', { sessionId }));
     } finally {
-      setDeletingSessionId(null);
+      deletingSessionsRef.current.delete(sessionId);
+      setDeletingSessionIds(new Set(deletingSessionsRef.current));
     }
   };
 
@@ -568,7 +572,7 @@ export function SessionsPanel({
                       type="button"
                       title={t('sessions.delete')}
                       className="shrink-0 p-1.5 rounded-md text-text-muted hover:text-danger hover:bg-danger-subtle  disabled:opacity-50"
-                      disabled={deletingSessionId === session.session_id}
+                      disabled={deletingSessionIds.has(session.session_id)}
                       onClick={() => void handleDeleteSession(session)}
                       data-testid="sessions-panel-session-item-delete"
                     >

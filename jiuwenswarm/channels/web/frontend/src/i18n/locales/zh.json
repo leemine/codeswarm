@@ -155,6 +155,7 @@
         "forbidden": "该资源不支持此操作",
         "notFound": "资源不存在或已发生变化，请刷新后重试",
         "sessionGone": "该会话已不存在，无法恢复",
+        "deleteUnconfirmed": "无法确认删除完成，会话状态未知。请刷新列表或重试。",
         "requestFailed": "操作失败，请稍后重试",
         "sessionRestoreFailed": "对话恢复失败，请刷新后重试"
       }

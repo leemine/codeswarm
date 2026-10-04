@@ -155,6 +155,7 @@
         "forbidden": "This operation is not supported for this resource",
         "notFound": "The resource no longer exists or has changed. Refresh and try again.",
         "sessionGone": "This conversation no longer exists and cannot be restored.",
+        "deleteUnconfirmed": "Deletion could not be confirmed. The Session state is unknown; refresh the list or retry.",
         "requestFailed": "The operation failed. Please try again later.",
         "sessionRestoreFailed": "Failed to restore the conversation. Refresh and try again."
       }
