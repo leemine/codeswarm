@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+import math
 import logging
 import os
 import stat
@@ -14,6 +16,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -45,6 +48,17 @@ class VerifiedDownloadAsset:
     expires_at: float
     size_bytes: int
     content_digest: str
+    workspace_origin_digest: str | None = None
+    asset_root: tuple[int, int] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedWorkspaceRegistration:
+    """Immutable bytes of a validated owner record; callers receive detached data."""
+    _canonical_json: str
+
+    def to_dict(self) -> dict:
+        return json.loads(self._canonical_json)
 
 
 class VerifiedDownloadAssetOwner:
@@ -70,6 +84,7 @@ class VerifiedDownloadAssetOwner:
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._sweeper: threading.Thread | None = None
+        self._governed_root: tuple[int, int] | None = None
 
     def stage(
         self,
@@ -116,9 +131,174 @@ class VerifiedDownloadAssetOwner:
             content_digest=actual_digest,
         )
 
+    def _stage_from_verified_fd(
+        self, source_fd: int, *, file_name: str, expires_at: float,
+        workspace_origin: dict, source_check: Callable[[], None],
+    ) -> VerifiedDownloadAsset:
+        """Host-only same-FD snapshot; provenance and bytes share one registration.
+
+        No owner lock is held while calling the Project/source checker. The
+        caller owns the source FD for the complete synchronous operation.
+        """
+        if expires_at <= self._now_fn():
+            raise ValueError("download_asset_expired")
+        if self._governed_root is not None:
+            self._check_governed_root()
+        source_check()
+        initial = _file_identity(os.fstat(source_fd))
+        asset_id = uuid.uuid4().hex
+        sealed = self.root / f"{asset_id}{Path(file_name).suffix[:32]}"
+        pending = self.root / f".{asset_id}.stage"
+        sidecar = self._sidecar_path(asset_id)
+        output = None
+        root_fd = _open_directory(self.root, create=True)
+        root_stat = os.fstat(root_fd)
+        try:
+            self._bind_governed_root(root_stat)
+            os.fchmod(root_fd, 0o700)
+        except BaseException:
+            os.close(root_fd)
+            raise
+        def check_root():
+            current = _open_directory(self.root)
+            try:
+                observed = os.fstat(current)
+                if (observed.st_dev, observed.st_ino) != (root_stat.st_dev, root_stat.st_ino):
+                    raise ValueError("download_asset_root_changed")
+            finally:
+                os.close(current)
+        try:
+            output = os.open(pending.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=root_fd)
+            digest, offset = hashlib.sha256(), 0
+            while True:
+                source_check()
+                chunk = os.pread(source_fd, _DIGEST_CHUNK_SIZE, offset)
+                if not chunk:
+                    break
+                _write_all(output, chunk)
+                digest.update(chunk)
+                offset += len(chunk)
+            if _file_identity(os.fstat(source_fd)) != initial or offset != initial["size"]:
+                raise ValueError("download_asset_source_changed")
+            source_check()
+            os.fsync(output)
+            os.fchmod(output, 0o400)
+            os.close(output)
+            output = None
+            os.replace(pending.name, sealed.name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+            check_root()
+            payload = {
+                "asset_id": asset_id, "sealed_path": sealed.as_posix(),
+                "expires_at": float(expires_at), "size_bytes": offset,
+                "content_digest": f"sha256:{digest.hexdigest()}",
+                "state": _ASSET_STATE_STAGED,
+                "workspace_origin": copy.deepcopy(workspace_origin),
+                "file_name": file_name,
+                "asset_root": [root_stat.st_dev, root_stat.st_ino],
+                "sealed_file": _file_identity(os.stat(sealed.name, dir_fd=root_fd, follow_symlinks=False)),
+            }
+            fingerprint = _registration_digest(payload)
+            source_check()
+            with self._lock:
+                self._write_sidecar_atomic(sidecar, payload, directory_fd=root_fd)
+            source_check()
+            check_root()
+            self._ensure_sweeper()
+            return VerifiedDownloadAsset(asset_id, sealed, float(expires_at), offset,
+                                         payload["content_digest"], fingerprint, (root_stat.st_dev, root_stat.st_ino))
+        except BaseException:
+            for owned in (sidecar, pending, sealed):
+                try:
+                    os.unlink(owned.name, dir_fd=root_fd)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    logger.error("Unexposed sealed asset cleanup failed")
+            raise
+        finally:
+            if output is not None:
+                os.close(output)
+            os.close(root_fd)
+
+    def workspace_registration(self, asset_id: str, fingerprint: str) -> VerifiedWorkspaceRegistration:
+        """Read an exact signed immutable registration; never infer old origins."""
+        with self._lock:
+            root_fd = _open_directory(self.root)
+            try:
+                fd = os.open(self._sidecar_path(asset_id).name,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root_fd)
+                try:
+                    before = _file_identity(os.fstat(fd))
+                    if before["size"] > 65536:
+                        raise ValueError("download_asset_registration_invalid")
+                    encoded = os.read(fd, 65537)
+                    if len(encoded) != before["size"] or _file_identity(os.fstat(fd)) != before:
+                        raise ValueError("download_asset_registration_changed")
+                    payload = json.loads(encoded)
+                finally:
+                    os.close(fd)
+                root = os.fstat(root_fd)
+                if type(payload) is not dict or payload.get("asset_root") != [root.st_dev, root.st_ino]:
+                    raise ValueError("download_asset_root_changed")
+            finally:
+                os.close(root_fd)
+            if (payload.get("state") not in _ACTIVE_ASSET_STATES
+                    or payload.get("asset_id") != asset_id
+                    or _registration_digest(payload) != fingerprint
+                    or self._now_fn() >= float(payload["expires_at"])):
+                raise ValueError("download_asset_registration_mismatch")
+            path = Path(payload["sealed_path"])
+            if (path.parent != self.root or not _regular_file_without_symlink(path)
+                    or _file_identity(path.stat(follow_symlinks=False)) != payload["sealed_file"]):
+                raise ValueError("download_asset_changed")
+            self._bind_governed_root(root)
+            return VerifiedWorkspaceRegistration(json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False))
+
+    def _bind_governed_root(self, root) -> None:
+        identity = (root.st_dev, root.st_ino)
+        with self._lock:
+            if self._governed_root is not None and self._governed_root != identity:
+                raise ValueError("download_asset_root_changed")
+            self._governed_root = identity
+
+    def _check_governed_root(self) -> None:
+        fd = _open_directory(self.root)
+        try:
+            self._bind_governed_root(os.fstat(fd))
+        finally:
+            os.close(fd)
+
+    @contextmanager
+    def _owned_asset_registration(self, asset):
+        """Mutation has the same immutable root/file proof as reading."""
+        if asset.asset_root is None or asset.workspace_origin_digest is None:
+            raise ValueError("download_asset_origin_missing")
+        with self._lock:
+            fd = _open_directory(self.root)
+            try:
+                root = os.fstat(fd)
+                if (root.st_dev, root.st_ino) != asset.asset_root:
+                    raise ValueError("download_asset_root_changed")
+                self._bind_governed_root(root)
+                payload = _read_sidecar_at(fd, self._sidecar_path(asset.asset_id).name)
+                if (not self._payload_matches_asset(payload, asset)
+                        or payload.get("asset_root") != list(asset.asset_root)
+                        or payload.get("state") not in _ACTIVE_ASSET_STATES
+                        or asset.sealed_path.parent != self.root
+                        or _file_identity(os.stat(asset.sealed_path.name, dir_fd=fd, follow_symlinks=False)) != payload["sealed_file"]):
+                    raise ValueError("download_asset_registration_mismatch")
+                yield fd, payload
+            finally:
+                os.close(fd)
+
     def commit(self, asset: VerifiedDownloadAsset) -> None:
         """Mark a staged asset delivered while preserving the same TTL owner."""
 
+        if asset.workspace_origin_digest is not None:
+            with self._owned_asset_registration(asset) as (fd, payload):
+                payload["state"] = _ASSET_STATE_COMMITTED
+                self._write_sidecar_atomic(self._sidecar_path(asset.asset_id), payload, directory_fd=fd)
+            return
         with self._lock:
             sidecar_path = self._sidecar_path(asset.asset_id)
             payload = self._read_sidecar(sidecar_path)
@@ -132,6 +312,12 @@ class VerifiedDownloadAssetOwner:
     def revoke(self, asset: VerifiedDownloadAsset) -> None:
         """Remove an asset whose token has not become externally visible."""
 
+        if asset.workspace_origin_digest is not None:
+            with self._owned_asset_registration(asset) as (fd, _):
+                os.unlink(asset.sealed_path.name, dir_fd=fd)
+                os.unlink(self._sidecar_path(asset.asset_id).name, dir_fd=fd)
+                os.fsync(fd)
+            return
         with self._lock:
             self._safe_unlink(self._sidecar_path(asset.asset_id))
             self._safe_unlink(asset.sealed_path)
@@ -175,6 +361,108 @@ class VerifiedDownloadAssetOwner:
             return False
 
     def prune(self, *, now: float | None = None) -> None:
+        # Pure legacy roots retain their existing platform/cleanup behavior.
+        if self._governed_root is not None or self._has_governed_registration():
+            self._prune_governed(now=now)
+        else:
+            self._prune_legacy(now=now)
+
+    def _has_governed_registration(self) -> bool:
+        if os.name != "posix" or not self.root.exists():
+            return False
+        fd = _open_directory(self.root)
+        try:
+            for name in os.listdir(fd):
+                if not name.endswith(".json") or name.startswith("."):
+                    continue
+                try:
+                    if "workspace_origin" in _read_sidecar_at(fd, name):
+                        return True
+                except (OSError, ValueError):
+                    continue
+            return False
+        finally:
+            os.close(fd)
+
+    def _prune_governed(self, *, now=None) -> None:
+        current_time = self._now_fn() if now is None else float(now)
+        with self._lock:
+            try:
+                fd = _open_directory(self.root)
+            except OSError:
+                logger.error("Sealed asset prune root unavailable")
+                return
+            try:
+                root = os.fstat(fd)
+                identity = (root.st_dev, root.st_ino)
+                if self._governed_root is not None and identity != self._governed_root:
+                    logger.error("Sealed asset prune root changed")
+                    return
+                records = []
+                for name in os.listdir(fd):
+                    if name.startswith(".") or not name.endswith(".json"):
+                        continue
+                    try:
+                        payload = _read_sidecar_at(fd, name)
+                        if "workspace_origin" in payload and payload.get("asset_root") != list(identity):
+                            logger.error("Sealed asset prune root changed")
+                            return
+                        if (Path(payload["sealed_path"]).parent != self.root
+                                or payload["asset_id"] != Path(name).stem
+                                or payload.get("state") not in _ACTIVE_ASSET_STATES
+                                or not math.isfinite(float(payload["expires_at"]))):
+                            raise ValueError("download_asset_registration_mismatch")
+                        if "workspace_origin" in payload:
+                            _registration_digest(payload)
+                        records.append((name, payload))
+                    except (KeyError, OSError, TypeError, ValueError):
+                        # Unknown registration ownership is retained, never reset.
+                        logger.error("Sealed asset prune registration unavailable")
+                        return
+                self._bind_governed_root(root)
+                registered = set()
+                for name, payload in records:
+                    path = Path(str(payload.get("sealed_path", "")))
+                    if path.parent != self.root:
+                        continue
+                    registered.add(path.name)
+                    try:
+                        expires_at = float(payload["expires_at"])
+                        if not math.isfinite(expires_at):
+                            raise ValueError("download_asset_expiry_invalid")
+                    except (KeyError, TypeError, ValueError):
+                        logger.error("Sealed asset prune registration unavailable")
+                        continue
+                    if current_time <= expires_at:
+                        continue
+                    if "workspace_origin" in payload:
+                        try:
+                            asset = VerifiedDownloadAsset(payload["asset_id"], path, float(payload["expires_at"]),
+                                payload["size_bytes"], payload["content_digest"], _registration_digest(payload), identity)
+                            # Uses its own same-root FD; no raw path mutation.
+                            self.revoke(asset)
+                        except (KeyError, OSError, TypeError, ValueError):
+                            logger.error("Expired sealed asset cleanup remains unconfirmed")
+                    elif payload.get("asset_id") == Path(name).stem:
+                        for owned in (path.name, name):
+                            try:
+                                os.unlink(owned, dir_fd=fd)
+                            except FileNotFoundError:
+                                pass
+                cutoff = current_time - self._orphan_grace_seconds
+                for name in os.listdir(fd):
+                    if name.startswith(".") or name.endswith(".json") or name in registered:
+                        continue
+                    try:
+                        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                        if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+                            os.unlink(name, dir_fd=fd)
+                    except FileNotFoundError:
+                        pass
+            finally:
+                os.close(fd)
+
+    def _prune_legacy(self, *, now: float | None = None) -> None:
         """Recover registered assets and remove expired or old orphan files."""
 
         current_time = self._now_fn() if now is None else float(now)
@@ -298,30 +586,43 @@ class VerifiedDownloadAssetOwner:
         self,
         sidecar_path: Path,
         payload: dict[str, Any],
+        *, directory_fd: int | None = None,
     ) -> None:
         temp_path = self.root / f".{sidecar_path.stem}.{uuid.uuid4().hex}.tmp"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        file_descriptor = os.open(temp_path, flags, 0o600)
+        file_descriptor = None
         try:
-            encoded = json.dumps(
-                payload,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
+            file_descriptor = os.open(temp_path if directory_fd is None else temp_path.name,
+                                      flags, 0o600, dir_fd=directory_fd)
+            encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                                 allow_nan=False).encode("utf-8")
             _write_all(file_descriptor, encoded)
             os.fsync(file_descriptor)
-        finally:
             os.close(file_descriptor)
-        try:
-            os.replace(temp_path, sidecar_path)
-            if os.name != "nt":
-                directory_fd = os.open(self.root, os.O_RDONLY)
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
+            file_descriptor = None
+            if directory_fd is not None:
+                os.replace(temp_path.name, sidecar_path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+                os.fsync(directory_fd)
+            else:
+                os.replace(temp_path, sidecar_path)
+                if os.name != "nt":
+                    parent_fd = os.open(self.root, os.O_RDONLY)
+                    try:
+                        os.fsync(parent_fd)
+                    finally:
+                        os.close(parent_fd)
         finally:
-            self._safe_unlink(temp_path)
+            if file_descriptor is not None:
+                os.close(file_descriptor)
+            if directory_fd is None:
+                self._safe_unlink(temp_path)
+            else:
+                try:
+                    os.unlink(temp_path.name, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    logger.error("Sealed registration temporary cleanup failed")
 
     @staticmethod
     def _read_sidecar(sidecar_path: Path) -> dict[str, Any]:
@@ -343,6 +644,8 @@ class VerifiedDownloadAssetOwner:
             and float(payload.get("expires_at")) == asset.expires_at
             and int(payload.get("size_bytes")) == asset.size_bytes
             and payload.get("content_digest") == asset.content_digest
+            and (asset.workspace_origin_digest is None
+                 or _registration_digest(payload) == asset.workspace_origin_digest)
         )
 
     def _sidecar_path(self, asset_id: str) -> Path:
@@ -358,6 +661,62 @@ class VerifiedDownloadAssetOwner:
             path.unlink(missing_ok=True)
         except OSError:
             logger.warning("Failed to remove verified download asset path=%s", path)
+
+
+def _read_sidecar_at(root_fd, name):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root_fd)
+    try:
+        before = _file_identity(os.fstat(fd))
+        if before["size"] > 65536:
+            raise ValueError("download_asset_registration_invalid")
+        encoded = os.read(fd, 65537)
+        if len(encoded) != before["size"] or _file_identity(os.fstat(fd)) != before:
+            raise ValueError("download_asset_registration_changed")
+        value = json.loads(encoded)
+        if type(value) is not dict:
+            raise ValueError("download_asset_registration_invalid")
+        return value
+    finally:
+        os.close(fd)
+
+
+def _open_directory(path: Path, *, create: bool = False) -> int:
+    """Owned directory FD with no symlink in any component (managed POSIX)."""
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("sealed asset platform unsupported")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open("/", flags)
+    try:
+        for part in path.parts[1:]:
+            if create:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+            child = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _file_identity(value) -> dict:
+    if not stat.S_ISREG(value.st_mode):
+        raise ValueError("download_asset_not_regular")
+    return {"device": value.st_dev, "inode": value.st_ino, "size": value.st_size,
+            "mtime_ns": value.st_mtime_ns, "ctime_ns": value.st_ctime_ns}
+
+
+def _registration_digest(payload: dict) -> str:
+    keys = {"asset_id", "sealed_path", "expires_at", "size_bytes", "content_digest",
+            "workspace_origin", "asset_root", "sealed_file", "file_name", "state"}
+    if type(payload) is not dict or set(payload) != keys:
+        raise ValueError("download_asset_origin_invalid")
+    body = {key: value for key, value in payload.items() if key != "state"}
+    return "sha256:" + hashlib.sha256(json.dumps(body, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
 def _normalize_asset_id(value: str) -> str:

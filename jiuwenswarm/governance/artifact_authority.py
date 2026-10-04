@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from .resources import ResourceAccessDenied, ResourceGuard, ResourceRequest
 
 
@@ -97,6 +100,13 @@ class NativeArtifactAuthority:
 
         if not current():
             raise ResourceAccessDenied("artifact original execution changed")
+        from openjiuwen.harness_protocol import json_value_to_builtin
+        operation = source_execution.operation
+        operation_digest = hashlib.sha256(json.dumps({
+            "call_id": operation.call_id, "agent_name": operation.agent_name,
+            "provider_session_id": operation.provider_session_id, "turn_id": operation.turn_id,
+            "tool_name": operation.tool_name, "arguments": json_value_to_builtin(operation.arguments),
+        }, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
         return WorkspaceArtifactIssuer.capture(
             self._host,
             self._identity,
@@ -105,4 +115,6 @@ class NativeArtifactAuthority:
             workspace=workspace,
             source_check=current,
             actual_paths=actual_paths,
+            tool_decision=original_tool_decision,
+            tool_origin=(("call_id", operation.call_id), ("operation_digest", operation_digest)),
         )

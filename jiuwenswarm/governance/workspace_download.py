@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import math
 import stat
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 from .contracts import TrustedIdentity
-from .resources import ResourceGuard, ResourceRequest
+from .resources import ResourceDecision, ResourceGuard, ResourceRequest
 
 ARTIFACT_NAMESPACE = "workspace_artifact_v1"
 MAX_DOWNLOAD_TOKEN_BYTES = 4096
@@ -187,6 +188,8 @@ class WorkspaceArtifactIssuer:
     _paths: tuple[str, ...]
     _revision: int
     _decisions: tuple
+    _tool_decision: ResourceDecision | None = None
+    _tool_origin: tuple | None = None
 
     @classmethod
     def capture(
@@ -199,6 +202,8 @@ class WorkspaceArtifactIssuer:
         workspace,
         source_check,
         actual_paths,
+        tool_decision=None,
+        tool_origin=None,
     ):
         try:
             if (
@@ -223,7 +228,7 @@ class WorkspaceArtifactIssuer:
             decisions = tuple(_decision(host, source, path) for path in actual_paths)
             if source_check() is not True or identity_resolver() != identity:
                 _deny()
-            return cls(host, identity_resolver, source, source_check, actual_paths, revision, decisions)
+            return cls(host, identity_resolver, source, source_check, actual_paths, revision, decisions, tool_decision, tool_origin)
         except Exception:
             raise WorkspaceDownloadDenied("artifact source unavailable") from None
 
@@ -260,6 +265,124 @@ class WorkspaceArtifactIssuer:
             return proof
         except Exception:
             raise WorkspaceDownloadDenied("artifact source unavailable") from None
+
+    def check_sealed_source(self, path):
+        """Captured origin only: never acquire a new ToolExecution in a worker."""
+        if (path not in self._paths or self._origin() is not True
+                or self._identity() != self._source.identity
+                or _source(self._host, self._source.identity, self._source.session_id)
+                != (self._source, self._revision)
+                or _decision(self._host, self._source, path)
+                != self._decisions[self._paths.index(path)]
+                or self._tool_origin is None
+                or type(self._tool_decision) is not ResourceDecision
+                or ResourceGuard(self._host._storage).check(
+                    dict(self._source.binding)["project_id"], self._source.identity,
+                    self._tool_decision.request) != self._tool_decision):
+            _deny()
+
+    def stage_sealed(self, owner, original_path, *, file_name, expires_at):
+        from jiuwenswarm.agents.harness.common.tools.verified_download_assets import VerifiedDownloadAssetOwner
+        if (type(owner) is not VerifiedDownloadAssetOwner
+                or type(expires_at) not in (int, float) or not math.isfinite(expires_at)
+                or not time.time() < expires_at <= time.time() + 600):
+            _deny()
+        self.check_sealed_source(original_path)
+        if file_name != Path(original_path).name:
+            _deny()
+        with _open(dict(self._source.binding)["project_dir"], original_path) as (fd, root, file):
+            def check():
+                self.check_sealed_source(original_path)
+                with _open(dict(self._source.binding)["project_dir"], original_path) as (_, current_root, current_file):
+                    if (root, file) != (current_root, current_file):
+                        _deny()
+            origin = {
+                "schema_version": 1, "source": asdict(self._source),
+                "owner_authority_revision": self._revision,
+                "original_path": original_path, "root": list(root), "file": asdict(file),
+                "workspace_decision": asdict(self._decisions[self._paths.index(original_path)]),
+                "tool_decision": asdict(self._tool_decision),
+                "tool_origin": dict(self._tool_origin),
+            }
+            return owner._stage_from_verified_fd(fd, file_name=file_name,
+                expires_at=expires_at, workspace_origin=origin, source_check=check)
+
+    @contextmanager
+    def open_sealed(self, asset, original_path, *, owner):
+        """Metadata probes use the same registered FD, never a raw sealed path."""
+        self.issue_sealed(asset, original_path, self._source.session_id, owner=owner)
+        registration = owner.workspace_registration(asset.asset_id, asset.workspace_origin_digest).to_dict()
+        with _open(str(owner.root), registration["sealed_path"]) as (fd, root, file):
+            if list(root) != registration["asset_root"] or asdict(file) != registration["sealed_file"]:
+                _deny()
+            yield fd
+            if _File.from_stat(os.fstat(fd)) != file:
+                _deny()
+        self.issue_sealed(asset, original_path, self._source.session_id, owner=owner)
+
+    def issue_sealed(self, asset, original_path, session_id, *, owner):
+        from jiuwenswarm.agents.harness.common.tools.verified_download_assets import VerifiedDownloadAsset, VerifiedDownloadAssetOwner
+        if type(owner) is not VerifiedDownloadAssetOwner or type(asset) is not VerifiedDownloadAsset:
+            _deny()
+        self.check_sealed_source(original_path)
+        if session_id != self._source.session_id or not asset.workspace_origin_digest:
+            _deny()
+        registration = owner.workspace_registration(asset.asset_id, asset.workspace_origin_digest).to_dict()
+        source, revision, path, _, _, workspace, tool = _parse_sealed_origin(registration)
+        if (source != self._source or revision != self._revision or path != original_path
+                or workspace != self._decisions[self._paths.index(path)] or tool != self._tool_decision
+                or registration["workspace_origin"]["tool_origin"] != dict(self._tool_origin)
+                or registration["sealed_path"] != str(asset.sealed_path)
+                or registration["size_bytes"] != asset.size_bytes
+                or registration["content_digest"] != asset.content_digest
+                or registration["expires_at"] != asset.expires_at):
+            _deny()
+        self.check_sealed_source(original_path)
+        return {"schema_version": 2, "registration_digest": asset.workspace_origin_digest}
+
+
+def _parse_decision(value):
+    if type(value) is not dict or set(value) != set(ResourceDecision.__dataclass_fields__):
+        _deny()
+    request = value["request"]
+    if type(request) is not dict or set(request) != set(ResourceRequest.__dataclass_fields__):
+        _deny()
+    result = ResourceDecision(**{**value, "request": ResourceRequest(**request)})
+    if result.allowed is not True:
+        _deny()
+    return result
+
+
+def _parse_sealed_origin(registration):
+    value = registration["workspace_origin"]
+    if (type(value) is not dict or set(value) != {"schema_version", "source", "owner_authority_revision",
+            "original_path", "root", "file", "workspace_decision", "tool_decision", "tool_origin"}
+            or type(value["schema_version"]) is not int or value["schema_version"] != 1
+            or type(value["owner_authority_revision"]) is not int
+            or not 0 < value["owner_authority_revision"] < 2**256):
+        _deny()
+    origin = value["tool_origin"]
+    if (type(origin) is not dict or set(origin) != {"call_id", "operation_digest"}
+            or type(origin["call_id"]) is not str or not 0 < len(origin["call_id"]) <= 2048
+            or type(origin["operation_digest"]) is not str or len(origin["operation_digest"]) != 64
+            or any(c not in "0123456789abcdef" for c in origin["operation_digest"])):
+        _deny()
+    source, root, file = _parse({"sid": value["source"]["session_id"],
+        "path": value["original_path"], "exp": registration["expires_at"],
+        ARTIFACT_NAMESPACE: {"schema_version": 1, "source": value["source"],
+            "root": value["root"], "file": value["file"]}})
+    workspace, tool = _parse_decision(value["workspace_decision"]), _parse_decision(value["tool_decision"])
+    for decision in (workspace, tool):
+        if (decision.project_id != dict(source.binding)["project_id"]
+                or decision.actor_id != source.identity.actor_id
+                or decision.subject_id != source.identity.subject_id):
+            _deny()
+    if (workspace.request.action != "read" or workspace.request.path != value["original_path"]
+            or workspace.reference != dict(source.binding)["project_dir"]
+            or tool.reference != "native:send_file_to_user" or tool.request.action != "invoke"
+            or tool.request.path is not None):
+        _deny()
+    return source, value["owner_authority_revision"], value["original_path"], root, file, workspace, tool
 
 
 def _parse(payload):
@@ -362,6 +485,10 @@ class WorkspaceDownloadPermit:
     _file: _File
     _path: str
     _token_check: Callable = field(repr=False)
+    _sealed_registration: dict | None = field(default=None, repr=False)
+    _asset_owner: object = field(default=None, repr=False)
+    _tool_decision: ResourceDecision | None = field(default=None, repr=False)
+    _display_name: str | None = None
 
     @property
     def size(self):
@@ -369,14 +496,14 @@ class WorkspaceDownloadPermit:
 
     @property
     def name(self):
-        return Path(self._path).name
+        return self._display_name or Path(self._path).name
 
     @property
     def session_id(self):
         return self._source.session_id
 
     @classmethod
-    def capture(cls, host, identity_resolver, session_id, token, *, token_validator):
+    def capture(cls, host, identity_resolver, session_id, token, *, token_validator, asset_owner=None):
         """token_validator must be the host's existing HMAC validator, never wire."""
         try:
             if (
@@ -385,6 +512,9 @@ class WorkspaceDownloadPermit:
             ):
                 _deny()
             payload = token_validator(token, session_id=session_id)
+            if type(payload) is dict and payload.get("kind") == "verified_asset_v1":
+                return cls._capture_sealed(host, identity_resolver, session_id, token,
+                    payload, token_validator, asset_owner)
             source, root, file = _parse(payload)
             if (
                 identity_resolver() != source.identity
@@ -416,6 +546,54 @@ class WorkspaceDownloadPermit:
         except Exception:
             raise WorkspaceDownloadDenied("owner Workspace download denied") from None
 
+    @classmethod
+    def _capture_sealed(cls, host, identity, sid, token, payload, validator, owner):
+        from jiuwenswarm.agents.harness.common.tools.verified_download_assets import get_verified_download_asset_owner
+        if set(payload) != {"kind", "asset_id", "path", "exp", "size", "digest", "name", "sid", ARTIFACT_NAMESPACE}:
+            _deny()
+        proof = payload[ARTIFACT_NAMESPACE]
+        if (type(proof) is not dict or set(proof) != {"schema_version", "registration_digest"}
+                or type(proof["schema_version"]) is not int or proof["schema_version"] != 2
+                or type(payload["name"]) is not str or not payload["name"]
+                or Path(payload["name"]).name != payload["name"]
+                or any(ord(c) < 32 for c in payload["name"])):
+            _deny()
+        owner = owner or get_verified_download_asset_owner()
+        registration = owner.workspace_registration(payload["asset_id"], proof["registration_digest"]).to_dict()
+        if payload["name"] != registration["file_name"]:
+            _deny()
+        for key, registered in (("path", "sealed_path"), ("exp", "expires_at"), ("size", "size_bytes"), ("digest", "content_digest")):
+            if type(payload[key]) is not type(registration[registered]) or payload[key] != registration[registered]:
+                _deny()
+        source, revision, original_path, _, _, decision, tool = _parse_sealed_origin(registration)
+        if sid != source.session_id or payload["sid"] != sid or identity() != source.identity:
+            _deny()
+        def token_check():
+            if validator(token, session_id=sid) != payload:
+                _deny()
+            current = owner.workspace_registration(payload["asset_id"], proof["registration_digest"]).to_dict()
+            # A successful push can change only this lifecycle label.
+            if {k: v for k, v in current.items() if k != "state"} != {k: v for k, v in registration.items() if k != "state"}:
+                _deny()
+        root, file = registration["asset_root"], registration["sealed_file"]
+        if (type(root) is not list or len(root) != 2 or any(type(n) is not int or n < 0 for n in root)
+                or type(file) is not dict or set(file) != set(_File.__dataclass_fields__)
+                or any(type(n) is not int or n < 0 for n in file.values())):
+            _deny()
+        permit = cls(host, identity, source, revision, decision, tuple(root), _File(**file),
+            original_path, token_check, registration, owner, tool, payload["name"])
+        permit.check()
+        return permit
+
+    @contextmanager
+    def _open_content(self):
+        if self._sealed_registration is not None:
+            with _open(str(self._asset_owner.root), self._sealed_registration["sealed_path"]) as value:
+                yield value
+        else:
+            with _open(dict(self._source.binding)["project_dir"], self._path) as value:
+                yield value
+
     def _authority(self):
         self._token_check()
         if (
@@ -423,6 +601,9 @@ class WorkspaceDownloadPermit:
             or _source(self._host, self._source.identity, self.session_id)
             != (self._source, self._revision)
             or _decision(self._host, self._source, self._path) != self._decision
+            or (self._tool_decision is not None and ResourceGuard(self._host._storage).check(
+                dict(self._source.binding)["project_id"], self._source.identity,
+                self._tool_decision.request) != self._tool_decision)
         ):
             _deny()
 
@@ -430,7 +611,7 @@ class WorkspaceDownloadPermit:
         """Call after every wait and at the actual final headers/body sink."""
         try:
             self._authority()
-            with _open(dict(self._source.binding)["project_dir"], self._path) as (
+            with self._open_content() as (
                 _,
                 root,
                 file,
@@ -452,7 +633,7 @@ class WorkspaceDownloadPermit:
             ):
                 _deny()
             self._authority()
-            with _open(dict(self._source.binding)["project_dir"], self._path) as (
+            with self._open_content() as (
                 fd,
                 root,
                 file,

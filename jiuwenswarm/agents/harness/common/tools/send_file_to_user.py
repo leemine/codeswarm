@@ -54,7 +54,7 @@ def _projected_artifact_delivery_id(artifact_id: str) -> str:
     return f"browser-artifact:{digest}"
 
 
-def looks_like_skill_package(path: str | Path) -> bool:
+def looks_like_skill_package(path: str | Path, *, file_object=None) -> bool:
     """轻量判断交付文件是否为 Skill 包（不解压全量内容）.
 
     - ``.skill`` / ``.skill.zip``：按扩展名视为技能包
@@ -71,9 +71,9 @@ def looks_like_skill_package(path: str | Path) -> bool:
     if not name.endswith(".zip"):
         return False
     try:
-        if not file_path.is_file():
+        if file_object is None and not file_path.is_file():
             return False
-        with zipfile.ZipFile(file_path, "r") as zf:
+        with zipfile.ZipFile(file_object if file_object is not None else file_path, "r") as zf:
             for entry in zf.namelist():
                 parts = [
                     part
@@ -533,8 +533,6 @@ class SendFileToolkit:
             from jiuwenswarm.governance.tool_context import current_native_execution_slice
             from jiuwenswarm.governance.workspace_artifact_origin import validate_send_file_origin
             from jiuwenswarm.governance.workspace_download import WorkspaceArtifactIssuer, WorkspaceDownloadDenied
-            if self._require_execution_authorization:
-                raise WorkspaceDownloadDenied('sealed artifact source is not supported')
             bound = current_native_execution_slice()
             factory = getattr(bound, 'artifact_issuer_factory', None)
             origin = dict(source_execution=current_tool_execution(), execution_slice=bound,
@@ -622,6 +620,13 @@ class SendFileToolkit:
         materialized_files: list[str] = []
         for fp in valid_files:
             try:
+                if envelope.artifact_issuer is not None:
+                    # Original Workspace path only; copying from another root
+                    # must never silently manufacture authority for that root.
+                    if fp not in envelope.artifact_issuer._paths:
+                        raise ValueError("artifact original path changed")
+                    materialized_files.append(fp)
+                    continue
                 materialized_files.append(
                     self._materialize_team_deliverable_from_roots(
                         fp,
@@ -720,12 +725,17 @@ class SendFileToolkit:
                     raise RuntimeError("send_file_asset_owner_missing")
                 expires_at = float(int(time.time()) + _VERIFIED_ASSET_TTL_SECONDS)
                 for file_path in valid_files:
-                    asset = await asyncio.to_thread(
-                        envelope.asset_owner.stage,
-                        Path(file_path),
-                        file_name=Path(file_path).name,
-                        expires_at=expires_at,
-                    )
+                    if envelope.artifact_issuer is not None:
+                        def stage(path=file_path):
+                            return envelope.artifact_issuer.stage_sealed(
+                                envelope.asset_owner, path, file_name=Path(path).name,
+                                expires_at=expires_at)
+                        asset = await self._stage_owned_asset(envelope.asset_owner, stage)
+                    else:
+                        asset = await asyncio.to_thread(
+                            envelope.asset_owner.stage, Path(file_path),
+                            file_name=Path(file_path).name, expires_at=expires_at)
+
                     owned_assets.append(asset)
                     assets_by_path[_normalize_sent_file_path(file_path)] = asset
             files_payload = self._build_files_payload(
@@ -788,6 +798,9 @@ class SendFileToolkit:
             # The Runtime push is the externally visible commit point. Entering
             # it makes delivery uncertain on exceptions, so staged assets must
             # remain valid until TTL instead of being revoked prematurely.
+            if envelope.artifact_issuer is not None and envelope.require_execution_authorization:
+                for path in valid_files:
+                    envelope.artifact_issuer.check_sealed_source(path)
             exposure_started = True
             if not await send_runtime_push(msg):
                 exposure_started = False
@@ -846,7 +859,36 @@ class SendFileToolkit:
                 and envelope.asset_owner is not None
             ):
                 for asset in owned_assets:
-                    envelope.asset_owner.revoke(asset)
+                    try:
+                        envelope.asset_owner.revoke(asset)
+                    except Exception:
+                        logger.error("Unexposed artifact cleanup failed")
+
+    @staticmethod
+    async def _stage_owned_asset(owner, stage):
+        """Drain only this worker on cancellation; never abandon its asset."""
+        task = asyncio.create_task(asyncio.to_thread(stage))
+        try:
+            return await asyncio.shield(task)
+        except BaseException:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            if not task.cancelled():
+                try:
+                    asset = task.result()
+                except BaseException:
+                    pass
+                else:
+                    try:
+                        owner.revoke(asset)
+                    except Exception:
+                        logger.error("Unexposed artifact cleanup failed")
+            raise
 
     @staticmethod
     def _normalize_requested_paths(value: Any) -> tuple[str, ...]:
@@ -880,9 +922,6 @@ class SendFileToolkit:
         artifact_metadata_by_path: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         files_payload: list[dict[str, Any]] = []
-        if envelope.artifact_issuer is not None and envelope.require_execution_authorization:
-            from jiuwenswarm.governance.workspace_download import WorkspaceDownloadDenied
-            raise WorkspaceDownloadDenied('sealed artifact source is not supported')
         if envelope.require_execution_authorization:
             from jiuwenswarm.agents.harness.common.tools.web_file_download import (
                 build_verified_asset_download_info,
@@ -896,12 +935,18 @@ class SendFileToolkit:
                     base_name,
                     envelope.session_id,
                     envelope.user_id,
+                    **({"artifact_issuer": envelope.artifact_issuer,
+                        "original_path": file_path, "asset_owner": envelope.asset_owner}
+                       if envelope.artifact_issuer is not None else {}),
                 )
-                probe_path = (
-                    file_path
-                    if Path(file_path).is_file()
-                    else str(asset.sealed_path)
-                )
+                probe_path = (str(asset.sealed_path) if envelope.artifact_issuer is not None
+                    else file_path if Path(file_path).is_file() else str(asset.sealed_path))
+                if envelope.artifact_issuer is not None:
+                    with envelope.artifact_issuer.open_sealed(asset, file_path, owner=envelope.asset_owner) as fd:
+                        with os.fdopen(os.dup(fd), "rb") as verified_file:
+                            is_skill_package = looks_like_skill_package(file_path, file_object=verified_file)
+                else:
+                    is_skill_package = looks_like_skill_package(probe_path)
                 files_payload.append(
                     {
                         "path": asset.sealed_path.as_posix(),
@@ -910,7 +955,7 @@ class SendFileToolkit:
                         "mime_type": download_info["mime_type"],
                         "download_url": download_info["download_url"],
                         "download_token": download_info["download_token"],
-                        "is_skill_package": looks_like_skill_package(probe_path),
+                        "is_skill_package": is_skill_package,
                     }
                 )
             return SendFileToolkit._attach_artifact_metadata(

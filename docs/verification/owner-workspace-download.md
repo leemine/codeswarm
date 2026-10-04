@@ -251,3 +251,70 @@ The real UI failure and successful owned-process cleanup remain at
 `/tmp/r2b-owner-download-ui-run-380befb1/result.json`. This patch still requires
 integration stable and the ordinary UI story on the new candidate; no new real
 Provider, delayed-operation or revocation probe was run for this fix.
+
+## Organization approved sealed snapshots (2026-10-04, candidate)
+
+The organization `require_execution_authorization=True` path now preserves the
+existing approval contract: approval names an exact source path, and delivery
+captures its then-current bytes. It does not silently replace this with an
+approval-time content digest. The original Native ToolExecution certificate,
+current owning Runtime/Session, `native:send_file_to_user` tool/invoke decision,
+and exact Workspace/read decision are captured before staging. No wire field,
+legacy user ID, or arbitrary `/tmp` path can manufacture this source authority.
+
+`WorkspaceArtifactIssuer.stage_sealed(owner, original_path, *, file_name,
+expires_at)` opens the authorized source through the existing no-symlink
+Workspace traversal and gives that same FD to the existing asset owner. Source
+identity and authority are checked while copying and before publication. The
+original sidecar stores the frozen source identity, owner revision, exact
+resource decisions, non-sensitive ToolExecution fingerprint, source/root/file
+stamps, sealed root/file stamps, name, expiry, size and digest. Only `state` is
+excluded from the registration fingerprint. No credentials are persisted.
+`VerifiedWorkspaceRegistration` returns an immutable snapshot, not the mutable
+sidecar dictionary.
+
+The existing signed `verified_asset_v1` token contains a
+`workspace_artifact_v1` schema-2 registration digest. Existing token, RPC and
+HTTP routes remain the sole delivery path. `WorkspaceDownloadPermit.capture`
+checks this registration against the original owner and current full identity,
+Session/source/project authority and exact Workspace and tool resource
+revisions. Reads use the sealed asset FD, not the original source path. Tool
+completion does not revoke already delivered assets; current permission,
+source revocation, asset TTL and sealed-file identity still apply. Successful
+staging cannot authorize another actor or a new grant revision. The protected
+URL uses exactly `token` and `session_id`; legacy user routing is not emitted.
+
+Organization commit, revoke and expiry cleanup also pin and compare the original
+root device/inode before mutating via its FD. A replaced root or symlinked
+ancestor is rejected, including restart recovery from copied sidecars carrying
+another root identity. Unknown cleanup is retained and logged with fixed text;
+it is never reported as deletion of a replacement directory. Legacy asset
+records retain their existing branch. Safe metadata probing of sealed ZIP files
+uses the same verified FD rather than reopening a raw sealed path.
+
+A cancelled staging await retains ownership of its worker, drains it, and
+removes only the returned unexposed asset. This drain has no independent time
+limit. While that worker has not exited, the original task remains alive and a
+bounded Session stop must report unconfirmed exit; this wait is not evidence of
+completed cleanup. Push failure removes unexposed assets; an uncertain push or
+commit failure retains a staged asset under the original TTL rather than
+pretending publication was undone.
+
+The new deterministic tests exercise the actual Native AbilityManager and
+SmartApproval grant issuer, original owner/resource sidecars, HMAC, sealed
+storage, download permit and actual ASGI GET/HEAD/range/final-buffer guards.
+The model, push delivery and in-process E2A bridge are fixtures. They are not a
+real browser/human approval or external Provider acceptance test. Evidence and
+precise source combinations are recorded in `/tmp/r2b-sealed-artifacts/`.
+Integration stable, the new formally locked core pairing, and the ordinary
+approved-file UI story remain required before calling this capability accepted.
+
+Candidate affected validation: **243 passed** in 36.21 seconds (one existing
+Authlib deprecation warning), plus Ruff and `git diff --check`. The source is
+this isolated branch based on swarm `10604eeb`, overlaid explicitly with
+`PYTHONPATH`; core is the noneditable installed
+`33d5b922f6a09df07a856c85f47b4851fa5f61e4` in
+`/tmp/r2b-core-33d5b922-locked-venv`. This is local affected-source validation,
+not verification of the integration owner's later core lock or full stable.
+The new module is covered by the existing governance-projects directory
+collection; its 180-second limit and existing exclusions are unchanged.

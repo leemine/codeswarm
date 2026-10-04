@@ -122,6 +122,7 @@ class WebFileDownloadManager:
         *,
         file_name: str,
         session_id: str = "",
+        artifact_issuer=None, original_path=None, asset_owner=None,
     ) -> str:
         """Generate a token bound to one durable verified asset registration."""
 
@@ -135,7 +136,20 @@ class WebFileDownloadManager:
             "name": Path(file_name).name,
             "sid": session_id,
         }
-        return self._sign_payload(payload)
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        from jiuwenswarm.governance.workspace_download import (
+            ARTIFACT_NAMESPACE, MAX_DOWNLOAD_TOKEN_BYTES, WorkspaceArtifactIssuer, WorkspaceDownloadDenied,
+        )
+        if configured_authenticator() is not None or artifact_issuer is not None:
+            if (type(artifact_issuer) is not WorkspaceArtifactIssuer or asset_owner is None
+                    or type(original_path) is not str or Path(file_name).name != Path(original_path).name):
+                raise WorkspaceDownloadDenied("sealed artifact execution source required")
+            payload[ARTIFACT_NAMESPACE] = artifact_issuer.issue_sealed(
+                asset, original_path, session_id, owner=asset_owner)
+        token = self._sign_payload(payload)
+        if len(token.encode()) > MAX_DOWNLOAD_TOKEN_BYTES:
+            raise WorkspaceDownloadDenied("artifact selector exceeds supported size")
+        return token
 
     def generate_token(
         self,
@@ -440,6 +454,7 @@ def build_verified_asset_download_info(
     file_name: str,
     session_id: str = "",
     user_id: str = "",
+    *, artifact_issuer=None, original_path=None, asset_owner=None,
 ) -> dict[str, Any]:
     """Build download metadata whose token is backed by a staged asset."""
 
@@ -448,6 +463,7 @@ def build_verified_asset_download_info(
         asset,
         file_name=file_name,
         session_id=session_id,
+        artifact_issuer=artifact_issuer, original_path=original_path, asset_owner=asset_owner,
     )
     mime_type = "application/octet-stream"
 
@@ -461,6 +477,7 @@ def build_verified_asset_download_info(
         "name": Path(file_name).name,
         "size": asset.size_bytes,
         "mime_type": mime_type,
-        "download_url": manager.generate_download_url(token, user_id),
+        "download_url": (f"/file-api/download?{urlencode({'token': token, 'session_id': session_id})}"
+                         if artifact_issuer is not None else manager.generate_download_url(token, user_id)),
         "download_token": token,
     }
