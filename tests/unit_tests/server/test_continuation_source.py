@@ -347,3 +347,13 @@ def test_actual_legacy_writer_does_not_turn_tool_or_reasoning_into_seed(setup):
 def test_ambiguous_legacy_payloads_fail_closed_even_when_empty(field, value):
     from jiuwenswarm.server.runtime.gateway_adapter.shared_history_adapter import SharedHistoryAdapter
     assert not SharedHistoryAdapter._visible({'role': 'assistant', 'content': 'legacy', field: value})
+
+
+def test_explicit_target_model_is_bound_as_data_without_consuming_credentials(setup):
+    first = setup.compiler.compile(replace(setup.request, model_name='bob-model'))
+    second = setup.compiler.compile(replace(setup.request, model_name='other-model'))
+    assert first.proof.request.model_name == 'bob-model' and first.digest != second.digest
+    assert first.messages == second.messages
+    for invalid in (None, [], ' spaced ', 'bad\nmodel', 'x' * 201):
+        with pytest.raises(ValueError):
+            replace(setup.request, model_name=invalid)

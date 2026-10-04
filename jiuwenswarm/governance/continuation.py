@@ -32,11 +32,13 @@ class ContinuationInput:
     execution_profile_id: str
     mode: str = 'agent'
     title: str = ''
+    model_name: str = ''
 
     def __post_init__(self):
         for name in ('session_id', 'share_id', 'create_token', 'target_project_id', 'execution_profile_id'):
             _text(getattr(self, name), name)
         _text(self.title, 'title', maximum=100, empty=True)
+        _text(self.model_name, 'model_name', empty=True)
         if type(self.expected_revision) is not int or not 1 <= self.expected_revision < 2 ** 63:
             raise ValueError('invalid continuation expected_revision')
         # Further modes require their own real Provider/Team acceptance.
