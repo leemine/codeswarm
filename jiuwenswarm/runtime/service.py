@@ -2096,6 +2096,10 @@ class AgentRuntime:
 
         token = set_runtime_context(self, self._agent_manager)
         try:
+            goal_parent = self._native_goal_parent(request)
+            if goal_parent is not None:
+                async with aclosing(self._stream_native_goal_control(request, goal_parent)) as events:
+                    return [event async for event in events]
             work_kind = self._request_work_kind(request)
             if work_kind is not None:
                 await self._ensure_session_registered(request)
@@ -2529,6 +2533,14 @@ class AgentRuntime:
             set_runtime_context,
         )
 
+        goal_parent = self._native_goal_parent(request)
+        if goal_parent is not None:
+            if background:
+                raise GovernanceError('Native Goal control requires a foreground command')
+            async with aclosing(self._stream_native_goal_control(request, goal_parent)) as events:
+                async for event in events:
+                    yield event
+            return
         is_session_input = self._is_session_input_request(request)
         if is_session_input:
             validate_session_input(request.params)
@@ -2905,6 +2917,56 @@ class AgentRuntime:
                 error=error,
                 metadata=request.metadata,
             )
+
+    def _native_goal_parent(self, request):
+        if request.req_method is not ReqMethod.COMMAND_GOAL or not request.session_id:
+            return None
+        if self._request_targets_team(request):
+            return None
+        return self._session_coordinator.native_goal_parent(request.session_id)
+
+    async def _stream_native_goal_control(self, request, parent):
+        """Use the existing facade with a temporary, explicitly parented control."""
+        from jiuwenswarm.runtime.context import reset_runtime_context, set_runtime_context
+        from jiuwenswarm.runtime.events import RuntimeEvent
+        from jiuwenswarm.runtime.native_goal import capture_control
+
+        async def operation():
+            token = set_runtime_context(self, self._agent_manager)
+            governed = None
+            try:
+                governed = self._prepare_governed_request(request)
+                agent, control = capture_control(self, request, parent)
+                self._commit_governed_request(governed, request)
+                control.check_current()
+                if request.is_stream:
+                    async with aclosing(agent.process_message_stream(request)) as chunks:
+                        async for chunk in chunks:
+                            control.check_result()
+                            if governed is not None and self._submission_guard.outcome(governed) == 'unknown':
+                                self._submission_guard.accepted(governed)
+                            yield RuntimeEvent.from_agent_message(chunk,
+                                request_id=request.request_id, channel_id=request.channel_id,
+                                session_id=request.session_id, default_agent_ref=request.agent_ref)
+                else:
+                    response = await agent.execute_message(request)
+                    control.check_result()
+                    if governed is not None:
+                        self._submission_guard.accepted(governed)
+                    yield RuntimeEvent.from_agent_message(response,
+                        request_id=request.request_id, channel_id=request.channel_id,
+                        session_id=request.session_id, default_agent_ref=request.agent_ref,
+                        default_complete=True)
+            finally:
+                if governed is not None:
+                    self._submission_guard.reject(governed)
+                reset_runtime_context(token)
+
+        stream = self._session_coordinator.run_stream(request.session_id, request.request_id,
+            SessionWorkKind.GOAL_CONTROL, operation, parent_execution_id=parent.execution_id)
+        async with aclosing(stream):
+            async for event in stream:
+                yield event
 
     async def _stream_session_input_started(
         self, request: AgentRequest, owner_channel: str,

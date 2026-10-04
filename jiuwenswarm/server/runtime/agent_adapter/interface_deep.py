@@ -13450,6 +13450,16 @@ class JiuWenSwarmDeepAdapter:
         )
 
 
+    async def _submit_native_goal_request(self, request, inputs, *, action, **kwargs):
+        """Keep the actual request identity at the managed Goal admission edge."""
+        native = self._native_execution
+        owned = {}
+        if getattr(native, "_require_execution_origin", False):
+            owned["request"] = SendInputRequest(
+                request_id=request.request_id, inputs=inputs,
+            )
+        return await native.submit_goal(action, **owned, **kwargs)
+
     async def _attach_and_send_inputs(
         self,
         request: AgentRequest,
@@ -16629,8 +16639,9 @@ class JiuWenSwarmDeepAdapter:
                 else:
                     from openjiuwen.harness_protocol import DeliveryMode
 
-                    receipt, control_result = await native_execution.submit_goal(
-                        str(pending_goal_op.get("action") or "get"),
+                    receipt, control_result = await self._submit_native_goal_request(
+                        request, inputs,
+                        action=str(pending_goal_op.get("action") or "get"),
                         **goal_kwargs,
                     )
                     if receipt.accepted_mode is not DeliveryMode.STEER:

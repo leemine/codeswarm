@@ -139,7 +139,8 @@ class RuntimeSessionCoordinator:
         handle = values[0]
         if handle.work_kind is SessionWorkKind.CONTROL_INPUT:
             return self.claimed_control_parent(session_id, request_id)
-        if handle.work_kind is SessionWorkKind.SESSION_INPUT:
+        if (handle.work_kind is SessionWorkKind.SESSION_INPUT
+                or (handle.work_kind is SessionWorkKind.GOAL_CONTROL and handle.parent_execution_id)):
             parent = self._registry.get(handle.parent_execution_id)
             if (handle.task is not asyncio.current_task() or parent is None
                     or parent.state.terminal or parent.cancellation_requested
@@ -183,11 +184,38 @@ class RuntimeSessionCoordinator:
 
     def native_session_input_admission(self, session_id, request_id):
         """Capture the actual supplemental producer and its original parent."""
+        return self._native_control_admission(session_id, request_id, SessionWorkKind.SESSION_INPUT)
+
+    def native_goal_control_admission(self, session_id, request_id):
+        """Capture only an explicitly linked Goal control producer."""
+        return self._native_control_admission(session_id, request_id, SessionWorkKind.GOAL_CONTROL)
+
+    def native_goal_parent(self, session_id):
+        """Select the sole live managed Native owner, never the latest request."""
+        record = self._sessions.get(session_id)
+        if record is None:
+            return None
+        record = self._require_open_session(session_id)
+        parents = [handle for handle in self._registry.select(
+            session_id=session_id, generation=record.generation, active_only=True,
+        ) if handle._native_admission is not None]
+        if not parents:
+            return None
+        if len(parents) != 1:
+            raise SessionExecutionEndedError('Native Goal requires one original owner')
+        parent = parents[0]
+        parent._native_admission.check_current()
+        if parent._native_admission.owned_turn is None:
+            raise SessionExecutionEndedError('Native Goal original Turn is not admitted')
+        return parent
+
+    def _native_control_admission(self, session_id, request_id, work_kind):
         record = self._require_open_session(session_id)
         matches = self._registry.select(session_id=session_id, request_id=request_id,
             generation=record.generation, active_only=True)
         task = asyncio.current_task()
-        if (len(matches) != 1 or matches[0].work_kind is not SessionWorkKind.SESSION_INPUT
+        if (len(matches) != 1 or matches[0].work_kind is not work_kind
+                or not matches[0].parent_execution_id
                 or task is None or matches[0].task is not task):
             raise SessionExecutionEndedError('original supplemental input unavailable')
         handle = matches[0]
@@ -198,7 +226,7 @@ class RuntimeSessionCoordinator:
         principal = handle._execution_authority
         identity = principal.identity() if principal is not None else None
 
-        def check():
+        def check(*, for_ack=False):
             if (self._sessions.get(session_id) is not record
                     or self._registry.get(handle.execution_id) is not handle
                     or self._registry.get(parent.execution_id) is not parent
@@ -212,7 +240,12 @@ class RuntimeSessionCoordinator:
                 raise SessionExecutionEndedError('original supplemental input ended')
             if principal is not None and principal.identity() != identity:
                 raise SessionExecutionEndedError('supplemental credential changed')
-            admission.check_current()
+            if for_ack:
+                # This callback authorizes only the temporary producer. Core
+                # separately requires the original successful clear exit.
+                admission.check_owner()
+            else:
+                admission.check_current()
         check()
         return admission, check
 
