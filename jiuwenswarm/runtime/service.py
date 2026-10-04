@@ -374,6 +374,7 @@ class AgentRuntime:
         extension_registry: Any | None = None,
         extension_manager: Any | None = None,
         required_capabilities: Mapping[str, str] | None = None,
+        organization_session_host: Any | None = None,
     ) -> None:
         # Explicit registries are borrowed. An explicit manager transfers its
         # load/shutdown lifecycle to this Runtime; its registry is authoritative.
@@ -424,7 +425,8 @@ class AgentRuntime:
         )
         from jiuwenswarm.governance.session_boundary import organization_sharing_host
         from jiuwenswarm.governance.session_publication import SessionOwnerPublication
-        self._organization_session_host = organization_sharing_host()
+        self._organization_session_host = (organization_session_host
+            if organization_session_host is not None else organization_sharing_host())
         self._owner_publication = (SessionOwnerPublication(self._organization_session_host)
                                    if self._organization_session_host is not None else None)
         self._owner_provision_checks = {}

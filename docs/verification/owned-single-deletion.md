@@ -25,3 +25,21 @@ Confirmed deletion removes only that Session's local state. App enters its exist
 The client default remains legacy compatible with the original exact `{session_id}` deletion response. Existing legacy, Team and cron consumers are **not** claimed to enforce the new exit-confirmation requirement. This UI slice does not broaden their backend authority.
 
 Validation: `npm run test:single-session-delete` exercises the real Sidebar/dialog/client and App's shared navigation hook through React/jsdom (12 passed); `test:session-delete` retains 24 passing existing deletion cases; `test:sidebar-model` retains 5 passing menu cases. SVG icons are test stubs, not visual validation. `npm run build` and `git diff --check` are required for delivery. Real browser/socket/Provider deletion remains a separate pending normal-path probe; no B4 completion is claimed by these tests.
+
+## Product composition correction (2026-10-04)
+
+The real dual-user browser probe at swarm 3deb583a with installed core f6c56838
+completed Bob's Native turn, but its visible delete action returned
+DELETE_UNCONFIRMED before entering the lifecycle transaction. AgentServer and
+AgentRuntime had each constructed a SharingHostService; the receipt correctly
+rejected a permit issued by a different host object. No deletion was committed.
+AgentServer now injects its original host through its shared Runtime construction
+and reconstruction path. Receipt identity checks remain strict.
+
+The real-constructor regression also captures a deletion authority from the
+original permit and repeats it after Runtime reconstruction. Together with
+owned deletion/delivery and Runtime service regressions, 128 tests passed using
+installed noneditable core f6c56838 and an isolated swarm source overlay
+(`/tmp/r2b-host-composition.log`). The previous 3deb583a strict stable result
+(4641 passed) is retained for that SHA only; the corrected candidate still needs
+its own stable and actual browser verification.

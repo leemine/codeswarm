@@ -222,3 +222,44 @@ async def test_unconfirmed_provider_exit_cannot_cross_as_success(delivery):
     await x.dispatch(2)
     assert_success_frames(await x.drain(), d, 2)
     d.release.assert_awaited_once_with(d.sid)
+
+
+@pytest.mark.asyncio
+async def test_real_server_composition_keeps_original_delete_host_on_rebuild(deletion, monkeypatch):
+    """The real constructor must not create a second, receipt-incompatible host."""
+    from copy import copy
+    from jiuwenswarm.runtime.plan import PlanModeController
+
+    d = deletion
+    hosts = []
+    def factory():
+        host = copy(d.tx.setup.host)
+        hosts.append(host)
+        return host
+    monkeypatch.setattr(session_boundary, 'organization_sharing_host', factory)
+    monkeypatch.setattr(organization_auth, 'configured_authenticator', lambda: None)
+    server = AgentWebSocketServer(trusted_identity_resolver=lambda _: d.tx.setup.identities[0])
+    original = server.get_runtime()
+    rebuilt = None
+    try:
+        assert len(hosts) == 1
+        host = server._organization_session_host
+        assert original._organization_session_host is host
+        assert original._owner_publication.host is host
+        # Exercise the receipt capture that rejected the real browser request.
+        request = d.request()
+        permit = session_boundary.admit_session_request(
+            'session.delete', request.params,
+            identity_resolver=lambda: d.tx.setup.identities[0],
+            host=host, envelope_session=d.sid,
+        )
+        authority = original.prepare_session_deletion(request, permit)
+        assert authority.host is permit.host is host
+        rebuilt = server._build_runtime(plan_controller=PlanModeController())
+        assert len(hosts) == 1
+        assert rebuilt._organization_session_host is host
+        assert rebuilt.prepare_session_deletion(d.request(), permit).host is host
+    finally:
+        if rebuilt is not None:
+            await rebuilt.close()
+        await original.close()

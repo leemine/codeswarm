@@ -2081,6 +2081,7 @@ class AgentWebSocketServer:
             resource_lease=lease,
             team_execution_controller=get_team_manager(None),
             trusted_identity_resolver=self._resolve_trusted_identity,
+            organization_session_host=self._organization_session_host,
         )
 
     def _resolve_trusted_identity(self, request: object):
