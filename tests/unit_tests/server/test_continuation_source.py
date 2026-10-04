@@ -311,3 +311,39 @@ def test_target_authorizer_cannot_change_actor_during_final_check(setup):
     setup.compiler.project_authorizer = SimpleNamespace(authorize=authorize)
     with pytest.raises(SessionSharingDenied):
         setup.compiler.compile(setup.request)
+
+
+def test_actual_legacy_writer_does_not_turn_tool_or_reasoning_into_seed(setup):
+    records = [
+        (None, {'tool_calls': [{'id': 't', 'name': 'read'}]}, 'tool-declaration'),
+        ('', {'tool_call': {'id': 't'}}, 'tool-single'),
+        (None, {'function_call': {'name': 'read'}}, 'legacy-function'),
+        (None, {'tool_result': {'content': 'secret'}}, 'tool-result'),
+        (None, {'reasoning_content': 'private-reasoning'}, 'ambiguous-reasoning'),
+        ('', {'reasoning': 'private-reasoning'}, 'legacy-reasoning'),
+        ('chat.final', {'reasoning_content': 'private-reasoning'}, 'visible-answer'),
+    ]
+    for index, (event, extra, content) in enumerate(records):
+        receipt = session_history.append_history_record_durable(
+            session_id='source-session', request_id=f'legacy-{index}', channel_id='web',
+            role='assistant', content=content, timestamp=1.0, event_type=event, extra=extra)
+        assert receipt.result(timeout=5) is True
+    raw = setup.path.read_text()
+    assert 'tool-declaration' in raw and 'ambiguous-reasoning' in raw
+    scope = setup.host.prepare_source('source-session', ALICE)
+    record = setup.host.store.revise(setup.grant['share_id'], ALICE, actions={'view', 'execute'},
+                                    history=scope, expires_at=200, expected_revision=1)
+    seed = setup.compiler.compile(replace(setup.request, expected_revision=record['revision']))
+    assert seed.messages[-1].content == 'visible-answer'
+    rendered = json.dumps([asdict(message) for message in seed.messages])
+    for _, _, content in records[:-1]:
+        assert content not in rendered
+    assert 'private-reasoning' not in rendered
+
+
+@pytest.mark.parametrize('field', ['tool_call', 'tool_calls', 'function_call', 'tool_result',
+                                   'reasoning', 'reasoning_content'])
+@pytest.mark.parametrize('value', [None, '', [], {}])
+def test_ambiguous_legacy_payloads_fail_closed_even_when_empty(field, value):
+    from jiuwenswarm.server.runtime.gateway_adapter.shared_history_adapter import SharedHistoryAdapter
+    assert not SharedHistoryAdapter._visible({'role': 'assistant', 'content': 'legacy', field: value})

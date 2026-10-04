@@ -28,6 +28,16 @@ MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 def visible_conversation_text(record: dict[str, Any]) -> bool:
     """The shared viewer/continuation text projection, excluding tool events."""
     role, event = record.get('role'), record.get('event_type')
+    # Legacy/SDK writers may omit event_type while retaining structured tool
+    # declarations or reasoning. Missing event identity is not final-text proof.
+    if any(key in record for key in ('tool_call', 'tool_calls', 'function_call', 'tool_result')):
+        return False
+    if role == 'assistant' and event in (None, '') and any(
+        key in record for key in ('reasoning_content', 'reasoning')
+    ):
+        return False
+    # Explicit chat.final commonly also stores reasoning_content; only its
+    # final content is projected, never that separate reasoning field.
     return ((role == 'user' and event in (None, ''))
             or (role == 'assistant' and event in (None, '', 'chat.final'))) and (
         isinstance(record.get('content'), str) and bool(record['content'].strip())
