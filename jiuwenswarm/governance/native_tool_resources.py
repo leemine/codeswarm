@@ -111,6 +111,14 @@ class NativeToolResourceResolver:
             or self._owns_session(execution, proof.agent, session) is not True
         ):
             raise ValueError("Native operation has no matching owned Session")
+        if tool.tool_name == "submit_goal_report":
+            from openjiuwen.harness.tools.goal import SubmitGoalReportTool
+            if (type(proof.executor) is not SubmitGoalReportTool
+                    or not has_native_invoke(proof.executor, SubmitGoalReportTool)
+                    or proof.goal_check is None
+                    or set(tool.arguments) - {"status", "evidence", "remaining_work", "next_instruction"}):
+                raise ValueError("unsupported Native Goal report executor")
+            return self._checked_uses(proof, [self._use("tool", "native:submit_goal_report", "invoke")])
         if tool.tool_name == "send_file_to_user":
             from openjiuwen.core.foundation.tool.function.function import LocalFunction
             from jiuwenswarm.agents.harness.common.tools.send_file_to_user import SendFileToolkit

@@ -103,6 +103,7 @@ class NativeExecutorProof:
     original_invoke: Any
     final_invocation: Any
     lifetime: _ProofLifetime = field(default_factory=_ProofLifetime)
+    goal_check: Any = field(default=None, repr=False, compare=False)
 
     def is_current(self) -> bool:
         try:
@@ -134,6 +135,7 @@ class NativeExecutorProof:
                 is self.backend
                 and getattr(self.backend, "mode", None) == self.backend_mode
                 and executor.invoke == self.invoke
+                and (self.goal_check is None or self.goal_check() is None)
             )
         except Exception:
             return False
@@ -187,6 +189,9 @@ def native_executor_scope(ctx, operation: BeforeToolContext):
             original,
             final,
         )
+        if operation.tool_name == "submit_goal_report":
+            from .native_goal_tools import capture_goal_report
+            object.__setattr__(proof, "goal_check", capture_goal_report(proof))
     except Exception:
         proof = None
     token = _PROOF.set(proof)
