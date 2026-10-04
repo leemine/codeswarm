@@ -1414,7 +1414,14 @@ export function ConversationSidebar({
               removeSessionLocally(session.session_id);
               await useWorkspaceStore.getState().refreshWorkspaceData();
             } catch (error) {
-              toast.open({ content: error instanceof DeletionAuditPendingError ? t('multiSession.deleteAuditPending') : error instanceof Error ? error.message : String(error), variant: 'error' });
+              const auditPending = error instanceof DeletionAuditPendingError && error.sessionId === session.session_id;
+              if (auditPending) {
+                removeSessionLocally(session.session_id);
+                void useWorkspaceStore.getState().refreshWorkspaceData();
+              }
+              toast.open({ content: auditPending ? t('multiSession.deleteAuditPending')
+                : error instanceof DeletionAuditPendingError ? t('settingsPanel.archivedTasks.errors.deleteUnconfirmed')
+                : error instanceof Error ? error.message : String(error), variant: 'error' });
             }
           })();
         } : deletableSingle ? () => {
@@ -1484,7 +1491,14 @@ export function ConversationSidebar({
                         removeSessionLocally(ts.session_id);
                         await loadCronSessions(projectId, job.id);
                       } catch (error) {
-                        toast.open({ content: error instanceof DeletionAuditPendingError ? t('multiSession.deleteAuditPending') : error instanceof Error ? error.message : String(error), variant: 'error' });
+                        const auditPending = error instanceof DeletionAuditPendingError && error.sessionId === ts.session_id;
+                        if (auditPending) {
+                          removeSessionLocally(ts.session_id);
+                          void loadCronSessions(projectId, job.id);
+                        }
+                        toast.open({ content: auditPending ? t('multiSession.deleteAuditPending')
+                          : error instanceof DeletionAuditPendingError ? t('settingsPanel.archivedTasks.errors.deleteUnconfirmed')
+                          : error instanceof Error ? error.message : String(error), variant: 'error' });
                       }
                     })();
                   }}

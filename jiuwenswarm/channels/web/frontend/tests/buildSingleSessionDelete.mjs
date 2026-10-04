@@ -5,6 +5,7 @@ await build({
     'src/features/workspace/archivedTaskClient.ts',
     'src/stores/workspaceStore.ts',
     'src/stores/cronStore.ts',
+    'src/components/ui/Toast/toastStore.ts',
     'src/multi-session/state/useSideConversationDeletion.ts',
   ],
   bundle: true,

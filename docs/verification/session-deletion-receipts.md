@@ -159,9 +159,19 @@ desktop and 375px actual DeleteDialog renderings were inspected using installed
 Chrome and existing theme tokens. These are deterministic synthetic-exit and
 component evidence, not real Provider/product UI acceptance or integrated stable.
 Evidence and complete commands: `/tmp/r2b-delete-audit-runtime/README.md`.
+
 The direct Runtime SDK also derives `SessionDeleteResult.audit_pending` from
 the original deletion acknowledgement at its final return boundary. It returns
 explicit true/false for managed deletion; the appended field defaults to None
 for unchanged legacy callers. A retry after actual deletion repairs only the
 original audit context and does not repeat Provider exit or resource release.
 Integrated host/delivery/SDK regression with formal core fba69354: 195 passed.
+
+Follow-up consumer review also covers both existing cron Session delete menu
+handlers (pinned row and expanded cron result row): only a pending exception with
+that exact requested Session ID removes the local row and refreshes its original
+workspace/job list. They show the fixed pending warning without claiming an audit
+retry control. Wrong-ID pending exceptions leave rows untouched. Four additional
+actual Sidebar click cases pass (20 in that suite), and the isolated frontend
+build passes in 32.20 seconds. This preserves existing legacy handlers; it does
+not open organization cron deletion or create a new authorization path.

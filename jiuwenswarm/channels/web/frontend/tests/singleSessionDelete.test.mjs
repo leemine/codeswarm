@@ -17,11 +17,12 @@ Object.assign(globalThis, {
 });
 const base = '../node_modules/.cache/single-session-delete/';
 const { ConversationSidebar } = await import(base + 'multi-session/sidebar/ConversationSidebar.js');
-const { archivedTaskClient, createArchivedTaskClient } = await import(
+const { DeletionAuditPendingError, archivedTaskClient, createArchivedTaskClient } = await import(
   base + 'features/workspace/archivedTaskClient.js'
 );
 const { useWorkspaceStore } = await import(base + 'stores/workspaceStore.js');
 const { useCronStore } = await import(base + 'stores/cronStore.js');
+const { toast } = await import(base + 'components/ui/Toast/toastStore.js');
 const { useSessionDeletionReceipt } = await import(base + 'multi-session/state/useSideConversationDeletion.js');
 const q = (id) => document.querySelector(`[data-testid="${id}"]`);
 const tick = () =>
@@ -49,7 +50,7 @@ async function mount(response, { organization = true, mode = 'agent' } = {}) {
   navigations = [];
   current = { current: 'a' };
   archivedTaskClient.deleteSession = createArchivedTaskClient(response).deleteSession;
-  useCronStore.setState({ jobs: [], loadJobs: async () => {} });
+  useCronStore.setState({ jobs: [], cronSessions: {}, expandedCronGroups: {}, loadJobs: async () => {} });
   useWorkspaceStore.setState({
     workMode: 'work',
     projects: [{ project_id: 'p', name: 'Project', work_mode: 'work', session_count: 2 }],
@@ -234,4 +235,46 @@ for (const payload of [
     await assert.rejects(createArchivedTaskClient(async () => payload).deleteSession('a'),
       error => error.code === 'DELETE_UNCONFIRMED');
   });
+}
+
+async function deleteMenu(id) {
+  await click(row(id).querySelector('[data-testid="multi-session-conversation-list-item-more"]'));
+  await click([...document.querySelectorAll('[data-testid="multi-session-conversation-menu-item"][data-variant="delete"]')].at(-1));
+}
+for (const nested of [false, true]) {
+  for (const exact of [true, false]) {
+    test(`existing cron deletion consumer reconciles only its exact pending receipt nested=${nested} exact=${exact}`, async () => {
+      const sid = 'cron_owned';
+      let refreshes = 0;
+      const notices = [];
+      await mount(async () => ({ session_id: sid, deleted: true, exit_confirmed: true, audit_pending: true }));
+      if (!exact) archivedTaskClient.deleteSession = async () => { throw new DeletionAuditPendingError('other'); };
+      toast.open = event => { notices.push(event); return 'test'; };
+      await act(async () => {
+        if (nested) {
+          useCronStore.setState({
+            jobs: [{ id: 'job', name: 'Existing job', project_id: 'p', enabled: true }],
+            expandedCronGroups: { 'cron-job': true },
+            cronSessions: { job: [session(sid)] },
+            loadCronSessions: async (projectId, jobId) => {
+              assert.equal(projectId, 'p'); assert.equal(jobId, 'job');
+              refreshes++;
+              useCronStore.setState({ cronSessions: { job: [] } });
+            },
+          });
+        } else {
+          useWorkspaceStore.setState({
+            pinnedSessions: [{ ...session(sid), pinned: true }],
+            refreshWorkspaceData: async () => { refreshes++; },
+          });
+        }
+      });
+      await deleteMenu(sid);
+      assert.equal(refreshes, exact ? 1 : 0);
+      assert.equal(row(sid) === null, exact);
+      assert.equal(notices.length, 1);
+      assert.equal(q('multi-session-dialog'), null);
+      assert.deepEqual(navigations, []);
+    });
+  }
 }
