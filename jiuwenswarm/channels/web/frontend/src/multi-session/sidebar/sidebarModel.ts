@@ -122,10 +122,12 @@ export function getProjectMenuItems(
   ];
 }
 
-export function getProjectSessionMenuItems(isPinned: boolean, translate: Translate): SidebarMenuItem[] {
-  return buildSidebarMenuItems(isPinned, PIN_LABEL_PAIRS.projectSession, translate, {
+export function getProjectSessionMenuItems(isPinned: boolean, translate: Translate, options: { deletable?: boolean } = {}): SidebarMenuItem[] {
+  const items = buildSidebarMenuItems(isPinned, PIN_LABEL_PAIRS.projectSession, translate, {
     archiveLabel: translate('multiSession.project.archiveConversation'),
   });
+  if (options.deletable) items.push({ action: 'delete', label: translate('multiSession.delete'), danger: true });
+  return items;
 }
 
 export function getConversationMenuItems(

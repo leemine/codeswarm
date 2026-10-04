@@ -1,4 +1,4 @@
-import { useSideConversationDeletion } from './multi-session/state/useSideConversationDeletion';
+import { useSideConversationDeletion, useSessionDeletionReceipt } from './multi-session/state/useSideConversationDeletion';
 import { SharedHistoryDialog } from './multi-session/dialogs/SharedHistoryDialog';
 import { onOrganizationCredentialChange } from './services/organizationCredentialEvents';
 import { ShareSessionDialog } from './multi-session/dialogs/ShareSessionDialog';
@@ -3430,7 +3430,7 @@ function AppContent({
     [handleRestoreSession, mode, request],
   );
 
-  const removeSideConversationLocally = useCallback((sideSessionId: string) => {
+  const removeSessionStateLocally = useCallback((sideSessionId: string) => {
     disposeInFlightHistoryHandles(sideSessionId);
     sessionIdsCreatedInThisPageRef.current.delete(sideSessionId);
     useSessionStore.getState().removeSession(sideSessionId);
@@ -3445,7 +3445,14 @@ function AppContent({
   const deleteSideConversation = useSideConversationDeletion(
     sideConversationRef,
     setSideConversation,
-    removeSideConversationLocally,
+    removeSessionStateLocally,
+  );
+
+  const handleSessionDeleted = useSessionDeletionReceipt(
+    sessionIdRef,
+    mode,
+    enterNewConversation,
+    removeSessionStateLocally,
   );
 
   const handleStartSideConversation = useCallback(async (
@@ -3824,6 +3831,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 onSelect={requestSessionNavigation}
                 onOpenCron={() => handleNavigate('cron')}
                 onOpenSharedSessions={organizationAuth ? () => { setSharingDialogSessionId(null); setSharingInboxOpen(true); } : undefined}
+                onSessionDeleted={handleSessionDeleted}
                 isCronActive={false}
                 collapsed={conversationSidebarCollapsed}
                 floating={conversationSidebarFloating}
@@ -4040,6 +4048,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
               onSelect={requestSessionNavigation}
               onOpenCron={() => handleNavigate('cron')}
                 onOpenSharedSessions={organizationAuth ? () => { setSharingDialogSessionId(null); setSharingInboxOpen(true); } : undefined}
+                onSessionDeleted={handleSessionDeleted}
               isCronActive
               collapsed={conversationSidebarCollapsed}
               floating={conversationSidebarFloating}

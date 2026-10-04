@@ -98,6 +98,7 @@ interface ConversationSidebarProps {
   /** 跳转到"定时任务"主面板；该入口原来在最左侧图标栏，现移到工作小窗口的"新建任务"下方 */
   onOpenCron: () => void;
   onOpenSharedSessions?: () => void;
+  onSessionDeleted?: (sessionId: string) => void;
   /** 当前是否正停留在定时任务面板，用于给下面这个入口按钮加选中态 */
   isCronActive: boolean;
   /** 侧边栏是否收起 */
@@ -864,6 +865,7 @@ export function ConversationSidebar({
   onSelect,
   onOpenCron,
   onOpenSharedSessions,
+  onSessionDeleted,
   isCronActive,
   collapsed = false,
   floating = false,
@@ -883,6 +885,19 @@ export function ConversationSidebar({
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
   const [pinError, setPinError] = useState<string | null>(null);
+  const [deleteSessionTarget, setDeleteSessionTarget] = useState<Session | null>(null);
+  const deleteSessionTargetRef = useRef(deleteSessionTarget);
+  deleteSessionTargetRef.current = deleteSessionTarget;
+  const [deleteSessionBusy, setDeleteSessionBusy] = useState(false);
+  const [deleteSessionError, setDeleteSessionError] = useState<string | null>(null);
+  const deleteSessionPending = useRef(new Set<string>());
+  const mountedRef = useRef(true);
+  const deletedCallbackRef = useRef(onSessionDeleted);
+  deletedCallbackRef.current = onSessionDeleted;
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   // 既有「删除项目」流程状态：与归档并存，互不影响
   const [deleteProjectTarget, setDeleteProjectTarget] = useState<ProjectInfo | null>(null);
   const [projectAction, setProjectAction] = useState<'delete' | 'archive'>('delete');
@@ -1334,10 +1349,42 @@ export function ConversationSidebar({
     }
   }
 
+  async function handleDeleteOwnedSession() {
+    const target = deleteSessionTarget;
+    if (!target || deleteSessionPending.current.has(target.session_id)) return;
+    deleteSessionPending.current.add(target.session_id);
+    setDeleteSessionBusy(true);
+    setDeleteSessionError(null);
+    const isCurrent = () => mountedRef.current && deleteSessionTargetRef.current === target;
+    try {
+      await archivedTaskClient.deleteSession(target.session_id, { requireExitConfirmation: true });
+      if (!mountedRef.current) return;
+      removeSessionLocally(target.session_id);
+      deletedCallbackRef.current?.(target.session_id);
+      if (isCurrent()) setDeleteSessionTarget(null);
+      void useWorkspaceStore.getState().refreshWorkspaceData();
+    } catch (error) {
+      const code = getArchiveErrorCode(error);
+      if (isCurrent()) setDeleteSessionError(t(code === 'DELETE_UNCONFIRMED' || code === 'NOT_FOUND'
+        ? 'settingsPanel.archivedTasks.errors.deleteUnconfirmed'
+        : 'multiSession.errors.delete'));
+      if (mountedRef.current && code === 'NOT_FOUND') {
+        void useWorkspaceStore.getState().refreshWorkspaceData();
+      }
+    } finally {
+      deleteSessionPending.current.delete(target.session_id);
+      if (isCurrent()) setDeleteSessionBusy(false);
+    }
+  }
+
   function renderSession(session: Session, options: { nested?: boolean; projectMenu?: boolean } = {}) {
     const nested = options.nested === true;
     const projectMenu = options.projectMenu === true;
     const cronSession = Boolean(session.cron_id) || session.session_id.startsWith('cron_');
+    // Existing organization-only UI surface; this controls visibility, never authority.
+    const deletableSingle = Boolean(onOpenSharedSessions) && !cronSession
+      && !session.session_id.startsWith('heartbeat_')
+      && ['agent', 'agent.work', 'agent.work.normal', 'agent.code', 'agent.code.normal'].includes(session.mode);
     return (
       <ConversationListItem
         key={session.session_id}
@@ -1360,12 +1407,16 @@ export function ConversationSidebar({
               toast.open({ content: error instanceof Error ? error.message : String(error), variant: 'error' });
             }
           })();
+        } : deletableSingle ? () => {
+          setDeleteSessionTarget(session);
+          setDeleteSessionBusy(deleteSessionPending.current.has(session.session_id));
+          setDeleteSessionError(null);
         } : undefined}
         menuItems={cronSession
           ? getConversationMenuItems(Boolean(session.pinned), t, { archivable: false, deletable: true })
           : projectMenu
-          ? getProjectSessionMenuItems(Boolean(session.pinned), t)
-          : getConversationMenuItems(Boolean(session.pinned), t)}
+          ? getProjectSessionMenuItems(Boolean(session.pinned), t, { deletable: deletableSingle })
+          : getConversationMenuItems(Boolean(session.pinned), t, { deletable: deletableSingle })}
         onRename={() => setRenameTarget({
           kind: 'session',
           id: session.session_id,
@@ -1795,6 +1846,19 @@ export function ConversationSidebar({
             setRenameTarget(null);
           }}
           onSubmit={(value) => void handleRenameSubmit(value)}
+        />
+      ) : null}
+      {deleteSessionTarget ? (
+        <DeleteDialog
+          title={getSessionTitle(deleteSessionTarget, t('multiSession.untitled'))}
+          deleting={deleteSessionBusy}
+          error={deleteSessionError}
+          onCancel={() => {
+            if (deleteSessionBusy) return;
+            setDeleteSessionTarget(null);
+            setDeleteSessionError(null);
+          }}
+          onDelete={() => { void handleDeleteOwnedSession(); }}
         />
       ) : null}
       {deleteProjectTarget ? (

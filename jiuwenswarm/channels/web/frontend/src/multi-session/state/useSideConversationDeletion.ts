@@ -36,3 +36,21 @@ export function useSideConversationDeletion<T extends { session: { session_id: s
     [removeLocal, setSide, sideRef],
   );
 }
+
+/** Only the currently deleted Session enters a clean draft; late receipts only remove their own state. */
+export function useSessionDeletionReceipt<M>(
+  currentSession: MutableRefObject<string | null>,
+  mode: M,
+  enterNew: (mode: M, options: Record<string, never>, lifecycle: { clearPreviousSession: true }) => void,
+  removeLocal: (sessionId: string) => void,
+): (sessionId: string) => void {
+  return useCallback(
+    (sessionId: string) => {
+      if (currentSession.current === sessionId) {
+        enterNew(mode, {}, { clearPreviousSession: true });
+      }
+      removeLocal(sessionId);
+    },
+    [currentSession, mode, enterNew, removeLocal],
+  );
+}

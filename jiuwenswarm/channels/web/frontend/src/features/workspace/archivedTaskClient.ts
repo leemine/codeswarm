@@ -179,13 +179,15 @@ export function createArchivedTaskClient(request: ArchiveRequest) {
     /** 批量恢复（如项目批量归档 toast 的撤销）；逐项结果必须检查 ok。 */
     unarchiveSessions: (sessionIds: string[]) =>
       request<BatchSessionArchiveResponse>('session.unarchive', { session_ids: sessionIds }),
-    deleteSession: async (sessionId: string) => {
+    deleteSession: async (sessionId: string, options: { requireExitConfirmation?: boolean } = {}) => {
       const result = await request<unknown>('session.delete', { session_id: sessionId });
       if (!result || typeof result !== 'object' || Array.isArray(result)) {
         throw Object.assign(new Error('Session deletion was not confirmed'), { code: 'DELETE_UNCONFIRMED' });
       }
       const payload = result as Record<string, unknown>;
       if (payload.session_id !== sessionId || !sessionId
+        || (options.requireExitConfirmation === true
+          && (payload.deleted !== true || payload.exit_confirmed !== true))
         || ('ok' in payload && payload.ok !== true)
         || ('success' in payload && payload.success !== true)
         || ('deleted' in payload && payload.deleted !== true)
