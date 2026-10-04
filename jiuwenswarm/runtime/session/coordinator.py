@@ -236,6 +236,8 @@ class RuntimeSessionCoordinator:
                 await check(record)
             except Exception as exc:
                 failures.append(exc)
+        if len(failures) == 1:
+            raise failures[0]
         if failures:
             raise ExceptionGroup('original Session authority exit remains unconfirmed', failures)
 

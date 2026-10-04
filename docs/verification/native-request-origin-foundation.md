@@ -60,3 +60,6 @@ Provider 取消 fence 与 producer 实际收到 cancel 分别记录。调度入�
 
 
 调度器修正后的主独立受影响回归111 passed / 1既有Authlib warning，15.37s，进程退出0；`/tmp/r2b-native-runtime-scheduler-final.log`。新增组织公开invoke/stream对空/default/unmanaged项目拒绝、非组织SDK兼容，以及SESSION_MESSAGE/CHAT_UNARY取消重试与close的原cleanup gate。旧scheduler取消与旧close的独立进程overlay各稳定2失败，保留`/tmp/r2b-native-full-runtime-review/{cancel-red-overlay.log,close-red-overlay.log}`；未修改生产获取红证据。相关新增测试纳入stable，不降低预算或改变历史白名单。
+
+
+冻结e498完整strict未通过：5110 passed/11 failed/59 error/1 timeout，closed=true。旧手组legacy Native治理夹具正在改为实际受管构造；两项原单一退出异常类型被聚合包装，本修正保留唯一失败的原异常类型，仅多项失败聚合，原退出重试与Native双凭据监视21项通过。独立Node三目录已按现有package-lock npm ci补齐，不调整stable标准。e498普通Native双用户UI通过且owned资源已清理，不能覆盖本次strict失败。
