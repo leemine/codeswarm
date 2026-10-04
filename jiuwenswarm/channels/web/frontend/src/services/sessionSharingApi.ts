@@ -131,6 +131,11 @@ export interface SharedSessionTarget {
   session_id: string;
   share_id: string;
 }
+/** Display freshness only; history.get remains the actual read authority. */
+export interface SharedViewGrant {
+  revision: number;
+  expires_at: number | null;
+}
 export interface SharedHistoryPage extends SharedSessionTarget {
   messages: { role: 'user' | 'assistant'; content: string; id?: string }[];
   next_cursor: string | null;
@@ -177,13 +182,42 @@ export const sessionSharingApi = {
       request,
     );
   },
-  history: async (target: SharedSessionTarget, cursor?: string): Promise<SharedHistoryPage> => {
-    const page = await webRequest<SharedHistoryPage>('session.share.history.get', {
-      session_id: target.session_id,
-      share_id: target.share_id,
-      ...(cursor === undefined ? {} : { cursor }),
-      limit: 50,
-    });
+  viewGrant: async (target: SharedSessionTarget, signal?: AbortSignal): Promise<SharedViewGrant> => {
+    const result = await webRequest<{ shares: SessionShare[] }>('session.share.list', {}, { signal });
+    if (!Array.isArray(result?.shares)) throw new Error('Shared history unavailable');
+    const matches = result.shares.filter(
+      (share) => share?.session_id === target.session_id && share.share_id === target.share_id,
+    );
+    const grant = matches[0];
+    if (
+      matches.length !== 1 ||
+      grant.state !== 'active' ||
+      !Array.isArray(grant.actions) ||
+      !grant.actions.includes('view') ||
+      !Number.isSafeInteger(grant.revision) ||
+      grant.revision < 1 ||
+      !(
+        grant.expires_at === null ||
+        (typeof grant.expires_at === 'number' &&
+          Number.isFinite(grant.expires_at) &&
+          grant.expires_at > Date.now() / 1000)
+      )
+    ) {
+      throw new Error('Shared history unavailable');
+    }
+    return Object.freeze({ revision: grant.revision, expires_at: grant.expires_at });
+  },
+  history: async (target: SharedSessionTarget, cursor?: string, signal?: AbortSignal): Promise<SharedHistoryPage> => {
+    const page = await webRequest<SharedHistoryPage>(
+      'session.share.history.get',
+      {
+        session_id: target.session_id,
+        share_id: target.share_id,
+        ...(cursor === undefined ? {} : { cursor }),
+        limit: 50,
+      },
+      { signal },
+    );
     if (
       page?.session_id !== target.session_id ||
       page.share_id !== target.share_id ||
