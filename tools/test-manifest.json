@@ -34,6 +34,48 @@
   "profiles": {
     "mvp": {
       "suites": [
+        "codeswarm.python.acp",
+        "codeswarm.browser.unit",
+        "codeswarm.tui.contract"
+      ],
+      "retention_days": 30
+    },
+    "pr-smoke": {
+      "suites": [
+        "codeswarm.python.acp",
+        "codeswarm.browser.unit",
+        "codeswarm.tui.contract"
+      ],
+      "retention_days": 30
+    },
+    "pr-stable": {
+      "suites": [
+        "codeswarm.python.execution-construction",
+        "codeswarm.python.browser-artifact-delivery",
+        "codeswarm.python.acp",
+        "codeswarm.python.common",
+        "codeswarm.python.e2a",
+        "codeswarm.python.evolution",
+        "codeswarm.python.sdd",
+        "codeswarm.browser.unit",
+        "codeswarm.tui.contract",
+        "codeswarm.python.goal-heartbeat-lifecycle",
+        "codeswarm.python.governance-projects",
+        "codeswarm.python.governance-continuation",
+        "codeswarm.web.governance"
+      ],
+      "retention_days": 30
+    },
+    "web-diagnostic": {
+      "suites": ["codeswarm.web.scripts"],
+      "retention_days": 90
+    },
+    "tui-diagnostic": {
+      "suites": ["codeswarm.tui.full"],
+      "retention_days": 90
+    }
+  },
+  "suites": [
     {
       "id": "codeswarm.web.governance",
       "owner": "web",
@@ -88,48 +130,6 @@
         "30"
       ]
     },
-        "codeswarm.python.acp",
-        "codeswarm.browser.unit",
-        "codeswarm.tui.contract"
-      ],
-      "retention_days": 30
-    },
-    "pr-smoke": {
-      "suites": [
-        "codeswarm.python.acp",
-        "codeswarm.browser.unit",
-        "codeswarm.tui.contract"
-      ],
-      "retention_days": 30
-    },
-    "pr-stable": {
-      "suites": [
-        "codeswarm.python.execution-construction",
-        "codeswarm.python.browser-artifact-delivery",
-        "codeswarm.python.acp",
-        "codeswarm.python.common",
-        "codeswarm.python.e2a",
-        "codeswarm.python.evolution",
-        "codeswarm.python.sdd",
-        "codeswarm.browser.unit",
-        "codeswarm.tui.contract",
-        "codeswarm.python.goal-heartbeat-lifecycle",
-        "codeswarm.python.governance-projects",
-        "codeswarm.python.governance-continuation",
-        "codeswarm.web.governance"
-      ],
-      "retention_days": 30
-    },
-    "web-diagnostic": {
-      "suites": ["codeswarm.web.scripts"],
-      "retention_days": 90
-    },
-    "tui-diagnostic": {
-      "suites": ["codeswarm.tui.full"],
-      "retention_days": 90
-    }
-  },
-  "suites": [
     {
       "id": "codeswarm.python.browser-artifact-delivery",
       "owner": "runtime",
