@@ -25,6 +25,8 @@ class SessionDeleteResult:
     recovery_required: bool = False
     error_code: str | None = None
     error_message: str | None = None
+    # None preserves legacy unknown; False only describes this deletion receipt.
+    audit_pending: bool | None = None
 
     @classmethod
     def failure(

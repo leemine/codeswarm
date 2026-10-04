@@ -51,7 +51,7 @@ async def test_revoked_source_owner_deletes_through_actual_transaction(deletion)
     d.tx.setup.host.store.revoke(d.tx.request.share_id, txns.ALICE, expected_revision=1)
     assert not d.tx.setup.host.owner_current(d.sid, txns.BOB)
     result = await d.run()
-    assert result == {'session_id': d.sid, 'ok': True, 'deleted': True, 'exit_confirmed': True}
+    assert result == {'session_id': d.sid, 'ok': True, 'deleted': True, 'exit_confirmed': True, 'audit_pending': False}
     assert not (d.tx.root / d.sid).exists()
     assert txns.owner(d.tx)['retired'] is True
     assert lc.state('session', d.sid)['deleted'] is True

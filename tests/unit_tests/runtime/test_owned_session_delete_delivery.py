@@ -92,7 +92,7 @@ async def delivery(deletion, monkeypatch):
 
 
 def fixed_payload(d):
-    return {'session_id': d.sid, 'deleted': True, 'exit_confirmed': True}
+    return {'session_id': d.sid, 'deleted': True, 'exit_confirmed': True, 'audit_pending': False}
 
 
 def assert_success_frames(frames, d, number=1):

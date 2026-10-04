@@ -305,6 +305,10 @@ class SharingHostService:
         from .deletion_receipt import confirm_for_permit
         return confirm_for_permit(self, permit)
 
+    def deletion_audit_pending_for_permit(self, permit) -> bool:
+        from .deletion_receipt import audit_pending_for_permit
+        return audit_pending_for_permit(self, permit)
+
     def register_owner_and_source(self, session_id: str, owner: TrustedIdentity, project_id: str, *,
                                   expected_owner_revision: int = 0) -> int:
         """Host-only prepublish registration; one sidecar save and no history IO.

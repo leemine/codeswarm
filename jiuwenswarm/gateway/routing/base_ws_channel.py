@@ -349,10 +349,17 @@ class BaseWsChannel(BaseWebChannel):
                         raise PermissionError("deletion response has no original permit")
                     def guard():
                         try:
-                            return (connection_principal(ws).identity() == permit.identity
-                                    and getattr(ws, "_jiuwen_session_permits", {}).get(frame.request_id) is permit
-                                    and (not frame.success
-                                         or permit.host.confirm_deletion_for_permit(permit) is True))
+                            if (connection_principal(ws).identity() != permit.identity
+                                    or getattr(ws, "_jiuwen_session_permits", {}).get(frame.request_id) is not permit):
+                                return False
+                            if frame.success:
+                                pending = permit.host.deletion_audit_pending_for_permit(permit)
+                                if type(pending) is not bool:
+                                    return False
+                                # Re-derive at actual writer delivery: a lawful
+                                # repair while queued can change true to false.
+                                payload["audit_pending"] = pending
+                            return True
                         except Exception:
                             return False
                     payload = {"session_id": permit.cleanup[0], "deleted": frame.success,
@@ -528,22 +535,6 @@ class BaseWsChannel(BaseWebChannel):
                 if isinstance(frame, _AuthorizedFrame):
                     delivery_guard = frame.guard
                     frame = frame.data
-                # dict 帧在出口处序列化一次；str/bytes 原样发送。避免入队前
-                # 预 dumps 与 _coalesce 解析回 dict 的二次编解码往返。序列化
-                # 与 send 共用下方兜底：任一失败都只丢这一帧，不杀 writer。
-                if isinstance(frame, dict):
-                    try:
-                        wire = json.dumps(frame, ensure_ascii=False)
-                    except (TypeError, ValueError) as e:
-                        if receipt is not None and not receipt.done():
-                            receipt.set_result(False)
-                        logger.warning(
-                            "[%s] frame serialize failed, dropping ws_id=%s err=%s",
-                            self.channel_id, ws_id, e,
-                        )
-                        continue
-                else:
-                    wire = frame
                 try:
                     from jiuwenswarm.governance.organization_auth import connection_principal
                     principal = connection_principal(ws)  # Recheck after queue/backpressure.
@@ -551,6 +542,22 @@ class BaseWsChannel(BaseWebChannel):
                         if receipt is not None and not receipt.done():
                             receipt.set_result(False)
                         continue
+                    # dict 帧在出口处序列化一次；str/bytes 原样发送。避免入队前
+                    # 预 dumps 与 _coalesce 解析回 dict 的二次编解码往返。序列化
+                    # 与 send 共用下方兜底：任一失败都只丢这一帧，不杀 writer。
+                    if isinstance(frame, dict):
+                        try:
+                            wire = json.dumps(frame, ensure_ascii=False)
+                        except (TypeError, ValueError) as e:
+                            if receipt is not None and not receipt.done():
+                                receipt.set_result(False)
+                            logger.warning(
+                                "[%s] frame serialize failed, dropping ws_id=%s err=%s",
+                                self.channel_id, ws_id, e,
+                            )
+                            continue
+                    else:
+                        wire = frame
                     await asyncio.wait_for(ws.send(wire), timeout=10.0)
                     if receipt is not None and not receipt.done():
                         receipt.set_result(True)

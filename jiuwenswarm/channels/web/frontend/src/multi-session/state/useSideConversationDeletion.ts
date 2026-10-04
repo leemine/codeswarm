@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
-import { archivedTaskClient } from '../../features/workspace/archivedTaskClient';
+import { archivedTaskClient, DeletionAuditPendingError } from '../../features/workspace/archivedTaskClient';
 
 /** A deletion receipt belongs to the requested side Session, never the latest open pane. */
 export function useSideConversationDeletion<T extends { session: { session_id: string } }>(
@@ -20,13 +20,20 @@ export function useSideConversationDeletion<T extends { session: { session_id: s
       const pending = inFlight.current.get(sessionId);
       if (pending) return pending;
       const deletion = (async () => {
-        await archivedTaskClient.deleteSession(sessionId);
+        let auditPending: DeletionAuditPendingError | undefined;
+        try {
+          await archivedTaskClient.deleteSession(sessionId);
+        } catch (error) {
+          if (!(error instanceof DeletionAuditPendingError) || error.sessionId !== sessionId) throw error;
+          auditPending = error;
+        }
         if (!mounted.current) return;
         removeLocal(sessionId);
         if (sideRef.current?.session.session_id === sessionId) {
           sideRef.current = null;
           setSide(null);
         }
+        if (auditPending) throw auditPending;
       })().finally(() => {
         inFlight.current.delete(sessionId);
       });

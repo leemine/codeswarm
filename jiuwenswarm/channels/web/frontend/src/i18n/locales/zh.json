@@ -3506,6 +3506,10 @@
     "review": "审核"
   },
   "multiSession": {
+    "deleteAuditPending": "会话已删除，删除审计仍待补写。",
+    "deleteAuditPendingDialog": "会话已删除，删除审计仍待补写。重试只补写审计；关闭此对话框后将失去此重试入口。",
+    "retryDeletionAudit": "重试保存审计",
+    "deletedAuditDescription": "{{title}} 已删除。",
     "title": "工作",
     "conversations": "任务",
     "newConversation": "新建任务",

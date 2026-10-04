@@ -23,6 +23,11 @@ def deletion(boundary, monkeypatch):
         checks.append(permit)
         return completed[0]
     monkeypatch.setattr(host, 'confirm_deletion_for_permit', confirm, raising=False)
+    def audit_pending(permit):
+        if host.confirm_deletion_for_permit(permit) is not True:
+            raise PermissionError('synthetic completion unavailable')
+        return False
+    monkeypatch.setattr(host, 'deletion_audit_pending_for_permit', audit_pending)
     return host, actor, channel, ws, client, completed, checks
 
 
@@ -65,7 +70,7 @@ async def test_delete_uses_original_request_and_only_exact_host_confirmed_result
     permit = ws._jiuwen_session_permits['delete-1']
     assert not permit.revalidate()
     frames = await drain(channel, ws)
-    payload = {'session_id': 'session', 'deleted': True, 'exit_confirmed': True}
+    payload = {'session_id': 'session', 'deleted': True, 'exit_confirmed': True, 'audit_pending': False}
     assert frames == [
         {'type': 'res', 'id': 'delete-1', 'ok': True, 'payload': payload},
         {'type': 'event', 'event': 'session.deleted', 'payload': payload},

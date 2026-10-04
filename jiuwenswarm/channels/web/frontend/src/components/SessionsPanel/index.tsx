@@ -5,7 +5,7 @@ import { FileViewer } from '../AgentPanel/FileViewer';
 import { containsIgnoredDirectory } from '../../features/fileTreeFilters';
 import { isHistoryPreviewFile } from '../../features/historyFilePreview';
 import { webRequest } from '../../services/webClient';
-import { archivedTaskClient, getArchiveErrorCode } from '../../features/workspace/archivedTaskClient';
+import { DeletionAuditPendingError, archivedTaskClient, getArchiveErrorCode } from '../../features/workspace/archivedTaskClient';
 import { useChatStore } from '../../stores/chatStore';
 import { toDisplaySessionTitle } from '../../utils/documentMessage';
 
@@ -460,6 +460,12 @@ export function SessionsPanel({
         setSelectedFile(null);
       }
     } catch (error) {
+      if (error instanceof DeletionAuditPendingError && error.sessionId === sessionId) {
+        await loadSessions();
+        if (selectedSessionIdRef.current === sessionId) setSelectedFile(null);
+        setSessionsError(t('multiSession.deleteAuditPending'));
+        return;
+      }
       console.error('Failed to delete session:', error);
       setSessionsError(getArchiveErrorCode(error) === 'SESSION_BUSY'
         ? t('multiSession.project.errors.deleteSessionBusy')

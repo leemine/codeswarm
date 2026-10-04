@@ -7,6 +7,7 @@ import { useSettingsServices } from '../../services/SettingsServicesProvider';
 import { useWorkspaceStore } from '../../../../stores';
 import {
   archivedTaskClient,
+  DeletionAuditPendingError,
   findBatchSessionResult,
   getArchiveErrorCode,
   type ArchivedSession,
@@ -45,6 +46,7 @@ function ArchivedTasksSettingsPanel({ isConnected }: { isConnected: boolean }) {
   const [searchInput, setSearchInput] = useState('');
   const [keyword, setKeyword] = useState('');
   const [pendingActions, setPendingActions] = useState<Record<string, 'restore' | 'delete'>>({});
+  const [deleteAuditPendingSid, setDeleteAuditPendingSid] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const deleteTargetRef = useRef(deleteTarget);
   deleteTargetRef.current = deleteTarget;
@@ -132,8 +134,17 @@ function ArchivedTasksSettingsPanel({ isConnected }: { isConnected: boolean }) {
       if (isCurrentTarget()) {
         showToast('success', t('settingsPanel.archivedTasks.sessionDeleted'));
         setDeleteTarget(null);
+        setDeleteAuditPendingSid(null);
       }
     } catch (error) {
+      if (error instanceof DeletionAuditPendingError && error.sessionId === session.session_id) {
+        if (mountedRef.current) removeLocalSession(session.session_id);
+        if (isCurrentTarget()) {
+          setDeleteAuditPendingSid(session.session_id);
+          setDeleteError(t('multiSession.deleteAuditPendingDialog'));
+        }
+        return;
+      }
       if (isCurrentTarget()) {
         const code = getArchiveErrorCode(error);
         setDeleteError(t(code === 'NOT_FOUND' || code === 'DELETE_UNCONFIRMED'
@@ -274,7 +285,12 @@ function ArchivedTasksSettingsPanel({ isConnected }: { isConnected: boolean }) {
     </li>
   );
 
-  const deleteDialogMessage = deleteTarget ? (
+  const deleteAuditPending = deleteTarget?.session.session_id === deleteAuditPendingSid;
+  const deleteDialogMessage = deleteAuditPending ? (
+    <p className="archived-tasks__dialog-line" data-testid="archived-tasks-deleted-audit-description">
+      {t('multiSession.deletedAuditDescription', { title: getArchivedSessionTitle(deleteTarget!.session, t('multiSession.untitled')) })}
+    </p>
+  ) : deleteTarget ? (
     <>
       <p className="archived-tasks__dialog-line">
         {t('settingsPanel.archivedTasks.deleteSessionRecord', {
@@ -394,13 +410,14 @@ function ArchivedTasksSettingsPanel({ isConnected }: { isConnected: boolean }) {
         message={deleteDialogMessage}
         confirming={deleteBusy}
         error={deleteError ?? undefined}
-        confirmLabel={t('settingsPanel.archivedTasks.deletePermanently')}
+        confirmLabel={t(deleteAuditPending ? 'multiSession.retryDeletionAudit' : 'settingsPanel.archivedTasks.deletePermanently')}
         confirmVariant="danger"
         onConfirm={() => { void handleConfirmDelete(); }}
         onCancel={() => {
           if (deleteBusy) return;
           setDeleteError(null);
           setDeleteTarget(null);
+          setDeleteAuditPendingSid(null);
         }}
       />
 

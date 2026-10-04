@@ -161,10 +161,12 @@ async def send_deletion_result(ws: Any, *, authority, request) -> bool:
     try:
         if type(authority) is OwnedSessionDeletion and authority.request is request:
             authority.acknowledge()
-            allowed = authority.host.confirm_deletion_for_permit(authority._permit) is True
+            audit_pending = authority.host.deletion_audit_pending_for_permit(authority._permit)
+            allowed = type(audit_pending) is bool
     except Exception:
         pass
-    payload = ({'session_id': authority.session_id, 'deleted': True, 'exit_confirmed': True}
+    payload = ({'session_id': authority.session_id, 'deleted': True, 'exit_confirmed': True,
+                'audit_pending': audit_pending}
                if allowed else {'code': 'DELETE_UNCONFIRMED', 'error': 'Deletion result is unavailable.'})
     wire = encode_agent_response_for_wire(AgentResponse(
         request_id=request.request_id, channel_id=request.channel_id,

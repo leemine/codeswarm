@@ -300,6 +300,7 @@ class SessionArchiveService:
             if authority is not None:
                 authority.check_before_begin()
                 if lc.state('session', session_id).get('deleted') is True:
+                    authority.repair_audit()
                     return authority.acknowledge()
             active, archived = lc.session_paths(session_id)
             previous = lc.state("session", session_id).get("operation")

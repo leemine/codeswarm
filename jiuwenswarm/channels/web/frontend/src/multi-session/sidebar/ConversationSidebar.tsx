@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { useAdaptiveTooltip } from '../../hooks/useAdaptiveTooltip';
 import { useChatStore, type ChatRuntime } from '../../stores/chatStore';
 import { webClient } from '../../services/webClient';
-import { getArchiveErrorCode, archivedTaskClient, findBatchSessionResult, parseProjectOperationFailure } from '../../features/workspace/archivedTaskClient';
+import { DeletionAuditPendingError, getArchiveErrorCode, archivedTaskClient, findBatchSessionResult, parseProjectOperationFailure } from '../../features/workspace/archivedTaskClient';
 import { requestSettingsModule } from '../../features/settings/settingsNavigation';
 import { DeleteDialog } from '../dialogs/Dialogs';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, toast } from '../../components/ui';
@@ -885,6 +885,7 @@ export function ConversationSidebar({
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
   const [pinError, setPinError] = useState<string | null>(null);
+  const [deleteSessionAuditPending, setDeleteSessionAuditPending] = useState(false);
   const [deleteSessionTarget, setDeleteSessionTarget] = useState<Session | null>(null);
   const deleteSessionTargetRef = useRef(deleteSessionTarget);
   deleteSessionTargetRef.current = deleteSessionTarget;
@@ -1364,6 +1365,15 @@ export function ConversationSidebar({
       if (isCurrent()) setDeleteSessionTarget(null);
       void useWorkspaceStore.getState().refreshWorkspaceData();
     } catch (error) {
+      if (error instanceof DeletionAuditPendingError && error.sessionId === target.session_id) {
+        if (mountedRef.current) {
+          removeSessionLocally(target.session_id);
+          deletedCallbackRef.current?.(target.session_id);
+          void useWorkspaceStore.getState().refreshWorkspaceData();
+        }
+        if (isCurrent()) setDeleteSessionAuditPending(true);
+        return;
+      }
       const code = getArchiveErrorCode(error);
       if (isCurrent()) setDeleteSessionError(t(code === 'DELETE_UNCONFIRMED' || code === 'NOT_FOUND'
         ? 'settingsPanel.archivedTasks.errors.deleteUnconfirmed'
@@ -1404,11 +1414,12 @@ export function ConversationSidebar({
               removeSessionLocally(session.session_id);
               await useWorkspaceStore.getState().refreshWorkspaceData();
             } catch (error) {
-              toast.open({ content: error instanceof Error ? error.message : String(error), variant: 'error' });
+              toast.open({ content: error instanceof DeletionAuditPendingError ? t('multiSession.deleteAuditPending') : error instanceof Error ? error.message : String(error), variant: 'error' });
             }
           })();
         } : deletableSingle ? () => {
           setDeleteSessionTarget(session);
+          setDeleteSessionAuditPending(false);
           setDeleteSessionBusy(deleteSessionPending.current.has(session.session_id));
           setDeleteSessionError(null);
         } : undefined}
@@ -1473,7 +1484,7 @@ export function ConversationSidebar({
                         removeSessionLocally(ts.session_id);
                         await loadCronSessions(projectId, job.id);
                       } catch (error) {
-                        toast.open({ content: error instanceof Error ? error.message : String(error), variant: 'error' });
+                        toast.open({ content: error instanceof DeletionAuditPendingError ? t('multiSession.deleteAuditPending') : error instanceof Error ? error.message : String(error), variant: 'error' });
                       }
                     })();
                   }}
@@ -1853,6 +1864,9 @@ export function ConversationSidebar({
           title={getSessionTitle(deleteSessionTarget, t('multiSession.untitled'))}
           deleting={deleteSessionBusy}
           error={deleteSessionError}
+          notice={deleteSessionAuditPending ? t('multiSession.deleteAuditPendingDialog') : null}
+          confirmLabel={deleteSessionAuditPending ? t('multiSession.retryDeletionAudit') : undefined}
+          descriptionKey={deleteSessionAuditPending ? 'multiSession.deletedAuditDescription' : undefined}
           onCancel={() => {
             if (deleteSessionBusy) return;
             setDeleteSessionTarget(null);

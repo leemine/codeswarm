@@ -510,7 +510,7 @@ def adopt(host, receipt, operation, *, audit_context=None, audit_result=None):
     return result
 
 
-def confirm_for_permit(host, permit):
+def _confirmation_for_permit(host, permit):
     """Content-free ACK proof for the exact incoming delete request only."""
     from jiuwenswarm.governance.session_boundary import SessionRequestPermit, is_cleanup_request
     try:
@@ -549,6 +549,19 @@ def confirm_for_permit(host, permit):
                 return False
             if any(path.exists() for path in lifecycle.session_paths(sid)):
                 return False
-        return permit.identity_resolver() == permit.identity
+        return (permit.identity_resolver() == permit.identity, 'audit_pending' in value)
     except Exception:
         return False
+
+
+def confirm_for_permit(host, permit):
+    proof = _confirmation_for_permit(host, permit)
+    return type(proof) is tuple and proof[0] is True
+
+
+def audit_pending_for_permit(host, permit):
+    """Current status of that exact ACK proof; unknown is never false."""
+    proof = _confirmation_for_permit(host, permit)
+    if type(proof) is not tuple or proof[0] is not True:
+        _deny('original deletion audit status is unavailable')
+    return proof[1]

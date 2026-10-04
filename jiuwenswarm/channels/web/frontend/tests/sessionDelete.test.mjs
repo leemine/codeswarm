@@ -306,3 +306,32 @@ test('actual SessionsPanel concurrent deletions retain the other target pending 
   await tick();
   assert.equal(panelButton('b').disabled, false);
 });
+
+test('archived deletion pending retains existing dialog with audit-only retry and no success toast', async () => {
+  const calls = [];
+  await mount(async (_method, params) => {
+    calls.push(params.session_id);
+    return { session_id: 'a', deleted: true, exit_confirmed: true, audit_pending: calls.length === 1 };
+  });
+  await click(deleteButton('a'));
+  await click(confirm());
+  assert.match(document.querySelector('dialog[open]').textContent, /audit.*pending/i);
+  assert.match(confirm().textContent, /retry saving audit/i);
+  assert.equal(toasts.length, 0);
+  await click(confirm());
+  assert.deepEqual(calls, ['a', 'a']);
+  assert.equal(document.querySelector('dialog[open]'), null);
+});
+
+test('side deletion pending removes exact deleted pane but reports pending to its existing feedback caller', async () => {
+  const removed = await mountSide(async () => ({ session_id: 'a', deleted: true, exit_confirmed: true, audit_pending: true }));
+  await act(async () => assert.rejects(sideControls.deleteSide('a'), { code: 'DELETE_AUDIT_PENDING' }));
+  assert.deepEqual(removed, ['a']);
+  assert.equal(sideControls.getCurrent(), null);
+});
+
+test('SessionsPanel pending deletion shows fixed warning instead of a failure or ordinary success', async () => {
+  await mountSessionsPanel(async () => ({ session_id: 'a', deleted: true, exit_confirmed: true, audit_pending: true }));
+  await click(panelButton('a'));
+  assert.match(document.body.textContent, /audit.*pending/i);
+});

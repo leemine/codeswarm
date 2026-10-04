@@ -13,6 +13,8 @@ from jiuwenswarm.governance.session_boundary import admit_session_request
 from jiuwenswarm.governance.session_sharing import SessionSharingDenied
 from jiuwenswarm.runtime.session.model import SessionCloseTimeoutError
 from jiuwenswarm.server.runtime.session import lifecycle as lc
+from jiuwenswarm.server.runtime.session.deletion_receipt import DeletionAuditPending
+from jiuwenswarm.server.runtime.session.sharing_audit import SharingAuditContext
 
 
 class OwnedSessionDeletion:
@@ -26,6 +28,8 @@ class OwnedSessionDeletion:
         self._context = copy_context()
         self._identity = self._context.run(runtime._governance_identity, request)
         self._wire = self._request_facts()
+        self._audit_context = SharingAuditContext(
+            self._identity, request.request_id or None, "session.delete")
         self._resolver = lambda: self._context.run(runtime._governance_identity, request)
         self._permit = permit or admit_session_request(
             'session.delete', request.params or {}, identity_resolver=self._resolver,
@@ -78,9 +82,24 @@ class OwnedSessionDeletion:
     def enter(self, operation):
         self._check_original()
         if self.receipt is None:
-            self.receipt = self.host.begin_deletion(self._capture, operation)
+            self.receipt = self.host.begin_deletion(
+                self._capture, operation, audit_context=self._audit_context)
         else:
-            self.receipt = self.host.adopt_deletion(self.receipt, operation)
+            try:
+                self.receipt = self.host.adopt_deletion(
+                    self.receipt, operation, audit_context=self._audit_context)
+            except DeletionAuditPending:
+                # Claiming the SAME persisted operation may advance its owner
+                # generation. Recover that exact nonce, never another deletion.
+                original = json.loads(self.receipt._record_json)
+                recovered = self.host.resume_deletion(
+                    self.session_id, self._identity, identity_resolver=self._resolver)
+                current = json.loads(recovered._record_json)
+                if {k: v for k, v in original.items() if k != 'audit_pending'} != {
+                        k: v for k, v in current.items() if k != 'audit_pending'}:
+                    raise SessionSharingDenied('original deletion receipt changed')
+                self.receipt = recovered
+                self.repair_audit()
         self._check_original()
         self.host.check_deletion(self.receipt, for_admission=True)
 
@@ -131,12 +150,36 @@ class OwnedSessionDeletion:
     def commit_owner(self):
         self.check()
         try:
-            self.host.commit_deletion(self.receipt)
+            self.host.commit_deletion(self.receipt, audit_context=self._audit_context)
+        except DeletionAuditPending as exc:
+            if exc.receipt is not self.receipt or not self.host.confirms_deletion(self.receipt):
+                raise
+            self.host.deletion_audit_pending(self.receipt)
         except Exception:
+            # An atomic replace can succeed before a later IO error. Reconcile
+            # both the actual retirement and its strict persisted audit status.
             if not self.host.confirms_deletion(self.receipt):
                 raise
+            self.host.deletion_audit_pending(self.receipt)
         self._check_original()
         self.host.check_deletion(self.receipt, for_admission=True)
+
+    def repair_audit(self):
+        """Audit-only retry from the original persisted receipt/context."""
+        self._check_original()
+        if not self.host.confirms_deletion(self.receipt):
+            raise SessionSharingDenied('original deletion commit is unconfirmed')
+        if self.host.deletion_audit_pending(self.receipt):
+            try:
+                self.host.supplement_deletion_audit(self.receipt)
+            except DeletionAuditPending as exc:
+                if exc.receipt is not self.receipt:
+                    raise
+            except Exception:
+                # A failed save is never treated as a successful audit write.
+                # Only the exact durable receipt can resolve its current state.
+                self.host.deletion_audit_pending(self.receipt)
+        self._check_original()
 
     def acknowledge(self):
         self._check_original()
@@ -147,7 +190,8 @@ class OwnedSessionDeletion:
                 or state.get('deleted') is not True or operation.get('status') != 'completed'
                 or (operation.get('result') or {}).get('session_id') != self.session_id):
             raise SessionSharingDenied('original deletion commit is unconfirmed')
-        return {'session_id': self.session_id, 'ok': True, 'deleted': True, 'exit_confirmed': True}
+        return {'session_id': self.session_id, 'ok': True, 'deleted': True, 'exit_confirmed': True,
+                'audit_pending': self.host.deletion_audit_pending(self.receipt)}
 
 
 def capture_deletion(runtime, request, permit=None):

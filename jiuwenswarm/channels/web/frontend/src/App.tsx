@@ -77,7 +77,7 @@ import { readAgentTemplateName } from './features/agentIdentity';
 import { normalizeTeamLeaderIdentity } from './features/teamLeaderIdentity';
 import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages, useResponsiveLayout, useResponsivePanelResize } from './hooks';
 import { webRequest } from './services/webClient';
-import { archivedTaskClient, getArchiveErrorCode } from './features/workspace/archivedTaskClient';
+import { DeletionAuditPendingError, archivedTaskClient, getArchiveErrorCode } from './features/workspace/archivedTaskClient';
 import type { WorkflowRun } from './components/teamArea/workflowTypes';
 import { useTeamPanelState } from './features/teamPanelState';
 import { useSingleAgentPanelState } from './features/singleAgentPanelState';
@@ -3551,7 +3551,7 @@ function AppContent({
       await deleteSideConversation(side.session.session_id);
     } catch (error) {
       console.error('Failed to close side conversation:', error);
-      window.alert(t(getArchiveErrorCode(error) === 'SESSION_BUSY'
+      window.alert(t(error instanceof DeletionAuditPendingError ? 'multiSession.deleteAuditPending' : getArchiveErrorCode(error) === 'SESSION_BUSY'
         ? 'multiSession.project.errors.deleteSessionBusy'
         : 'multiSession.errors.delete'));
     }
@@ -3563,9 +3563,10 @@ function AppContent({
       return;
     }
     void deleteSideConversation(side.session.session_id).catch((error) => {
-      console.warn('Failed to discard side conversation after navigation:', error);
+      if (error instanceof DeletionAuditPendingError) window.alert(t('multiSession.deleteAuditPending'));
+      else console.warn('Failed to discard side conversation after navigation:', error);
     });
-  }, [deleteSideConversation, sessionId]);
+  }, [deleteSideConversation, sessionId, t]);
 
   const requestSessionNavigation = useCallback((target: Session | 'new', options?: NewConversationOptions) => {
     if (target === 'new') { enterNewConversation(mode, options); return; }

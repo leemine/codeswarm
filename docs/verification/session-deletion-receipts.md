@@ -106,3 +106,56 @@ with noneditable installed core `c7fa3781fa576492827f07f33dcb576c186be296`.
 Evidence: `/tmp/r2b-delete-receipt-audit/`; Ruff, diff checks and existing
 `pr-stable` plan validation passed. Full integrated stable and Runtime pending
 response wiring remain required. No lifecycle timeout or whitelist changed.
+
+## Runtime and existing deletion UI pending-audit delivery (2026-10-04)
+
+The Runtime captures one trusted `SharingAuditContext` for the original delete
+request and passes it to begin/adopt/commit. A direct host API with no request ID
+keeps that field absent; it does not invent a wire request. `commit_owner` now
+handles `DeletionAuditPending` explicitly. Other save failures require both
+confirmed original retirement and a strict pending read. An unreadable status
+cannot become `false` or successful delivery. A completed deletion retry calls
+only the original receipt's supplement operation; original request/attempt and
+confirmed generation remain unchanged and no Provider stop is repeated.
+
+Organization RPC success retains `session_id`, `deleted: true` and
+`exit_confirmed: true`, plus `audit_pending: boolean`. True means deletion really
+completed but that deletion's audit observation still needs repair. False means
+no pending observation on that receipt, not complete historical audit coverage.
+`SharingHostService.deletion_audit_pending_for_permit` derives this field from
+the exact original incoming permit, live full identity, receipt nonce, original
+owner/source/lifecycle and completed deletion. Unknown facts reject delivery.
+AgentServer and the Gateway do not trust a supplied backend/wire status flag.
+The Gateway recomputes the status after queueing, before serialization; a valid
+repair between enqueue and delivery can therefore change true to false without
+dropping the original receipt. This port authorizes no content or subscriptions.
+
+The current organization Single menu reuses its existing DeleteDialog. A
+validated pending receipt removes only its original Session and enters a draft
+only if that Session is still current. The same dialog stays mounted across
+that navigation, shows an explicit already-deleted warning, and changes the
+existing confirm button to retry audit saving for the same ID. A late A receipt
+cannot change B's dialog or navigate B. Existing settings, side-pane and legacy
+Session-list consumers also distinguish the validated pending receipt from a
+failed deletion. Legacy exact-ID success without these fields remains compatible
+and is not labeled as complete audit history.
+
+Closing the dialog, refreshing or signing out loses the UI retry entry. The
+original persisted receipt remains recoverable through authenticated same-ID
+`session.delete`; this slice adds no pending-operation inventory or full activity
+restoration. UI retries cannot repair a corrupt audit history themselves; the
+underlying storage must become valid first. Original owner/identity constraints
+still apply after restart. SDK `SessionDeleteResult` appends nullable
+`audit_pending` (None is legacy unknown); the integrating Runtime owner must map
+the organization service result into this field in `runtime/service.py`.
+
+Validation uses swarm source overlay based on `6574677c` and noneditable core
+`c7fa3781fa576492827f07f33dcb576c186be296`, with isolated configuration. Deletion,
+receipt, cleanup and actual AgentServer/Gateway tests: 119 passed, followed by
+7 focused audit tests including the extra incomplete-lifecycle retry (120 unique
+delete/cleanup cases total). Existing writer/authorization tests: 74 passed.
+React: 16 Single and 27 existing-consumer cases passed. Frontend build passed;
+desktop and 375px actual DeleteDialog renderings were inspected using installed
+Chrome and existing theme tokens. These are deterministic synthetic-exit and
+component evidence, not real Provider/product UI acceptance or integrated stable.
+Evidence and complete commands: `/tmp/r2b-delete-audit-runtime/README.md`.

@@ -188,3 +188,50 @@ test('NOT_FOUND refreshes inventory but retains an unknown, retryable deletion',
   assert.deepEqual(deleted, []);
   assert.deepEqual(navigations, []);
 });
+
+test('deleted audit-pending Session enters draft while original dialog stays mounted and retries same sid', async () => {
+  const calls = [];
+  await mount(async (method, params) => {
+    calls.push({ method, params });
+    return { session_id: 'a', deleted: true, exit_confirmed: true, audit_pending: calls.length === 1 };
+  });
+  await open('a');
+  await click(q('multi-session-dialog-confirm'));
+  assert.equal(row('a'), null);
+  assert.equal(navigations.length, 1);
+  // App preserves the chat Sidebar across current Session -> new draft.
+  current.current = null;
+  await act(async () => root.render(React.createElement(renderedProps.Harness)));
+  assert.ok(q('multi-session-dialog'));
+  assert.ok(q('multi-session-dialog-notice'));
+  assert.equal(q('multi-session-dialog-confirm').disabled, false);
+  await click(q('multi-session-dialog-confirm'));
+  assert.deepEqual(calls.map(x => x.params), [{ session_id: 'a' }, { session_id: 'a' }]);
+  assert.equal(q('multi-session-dialog'), null);
+  assert.equal(navigations.length, 1);
+});
+
+test('late audit-pending A cannot attach warning or retry to B dialog', async () => {
+  let resolve;
+  await mount(async () => new Promise(r => { resolve = r; }));
+  await open('a');
+  await click(q('multi-session-dialog-confirm'));
+  current.current = 'b';
+  await act(async () => root.render(React.createElement(renderedProps.Harness)));
+  await open('b');
+  await act(async () => resolve({ session_id: 'a', deleted: true, exit_confirmed: true, audit_pending: true }));
+  await tick();
+  assert.equal(q('multi-session-dialog-notice'), null);
+  assert.match(q('multi-session-dialog-description').textContent, /Session b/);
+  assert.deepEqual(navigations, []);
+});
+
+for (const payload of [
+  { session_id: 'a', audit_pending: true },
+  { session_id: 'a', deleted: true, exit_confirmed: true, audit_pending: 'unknown' },
+]) {
+  test(`audit status cannot promote an unconfirmed receipt ${JSON.stringify(payload)}`, async () => {
+    await assert.rejects(createArchivedTaskClient(async () => payload).deleteSession('a'),
+      error => error.code === 'DELETE_UNCONFIRMED');
+  });
+}
