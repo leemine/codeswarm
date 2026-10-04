@@ -105,11 +105,16 @@ class RuntimeSessionCoordinator:
                 raise RuntimeError("Session authority changed within its original generation")
             return record.authority_watch
         record.authority_watch = authority
+        self._ensure_authority_monitor(record, interval=interval)
+        return authority
 
+    def _ensure_authority_monitor(self, record, *, interval=1.0):
+        if record.authority_task is not None and not record.authority_task.done():
+            return
         async def monitor():
-            while self._sessions.get(session_id) is record and record.state is not RuntimeSessionState.CLOSED:
+            while self._sessions.get(record.session_id) is record and record.state is not RuntimeSessionState.CLOSED:
                 try:
-                    await self._revalidate_session_authority(record)
+                    await self._revalidate_record_authorities(record)
                 except Exception as exc:
                     # Retain the unconfirmed exit for explicit callers/status;
                     # retry only this same generation and close capability.
@@ -123,7 +128,116 @@ class RuntimeSessionCoordinator:
                     pass
         record.authority_task = asyncio.create_task(monitor())
         record.authority_task.add_done_callback(self._consume_task)
-        return authority
+
+    def native_execution_owner(self, session_id, request_id):
+        """Resolve the original Native admission without External side effects."""
+        record = self._require_open_session(session_id)
+        values = self._registry.select(session_id=session_id, request_id=request_id,
+                                       generation=record.generation, active_only=True)
+        if len(values) != 1 or values[0].cancellation_requested:
+            raise SessionExecutionEndedError('original Native execution unavailable')
+        handle = values[0]
+        if handle.work_kind is SessionWorkKind.CONTROL_INPUT:
+            return self.claimed_control_parent(session_id, request_id)
+        if handle.work_kind is SessionWorkKind.SESSION_INPUT:
+            parent = self._registry.get(handle.parent_execution_id)
+            if (handle.task is not asyncio.current_task() or parent is None
+                    or parent.state.terminal or parent.cancellation_requested
+                    or parent.session_id != session_id or parent.generation != record.generation):
+                raise SessionExecutionEndedError('original Native supplemental parent unavailable')
+            return parent
+        return handle
+
+    def native_request_lifecycle(self, session_id, request_id, native, check_authority, *, require_principal=True):
+        from openjiuwen.core.controller.schema.execution_origin import ExecutionOrigin
+        from jiuwenswarm.runtime.native_execution_origin import NativeExecutionAdmission
+        from jiuwenswarm.runtime.harness.native_session import NativeRequestLifecycle
+
+        owner = self.native_execution_owner(session_id, request_id)
+        admission = owner._native_admission
+        if admission is not None:
+            if admission.native is not native:
+                raise SessionExecutionEndedError('original Native Session was replaced')
+            admission.check_current()
+        else:
+            principal = owner._execution_authority
+            if (principal is None and require_principal) or owner.task is None or owner.task.done():
+                raise SessionExecutionEndedError('Native requires its original authenticated producer')
+            identity = principal.identity() if principal is not None else None
+            check_authority()
+            def check():
+                if principal is not None and principal.identity() != identity:
+                    raise SessionExecutionEndedError('original Native credential changed')
+                check_authority()
+            admission = NativeExecutionAdmission(self, self._sessions[session_id], owner,
+                                                native, check, owner.task)
+            owner._native_admission = admission
+            # All managed Native answers retain their original parent until
+            # its real receipt and original control consumers have exited.
+            owner.preserve_control_origin = True
+            admission.source = ExecutionOrigin(owner, _checker=admission.check_current)
+            owner.task.add_done_callback(admission.settle_terminal)
+            self._ensure_authority_monitor(admission.record)
+        return NativeRequestLifecycle(admission.source, admission.bind, admission.terminal,
+                                      on_not_admitted=admission.not_admitted)
+
+    async def _revalidate_native_authorities(self, record):
+        stopping, failures, timed_out = [], [], []
+        for handle in self._registry.select(session_id=record.session_id,
+                                            generation=record.generation, active_only=True):
+            admission = handle._native_admission
+            if admission is None or (admission.confirmed.is_set() and not handle.cancellation_requested):
+                continue
+            try:
+                if admission.producer.done() and admission.deferred_terminal is not None:
+                    raise SessionExecutionEndedError('Native producer exited without its Provider receipt')
+                admission.check_current()
+            except Exception:
+                # Configuration/credential failures fence the original work;
+                # retry the retained exact exit, never select a newer Turn.
+                handle.cancellation_requested = True
+                stopping.append(handle)
+                if not admission.confirmed.is_set():
+                    try:
+                        admission.start_exit()
+                    except Exception as exc:
+                        failures.append(exc)
+        # Fence and request every original exit before awaiting a slow one.
+        # A late Provider receipt still needs its already-cancelled producer
+        # joined; confirmation cannot make that pending work disappear.
+        for handle in stopping:
+            try:
+                result = await self.cancel_execution(record.session_id,
+                    execution_id=handle.execution_id, generation=record.generation)
+                timed_out.extend(result.timed_out)
+            except Exception as exc:
+                failures.append(exc)
+        if timed_out:
+            failures.append(SessionCloseTimeoutError(record.session_id, tuple(dict.fromkeys(timed_out))))
+        if failures:
+            raise ExceptionGroup('original Native exits remain unconfirmed', failures)
+
+    async def _finish_native_handles(self, handles, *, wait_timeout):
+        tasks = {handle.execution_id: handle._native_admission.start_exit()
+                 for handle in handles if handle._native_admission is not None
+                 and not handle._native_admission.confirmed.is_set()}
+        if not tasks:
+            return ()
+        _done, pending = await asyncio.wait(set(tasks.values()), timeout=wait_timeout)
+        return tuple(key for key, task in tasks.items()
+                     if task in pending or task.cancelled() or task.exception() is not None)
+
+    async def _revalidate_record_authorities(self, record):
+        failures = []
+        # A stuck credential-specific exit must never prevent a revoked share
+        # from fencing the whole original Session against new admissions.
+        for check in (self._revalidate_session_authority, self._revalidate_native_authorities):
+            try:
+                await check(record)
+            except Exception as exc:
+                failures.append(exc)
+        if failures:
+            raise ExceptionGroup('original Session authority exit remains unconfirmed', failures)
 
     async def _revalidate_session_authority(self, record):
         if (self._sessions.get(record.session_id) is not record
@@ -151,7 +265,7 @@ class RuntimeSessionCoordinator:
         # Explicit sharing mutations wait for the original resources to exit.
         # Cross-process changes and expiry are also observed by the same monitor.
         for record in tuple(self._sessions.values()):
-            await self._revalidate_session_authority(record)
+            await self._revalidate_record_authorities(record)
 
     def external_execution_owner(self, session_id: str, request_id: str) -> SessionExecutionHandle:
         """Resolve authority from the original registry, never request metadata."""
@@ -970,8 +1084,11 @@ class RuntimeSessionCoordinator:
             active_only=True,
         )
         handles = self._with_descendants(handles)
-        direct = [handle for handle in handles if self._requires_direct_cancel(handle)]
-        work = [handle for handle in handles if handle.work_kind.scheduled]
+        timeout = self._cancel_timeout if wait_timeout is None else wait_timeout
+        native_timeouts = await self._finish_native_handles(handles, wait_timeout=timeout)
+        ready = [handle for handle in handles if handle.execution_id not in native_timeouts]
+        direct = [handle for handle in ready if self._requires_direct_cancel(handle)]
+        work = [handle for handle in ready if handle.work_kind.scheduled]
         direct_ids = {handle.execution_id for handle in direct}
         for handle in handles:
             if handle.execution_id not in direct_ids:
@@ -984,7 +1101,7 @@ class RuntimeSessionCoordinator:
             direct,
             wait_timeout=self._cancel_timeout if wait_timeout is None else wait_timeout,
         )
-        timed_out = (*timed_out, *direct_timeouts)
+        timed_out = (*native_timeouts, *timed_out, *direct_timeouts)
         timed_out_set = set(timed_out)
         cancelled = 0
         for handle in handles:
@@ -1061,6 +1178,10 @@ class RuntimeSessionCoordinator:
             generation=target_generation,
         )
         active = [handle for handle in executions if not handle.state.terminal]
+        native_timeouts = await self._finish_native_handles(active,
+            wait_timeout=self._cancel_timeout if wait_timeout is None else wait_timeout)
+        if native_timeouts:
+            return CloseSessionResult(session_id, target_generation, True, native_timeouts)
         settling = []
         for handle in executions:
             if not handle.state.terminal or not handle.retain_owner_task:
@@ -1328,7 +1449,14 @@ class RuntimeSessionCoordinator:
             task = handle.task
             if task is None or task.done() or task is current:
                 continue
-            task.cancel()
+            admission = handle._native_admission
+            if admission is not None:
+                # The Provider fence is separate from cancelling this producer.
+                # Retain the actual send fact even if the producer uncancels
+                # itself while finishing; retries must join that same cleanup.
+                admission.request_producer_cancel(task)
+            else:
+                task.cancel()
             tasks[handle.execution_id] = task
         if not tasks:
             return ()
@@ -1494,8 +1622,14 @@ class RuntimeSessionCoordinator:
             record = self._sessions.get(handle.session_id)
             return record is not None and record.external_owner == handle.execution_id
 
-        pending = [handle for handle in handles if handle.cancellation_requested and not explicit_external_retry(handle)]
-        fresh = [handle for handle in handles if not handle.cancellation_requested or explicit_external_retry(handle)]
+        def needs_cancel(handle):
+            admission = handle._native_admission
+            if admission is not None:
+                return not admission.producer_cancel_requested
+            return not handle.cancellation_requested or explicit_external_retry(handle)
+
+        pending = [handle for handle in handles if not needs_cancel(handle)]
+        fresh = [handle for handle in handles if needs_cancel(handle)]
         for handle in fresh:
             handle.cancellation_requested = True
         cancelled_timeouts = await self._cancel_direct_handles(

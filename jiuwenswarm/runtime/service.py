@@ -642,6 +642,41 @@ class AgentRuntime:
             model_selection=model_selection, credential_decoder=decode_model_credential,
             binding_checker=continuation.check_model if continuation is not None else None,
         )
+        def native_lifecycle_factory(native, submitted):
+            from jiuwenswarm.runtime.harness.native_session import NativeExecutionSession
+            from jiuwenswarm.governance.organization_auth import configured_authenticator
+            if type(native) is not NativeExecutionSession or submitted is None:
+                raise GovernanceError('original Native request admission required')
+            if submitted.request_id != original_request_id:
+                raise GovernanceError('Native request differs from its original admission')
+            lookup = getattr(self._agent_manager, 'get_agent_for_session_nowait', None)
+            owner = lookup(original_channel_id, session_id) if callable(lookup) else None
+            adapter = getattr(owner, '_adapter', None)
+            binding = native.engine.binding
+            def selected_child():
+                if getattr(adapter, '_is_session_scoped_adapter', False):
+                    return adapter
+                cached = getattr(adapter, '_get_cached_session_adapter', None)
+                return cached(session_id) if callable(cached) else None
+            child = selected_child()
+            def check():
+                if (current_identity() != identity or not is_current()
+                        or not callable(lookup) or lookup(original_channel_id, session_id) is not owner
+                        or getattr(owner, '_adapter', None) is not adapter
+                        or selected_child() is not child or child is None
+                        or getattr(child, '_native_execution', None) is not native
+                        or getattr(child, '_parent_session_id', None) != session_id
+                        or native.engine.binding is not binding
+                        or binding.host_session_id != session_id
+                        or binding.subject_id != identity.subject_id
+                        or binding.workspace != str(Path(workspace).resolve())
+                        or native.closed):
+                    raise GovernanceError('original Native execution scope unavailable')
+                self._submission_guard.check_access(project_id, identity, 'execute')
+            check()
+            return self._session_coordinator.native_request_lifecycle(
+                session_id, original_request_id, native, check,
+                require_principal=configured_authenticator() is not None)
         return ExecutionResourceAuthorities({
             provider: BoundToolResourceAuthority(
                 ResourceExecutionContext(project_id, identity, session_id, str(Path(workspace).resolve()), provider),
@@ -649,7 +684,8 @@ class AgentRuntime:
                 current_identity=current_identity, is_current_execution=is_current,
             ) for provider in ("native", "codex", "opencode")
         }, model_authorizer=model_authority, mcp_authorizer=mcp_authority,
-           artifact_issuer_factory=artifact_factory, external_model_authorizer=external_model_authority)
+           artifact_issuer_factory=artifact_factory, external_model_authorizer=external_model_authority,
+           native_lifecycle_factory=native_lifecycle_factory)
 
     @property
     def extension_registry(self) -> Any | None:
