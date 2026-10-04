@@ -306,8 +306,10 @@ storage, download permit and actual ASGI GET/HEAD/range/final-buffer guards.
 The model, push delivery and in-process E2A bridge are fixtures. They are not a
 real browser/human approval or external Provider acceptance test. Evidence and
 precise source combinations are recorded in `/tmp/r2b-sealed-artifacts/`.
-Integration stable, the new formally locked core pairing, and the ordinary
-approved-file UI story remain required before calling this capability accepted.
+Integration stable and the new formally locked core pairing remain required
+before accepting this component change. The automatic-approval product entry is
+currently disabled as described below; no ordinary approved-file UI pass is
+claimed or reachable through its current configuration.
 
 Candidate affected validation: **243 passed** in 36.21 seconds (one existing
 Authlib deprecation warning), plus Ruff and `git diff --check`. The source is
@@ -318,3 +320,31 @@ this isolated branch based on swarm `10604eeb`, overlaid explicitly with
 not verification of the integration owner's later core lock or full stable.
 The new module is covered by the existing governance-projects directory
 collection; its 180-second limit and existing exclusions are unchanged.
+
+
+### Product entry availability clarification
+
+Upstream `b6cd34c2b1ea068b57cb6f9a91a0d15a0c9457f9` (2026-09-18,
+`!6891 fix(permissions): disable auto permission mode`) deliberately reduced
+`auto_config._VALID_RUNTIME_MODES` to `manual`, removed the UI automatic option
+and SmartApproval product documentation, and removed `automatic` from Gateway
+accepted profiles. The commit message does not record a more specific business
+or security reason; none is inferred here. Its `internal_auto_mode` pytest
+fixture explicitly enables retained internals only for tests.
+
+In the current source, `is_auto_permission_enabled` therefore returns false
+for ordinary configuration. `interface_deep._auto_permission_enabled_for_config`
+uses that predicate, and the real send-file assembly derives
+`require_execution_authorization` solely from `_enable_auto_permission`.
+Team tool assembly and Provider artifact projection retain the default false.
+The exported Python component `SendFileToolkit` still supports the explicit
+constructor/update-runtime-context keyword `require_execution_authorization=True`,
+with a real host execution grant and Native source certificate required. This
+is a retained component interface, not a high-level `jiuwenswarm_sdk.Client`
+option or a CLI switch. No such SDK/CLI option is present in their source.
+
+The new sealed tests exercise that explicit component composition without
+changing `_VALID_RUNTIME_MODES`. Re-enabling automatic approval or exposing a
+new manual sealed product option requires a separate authorized product change
+and its UI acceptance. The already-open ordinary owner Workspace download UI
+remains separate and does not prove this currently disabled sealed composition.
