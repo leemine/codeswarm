@@ -33,6 +33,14 @@ class _ConfirmedFrame:
     receipt: asyncio.Future
 
 
+@dataclass(frozen=True)
+class _CleanupFrame:
+    request_id: str
+    permit: Any
+    success: bool
+    response: bool
+
+
 @dataclass
 class _AuthorizedFrame:
     data: Any
@@ -300,6 +308,11 @@ class BaseWsChannel(BaseWebChannel):
                 if not receipt.done():
                     receipt.cancel()
 
+    def send_cleanup_result(self, ws: Any, request_id: str, permit: Any, *, success: bool) -> None:
+        """Only a host-correlated cancel result; never an active data subscription."""
+        for response in (True, False):
+            self._enqueue_send(ws, _CleanupFrame(request_id, permit, success is True, response))
+
     def _enqueue_send(self, ws: Any, data: Any, *, session_id: str | None = None) -> None:
         """非阻塞入队一帧到 ws 的出站队列，立即返回。
 
@@ -314,7 +327,27 @@ class BaseWsChannel(BaseWebChannel):
                 principal = connection_principal(ws)
                 permits = getattr(ws, "_jiuwen_session_permits", {})
                 permit = permits.get(data.get("id")) if isinstance(data, dict) else None
-                if isinstance(data, dict) and data.get("type") == "res" and data.get("ok") is False:
+                if isinstance(data, _CleanupFrame):
+                    frame = data
+                    permit = frame.permit
+                    if (permit is None or permit.cleanup is None or permit.method != "chat.interrupt"
+                            or permits.get(frame.request_id) is not permit):
+                        raise PermissionError("cleanup response has no original permit")
+                    def guard():
+                        return (connection_principal(ws).identity() == permit.identity
+                                and getattr(ws, "_jiuwen_session_permits", {}).get(frame.request_id) is permit
+                                and permit.revalidate())
+                    payload = {"request_id": frame.request_id, "session_id": permit.cleanup[0],
+                               "intent": "cancel", "success": frame.success,
+                               "exit_confirmed": frame.success}
+                    if frame.response:
+                        data = {"type": "res", "id": frame.request_id, "ok": frame.success,
+                                "payload": payload}
+                        if not frame.success:
+                            data.update(error="Cleanup failed or remains unconfirmed.", code="CLEANUP_UNCONFIRMED")
+                    else:
+                        data = {"type": "event", "event": "chat.interrupt_result", "payload": payload}
+                elif isinstance(data, dict) and data.get("type") == "res" and data.get("ok") is False:
                     # Failure messages from unscoped handlers never carry their
                     # original potentially sensitive payload into a browser.
                     data = {"type": "res", "id": data.get("id", ""), "ok": False,
@@ -323,6 +356,8 @@ class BaseWsChannel(BaseWebChannel):
                     def guard():
                         return principal.identity() is not None
                 elif permit is not None:
+                    if permit.cleanup is not None:
+                        raise PermissionError("cleanup permit cannot deliver ordinary data")
                     guard = permit.revalidate
                     if permit.method in {"session.share.continue", "session.share.continuation.options"}:
                         from jiuwenswarm.runtime.continuation_delivery import (
@@ -380,6 +415,8 @@ class BaseWsChannel(BaseWebChannel):
                 data = _AuthorizedFrame(data, guard)
             except Exception:
                 return
+        if isinstance(data, _CleanupFrame):
+            return
         receipt = None
         current = _delivery_receipts.get()
         if current is not None and current[0] is self:

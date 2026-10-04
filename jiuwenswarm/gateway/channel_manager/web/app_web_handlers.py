@@ -5723,6 +5723,42 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
 
     async def _chat_interrupt(ws, req_id, params, session_id):
+        from jiuwenswarm.governance.organization_auth import configured_authenticator, connection_principal
+        from jiuwenswarm.governance.session_boundary import is_cleanup_request
+        if configured_authenticator() is not None and is_cleanup_request("chat.interrupt", params):
+            from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+            from jiuwenswarm.common.schema.message import ReqMethod
+            from jiuwenswarm.gateway.routing.agent_request_timeout import send_agent_request_with_timeout
+            permit = getattr(ws, "_jiuwen_session_permits", {}).get(req_id)
+            success = False
+            try:
+                identity = connection_principal(ws).identity()
+                if permit is None or not permit.allows_cleanup("chat.interrupt", params, identity, session_id):
+                    raise PermissionError("original cleanup request required")
+                client = _resolve(agent_client)
+                if client is None or getattr(client, "server_ready", True) is False:
+                    raise ConnectionError("cleanup transport unavailable")
+                envelope = e2a_from_agent_fields(
+                    request_id=req_id, channel_id=channel.channel_id, session_id=session_id,
+                    req_method=ReqMethod.CHAT_CANCEL, params=dict(params), is_stream=False,
+                    timestamp=time.time(), user_id=channel._connection_user_id(ws),
+                )
+                response = await send_agent_request_with_timeout(client, envelope, label="session.cleanup")
+                result = response.payload
+                success = (permit.allows_cleanup("chat.interrupt", params,
+                           connection_principal(ws).identity(), session_id)
+                           and response.request_id == req_id and response.channel_id == channel.channel_id
+                           and response.ok is True
+                           and isinstance(result, dict) and result.get("session_id") == session_id
+                           and result.get("event_type") == "chat.interrupt_result"
+                           and result.get("intent") == "cancel" and result.get("success") is True
+                           and result.get("exit_confirmed") is True)
+            except Exception:
+                # Backend errors and payloads may contain private state. Only
+                # the fixed unconfirmed result is allowed across this boundary.
+                success = False
+            channel.send_cleanup_result(ws, req_id, permit, success=success)
+            return
         intent = params.get("intent") if isinstance(params, dict) else None
         payload = {"accepted": True, "session_id": session_id}
         if isinstance(intent, str) and intent:

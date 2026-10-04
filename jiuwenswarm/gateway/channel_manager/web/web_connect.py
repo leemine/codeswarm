@@ -1501,6 +1501,19 @@ class WebChannel(BaseWsChannel):
                 await self.send_response(ws, req_id, ok=False, error="Session authorization denied.", code="FORBIDDEN")
                 return
 
+        # A cleanup permit cannot establish a history subscription or enter the
+        # generic interrupt queue (which acknowledges receipt before execution).
+        if organization and permit.cleanup is not None:
+            handler = self._method_handlers.get(method)
+            if method != "chat.interrupt" or handler is None:
+                await self.send_response(ws, req_id, ok=False,
+                    error="Cleanup method is not available on this channel.", code="FORBIDDEN")
+                return
+            await self._invoke_method_handler(_MethodHandlerInvocation(
+                ws, method, req_id, params, permit.cleanup[0], handler,
+            ))
+            return
+
         # ── V2: session_id 解析 ──
         # 请求自带 session_id（如 chat.send）→ 用它更新 ws 路由注册。
         # 请求未带 session_id（如 memory.compute 心跳、updater.check、config.get
