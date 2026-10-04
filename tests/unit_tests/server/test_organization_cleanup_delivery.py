@@ -164,12 +164,13 @@ async def test_cleanup_permit_never_authorizes_generic_response_or_event(boundar
 
 
 @pytest.mark.asyncio
-async def test_delete_cleanup_delivery_is_not_implicitly_enabled(boundary):
+async def test_delete_without_host_receipt_is_not_reported_as_completed(boundary):
     _, _, channel, ws, client = boundary
+    client.send_request.return_value = response()
     await dispatch(channel, ws, method='session.delete')
     frames = await drain(channel, ws)
     assert len(frames) == 1 and frames[0]['ok'] is False
-    client.send_request.assert_not_awaited()
+    client.send_request.assert_awaited_once()
 
 
 @pytest.mark.asyncio

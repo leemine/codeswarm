@@ -1505,7 +1505,7 @@ class WebChannel(BaseWsChannel):
         # generic interrupt queue (which acknowledges receipt before execution).
         if organization and permit.cleanup is not None:
             handler = self._method_handlers.get(method)
-            if method != "chat.interrupt" or handler is None:
+            if method not in {"chat.interrupt", "session.delete"} or handler is None:
                 await self.send_response(ws, req_id, ok=False,
                     error="Cleanup method is not available on this channel.", code="FORBIDDEN")
                 return

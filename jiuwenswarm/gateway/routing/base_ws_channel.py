@@ -41,6 +41,14 @@ class _CleanupFrame:
     response: bool
 
 
+@dataclass(frozen=True)
+class _DeletionFrame:
+    request_id: str
+    permit: Any
+    success: bool
+    response: bool
+
+
 @dataclass
 class _AuthorizedFrame:
     data: Any
@@ -313,6 +321,12 @@ class BaseWsChannel(BaseWebChannel):
         for response in (True, False):
             self._enqueue_send(ws, _CleanupFrame(request_id, permit, success is True, response))
 
+    def send_deletion_result(self, ws: Any, request_id: str, permit: Any, *, success: bool) -> None:
+        """Only the exact original deletion can emit a host-confirmed receipt."""
+        self._enqueue_send(ws, _DeletionFrame(request_id, permit, success is True, True))
+        if success is True:
+            self._enqueue_send(ws, _DeletionFrame(request_id, permit, True, False))
+
     def _enqueue_send(self, ws: Any, data: Any, *, session_id: str | None = None) -> None:
         """非阻塞入队一帧到 ws 的出站队列，立即返回。
 
@@ -327,7 +341,32 @@ class BaseWsChannel(BaseWebChannel):
                 principal = connection_principal(ws)
                 permits = getattr(ws, "_jiuwen_session_permits", {})
                 permit = permits.get(data.get("id")) if isinstance(data, dict) else None
-                if isinstance(data, _CleanupFrame):
+                if isinstance(data, _DeletionFrame):
+                    frame = data
+                    permit = frame.permit
+                    if (permit is None or permit.cleanup is None or permit.method != "session.delete"
+                            or permits.get(frame.request_id) is not permit):
+                        raise PermissionError("deletion response has no original permit")
+                    def guard():
+                        try:
+                            return (connection_principal(ws).identity() == permit.identity
+                                    and getattr(ws, "_jiuwen_session_permits", {}).get(frame.request_id) is permit
+                                    and (not frame.success
+                                         or permit.host.confirm_deletion_for_permit(permit) is True))
+                        except Exception:
+                            return False
+                    payload = {"session_id": permit.cleanup[0], "deleted": frame.success,
+                               "exit_confirmed": frame.success}
+                    if frame.response:
+                        data = {"type": "res", "id": frame.request_id, "ok": frame.success,
+                                "payload": payload}
+                        if not frame.success:
+                            data.update(error="Deletion failed or remains unconfirmed.", code="DELETE_UNCONFIRMED")
+                    elif frame.success:
+                        data = {"type": "event", "event": "session.deleted", "payload": payload}
+                    else:
+                        raise PermissionError("unconfirmed deletion cannot emit an event")
+                elif isinstance(data, _CleanupFrame):
                     frame = data
                     permit = frame.permit
                     if (permit is None or permit.cleanup is None or permit.method != "chat.interrupt"
@@ -415,7 +454,7 @@ class BaseWsChannel(BaseWebChannel):
                 data = _AuthorizedFrame(data, guard)
             except Exception:
                 return
-        if isinstance(data, _CleanupFrame):
+        if isinstance(data, (_CleanupFrame, _DeletionFrame)):
             return
         receipt = None
         current = _delivery_receipts.get()
