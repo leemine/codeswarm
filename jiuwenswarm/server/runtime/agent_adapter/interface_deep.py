@@ -15708,10 +15708,19 @@ class JiuWenSwarmDeepAdapter:
                 # A queued follow-up needs its own Turn reader in the normal
                 # stream path; this ACK-only path is for active-turn steering.
                 return False
+            control = getattr(request, "_native_steer_control", None)
+            if getattr(native_execution, "_require_execution_origin", False):
+                from jiuwenswarm.runtime.harness.native_session import NativeSteerControl
+                if type(control) is not NativeSteerControl:
+                    raise PermissionError("Managed Native input requires its original control")
+            if control is not None:
+                control.check_current(native_execution, request.request_id)
             if native_execution._native.active_turn is None:
                 return False
             prepared = await self._prepare_root_input_dispatch(request, inputs)
             try:
+                if control is not None:
+                    control.check_current(native_execution, request.request_id)
                 await native_execution.send_request(
                     SendInputRequest(
                         request_id=request.request_id,
@@ -15719,8 +15728,16 @@ class JiuWenSwarmDeepAdapter:
                             request, prepared, mode
                         ),
                         mode=mode,
-                    )
+                    ),
+                    **({"control": control} if control is not None else {}),
                 )
+                if control is not None:
+                    try:
+                        control.check_current(native_execution, request.request_id)
+                    except Exception as exc:
+                        raise SessionInputDeliveryUnknown(
+                            "original Native steer owner changed after submission; do not retry automatically"
+                        ) from exc
                 return True
             finally:
                 self._permission_dispatch.finalize(prepared)
