@@ -67,7 +67,16 @@ class EngineAgentAdapter:
     event projection are composed here without constructing a DeepAgent.
     """
 
-    def __init__(self, route: AdmittedExecutionRoute, *, tool_gateway=None) -> None:
+    def __init__(self, route: AdmittedExecutionRoute, *, tool_gateway=None,
+                 model_gateway_binding=None, model_authority_factory=None) -> None:
+        if model_gateway_binding is not None or model_authority_factory is not None:
+            from jiuwenswarm.governance.model_credentials import ModelCredentialBinding
+            if (route.provider_id != 'opencode' or type(model_gateway_binding) is not ModelCredentialBinding
+                    or not callable(model_authority_factory)):
+                raise ValueError('explicit OpenCode model authority required')
+        self._model_gateway_binding = model_gateway_binding
+        self._model_authority_factory = model_authority_factory
+        self._turn_model_authorities = {}
         if route.provider_id == "native":
             raise ValueError("EngineAgentAdapter requires an External provider")
         self._route = route
@@ -279,6 +288,8 @@ class EngineAgentAdapter:
             raise RuntimeError(
                 "External construction did not retain its admitted binding"
             )
+        if self._model_gateway_binding is not None:
+            session.bind_model_gateway(self._model_gateway_binding, self._turn_model_authorities.get)
         return session
 
     def _release_external_owner(self, runtime, owner, request, *, goal=None) -> None:
@@ -312,6 +323,7 @@ class EngineAgentAdapter:
     async def complete_detached_turn(self, turn_id: str) -> None:
         """Called by the original projection only after durable terminal output."""
         self._turn_resource_authorizers.pop(turn_id, None)
+        self._turn_model_authorities.pop(turn_id, None)
         if (self._ordinary_owner is None or turn_id != self._ordinary_turn
                 or turn_id not in self._ordinary_terminal):
             return
@@ -498,6 +510,26 @@ class EngineAgentAdapter:
             metadata=request.metadata,
         )
 
+    def _capture_model_authority(self):
+        if self._model_gateway_binding is None:
+            return None
+        from jiuwenswarm.governance.opencode_model_http import model_authority_current
+        import inspect
+        cancelled = False
+        try:
+            value = self._model_authority_factory()
+            if inspect.iscoroutine(value):
+                value.close()
+            if model_authority_current(value):
+                return value
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            pass
+        if cancelled:
+            raise asyncio.CancelledError()
+        raise PermissionError('model request authority unavailable')
+
     async def process_message_stream_impl(
         self, request: AgentRequest, inputs: dict[str, Any]
     ) -> AsyncIterator[AgentResponseChunk]:
@@ -526,7 +558,10 @@ class EngineAgentAdapter:
             if runtime
             else None
         )
+        model_authority = self._capture_model_authority()
         if operation is not None or attach:
+            if self._model_gateway_binding is not None:
+                raise PermissionError('governed model gateway does not support detached Goal requests')
             if self._goal_runtime is None or runtime is None or owner is None:
                 raise RuntimeError(
                     "External Goal requires its admitted Runtime producer"
@@ -557,7 +592,7 @@ class EngineAgentAdapter:
             )
         )
         completed = False
-        stream = self._process_message_stream_impl(request, inputs)
+        stream = self._process_message_stream_impl(request, inputs, model_authority=model_authority)
         try:
             async for chunk in stream:
                 if chunk.runtime_completion == "completed":
@@ -590,6 +625,7 @@ class EngineAgentAdapter:
         if session.exit_state is not ExecutionExitState.EXIT_CONFIRMED:
             raise RuntimeError("External stop did not confirm execution exit")
         self._turn_resource_authorizers.clear()
+        self._turn_model_authorities.clear()
         await self.release_subagent_runtime_for_session(
             session.binding.host_session_id, reason="parent_ended"
         )
@@ -635,7 +671,12 @@ class EngineAgentAdapter:
         inputs: dict[str, Any],
         *,
         goal_attempt=None,
+        model_authority=None,
     ) -> AsyncIterator[AgentResponseChunk]:
+        if self._model_gateway_binding is not None and not isinstance(inputs.get('query'), InteractiveInput):
+            from jiuwenswarm.governance.opencode_model_http import model_authority_current
+            if not model_authority_current(model_authority):
+                raise PermissionError('original model request authority required')
         session = self._require_session()
         params = request.params if isinstance(request.params, dict) else {}
         if self._surface is not None:
@@ -669,7 +710,13 @@ class EngineAgentAdapter:
         authority = current_tool_authorizer(self._route.provider_id)
         if self._resource_governed and authority is None:
             raise PermissionError("protected execution requires current resource authority")
+        if model_authority is not None:
+            from jiuwenswarm.governance.opencode_model_http import model_authority_current
+        if model_authority is not None and not model_authority_current(model_authority):
+            raise PermissionError('original model request authority unavailable')
         receipt = await session.send(external_input, immediate=immediate)
+        if model_authority is not None:
+            self._turn_model_authorities[receipt.turn_id] = model_authority
         if authority is not None:
             self._turn_resource_authorizers[receipt.turn_id] = authority
         if goal_attempt is not None:
@@ -802,6 +849,7 @@ class EngineAgentAdapter:
         finally:
             if terminal_seen:
                 self._turn_resource_authorizers.pop(receipt.turn_id, None)
+                self._turn_model_authorities.pop(receipt.turn_id, None)
             if not terminal_seen:
                 session.abandon_output(receipt.turn_id)
             forget_submission = getattr(session, "forget_submission", None)

@@ -94,6 +94,8 @@ class ExecutionSession:
         self._tool_gateway = tool_gateway
         self._tool_transport: ManagedProductToolTransport | None = None
         self._native_preflight_bound = False
+        self._model_gateway_binding = None
+        self._model_authority_for_turn = None
         self._queue_size = max(1, queue_size)
         self._recovery = recovery
         self._output_router: TurnOutputRouter | None = None
@@ -130,6 +132,16 @@ class ExecutionSession:
             and provider_session_id
             and self.engine.harness.provider_session_id == provider_session_id
         )
+
+    def bind_model_gateway(self, binding, authority_for_turn) -> None:
+        """Bind a host-selected model once before this original Provider cycle."""
+        from jiuwenswarm.governance.model_credentials import ModelCredentialBinding
+        if (type(binding) is not ModelCredentialBinding or not callable(authority_for_turn)
+                or self.binding.provider_id != 'opencode' or self._model_gateway_binding is not None
+                or self._started or self._closed or self._tool_transport is not None):
+            raise ValueError('model gateway binding is unavailable')
+        self._model_gateway_binding = binding
+        self._model_authority_for_turn = authority_for_turn
 
     async def start(self, context: HarnessContext) -> None:
         """Start exactly one Provider cycle for the bound host Session."""
@@ -311,6 +323,8 @@ class ExecutionSession:
         governed_opencode = (
             self.binding.provider_id == "opencode" and context.tool_authorizer is not None
         )
+        if self._model_gateway_binding is not None and not governed_opencode:
+            raise ValueError('model gateway requires mandatory native authority')
         if governed_opencode:
             return await self._prepare_opencode_preflight(context, gateway)
         if gateway is None:
@@ -377,8 +391,22 @@ class ExecutionSession:
         self._tool_transport = transport
         await transport.start()
         values = transport.bind_native_preflight(harness.authorize_preflight)
+        model_gateway = None
+        if self._model_gateway_binding is not None:
+            original_binding = self.binding
+            def source_current(source):
+                return (self.binding is original_binding and self.engine.harness is harness
+                        and self._tool_transport is transport
+                        and self.owns_governed_provider_session(source.session_id)
+                        and harness._is_model_source_current(source))
+            model_gateway = transport.bind_model_gateway(
+                self._model_gateway_binding, execution_binding=original_binding,
+                capture_source=harness._capture_model_source, is_source_current=source_current,
+                authority_for_turn=self._model_authority_for_turn,
+            )
         harness.bind_preflight_endpoint(OpenCodePreflightEndpoint(
             **values, product_tool_names=names,
+            **({"model_gateway": model_gateway} if model_gateway is not None else {}),
         ))
         self._native_preflight_bound = True
         if gateway is None:

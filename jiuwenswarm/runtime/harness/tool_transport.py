@@ -30,6 +30,8 @@ from openjiuwen.harness_protocol import (
 PRODUCT_MCP_SERVER_NAME = "jiuwenswarm_product_tools"
 PRODUCT_MCP_PATH = "/mcp"
 _NATIVE_PREFLIGHT_PATH = "/native-preflight"
+_MODEL_BASE_PATH = "/model/v1"
+_MODEL_PATH = _MODEL_BASE_PATH + "/chat/completions"
 _MAX_REQUEST_BODY_BYTES = 1024 * 1024
 _START_TIMEOUT_S = 10.0
 _STOP_TIMEOUT_S = 10.0
@@ -62,6 +64,7 @@ class ManagedProductToolTransport:
         self._token = secrets.token_urlsafe(32)
         self._preflight_generation = secrets.token_urlsafe(32)
         self._preflight_handler = None
+        self._model_consumer = None
         self._product_call_handler = None
         self._accepting_preflight = False
         self._port: int | None = None
@@ -80,7 +83,14 @@ class ManagedProductToolTransport:
         """Return true only when the owned server task has actually exited."""
 
         task = self._serve_task
-        return task is None or task.done()
+        return (task is None or task.done()) and (
+            self._model_consumer is None or (self._model_consumer.closed and not self._pending_model_handlers())
+        )
+
+    def _pending_model_handlers(self):
+        server = self._uvicorn
+        state = getattr(server, 'server_state', None)
+        return tuple(task for task in getattr(state, 'tasks', ()) if not task.done())
 
     async def start(self) -> None:
         async with self._lifecycle_lock:
@@ -152,6 +162,26 @@ class ManagedProductToolTransport:
         return {'url': f'http://127.0.0.1:{self._port}{_NATIVE_PREFLIGHT_PATH}',
                 'token': self._token, 'generation': self._preflight_generation}
 
+    def bind_model_gateway(self, binding, *, execution_binding, capture_source,
+                           is_source_current, authority_for_turn):
+        from openjiuwen.harness_providers.opencode.model_gateway import OpenCodeModelGateway
+        from jiuwenswarm.governance.opencode_model_http import OpenCodeModelHttpConsumer
+        if (not self.started or not self._accepting_preflight or self._model_consumer is not None
+                or execution_binding.host_session_id != self._host_session_id):
+            raise RuntimeError('model gateway requires the original live transport')
+        endpoint = OpenCodeModelGateway(
+            f'http://127.0.0.1:{self._port}{_MODEL_BASE_PATH}', self._token,
+            self._preflight_generation, binding.model, binding.api_base,
+        )
+        consumer = OpenCodeModelHttpConsumer(
+            binding, execution_binding=execution_binding, capture_source=capture_source,
+            is_source_current=is_source_current, authority_for_turn=authority_for_turn,
+            is_current_transport=lambda: self.started and self._accepting_preflight
+                and self._model_consumer is consumer,
+        )
+        self._model_consumer = consumer
+        return endpoint
+
     def bind_product_calls(self, handler) -> None:
         """Install one mandatory consumer for original native product calls."""
         if (not self.started or self._gateway is None
@@ -195,6 +225,14 @@ class ManagedProductToolTransport:
                 pass
         if task is not None and not task.done():
             raise RuntimeError("product MCP transport exit could not be confirmed")
+        if self._model_consumer is not None:
+            async with asyncio.timeout(_STOP_TIMEOUT_S):
+                await self._model_consumer.close()
+                pending = self._pending_model_handlers()
+                if pending:
+                    _, pending = await asyncio.wait(pending, timeout=_STOP_TIMEOUT_S)
+                    if pending:
+                        raise RuntimeError('model HTTP handlers have not exited')
         if listener is not None:
             listener.close()
         self._uvicorn = None
@@ -326,7 +364,7 @@ class ManagedProductToolTransport:
                 for key, value in scope.get("headers", ())
             }
             supplied = headers.get("authorization", "")
-            if (scope.get("path") not in {PRODUCT_MCP_PATH, _NATIVE_PREFLIGHT_PATH}
+            if (scope.get("path") not in {PRODUCT_MCP_PATH, _NATIVE_PREFLIGHT_PATH, _MODEL_PATH}
                     or (scope.get("path") == PRODUCT_MCP_PATH and self._gateway is None)) or not hmac.compare_digest(
                 supplied,
                 f"Bearer {self._token}",
@@ -343,6 +381,26 @@ class ManagedProductToolTransport:
                     }
                 )
                 await send({"type": "http.response.body", "body": body})
+                return
+            if scope.get('path') == _MODEL_PATH:
+                from openjiuwen.harness_providers.opencode.model_gateway import SOURCE_HEADERS
+                raw_headers = [key.decode('latin-1').lower() for key, _ in scope.get('headers', ())]
+                consumer = self._model_consumer
+                valid = (
+                    consumer is not None and not consumer.closed and self.started and self._accepting_preflight
+                    and scope.get('method') == 'POST' and not scope.get('query_string')
+                    and scope.get('raw_path', _MODEL_PATH.encode()) == _MODEL_PATH.encode()
+                    and headers.get('host') == f'127.0.0.1:{port}'
+                    and len(raw_headers) == len(set(raw_headers))
+                    and headers.get('content-type', '').split(';')[0].lower() == 'application/json'
+                    and {key for key in headers if key.startswith('x-openjiuwen-')} == set(SOURCE_HEADERS)
+                )
+                if not valid:
+                    await send({'type': 'http.response.start', 'status': 403,
+                                'headers': [(b'content-type', b'application/json')]})
+                    await send({'type': 'http.response.body', 'body': b'{"error":"model request unavailable"}'})
+                    return
+                await consumer.handle(scope, receive, send, {key: headers[key] for key in SOURCE_HEADERS})
                 return
             if scope.get('path') == _NATIVE_PREFLIGHT_PATH:
                 await self._handle_native_preflight(scope, receive, send, headers, port)
