@@ -1142,7 +1142,9 @@ def _mcc_looks_usable(mcc: dict) -> bool:
     return bool(api_key)
 
 
-def build_model_from_entry(mcc: dict, mco: dict) -> Model:
+def build_model_from_entry(
+    mcc: dict, mco: dict, *, model_entry_fingerprint: str | None = None,
+) -> Model:
     """根据单个模型条目的 model_client_config / model_config_obj 构建 Model 实例。
 
     模块级公开函数：除本适配器外，模型缓存构建（``agent_ws_server`` /
@@ -1197,6 +1199,8 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
     from jiuwenswarm.governance.model_consumer import runtime_model_kwargs
     model = Model(**runtime_model_kwargs(
         ModelClientConfig(**mcc_fields), m_config, binding_config=mcc,
+        **({"model_entry_fingerprint": model_entry_fingerprint}
+           if model_entry_fingerprint is not None else {}),
     ))
     return model
 
@@ -2062,7 +2066,7 @@ class JiuWenSwarmDeepAdapter:
         self._root_instance_lock: asyncio.Lock | None = None
         self._session_adapters: dict[str, JiuWenSwarmDeepAdapter] = {}
         self._session_adapter_locks: dict[str, asyncio.Lock] = {}
-        self._native_session_routes: dict[str, tuple[Any, Any, Any]] = {}
+        self._native_session_routes: dict[str, tuple[Any, ...]] = {}
         self._session_adapter_last_used: dict[str, float] = {}
         self._session_adapter_config_version: int = 0
         self._session_adapter_versions: dict[str, int] = {}
@@ -3481,6 +3485,13 @@ class JiuWenSwarmDeepAdapter:
     def select_execution_for_request(self, request: AgentRequest) -> None:
         """Pin an admitted Native session before MCP can create its child."""
         bound = getattr(request, "_bound_execution", None)
+        continuation = getattr(request, "_continuation_context", None)
+        if continuation is not None:
+            from jiuwenswarm.governance.continuation_context import validate_continuation_context
+
+            validate_continuation_context(continuation, request.session_id, request.request_id)
+            if bound is None:
+                raise PermissionError("continuation requires its bound Native route")
         if bound is None:
             return
         if bound.spec.provider_id != "native":
@@ -3492,10 +3503,13 @@ class JiuWenSwarmDeepAdapter:
             getattr(request, "_execution_source"),
             getattr(request, "_execution_bindings"),
             bound,
+            continuation,
         )
         existing = self._native_session_routes.get(sid)
         if existing is not None and existing[2].binding is not bound.binding:
             raise RuntimeError("session execution binding changed")
+        if existing is not None and len(existing) > 3 and existing[3] is not None and continuation is None:
+            raise PermissionError("continuation context cannot be removed")
         child = self._session_adapters.get(sid)
         if child is not None and getattr(child, "_native_execution", None) is None:
             raise RuntimeError("session already uses the legacy interaction route")
@@ -3523,6 +3537,23 @@ class JiuWenSwarmDeepAdapter:
         )
         lock = self._session_adapter_locks.setdefault(sid, asyncio.Lock())
         async with lock:
+            # Capture the original request's live input before any creation or
+            # reload await. Never borrow a newer request's seed from this route.
+            native_route = self._native_session_routes.get(sid)
+            continuation = native_route[3] if native_route and len(native_route) > 3 else None
+
+            def validate_continuation_route():
+                if continuation is not None:
+                    from jiuwenswarm.governance.continuation_context import (
+                        ContinuationContextDenied, validate_continuation_context,
+                    )
+
+                    if (not history_before_request_id
+                            or self._native_session_routes.get(sid) is not native_route):
+                        raise ContinuationContextDenied("continuation request route changed")
+                    validate_continuation_context(continuation, sid, history_before_request_id)
+
+            validate_continuation_route()
             existing = self._session_adapters.get(sid)
             # Same-class child cleanup remains serialized by this session lock.
             if (
@@ -3597,6 +3628,16 @@ class JiuWenSwarmDeepAdapter:
                     existing,
                     host_external_input=host_external_input,
                 )
+                if continuation is not None:
+                    from jiuwenswarm.agents.harness.common.session_ops_service import warmup_session_context
+
+                    validate_continuation_route()
+                    await warmup_session_context(
+                        deep_agent=existing._instance, session_id=sid,
+                        history_before_request_id=history_before_request_id,
+                        continuation_context=continuation,
+                    )
+                    validate_continuation_route()
                 self._touch_session_adapter(sid)
                 if reserve_activity:
                     existing._register_session_agent_task(  # pylint: disable=protected-access
@@ -3605,110 +3646,127 @@ class JiuWenSwarmDeepAdapter:
                 return existing
 
             adapter = self._new_session_scoped_adapter(sid)
-            restored_profile = self._load_skill_retrieval_session_profile(sid)
-            restored_mcp_names = (
-                {
-                    str(name).strip()
-                    for name in restored_profile.get("initial_mcp_names", [])
-                    if str(name).strip()
-                }
-                if restored_profile is not None
-                else set(requested_mcp_scan_names or ())
-            )
-            adapter.restore_skill_retrieval_session(
-                restored_profile,
-                restored_mcp_names,
-                model_name,
-            )
-            config = (
-                dict(self._session_instance_config)
-                if isinstance(self._session_instance_config, dict)
-                else None
-            )
-            create_started_at = time.monotonic()
-            if permission_project_dir is not None:
-                config = {**(config or {}), "project_dir": permission_project_dir}
-            await adapter.create_instance(
-                config,
-                mode=self._session_instance_mode,
-                sub_mode=self._session_instance_sub_mode,
-                **self._session_instance_extra_create_kwargs(),
-            )
-            adapter.persist_skill_retrieval_session_profile()
-            instance_ready_at = time.monotonic()
-
-            native_route = self._native_session_routes.get(sid)
-            if native_route is None:
-                await adapter.start_interaction(session_id=sid)
-            else:
-                from openjiuwen.harness_protocol import HarnessContext
-
-                await self._reload_session_adapter_if_stale(
-                    sid, adapter, host_external_input=host_external_input,
-                )
-                source, bindings, bound = native_route
-                card = getattr(adapter._instance, "card", None)
-                context = HarnessContext(
-                    agent_name=adapter._agent_name,
-                    agent_id=str(getattr(card, "id", "") or adapter._agent_name),
-                    host_session_id=sid,
-                    cwd=bound.binding.workspace,
-                    system_prompt="",
-                )
-                execution = await adapter.start_native_interaction(
-                    source=source,
-                    bindings=bindings,
-                    subject_id=bound.binding.subject_id,
-                    workspace=bound.binding.workspace,
-                    context=context,
-                )
-                from jiuwenswarm.server.runtime.agent_adapter.native_detached_projection import (
-                    NativeDetachedProjection,
-                )
-                from jiuwenswarm.runtime.context import get_current_runtime
-
-                execution.enable_turn_outputs(
-                    detached_output=NativeDetachedProjection(
-                        sid, adapter, runtime=get_current_runtime(),
-                        request_id_for_turn=execution.request_id_for_turn,
-                    )
-                )
-            interaction_ready_at = time.monotonic()
-
-            self._session_adapters[sid] = adapter
-            # A brand-new session adapter is created from ``_session_instance_config``
-            # (which may predate the latest global reload). If a global reload left a
-            # pending ``config_base``, apply it now so the new session reflects the
-            # same configuration as already-existing sessions that reload lazily.
-            # ``_reload_session_adapter_if_stale`` owns the version bookkeeping
-            # (including the no-pending case, where it silently catches up).
-            if native_route is None:
-                await self._reload_session_adapter_if_stale(
-                    sid,
-                    adapter,
-                    host_external_input=host_external_input,
-                )
-            # 服务重启 / adapter 被驱逐后重建时，context_engine 内存池为空，
-            # 而 chat.send 主路径不会回灌磁盘 history.jsonl——继续历史会话时
-            # 模型将拿到空上下文。这里在新建 adapter 后从磁盘恢复上下文
-            # （全新会话磁盘无历史，warmup 内部会静默跳过）。
             try:
-                from jiuwenswarm.agents.harness.common.session_ops_service import (
-                    warmup_session_context,
+                restored_profile = self._load_skill_retrieval_session_profile(sid)
+                restored_mcp_names = (
+                    {
+                        str(name).strip()
+                        for name in restored_profile.get("initial_mcp_names", [])
+                        if str(name).strip()
+                    }
+                    if restored_profile is not None
+                    else set(requested_mcp_scan_names or ())
                 )
+                adapter.restore_skill_retrieval_session(
+                    restored_profile,
+                    restored_mcp_names,
+                    model_name,
+                )
+                config = (
+                    dict(self._session_instance_config)
+                    if isinstance(self._session_instance_config, dict)
+                    else None
+                )
+                create_started_at = time.monotonic()
+                if permission_project_dir is not None:
+                    config = {**(config or {}), "project_dir": permission_project_dir}
+                await adapter.create_instance(
+                    config,
+                    mode=self._session_instance_mode,
+                    sub_mode=self._session_instance_sub_mode,
+                    **self._session_instance_extra_create_kwargs(),
+                )
+                adapter.persist_skill_retrieval_session_profile()
+                instance_ready_at = time.monotonic()
 
-                await warmup_session_context(
-                    deep_agent=getattr(adapter, "_instance", None),
-                    session_id=sid,
-                    history_before_request_id=history_before_request_id,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[JiuWenSwarmDeepAdapter] session context warmup failed: "
-                    "session_id=%s error=%s",
-                    sid,
-                    exc,
-                )
+                validate_continuation_route()
+                if native_route is None:
+                    await adapter.start_interaction(session_id=sid)
+                else:
+                    from openjiuwen.harness_protocol import HarnessContext
+
+                    await self._reload_session_adapter_if_stale(
+                        sid, adapter, host_external_input=host_external_input,
+                    )
+                    validate_continuation_route()
+                    source, bindings, bound = native_route[:3]
+                    card = getattr(adapter._instance, "card", None)
+                    context = HarnessContext(
+                        agent_name=adapter._agent_name,
+                        agent_id=str(getattr(card, "id", "") or adapter._agent_name),
+                        host_session_id=sid,
+                        cwd=bound.binding.workspace,
+                        system_prompt="",
+                    )
+                    execution = await adapter.start_native_interaction(
+                        source=source,
+                        bindings=bindings,
+                        subject_id=bound.binding.subject_id,
+                        workspace=bound.binding.workspace,
+                        context=context,
+                    )
+                    from jiuwenswarm.server.runtime.agent_adapter.native_detached_projection import (
+                        NativeDetachedProjection,
+                    )
+                    from jiuwenswarm.runtime.context import get_current_runtime
+
+                    execution.enable_turn_outputs(
+                        detached_output=NativeDetachedProjection(
+                            sid, adapter, runtime=get_current_runtime(),
+                            request_id_for_turn=execution.request_id_for_turn,
+                        )
+                    )
+                interaction_ready_at = time.monotonic()
+
+                if continuation is None:
+                    self._session_adapters[sid] = adapter
+                # A brand-new session adapter is created from ``_session_instance_config``
+                # (which may predate the latest global reload). If a global reload left a
+                # pending ``config_base``, apply it now so the new session reflects the
+                # same configuration as already-existing sessions that reload lazily.
+                # ``_reload_session_adapter_if_stale`` owns the version bookkeeping
+                # (including the no-pending case, where it silently catches up).
+                if native_route is None:
+                    await self._reload_session_adapter_if_stale(
+                        sid,
+                        adapter,
+                        host_external_input=host_external_input,
+                    )
+                # 服务重启 / adapter 被驱逐后重建时，context_engine 内存池为空，
+                # 而 chat.send 主路径不会回灌磁盘 history.jsonl——继续历史会话时
+                # 模型将拿到空上下文。这里在新建 adapter 后从磁盘恢复上下文
+                # （全新会话磁盘无历史，warmup 内部会静默跳过）。
+                try:
+                    from jiuwenswarm.agents.harness.common.session_ops_service import (
+                        warmup_session_context,
+                    )
+
+                    validate_continuation_route()
+                    await warmup_session_context(
+                        deep_agent=getattr(adapter, "_instance", None),
+                        session_id=sid,
+                        history_before_request_id=history_before_request_id,
+                        **({"continuation_context": continuation} if continuation is not None else {}),
+                    )
+                    validate_continuation_route()
+                except Exception as exc:
+                    if continuation is not None:
+                        raise
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] session context warmup failed: "
+                        "session_id=%s error=%s",
+                        sid,
+                        exc,
+                    )
+            except BaseException:
+                if continuation is not None:
+                    try:
+                        await adapter.cleanup()
+                    except BaseException:
+                        logger.warning("continuation adapter cleanup failed")
+                raise
+            if continuation is not None:
+                self._session_adapters[sid] = adapter
             if requested_mcp_scan_names is not None or restored_profile is not None:
                 adapter.mark_session_mcp_reconcile_started()
             self._touch_session_adapter(sid)
@@ -6764,6 +6822,16 @@ class JiuWenSwarmDeepAdapter:
         请求未显式携带 model_name 时：最近一次已应用模型 → 会话 metadata.model
         → 适配器默认模型。避免 command.goal / 中断恢复在适配器重建后掉回默认。
         """
+        continuation = getattr(request, "_continuation_execution", None)
+        if continuation is not None:
+            from jiuwenswarm.runtime.continuation_execution import require_continuation_execution
+            from jiuwenswarm.governance.resources import ResourceAccessDenied
+
+            continuation = require_continuation_execution(continuation)
+            if (continuation.session_id != request.session_id
+                    or continuation.request_id != request.request_id):
+                raise ResourceAccessDenied("continuation model request changed")
+            return continuation.build_model()
         requested = self._requested_model_name(request)
         scoped = self._request_scoped_login_model(request, requested)
         if scoped is not None:

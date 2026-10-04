@@ -1453,11 +1453,77 @@ def _build_context_messages_from_history(
     return filtered_messages, skipped
 
 
+async def _warmup_continuation_context(
+    *, deep_agent: Any, session_id: str, history_before_request_id: str | None,
+    continuation_context: Any,
+) -> bool:
+    """Compose only the approved plaintext seed and the target's own history.
+
+    Called under the existing adapter lock. No source history, checkpoint, fork
+    metadata or temporary Session is consulted. A rebuilt context gets the seed
+    once; an existing context is only revalidated, never appended to.
+    """
+    from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UserMessage
+    from jiuwenswarm.governance.continuation_context import (
+        ContinuationContextDenied, validate_continuation_context,
+    )
+
+    if not history_before_request_id:
+        raise ContinuationContextDenied("continuation request boundary required")
+    handle = validate_continuation_context(
+        continuation_context, session_id, history_before_request_id,
+    )
+    react_agent = getattr(deep_agent, "react_agent", None)
+    engine = getattr(react_agent, "context_engine", None)
+    if engine is None:
+        raise ContinuationContextDenied("continuation context engine unavailable")
+    if engine.get_context(session_id=session_id) is not None:
+        handle.validate(session_id, history_before_request_id)
+        return True
+    session = resolve_live_agent_session(deep_agent, session_id)
+    if session is None:
+        raise ContinuationContextDenied("live continuation target session required")
+    try:
+        records = load_history_records(session_id) if history_exists(session_id) else []
+        if not isinstance(records, list) or any(not isinstance(row, dict) for row in records):
+            raise ValueError("invalid target history")
+        for index, row in enumerate(records):
+            if str(row.get("request_id") or "").strip() == history_before_request_id:
+                records = records[:index]
+                break
+        own_messages, _ = _build_context_messages_from_history(records)
+        messages = [
+            (UserMessage if message.role == "user" else AssistantMessage)(content=message.content)
+            for message in handle.seed.messages
+        ] + own_messages
+    except Exception:
+        raise ContinuationContextDenied("continuation target history unavailable") from None
+    handle.validate(session_id, history_before_request_id)
+    try:
+        await engine.create_context(
+            session=session, processors=_get_context_processors(react_agent), history_messages=messages,
+        )
+        handle.validate(session_id, history_before_request_id)
+    except BaseException as exc:
+        # create_context can install its pool entry before an awaited callback.
+        # This lock owner removes only this target's newly built context; cleanup
+        # failures must not mask cancellation or the original denied admission.
+        try:
+            await engine.clear_context(context_id="default_context_id", session_id=session_id)
+        except BaseException:
+            logger.warning("continuation context cleanup failed")
+        if isinstance(exc, Exception):
+            raise ContinuationContextDenied("continuation context creation denied") from None
+        raise
+    return True
+
+
 async def warmup_session_context(
     *,
     deep_agent: "DeepAgent",
     session_id: str,
     history_before_request_id: str | None = None,
+    continuation_context: Any = None,
 ) -> bool:
     """Restart-safe restore of context_engine messages from on-disk history.
 
@@ -1474,6 +1540,13 @@ async def warmup_session_context(
     history、不清理 Session state（agent/workflow 状态已由 checkpointer 在
     pre_run 恢复）、不强写 checkpointer（消息持久化本就由 history.jsonl 承担）。
     """
+    if continuation_context is not None:
+        return await _warmup_continuation_context(
+            deep_agent=deep_agent, session_id=session_id,
+            history_before_request_id=history_before_request_id,
+            continuation_context=continuation_context,
+        )
+
     react_agent = getattr(deep_agent, "react_agent", None)
     if react_agent is None:
         logger.warning("warmup_session_context: no react_agent for %s", session_id)
