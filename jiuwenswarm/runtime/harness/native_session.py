@@ -123,6 +123,67 @@ class NativeOwnedTurn:
 
 
 @dataclass(frozen=True, eq=False, repr=False)
+class _HostGoalReadmission:
+    """Fresh host admission; an old exit receipt confers no new authority."""
+
+    native: Any
+    binding: Any
+    agent: Any
+    session: Any
+    tool_owner: Any
+    selector: Any
+    request: SendInputRequest
+    action: str
+    previous: NativeOwnedTurn | None
+    previous_facts: Any
+    checker: Callable[[], None]
+
+    def check_previous(self):
+        old = self.previous
+        if old is None:
+            return
+        entry, pending, barrier, confirmed, cleanup = self.previous_facts
+        if (old._native is not self.native or old._entry is not entry
+                or old._pending is not pending or entry.owned is not old
+                or entry.lifecycle is None or entry.lifecycle.source is not old.source
+                or not entry.terminal_event.is_set() or not entry.terminal_notified
+                or entry.terminal_kind not in _TERMINAL
+                or pending._exit is not barrier or barrier is None
+                or barrier.confirmed is not confirmed or barrier.cleanup is not cleanup
+                or confirmed is None or not confirmed.done() or confirmed.cancelled()
+                or cleanup is None or not cleanup.done() or cleanup.cancelled()
+                or not pending._execution_done.is_set()):
+            raise PermissionError("Goal readmission requires the original confirmed exit receipt")
+        confirmed.result()
+        cleanup.result()
+
+    def check_static(self, entry, lifecycle):
+        n = self.native
+        if (n._closing or n._closed or n.engine.binding is not self.binding
+                or n._native.agent is not self.agent
+                or n._native._agent_session is not self.session
+                or n._tool_owner is not self.tool_owner
+                or self.agent.goal_manager is not self.selector.manager
+                or entry.readmission is not self or entry.request is not self.request
+                or entry.lifecycle is not lifecycle or lifecycle is None
+                or (self.request.mode is not None and self.request.mode is not InputDispatchMode.FOLLOW_UP)
+                or (self.previous is not None and (lifecycle.source is self.previous.source
+                    or lifecycle.source.host_value is self.previous.source.host_value))):
+            raise PermissionError("Goal readmission host admission changed")
+        self.check_previous()
+
+    def check(self, entry, lifecycle):
+        self.check_static(entry, lifecycle)
+        source = lifecycle.source
+        _sync_callback(self.checker)
+        source._check_current()
+        if lifecycle.source is not source:
+            raise PermissionError("Goal readmission producer source changed")
+        # The two synchronous callbacks may reenter and replace host objects.
+        self.check_static(entry, lifecycle)
+
+
+@dataclass(frozen=True, eq=False, repr=False)
 class NativeSteerControl:
     """One live supplemental-input capability for an exact original Round.
 
@@ -199,6 +260,8 @@ class _HostRequest:
         default=None, repr=False
     )
     goal_operation: Any = field(default=None, repr=False)
+    readmission: Any = field(default=None, repr=False)
+    readmission_plan: Any = field(default=None, repr=False)
     attach_goal: bool = False
     result: asyncio.Future | None = field(default=None, repr=False)
     resumes: list[SendInputRequest] = field(default_factory=list, repr=False)
@@ -296,6 +359,8 @@ class NativeExecutionSession:
             before_start=register_owner,
             dispatch_input=self._dispatch,
             capture_execution_origin=self._capture_execution_origin if require_execution_origin else None,
+            **({"prepare_goal_readmission": self._prepare_goal_readmission}
+               if require_execution_origin else {}),
         )
         harness = DeepAgentHarness(
             agent_factory,
@@ -1035,6 +1100,93 @@ class NativeExecutionSession:
             raise
         return True
 
+    def _prepare_goal_readmission(self, agent, content, origin):
+        """Called by core before attaching the sole output reader."""
+        from openjiuwen.harness.goal.readmission import _NativeGoalReadmissionPlan
+
+        token = content.metadata.get(_REQUEST_KEY)
+        entry = self._requests.get(token)
+        if entry is None:
+            raise PermissionError("Goal readmission lacks its original host request")
+        cap = entry.readmission
+        if cap is None:
+            return None  # Ordinary managed input still uses core's guarded attach.
+        lifecycle = entry.lifecycle
+        pending = self._native.active_turn
+
+        def check():
+            cap.check(entry, lifecycle)
+            if (self._requests.get(token) is not entry or agent is not cap.agent
+                    or self._native.active_turn is not pending
+                    or pending is None or pending._origin is not origin
+                    or origin.host_value is not lifecycle.source.host_value
+                    or pending.content is not content):
+                raise PermissionError("Goal readmission Pending or producer changed")
+
+        check()
+        if entry.readmission_plan is not None:
+            raise PermissionError("Goal readmission plan already prepared")
+        plan = _NativeGoalReadmissionPlan(cap.selector, cap.action, check,
+            cap.previous._pending if cap.previous is not None else None)
+        entry.readmission_plan = plan
+        return plan
+
+    async def submit_goal_readmission(
+        self, *, request: SendInputRequest, action: str, expected_record,
+        previous: NativeOwnedTurn | None, check_current: Callable[[], None],
+    ) -> tuple[SendReceipt, asyncio.Future]:
+        """Explicit fresh producer only; never invoked by an EOF observer.
+
+        Runtime supplies its current admission through the original lifecycle
+        factory and a synchronous checker. ``previous`` must be its retained
+        original owned handle; no Session/latest lookup can substitute for it.
+        """
+        if (not self._require_execution_origin or type(action) is not str or action not in {"resume", "attach"}
+                or type(request) is not SendInputRequest
+                or type(request.request_id) is not str or not request.request_id
+                or (request.mode is not None and request.mode is not InputDispatchMode.FOLLOW_UP)
+                or not callable(check_current) or self._native.active_turn is not None):
+            raise PermissionError("Goal readmission requires a fresh idle managed request")
+        request = replace(request, inputs=freeze_json_object(request.inputs))
+        binding, agent = self.engine.binding, self._native.agent
+        session, owner = self._native._agent_session, self._tool_owner
+        if (agent is None or session is None or owner is None
+                or owner[0] is not agent or owner[2] is not session or owner[3] is not binding
+                or session.get_session_id() != binding.host_session_id):
+            raise PermissionError("Goal readmission lacks its original bound Session")
+        selector = agent.goal_manager._capture_idle_readmission(expected_record=expected_record)
+        facts = None
+        if previous is not None:
+            if type(previous) is not NativeOwnedTurn or previous._native is not self:
+                raise PermissionError("Goal readmission requires an original Native owned handle")
+            pending = previous._pending
+            barrier = pending._exit
+            facts = (previous._entry, pending, barrier,
+                     getattr(barrier, 'confirmed', None), getattr(barrier, 'cleanup', None))
+        cap = _HostGoalReadmission(self, binding, agent, session, owner, selector,
+                                  request, action, previous, facts, check_current)
+        cap.check_previous()
+        result = asyncio.get_running_loop().create_future()
+        token = self._register_host_request(request=request, readmission=cap, result=result)
+        submission_started = False
+        try:
+            entry = self._requests[token]
+            cap.check(entry, entry.lifecycle)
+            selector.check_static()
+            if self._requests.get(token) is not entry:
+                raise PermissionError("Goal readmission request entry changed")
+            submission_started = True
+            receipt = await self._send(HarnessInput(content="", metadata={_REQUEST_KEY: token}))
+            self._remember_turn(receipt, token)
+            return receipt, result
+        except BaseException:
+            if not submission_started:
+                self._not_admitted(entry)
+            if self._requests.get(token) is entry:
+                self._failed_submission(token)
+            result.cancel()
+            raise
+
     async def submit_goal(
         self, action: str, *, request: SendInputRequest | None = None, **kwargs: Any
     ) -> tuple[SendReceipt, asyncio.Future]:
@@ -1176,6 +1328,16 @@ class NativeExecutionSession:
             entry.lifecycle.source._check_current()
             if default_request.mode is InputDispatchMode.STEER:
                 self._check_same_origin(entry.lifecycle, self._active_entry())
+        if entry.readmission is not None:
+            if resuming or default_request.mode is InputDispatchMode.STEER:
+                raise PermissionError("Goal readmission cannot become an old-root control")
+            plan = entry.readmission_plan
+            if plan is None:
+                raise PermissionError("Goal readmission was not prepared by Native admission")
+            record = plan.result()
+            if not entry.result.done():
+                entry.result.set_result({'result_type': 'goal_stream', 'goal': record.to_dict()})
+            return True
         if entry.attach_goal:
             return True
         if entry.goal is not None and not resuming:
