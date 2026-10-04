@@ -75,7 +75,11 @@ class SessionWorkScheduler:
             current = lane.current
             if current is not None and current.handle.execution_id in execution_ids:
                 if lane.current_task is not None and not lane.current_task.done():
-                    lane.current_task.cancel()
+                    admission = current.handle._native_admission
+                    if admission is not None:
+                        admission.request_producer_cancel(lane.current_task)
+                    else:
+                        lane.current_task.cancel()
                     wait_targets[current.handle.execution_id] = lane.current_task
         for handle in handles:
             if handle.execution_id not in wait_targets and handle.state.value == "queued":
@@ -112,7 +116,13 @@ class SessionWorkScheduler:
             self._lanes.pop(session_id, None)
         self._drain_queued(lane)
         current_id = lane.current.handle.execution_id if lane.current else None
-        if lane.processor is not None and not lane.processor.done():
+        admission = lane.current.handle._native_admission if lane.current else None
+        if admission is not None and lane.current_task is not None:
+            # Cancelling the processor propagates through its await and can
+            # interrupt an already-cancelled Native producer's cleanup. The
+            # removed lane exits naturally after this exact producer returns.
+            admission.request_producer_cancel(lane.current_task)
+        elif lane.processor is not None and not lane.processor.done():
             lane.processor.cancel()
         targets = {
             task

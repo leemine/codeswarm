@@ -27,6 +27,7 @@ class ExecutionResourceAuthorities(Mapping):
     mcp_authorizer: Callable | None = None
     artifact_issuer_factory: Callable | None = None
     external_model_authorizer: Callable | None = None
+    native_lifecycle_factory: Callable | None = None
 
     def __post_init__(self):
         object.__setattr__(self, 'providers', MappingProxyType(dict(self.providers)))
@@ -39,6 +40,9 @@ class ExecutionResourceAuthorities(Mapping):
         if self.external_model_authorizer is not None and not callable(self.external_model_authorizer):
             raise TypeError('external model authority must be callable')
 
+        if self.native_lifecycle_factory is not None and not callable(self.native_lifecycle_factory):
+            raise TypeError("Native lifecycle factory must be callable")
+
     def __getitem__(self, key):
         return self.providers[key]
 
@@ -47,6 +51,32 @@ class ExecutionResourceAuthorities(Mapping):
 
     def __len__(self):
         return len(self.providers)
+
+
+@dataclass(slots=True)
+class _NativeLifecycleScope:
+    factory: Callable
+    active: bool = True
+
+    def capture(self, native, request):
+        if not self.active:
+            raise PermissionError("Native admission scope has ended")
+        return self.factory(native, request)
+
+
+_NATIVE_LIFECYCLE: ContextVar[_NativeLifecycleScope | None] = ContextVar(
+    "native_request_lifecycle", default=None
+)
+
+
+def submitted_native_lifecycle_factory():
+    """Read only the submitting live scope; stored origins outlive this scope."""
+    scope = _NATIVE_LIFECYCLE.get()
+    if scope is None:
+        return None
+    if not scope.active:
+        raise PermissionError("Native admission scope has ended")
+    return scope.capture
 
 
 _MODEL_AUTHORITY: ContextVar[Callable | None] = ContextVar('model_resource_authority', default=None)
@@ -222,14 +252,22 @@ def tool_authority_scope(
         if callback is None and provider_authorizers is None
         else MappingProxyType(authorities)
     )
+    factory = getattr(provider_authorizers, "native_lifecycle_factory", None)
+    if factory is not None and not callable(factory):
+        raise TypeError("Native lifecycle factory must be callable")
     token = _AUTHORITY.set(bound)
     model_token = _MODEL_AUTHORITY.set(getattr(provider_authorizers, "model_authorizer", None))
     external_model_token = _EXTERNAL_MODEL_AUTHORITY.set(getattr(provider_authorizers, "external_model_authorizer", None))
     mcp_token = _MCP_AUTHORITY.set(getattr(provider_authorizers, "mcp_authorizer", None))
     artifact_token = _ARTIFACT_AUTHORITY.set(getattr(provider_authorizers, "artifact_issuer_factory", None))
+    lifecycle = _NativeLifecycleScope(factory) if factory is not None else None
+    lifecycle_token = _NATIVE_LIFECYCLE.set(lifecycle)
     try:
         yield
     finally:
+        if lifecycle is not None:
+            lifecycle.active = False
+        _NATIVE_LIFECYCLE.reset(lifecycle_token)
         _ARTIFACT_AUTHORITY.reset(artifact_token)
         _MCP_AUTHORITY.reset(mcp_token)
         _MODEL_AUTHORITY.reset(model_token)
