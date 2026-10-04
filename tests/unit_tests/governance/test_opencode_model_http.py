@@ -45,10 +45,7 @@ async def model(tmp_path, monkeypatch):
         actions=("use",),
         expected_revision=0,
     )
-    session, harness, context = fixture_session(tmp_path)
-    harness._config = replace(
-        harness._config, model=OpenCodeModelConfig(binding.model, binding.api_base)
-    )
+    session, harness, context = fixture_session(tmp_path, model=OpenCodeModelConfig(binding.model, binding.api_base))
     state = SimpleNamespace(current=True, requests=[], response=None)
     resolver = Mock(return_value="synthetic-upstream-key")
     use = CredentialUse("credential", binding.reference, "model", binding.destination)

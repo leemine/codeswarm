@@ -15,6 +15,20 @@ is_current)` using the existing `BoundCredentialAuthority` and `CredentialUse`.
 It must capture the original trusted host request, identity, resource directory,
 and bound model; it must not select a later active request.
 
+`AgentRuntime` now supplies this factory through the original submitting
+resource-authority scope. Construction selects a unique catalog model/base and
+exact selection key; inline Provider credentials, duplicate references, and
+ambiguous fallback are rejected. Selection reads metadata only. Each actual
+request captures the original owner, adapter, ExecutionSession, and Binding by
+identity, plus the original Runtime execution and authenticated context. Reusing
+the same Binding in a replacement owner does not preserve the old authority.
+The catalog fingerprint and credential grant are rechecked at actual HTTP use.
+ASGI ambient identity cannot replace the submitting identity. Initial factory
+errors and cancellation have clean diagnostics without original exception
+context. A cached legacy adapter cannot enter a governed request without its
+model gateway. Protected Team construction remains explicitly unavailable until
+each member has its own complete model binding; this is an open acceptance gate.
+
 The adapter calls that factory once before its logical request's first await.
 It retains the exact result under the original submission receipt alongside the
 existing per-Turn tool authority. Terminal projection and confirmed stop remove
@@ -68,6 +82,10 @@ The candidate was tested with formally installed core
 `bfe92d1d98e9afbad8edb1a42d8a64b2262d1b87` and candidate swarm source: 139 affected
 tests passed. Its dependency lock is intentionally unchanged pending the parent
 integration. This is not this branch's locked-pair/stable acceptance. The new
-test must be included in the integrated stable manifest. A real fixed-CLI
-`chat.headers` plus HTTP-source proof ordinary story, full Runtime host factory,
-B3 selector/seed, and final UI acceptance remain separate integration gates.
+test is included recursively by the existing governance stable shard. The host
+factory slice passed 166 affected tests with formally installed core
+`fba69354d5ed63e26f92b05bbc286bc678c07339` and candidate swarm source. Tests include
+actual Runtime factory capture, store, ASGI consumer and HTTP sink, using
+synthetic identity scopes and a loopback model. A real fixed-CLI `chat.headers`
+plus HTTP-source proof ordinary story, B3 selector/seed, final locked-pair stable,
+and final UI acceptance remain separate integration gates.

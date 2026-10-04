@@ -14,12 +14,14 @@ from jiuwenswarm.runtime.harness.execution_session import ExecutionSession, Exec
 from jiuwenswarm.runtime.harness.tool_gateway import ProductToolGateway, ProductToolScope
 
 
-def fixture_session(root: Path, gateway=None):
+def fixture_session(root: Path, gateway=None, *, model=None):
+    from dataclasses import asdict
+    provider_config = {'model': asdict(model)} if model is not None else {}
     bound = ExecutionBindingStore().bind(
-        ExecutionConfigSource(explicit=AgentExecutionSpec('opencode', 'r1')),
+        ExecutionConfigSource(explicit=AgentExecutionSpec('opencode', 'r1', provider_config=provider_config)),
         subject_id='owner', host_session_id='parent', workspace=str(root),
     )
-    harness = OpenCodeHarness(OpenCodeHarnessConfig(model=OpenCodeModelConfig('fixture', 'http://127.0.0.1:1')))
+    harness = OpenCodeHarness(OpenCodeHarnessConfig(model=model or OpenCodeModelConfig('fixture', 'http://127.0.0.1:1')))
     session = ExecutionSession(HarnessEngine(bound.binding, harness),
                                RuntimeWorkspacePaths(root, root, root, root), tool_gateway=gateway)
     async def authorize(_operation):

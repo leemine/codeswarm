@@ -512,6 +512,9 @@ class EngineAgentAdapter:
 
     def _capture_model_authority(self):
         if self._model_gateway_binding is None:
+            from jiuwenswarm.governance.tool_context import current_tool_authorizer
+            if self._route.provider_id == 'opencode' and current_tool_authorizer('opencode') is not None:
+                raise PermissionError('protected OpenCode requires its original model gateway')
             return None
         from jiuwenswarm.governance.opencode_model_http import model_authority_current
         import inspect

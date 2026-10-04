@@ -613,6 +613,35 @@ class AgentRuntime:
             current_identity=current_identity, is_current_execution=is_current,
             owns_execution=owns_model_execution, owns_tool=owns_artifact_tool,
         )
+        from jiuwenswarm.governance.opencode_model_credentials import OpenCodeModelCredentialAuthority
+
+        def capture_external_model_binding(binding):
+            lookup = getattr(self._agent_manager, 'get_agent_for_session_nowait', None)
+            owner = lookup(original_channel_id, session_id) if callable(lookup) else None
+            adapter = getattr(owner, '_adapter', None)
+            session = getattr(adapter, 'execution_session', None)
+            def owner_current():
+                return (is_current() and callable(lookup)
+                        and lookup(original_channel_id, session_id) is owner
+                        and getattr(owner, '_adapter', None) is adapter
+                        and getattr(adapter, 'execution_session', None) is session
+                        and session is not None and session.binding is binding
+                        and not session.closed
+                        # Admission precedes startup; actual HTTP additionally
+                        # requires the original live Provider source/transport.
+                        and getattr(session.exit_state, 'value', None) in {'not_started', 'running'})
+            return owner_current
+
+        params = request.params if isinstance(request.params, dict) else {}
+        model_selection = (continuation.target.request.model_name if continuation is not None
+                           else params.get('model_name'))
+        external_model_authority = OpenCodeModelCredentialAuthority(
+            ResourceExecutionContext(project_id, identity, session_id, str(Path(workspace).resolve()), 'opencode'),
+            resource_authorizer=self._resource_authorizer, current_identity=current_identity,
+            is_current_execution=is_current, capture_binding=capture_external_model_binding,
+            model_selection=model_selection, credential_decoder=decode_model_credential,
+            binding_checker=continuation.check_model if continuation is not None else None,
+        )
         return ExecutionResourceAuthorities({
             provider: BoundToolResourceAuthority(
                 ResourceExecutionContext(project_id, identity, session_id, str(Path(workspace).resolve()), provider),
@@ -620,7 +649,7 @@ class AgentRuntime:
                 current_identity=current_identity, is_current_execution=is_current,
             ) for provider in ("native", "codex", "opencode")
         }, model_authorizer=model_authority, mcp_authorizer=mcp_authority,
-           artifact_issuer_factory=artifact_factory)
+           artifact_issuer_factory=artifact_factory, external_model_authorizer=external_model_authority)
 
     @property
     def extension_registry(self) -> Any | None:

@@ -26,6 +26,7 @@ class ExecutionResourceAuthorities(Mapping):
     model_authorizer: Callable | None = None
     mcp_authorizer: Callable | None = None
     artifact_issuer_factory: Callable | None = None
+    external_model_authorizer: Callable | None = None
 
     def __post_init__(self):
         object.__setattr__(self, 'providers', MappingProxyType(dict(self.providers)))
@@ -35,6 +36,8 @@ class ExecutionResourceAuthorities(Mapping):
             raise TypeError('MCP authority must be callable')
         if self.artifact_issuer_factory is not None and not callable(self.artifact_issuer_factory):
             raise TypeError('artifact issuer factory must be callable')
+        if self.external_model_authorizer is not None and not callable(self.external_model_authorizer):
+            raise TypeError('external model authority must be callable')
 
     def __getitem__(self, key):
         return self.providers[key]
@@ -47,6 +50,7 @@ class ExecutionResourceAuthorities(Mapping):
 
 
 _MODEL_AUTHORITY: ContextVar[Callable | None] = ContextVar('model_resource_authority', default=None)
+_EXTERNAL_MODEL_AUTHORITY: ContextVar[Callable | None] = ContextVar('external_model_resource_authority', default=None)
 _MCP_AUTHORITY: ContextVar[Callable | None] = ContextVar('mcp_resource_authority', default=None)
 _ARTIFACT_AUTHORITY: ContextVar[Callable | None] = ContextVar('artifact_issuer_factory', default=None)
 _NATIVE_MODEL_SOURCE: ContextVar[Callable | None] = ContextVar('native_model_authority_source', default=None)
@@ -128,6 +132,10 @@ def end_native_execution_slice(handle, *, restore=True):
 
 def submitted_model_authorizer():
     return _MODEL_AUTHORITY.get()
+
+
+def submitted_external_model_authorizer():
+    return _EXTERNAL_MODEL_AUTHORITY.get()
 
 
 def submitted_mcp_authorizer():
@@ -216,6 +224,7 @@ def tool_authority_scope(
     )
     token = _AUTHORITY.set(bound)
     model_token = _MODEL_AUTHORITY.set(getattr(provider_authorizers, "model_authorizer", None))
+    external_model_token = _EXTERNAL_MODEL_AUTHORITY.set(getattr(provider_authorizers, "external_model_authorizer", None))
     mcp_token = _MCP_AUTHORITY.set(getattr(provider_authorizers, "mcp_authorizer", None))
     artifact_token = _ARTIFACT_AUTHORITY.set(getattr(provider_authorizers, "artifact_issuer_factory", None))
     try:
@@ -224,4 +233,5 @@ def tool_authority_scope(
         _ARTIFACT_AUTHORITY.reset(artifact_token)
         _MCP_AUTHORITY.reset(mcp_token)
         _MODEL_AUTHORITY.reset(model_token)
+        _EXTERNAL_MODEL_AUTHORITY.reset(external_model_token)
         _AUTHORITY.reset(token)
