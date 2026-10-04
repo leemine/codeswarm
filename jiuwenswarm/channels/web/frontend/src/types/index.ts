@@ -103,6 +103,8 @@ export type ModelReasoningCatalog = {
 
 export interface ModelEntry {
   model_name: string;
+  /** Exact host catalog selection; never reconstructed from a filtered UI index. */
+  selection_key?: string;
   api_base: string;
   api_key: string;
   model_provider: string;

@@ -838,6 +838,7 @@
     "taskFullDuplexStarting": "Starting Full-duplex conversation",
     "taskFullDuplexStop": "Stop Full-duplex conversation and screen sharing",
     "modelSelector": {
+      "unavailable": "Model unavailable: {{model}}",
       "tooltip": "Switch the model used for chat",
       "configured": "Configured Models",
       "free": "Limited-time Free Models",

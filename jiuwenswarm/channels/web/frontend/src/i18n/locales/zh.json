@@ -829,6 +829,7 @@
     "taskFullDuplexStarting": "正在启动全双工对话",
     "taskFullDuplexStop": "停止全双工对话和屏幕共享",
     "modelSelector": {
+      "unavailable": "模型不可用：{{model}}",
       "tooltip": "切换对话使用的模型",
       "configured": "已配置模型",
       "free": "限时免费模型",

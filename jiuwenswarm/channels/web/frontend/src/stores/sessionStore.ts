@@ -251,11 +251,19 @@ function normalizeSession(session: Session): Session {
  * @param defaultModelName 后端配置的默认模型名字字符串
  * @returns 解析命中的模型条目；`chatAvailableModels` 为空（模型列表尚未加载）时返回 null
  */
+export function isExactModelSelectionKey(value: string | null): value is string {
+  return typeof value === 'string' && /^.+#[0-9]+$/.test(value);
+}
+
 export function resolveEffectiveModel(
   chatAvailableModels: ModelEntry[],
   selectedModelName: string | null,
   defaultModelName: string | null,
+  availableModels: ModelEntry[] = chatAvailableModels,
 ): ModelEntry | null {
+  if (isExactModelSelectionKey(selectedModelName)) {
+    return availableModels.find((model) => model.selection_key === selectedModelName) ?? null;
+  }
   if (chatAvailableModels.length === 0) return null;
   const displayed = selectedModelName || defaultModelName;
   // 兼容历史保存的 alias 和后端会话元数据中的 model_name，使展示与请求命中同一条目。
@@ -278,11 +286,13 @@ export function resolveChatModelSelection(
   chatAvailableModels: ModelEntry[],
   selectedModelName: string | null,
   defaultModelName: string | null,
+  availableModels: ModelEntry[] = chatAvailableModels,
 ): ModelEntry | null {
   return resolveEffectiveModel(
     chatAvailableModels,
     selectedModelName,
     defaultModelName,
+    availableModels,
   );
 }
 
@@ -746,6 +756,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const state = get();
     const runtime = state.runtimes[sessionId];
     if (!runtime) return null;
+    // A host-selected exact key must never silently become another connection,
+    // including while the catalog is refreshing or that binding was removed.
+    if (isExactModelSelectionKey(runtime.selectedModelName)) return runtime.selectedModelName;
     // 不再原样吐出 runtime.selectedModelName（可能是模型改名后失配的陈旧字符串），
     // 而是走与 UI 显示（ModelSelector）相同的解析逻辑，确保发给后端的 model_name
     // 参数与界面上显示的模型永远指向同一个 entry（bug003）。
