@@ -82,6 +82,13 @@ class RuntimeSessionCoordinator:
         self._control_claims: set[tuple[str, int, str, str]] = set()
         self._accepting = True
         self._lock = asyncio.Lock()
+        self._execution_authority_capture: Callable[[], object | None] | None = None
+
+    def _set_execution_authority_capture(self, capture: Callable[[], object | None]) -> None:
+        """Bind one host capture hook; the original registry retains its result."""
+        if self._execution_authority_capture is not None and self._execution_authority_capture != capture:
+            raise RuntimeError("execution authority capture is already bound")
+        self._execution_authority_capture = capture
 
     def watch_session_authority(self, session_id, *, generation, authority, interval=1.0):
         """Keep one captured stop capability on the original Session record.
@@ -306,7 +313,10 @@ class RuntimeSessionCoordinator:
     ) -> SessionExecutionSnapshot:
         """Track an already-running provider Turn without acquiring another lane."""
         record = self._require_open_session(session_id)
-        handle = self._new_execution(record, request_id, SessionWorkKind.GOAL_ATTACH)
+        # This is an observer callback, not an authenticated admission. Its
+        # inherited task context must never manufacture a credential owner.
+        handle = self._new_execution(record, request_id, SessionWorkKind.GOAL_ATTACH,
+                                     capture_authority=False)
         handle.retain_after_control = True
         self._registry.mark_running(handle)
         self._refresh_session_state(record)
@@ -713,9 +723,6 @@ class RuntimeSessionCoordinator:
             )
         parent = self._stream_control_parent(record, request_id)
         parent_was_waiting = parent.state is SessionExecutionState.WAITING_FOR_CONTROL
-        record.stream_control_claims.add(request_id)
-        if parent_was_waiting:
-            self._registry.resume_waiting(parent)
         handle = self._new_execution(
             record,
             request_id,
@@ -723,6 +730,9 @@ class RuntimeSessionCoordinator:
             parent_execution_id=parent.execution_id,
             allow_duplicate_request=True,
         )
+        record.stream_control_claims.add(request_id)
+        if parent_was_waiting:
+            self._registry.resume_waiting(parent)
         handle.control_fingerprint = control_fingerprint
         handle.task = asyncio.current_task()
         self._registry.mark_running(handle)
@@ -1156,6 +1166,7 @@ class RuntimeSessionCoordinator:
         *,
         parent_execution_id: str | None = None,
         allow_duplicate_request: bool = False,
+        capture_authority: bool = True,
     ) -> SessionExecutionHandle:
         normalized_request_id = str(request_id or "")
         if not allow_duplicate_request and normalized_request_id:
@@ -1169,6 +1180,10 @@ class RuntimeSessionCoordinator:
                     "request was already accepted for this Session generation: "
                     f"{normalized_request_id}"
                 )
+        # Capture before superseding any original waiting work or registering
+        # a new handle. A rejected credential must have no admission side effect.
+        authority = (self._execution_authority_capture()
+                     if capture_authority and self._execution_authority_capture is not None else None)
         superseded_kinds: set[SessionWorkKind] = set()
         if work_kind in {SessionWorkKind.CHAT_UNARY, SessionWorkKind.CHAT_STREAM}:
             superseded_kinds = {
@@ -1202,6 +1217,7 @@ class RuntimeSessionCoordinator:
             generation=record.generation,
             work_kind=work_kind,
             parent_execution_id=parent_execution_id,
+            _execution_authority=authority,
         )
         self._registry.register(handle)
         self._notify_execution_changed(record)

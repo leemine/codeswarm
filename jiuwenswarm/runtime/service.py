@@ -442,6 +442,7 @@ class AgentRuntime:
             self._session_provisioner.set_owner_lifecycle(self._owner_publication)
         self._resource_lease = resource_lease
         self._session_coordinator = session_coordinator or RuntimeSessionCoordinator()
+        self._session_coordinator._set_execution_authority_capture(self._capture_execution_authority)
         self.set_admission_controller(admission_controller)
         # Covers chat admission and preparation before the Team adapter creates
         # its own in-flight marker (including first-run Team construction).
@@ -473,6 +474,15 @@ class AgentRuntime:
         self._pending_session_provisions: set[PreparedSessionProvision[Any]] = set()
         self._started = False
         self._closed = False
+
+    @staticmethod
+    def _capture_execution_authority():
+        """Retain the exact authenticated credential, never an actor lookup."""
+        from jiuwenswarm.governance.organization_auth import current_principal
+        principal = current_principal()
+        if principal is not None:
+            principal.identity()
+        return principal
 
     def _governance_identity(self, value: object) -> TrustedIdentity | None:
         identity = self._trusted_identity_resolver(value) if self._trusted_identity_resolver else None
