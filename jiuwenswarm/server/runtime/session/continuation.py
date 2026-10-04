@@ -48,13 +48,16 @@ class ContinuationCompiler:
             raise TypeError('validated continuation input required')
         identity = self._identity()
         target_revision = self._target(request, identity)
-        records = [record for record in self.host.store.list_for_actor(identity)
-                   if record.get('session_id') == request.session_id
-                   and record.get('share_id') == request.share_id
-                   and record.get('target') == asdict(identity)]
-        if len(records) != 1 or records[0].get('revision') != request.expected_revision:
-            raise SessionSharingDenied('continuation share unavailable or changed')
-        record = records[0]
+        # Exact source lookup avoids recursively scanning unrelated derived
+        # Sessions when a committed continuation revalidates its provenance.
+        with self.host._storage._locked():
+            data = self.host._storage._load()
+            record = self.host.store._section(data)['shares'].get(request.share_id)
+            if (not isinstance(record, dict) or record.get('share_id') != request.share_id
+                    or record.get('session_id') != request.session_id
+                    or record.get('target') != asdict(identity)
+                    or record.get('revision') != request.expected_revision):
+                raise SessionSharingDenied('continuation share unavailable or changed')
         history = SessionHistoryRange(**record['history'])
         # Both decisions concern the exact same share. A second grant cannot
         # supply the missing action. Existing sidecar lock is reentrant.

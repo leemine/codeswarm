@@ -135,6 +135,8 @@ class SharingHostService:
         facts = self._live_binding(data, session_id, owner, source['project_id'])
         if facts[2:] != (source['session_generation'], source['project_generation']):
             raise SessionSharingDenied('Session lifecycle generation changed')
+        from .continuation_publication import guard
+        guard(self, session_id, record, owner, source)
         return record, owner, source, facts
 
     def resolve_source(self, session_id: str) -> SessionSharingAuthority | None:
@@ -189,6 +191,8 @@ class SharingHostService:
             old = owners.get(session_id)
             if old is not None and (not isinstance(old, dict) or old.get('retired') is not True):
                 raise SessionSharingConflict('Session owner already registered')
+            if isinstance(old, dict) and 'continuation' in old:
+                raise SessionSharingConflict('continuation Session IDs cannot be reused')
             previous = _component(old['revision'], positive=True) if old else 0
             if type(expected_owner_revision) is not int or expected_owner_revision != previous:
                 raise SessionSharingConflict('owner revision changed')
@@ -207,6 +211,10 @@ class SharingHostService:
                 'retired': False, 'source': {'schema_version': 1, 'epoch': epoch, 'active': True,
                 'project_id': project_id, 'session_generation': _component(session_state.get('generation', 0)),
                 'project_generation': _component(project_state.get('generation', 0)), 'history': None}}
+            from .continuation_publication import prepare_registration
+            publication = prepare_registration(self, session_id, owner, project_id, previous=previous, epoch=epoch, owners=owners)
+            if publication is not None:
+                owners[session_id]['continuation'] = publication
             self._storage._save(data)
             return epoch
 
@@ -236,6 +244,9 @@ class SharingHostService:
                 raise SessionSharingDenied('owner reservation source unavailable')
             revision = _component(record.get('revision'), positive=True)
             epoch = _component(source.get('epoch'), positive=True)
+            continuation = record.get('continuation')
+            if isinstance(continuation, dict) and continuation.get('state') == 'committed':
+                raise SessionSharingConflict('committed continuation cannot be aborted by a prepare receipt')
             if (record.get('retired') is True and revision == retired_revision
                     and source.get('active') is False and epoch == retired_epoch
                     and source.get('history') is None):
