@@ -20,6 +20,10 @@ from jiuwenswarm.governance.resources import valid_expiry
 from jiuwenswarm.governance.session_sharing import SessionHistoryRange, SessionSharingDenied, SessionSharingConflict
 from . import lifecycle
 from .continuation import ContinuationCompiler, MAX_SEED_BYTES, MAX_SEED_MESSAGES
+from .sharing_audit import (
+    SharingAuditBounds, SharingAuditFacts, SharingAuditContext, AuditResultCallback,
+    append_sharing_audit, audit_context as checked_audit_context, notify_audit_result, source_project,
+)
 
 MAX_SEED_FILE_BYTES = 8 * 1024 * 1024
 MAX_SOURCE_DEPTH = 8
@@ -326,7 +330,8 @@ def write_seed(scope):
         raise SessionSharingConflict('continuation reservation changed during write')
 
 
-def commit(scope):
+def commit(scope, *, audit_context: SharingAuditContext | None = None,
+           audit_result: AuditResultCallback | None = None):
     _without_sidecar_lock(scope.host)
     scope._require()
     publication = _owned_publication(scope.host, scope.session_id, scope.seed.proof.identity, require_committed=False)
@@ -350,7 +355,19 @@ def commit(scope):
         if publication['state'] == 'committed':
             return
         record['continuation']['state'] = 'committed'
+        proof = scope.seed.proof
+        result = append_sharing_audit(data, checked_audit_context(proof.identity, audit_context),
+            SharingAuditFacts('continue', proof.request.session_id, proof.request.share_id, proof.identity,
+                proof.share_revision, proof.owner_revision, proof.source_revision,
+                decision_owner_revision=proof.owner_revision, decision_source_revision=proof.source_revision,
+                source_project_id=source_project(data['session_sharing'], proof.request.session_id),
+                target_session_id=scope.session_id, target_project_id=proof.request.target_project_id,
+                target_revision=proof.target_revision, parent_share_id=proof.parent_share_id,
+                parent_revision=proof.parent_revision,
+                bounds_after=SharingAuditBounds(('execute', 'view'), proof.history, proof.expires_at),
+                publication_id=scope.publication_id, seed_digest=scope.seed.digest, phase='publication'))
         host._storage._save(data)
+    notify_audit_result(audit_result, result)
 
 
 def confirms_committed(scope):

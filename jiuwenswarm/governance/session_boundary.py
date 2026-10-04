@@ -52,6 +52,9 @@ def _inventory_revision(host):
     # persistent policy store. Mutation during a scan invalidates its buffer.
     with host._storage._locked():
         data = host._storage._load()
+        # Mutation history is not authority. Only this explicit audit domain is
+        # excluded; shares/ACL/owners/resources/publications remain in the proof.
+        data.pop('sharing_audit', None)
         # Compiling an append-only source extent prepares a view; it does not
         # change authority. Replacement/truncation increments source.epoch.
         # Fixed granted ranges remain included under shares and revisions.

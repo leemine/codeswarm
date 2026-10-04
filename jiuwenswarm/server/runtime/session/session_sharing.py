@@ -22,6 +22,11 @@ from jiuwenswarm.governance.session_sharing import (
 )
 from .project_access import ProjectAccessStore
 from .session_history import is_valid_session_id
+from .sharing_audit import (
+    SharingAuditBounds, SharingAuditFacts, SharingAuditError, SharingAuditWriteResult,
+    SharingAuditContext, AuditResultCallback, append_sharing_audit,
+    audit_context as checked_audit_context, notify_audit_result, source_project,
+)
 
 
 class SessionSharingStore:
@@ -179,25 +184,33 @@ class SessionSharingStore:
 
     def grant(self, session_id: str, grantor: TrustedIdentity, target: TrustedIdentity, *,
               actions, history: SessionHistoryRange, expires_at: float | None,
-              parent_share_id: str | None = None) -> dict[str, Any]:
-        return self._write_grant(session_id, grantor, target, actions=actions, history=history,
-                                 expires_at=expires_at, parent_share_id=parent_share_id)
+              parent_share_id: str | None = None, audit_context: SharingAuditContext | None = None,
+              audit_result: AuditResultCallback | None = None) -> dict[str, Any]:
+        record, result = self._write_grant(session_id, grantor, target, actions=actions, history=history,
+                                          expires_at=expires_at, parent_share_id=parent_share_id,
+                                          audit_context=audit_context)
+        notify_audit_result(audit_result, result)
+        return record
 
     def revise(self, share_id: str, grantor: TrustedIdentity, *, actions,
-               history: SessionHistoryRange, expires_at: float | None, expected_revision: int) -> dict[str, Any]:
+               history: SessionHistoryRange, expires_at: float | None, expected_revision: int,
+               audit_context: SharingAuditContext | None = None,
+               audit_result: AuditResultCallback | None = None) -> dict[str, Any]:
         """Replace a grant's bounds; descendants pin its old revision and expire."""
         with self._storage._locked():
             data = self._storage._load()
             record = self._section(data)['shares'].get(share_id)
             if not record or record.get('grantor') != self._identity(grantor):
                 raise SessionSharingDenied('share unavailable')
-            return self._write_grant(record['session_id'], grantor, TrustedIdentity(**record['target']),
-                                     actions=actions, history=history, expires_at=expires_at,
-                                     parent_share_id=record['parent_share_id'], share_id=share_id,
-                                     expected_revision=expected_revision)
+            updated, result = self._write_grant(record['session_id'], grantor, TrustedIdentity(**record['target']),
+                                                actions=actions, history=history, expires_at=expires_at,
+                                                parent_share_id=record['parent_share_id'], share_id=share_id,
+                                                expected_revision=expected_revision, audit_context=audit_context)
+        notify_audit_result(audit_result, result)
+        return updated
 
     def _write_grant(self, session_id, grantor, target, *, actions, history, expires_at,
-                     parent_share_id, share_id=None, expected_revision=0):
+                     parent_share_id, share_id=None, expected_revision=0, audit_context=None):
         self._session(session_id)
         grantor_data, target_data = self._identity(grantor), self._identity(target)
         actions = frozenset(actions)
@@ -233,10 +246,21 @@ class SessionSharingStore:
                       'parent_share_id': parent_share_id, 'parent_revision': parent_revision,
                       'created_at': old['created_at'] if old else self._clock(), 'updated_at': self._clock()}
             section['shares'][share_id] = record
+            result = append_sharing_audit(data, checked_audit_context(grantor, audit_context),
+                SharingAuditFacts('update' if old else 'create', session_id, share_id, target,
+                    record['revision'], owner['revision'], source.revision,
+                    decision_owner_revision=owner['revision'], decision_source_revision=source.revision,
+                    source_project_id=source_project(section, session_id),
+                    before_revision=expected_revision, after_revision=record['revision'],
+                    parent_share_id=parent_share_id, parent_revision=parent_revision,
+                    bounds_before=SharingAuditBounds.from_record(old) if old else None,
+                    bounds_after=SharingAuditBounds.from_record(record)), recorded_at=self._clock())
             self._storage._save(data)
-            return copy.deepcopy(record)
+            return copy.deepcopy(record), result
 
-    def revoke(self, share_id: str, identity: TrustedIdentity, *, expected_revision: int) -> int:
+    def revoke(self, share_id: str, identity: TrustedIdentity, *, expected_revision: int,
+               audit_context: SharingAuditContext | None = None,
+               audit_result: AuditResultCallback | None = None) -> int:
         with self._storage._locked():
             data = self._storage._load()
             section = self._section(data)
@@ -256,8 +280,23 @@ class SessionSharingStore:
                 raise SessionSharingConflict('share revision changed')
             record.update(revoked=True, revision=expected_revision + 1, revoked_at=self._clock(),
                           revoked_by=identity_data)
+            try:
+                bounds = SharingAuditBounds.from_record(record)
+                result = append_sharing_audit(data, checked_audit_context(identity, audit_context),
+                    SharingAuditFacts('revoke', record['session_id'], share_id, TrustedIdentity(**record['target']),
+                        record['revision'], record['owner_revision'], record['source_revision'],
+                        decision_owner_revision=owner['revision'], decision_source_revision=source.revision,
+                        source_project_id=source_project(section, record['session_id']),
+                        before_revision=expected_revision, after_revision=record['revision'],
+                        parent_share_id=record['parent_share_id'], parent_revision=record['parent_revision'],
+                        bounds_before=bounds, bounds_after=bounds), recorded_at=self._clock())
+            except (SharingAuditError, KeyError, TypeError, ValueError):
+                # Revocation remains effective even if this non-authority domain
+                # is corrupt. Preserve it verbatim, never reset or call it audited.
+                result = SharingAuditWriteResult(False, True, 'audit_storage_invalid')
             self._storage._save(data)
-            return expected_revision + 1
+        notify_audit_result(audit_result, result)
+        return expected_revision + 1
 
     def authorize(self, session_id: str, identity: TrustedIdentity, action: str, *,
                   history: SessionHistoryRange, share_id: str | None = None) -> SessionSharingDecision:
