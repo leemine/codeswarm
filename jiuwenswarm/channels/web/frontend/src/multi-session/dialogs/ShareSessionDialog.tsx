@@ -12,6 +12,9 @@ import {
 } from '../../services/sessionSharingApi';
 import './ShareSessionDialog.css';
 import { ContinuationPane, type OnContinued } from './ContinuationPane';
+import { SharingAuditSection } from './SharingAuditSection';
+import { onOrganizationCredentialChange } from '../../services/organizationCredentialEvents';
+import { webClient } from '../../services/webClient';
 import type { ContinuationAttempts } from '../state/continueSharedSession';
 
 function localDateTime(time: number): string {
@@ -19,7 +22,17 @@ function localDateTime(time: number): string {
   return new Date(time - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 }
 
-export function ShareSessionDialog({
+export function ShareSessionDialog(props: {
+  sessionId?: string;
+  onClose: () => void;
+  onOpenSharedSession?: (target: SharedSessionTarget) => void;
+  onContinued?: OnContinued;
+  continuationAttempts?: ContinuationAttempts;
+}) {
+  return <ShareSessionContent key={props.sessionId ?? ''} {...props} />;
+}
+
+function ShareSessionContent({
   sessionId,
   onClose,
   onOpenSharedSession,
@@ -50,7 +63,32 @@ export function ShareSessionDialog({
   const localAttempts = useRef<ContinuationAttempts>(new Map());
   const [continuing, setContinuing] = useState<SessionShare | null>(null);
 
+  const pendingRefresh = useRef<AbortController | null>(null);
+  function invalidate(preserveContinuation = false) {
+    generation.current += 1;
+    operationGeneration.current += 1;
+    pendingRefresh.current?.abort();
+    pendingRefresh.current = null;
+    setManaged([]);
+    setReceived([]);
+    setCanCreate(false);
+    setBusy(false);
+    setEditing(null);
+    setTarget('');
+    setFeedback(null);
+    // The existing continuation pane retains its immutable retry token across disconnects.
+    if (!preserveContinuation) setContinuing(null);
+    setLoading(false);
+  }
+  function close() {
+    invalidate();
+    onClose();
+  }
+
   async function refresh() {
+    pendingRefresh.current?.abort();
+    const controller = new AbortController();
+    pendingRefresh.current = controller;
     const current = ++generation.current;
     setLoading(true);
     setError(false);
@@ -59,10 +97,10 @@ export function ShareSessionDialog({
     setCanCreate(false);
     setContinuing(null);
     const [owned, all] = await Promise.allSettled([
-      sessionId ? sessionSharingApi.list(sessionId) : Promise.resolve(null),
-      sessionSharingApi.list(),
+      sessionId ? sessionSharingApi.list(sessionId, controller.signal) : Promise.resolve(null),
+      sessionSharingApi.list(undefined, controller.signal),
     ]);
-    if (current !== generation.current) return;
+    if (current !== generation.current || controller.signal.aborted) return;
     if (owned.status === 'fulfilled' && owned.value !== null) {
       setManaged(owned.value.shares);
       setCanCreate(true);
@@ -78,7 +116,14 @@ export function ShareSessionDialog({
     setFeedback(null);
     setRevokedHere(new Set());
     void refresh();
+    const auth = onOrganizationCredentialChange(() => invalidate());
+    const connection = webClient.onStateChange((state) => {
+      if (state !== 'ready') invalidate(true);
+    });
     return () => {
+      auth();
+      connection();
+      pendingRefresh.current?.abort();
       generation.current += 1;
       operationGeneration.current += 1;
     };
@@ -132,15 +177,15 @@ export function ShareSessionDialog({
       titleId="session-sharing-title"
       className="session-sharing-dialog"
       closeDisabled={busy}
-      onCancel={onClose}
-      onBackdropClick={onClose}
+      onCancel={close}
+      onBackdropClick={close}
     >
       <div data-testid="multi-session-sharing-dialog" className="session-sharing-content">
         <div className="session-sharing-heading">
           <h2 id="session-sharing-title" data-testid="multi-session-sharing-title">
             {t('sessionSharing.title')}
           </h2>
-          <button type="button" onClick={onClose} disabled={busy} data-testid="multi-session-sharing-close">
+          <button type="button" onClick={close} disabled={busy} data-testid="multi-session-sharing-close">
             {t('common.close')}
           </button>
         </div>
@@ -254,6 +299,7 @@ export function ShareSessionDialog({
             )}
           </form>
         )}
+        {canCreate && !loading && sessionId && <SharingAuditSection key={sessionId} sessionId={sessionId} />}
         {sessionId && (
           <>
             <h3 data-testid="multi-session-sharing-managed-title">{t('sessionSharing.managed')}</h3>

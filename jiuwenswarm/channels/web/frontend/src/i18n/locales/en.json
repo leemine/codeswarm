@@ -3243,6 +3243,24 @@
     }
   },
   "sessionSharing": {
+    "audit": {
+      "refresh": "Refresh audit",
+      "title": "Recent sharing audit",
+      "coverage": "Only confirmed sharing changes and continuation publications are recorded here. This is not a complete activity audit.",
+      "error": "Audit records are unavailable. Refresh to check current access.",
+      "count": "Showing {{count}} recent records",
+      "empty": "No recorded events for this session. Earlier activity may not have been audited.",
+      "actors": "{{actor}} → {{target}}",
+      "revision": "Share {{share}} · revision {{revision}}",
+      "more": "Older records exist. Only the most recent records are shown here.",
+      "latestHundred": "Show latest 100",
+      "action": {
+        "create": "Share created",
+        "update": "Share updated",
+        "revoke": "Share revoked",
+        "continue": "Continuation published"
+      }
+    },
     "exitUnconfirmed": "The permission change is committed, but execution exit is not confirmed. Refresh the current state and check the affected execution; do not repeat this change.",
     "auditDegraded": "Revocation is committed, but audit storage is unavailable and this change was not recorded in audit history. Ask an administrator to check audit storage; do not repeat revocation.",
     "refreshError": "The permission change is committed, but refreshing the list failed. Refresh the list; do not repeat the change.",

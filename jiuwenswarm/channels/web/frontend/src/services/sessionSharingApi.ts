@@ -249,7 +249,103 @@ async function sharingMutation<T>(
   return { ...value, audit: sharingAudit(value.audit) } as T & { audit?: SharingAuditStatus };
 }
 
+export interface SharingAuditEvent {
+  sequence: number;
+  event_id: string;
+  recorded_at: number;
+  action: 'create' | 'update' | 'revoke' | 'continue';
+  phase: 'mutation' | 'publication';
+  result: 'committed';
+  share_id: string;
+  share_revision: number;
+  before_revision: number | null;
+  after_revision: number | null;
+  actor_id: string;
+  target_actor_id: string;
+  request_id: string | null;
+  method: string;
+}
+export interface SharingAuditPage {
+  session_id: string;
+  events: SharingAuditEvent[];
+  has_more: boolean;
+  coverage: 'confirmed_mutations_and_publications_only';
+}
+
+function validateAuditPage(value: SharingAuditPage, sessionId: string, limit: number): SharingAuditPage {
+  const keys = [
+    'sequence',
+    'event_id',
+    'recorded_at',
+    'action',
+    'phase',
+    'result',
+    'share_id',
+    'share_revision',
+    'before_revision',
+    'after_revision',
+    'actor_id',
+    'target_actor_id',
+    'request_id',
+    'method',
+  ];
+  if (
+    !onlyKeys(value, ['session_id', 'events', 'has_more', 'coverage']) ||
+    value.session_id !== sessionId ||
+    value.coverage !== 'confirmed_mutations_and_publications_only' ||
+    typeof value.has_more !== 'boolean' ||
+    !Array.isArray(value.events) ||
+    value.events.length > limit ||
+    (value.has_more && value.events.length !== limit)
+  )
+    throw new Error('Audit response unavailable');
+  const ids = new Set<string>();
+  let previous = Infinity;
+  for (const event of value.events) {
+    if (
+      !onlyKeys(event, keys) ||
+      Object.keys(event).length !== keys.length ||
+      !Number.isSafeInteger(event.sequence) ||
+      event.sequence < 1 ||
+      event.sequence >= previous ||
+      !validText(event.event_id, 1024) ||
+      ids.has(event.event_id) ||
+      typeof event.recorded_at !== 'number' ||
+      !Number.isFinite(new Date(event.recorded_at * 1000).getTime()) ||
+      !['create', 'update', 'revoke', 'continue'].includes(event.action) ||
+      event.result !== 'committed' ||
+      event.phase !== (event.action === 'continue' ? 'publication' : 'mutation') ||
+      !validText(event.share_id, 1024) ||
+      !Number.isSafeInteger(event.share_revision) ||
+      event.share_revision < 1 ||
+      !validText(event.actor_id, 1024) ||
+      !validText(event.target_actor_id, 1024) ||
+      !(event.request_id === null || validText(event.request_id, 1024)) ||
+      !['host_api', `session.share.${event.action}`].includes(event.method) ||
+      (event.action === 'continue'
+        ? event.before_revision !== null || event.after_revision !== null
+        : !Number.isSafeInteger(event.before_revision) ||
+          event.before_revision! < 0 ||
+          event.after_revision !== event.before_revision! + 1 ||
+          event.after_revision !== event.share_revision)
+    )
+      throw new Error('Audit response unavailable');
+    ids.add(event.event_id);
+    previous = event.sequence;
+  }
+  return value;
+}
+
 export const sessionSharingApi = {
+  audit: async (sessionId: string, limit = 50, signal?: AbortSignal): Promise<SharingAuditPage> => {
+    if (!validText(sessionId) || !Number.isSafeInteger(limit) || limit < 1 || limit > 100)
+      throw new Error('Audit request unavailable');
+    return validateAuditPage(
+      await webRequest<SharingAuditPage>('session.share.audit.list', { session_id: sessionId, limit }, { signal }),
+      sessionId,
+      limit,
+    );
+  },
   continuationOptions: async (input: ContinuationOptionsInput): Promise<ContinuationOption[]> => {
     const params = {
       session_id: input.session_id,
@@ -345,8 +441,10 @@ export const sessionSharingApi = {
     }
     return page;
   },
-  list: (sessionId?: string) =>
-    webRequest<{ shares: SessionShare[] }>('session.share.list', sessionId ? { session_id: sessionId } : {}),
+  list: (sessionId?: string, signal?: AbortSignal) =>
+    webRequest<{ shares: SessionShare[] }>('session.share.list', sessionId ? { session_id: sessionId } : {}, {
+      signal,
+    }),
   create: (sessionId: string, targetActor: string, bounds: SharingBounds) =>
     sharingMutation<{ share: SessionShare }>('session.share.create', {
       session_id: sessionId,

@@ -99,3 +99,17 @@
 .session-continuation-pane .session-sharing-row-actions {
   flex-wrap: wrap;
 }
+
+.session-sharing-audit {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--color-border-default);
+}
+.session-sharing-audit-list {
+  max-height: 320px;
+  overflow-y: auto;
+}
+.session-sharing-audit time {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}

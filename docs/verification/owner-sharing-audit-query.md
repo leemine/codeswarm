@@ -35,6 +35,19 @@ AgentServer send_lock 与 WebChannel handler→E2A proxy→queued writer；运�
 不是实际 Provider/UI 验收。新增查询测试已纳入原 stable governance-projects 的 discover 和
 command；未增加超时或例外。原分享、审计写入、cleanup 与 Gateway 相邻回归保留。
 
-本片不包含审计 UI；后续复用 ShareSessionDialog 的当前会话区域，不另建界面。当前也不包含
-admission、consume、denied、delivery 全量事件，不能据此宣布完整 R2-B4 审计完成。正式集成
-后仍需 stable、新锁来源核验和按影响面真实验证。
+ShareSessionDialog 复用当前会话 owner 管理区域，提供默认折叠的“最近分享审计”。只有现有
+owner 列表查询成功后才显示入口；受共享者收件箱不触发 owner 审计。展开显式读取最近 50 条，
+有更多记录时可重新查询最近 100 条；仍有更早记录时明确提示只展示最近记录，不提供虚假完整分页。
+客户端严格校验原 session_id、字段白名单、倒序唯一序列、修订和固定 coverage，仅以纯文本显示
+时间、动作、actor/target actor、share 和修订。失败清空结果并显示固定安全文案，不展示服务端错误正文。
+
+关闭/折叠、换 Session、凭据变化（含登出）和断线会清空审计内容，取消请求并使旧 generation 失效；
+迟到列表/审计响应不能恢复入口或旧记录。连接恢复不会自动复用旧数据，需再次刷新当前授权。
+原继续执行 pane 的断线同 input/token 重试保持不变。此界面没有撤权推送或后台审计轮询，也不能撤回
+用户已经看到的信息；每次读取仍由服务端独立授权，UI 可见性不是权限。
+
+前端行为测试纳入原 test:session-continuation 窄脚本，覆盖 owner/inbox、限额、schema/纯文本、
+显示后清理、迟到响应、取消和失败固定文案；相邻原分享/继续/历史测试、构建与双语言宽窄屏合成组件
+视觉检查保留证据。合成组件 API 不是实际双用户服务或 Provider 验收。当前仍不包含 admission、
+consume、denied、delivery 全量事件，不能据此宣布完整 R2-B4 审计完成。正式集成后仍需 stable、
+新锁来源核验和按影响面真实验证。
