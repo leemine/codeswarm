@@ -341,6 +341,14 @@ class _CurrentNativeToolResources:
             return OpenCodeToolResourceResolver(
                 grants, owns_session=self._owns_external_session,
             ).resources_for_tool(execution, operation)
+        from openjiuwen.core.foundation.tool import MCPTool
+        from jiuwenswarm.governance.native_executor import require_native_executor
+        proof = require_native_executor(operation)
+        if type(proof.executor) is MCPTool:
+            from jiuwenswarm.governance.native_mcp_tools import native_mcp_resources
+            if self._owns_session(execution, proof.agent, proof.session) is not True:
+                raise GovernanceError('MCP executor has no original Session owner')
+            return native_mcp_resources(execution, operation)
         return NativeToolResourceResolver(grants, owns_session=self._owns_session).resources_for_tool(execution, operation)
 
 
@@ -563,13 +571,19 @@ class AgentRuntime:
             owns_execution=owns_model_execution, credential_decoder=decode_model_credential,
             binding_checker=continuation.check_model if continuation is not None else None,
         )
+        from jiuwenswarm.governance.mcp_credentials import NativeMcpCredentialAuthority
+        mcp_authority = NativeMcpCredentialAuthority(
+            model_authority.execution, resource_authorizer=self._resource_authorizer,
+            current_identity=current_identity, is_current_execution=is_current,
+            owns_execution=owns_model_execution, credential_decoder=decode_model_credential,
+        )
         return ExecutionResourceAuthorities({
             provider: BoundToolResourceAuthority(
                 ResourceExecutionContext(project_id, identity, session_id, str(Path(workspace).resolve()), provider),
                 authorizer=self._resource_authorizer, resolver=resolver,
                 current_identity=current_identity, is_current_execution=is_current,
             ) for provider in ("native", "codex", "opencode")
-        }, model_authorizer=model_authority)
+        }, model_authorizer=model_authority, mcp_authorizer=mcp_authority)
 
     @property
     def extension_registry(self) -> Any | None:

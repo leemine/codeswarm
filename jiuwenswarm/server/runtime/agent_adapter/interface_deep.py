@@ -12435,9 +12435,39 @@ class JiuWenSwarmDeepAdapter:
                 kv_cache_runtime=get_kv_cache_runtime(),
             )
 
+        mcp_registrations = []
+
+        def after_stop() -> None:
+            # These records belong to this exact execution, including callers
+            # using prepare_native_session directly instead of the facade.
+            for registration in reversed(mcp_registrations):
+                registration.close()
+            mcp_registrations.clear()
+
         async def before_start(instance: Any, session: Any) -> None:
             agent_factory(None)
             await self.install_session_input_guard()
+            from jiuwenswarm.governance.organization_auth import configured_authenticator
+            if configured_authenticator() is not None:
+                from jiuwenswarm.server.runtime.session.lifecycle import raw_metadata
+                from jiuwenswarm.governance.mcp_credentials import configured_native_mcp_catalog
+                from jiuwenswarm.server.runtime.mcp.native_registration import install_native_mcp_tools
+                metadata = raw_metadata(bound.binding.host_session_id)
+                project_id = metadata.get('project_id') if isinstance(metadata, dict) else None
+                if not isinstance(project_id, str) or not project_id:
+                    raise PermissionError('Native MCP catalog requires the original managed Session')
+                registrations = []
+                try:
+                    for entry in configured_native_mcp_catalog(project_id):
+                        registrations.append(install_native_mcp_tools(
+                            agent=instance.react_agent, session=session, native_session=execution,
+                            execution_binding=bound.binding, project_id=project_id,
+                            connection=entry.binding, manifest=entry.manifest))
+                except BaseException:
+                    for registration in reversed(registrations):
+                        registration.close()
+                    raise
+                mcp_registrations.extend(registrations)
 
         async def dispatch_guard(request: Any, *, send: Any) -> Any:
             agent_factory(None)
@@ -12447,13 +12477,14 @@ class JiuWenSwarmDeepAdapter:
             agent_factory(None)
             return await self._dispatch_goal_control(**kwargs)
 
-        return NativeExecutionSession(
+        execution = NativeExecutionSession(
             bound, agent_factory=agent_factory,
-            session_factory=session_factory, before_start=before_start,
+            session_factory=session_factory, before_start=before_start, after_stop=after_stop,
             dispatch_guard=dispatch_guard,
             goal_dispatcher=goal_dispatcher,
             event_observer=event_observer,
         )
+        return execution
 
     async def start_native_interaction(
         self, *, source: Any, bindings: Any, subject_id: str,

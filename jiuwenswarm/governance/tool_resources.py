@@ -72,6 +72,10 @@ class BoundToolResourceAuthority:
         self._current = is_current_execution
 
     async def __call__(self, tool: BeforeToolContext) -> bool:
+        return self.check(tool)
+
+    def check(self, tool: BeforeToolContext) -> bool:
+        """Recheck the same actual operation without scheduling or granting it."""
         try:
             if (not isinstance(tool, BeforeToolContext)
                     or self._identity() != self.execution.identity

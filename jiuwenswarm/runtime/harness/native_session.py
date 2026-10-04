@@ -64,6 +64,8 @@ class _HostRequest:
     guarded_authority: Any = field(default=None, repr=False)
     model_authority: Any = field(default=None, repr=False)
     guarded_model_authority: Any = field(default=None, repr=False)
+    mcp_authority: Any = field(default=None, repr=False)
+    guarded_mcp_authority: Any = field(default=None, repr=False)
 
 
 class NativeExecutionSession:
@@ -81,6 +83,7 @@ class NativeExecutionSession:
         agent_factory: AgentFactory,
         session_factory: Callable[[HarnessContext, DeepAgent], Awaitable[Any]],
         before_start: Callable[[DeepAgent, Any], Awaitable[None]] | None = None,
+        after_stop: Callable[[], None] | None = None,
         dispatch_guard: Callable[..., Awaitable[Any]] | None = None,
         goal_dispatcher: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         event_observer: Callable[[HarnessEvent], Awaitable[None]] | None = None,
@@ -99,6 +102,7 @@ class NativeExecutionSession:
             raise UnsupportedHarnessCapabilityError(
                 "Native host assembly does not support explicit execution authorization"
             )
+        self._after_stop = after_stop
         self._dispatch_guard = dispatch_guard
         self._goal_dispatcher = goal_dispatcher
         self._observer = event_observer
@@ -113,6 +117,7 @@ class NativeExecutionSession:
         self._tool_owner = None
         self._resource_governed = False
         self._model_resource_governed = False
+        self._mcp_resource_governed = False
 
         async def register_owner(instance, session):
             if self._tool_owner is not None:
@@ -179,6 +184,8 @@ class NativeExecutionSession:
                     await asyncio.wait_for(
                         self.io.stop(), timeout=RESOURCE_STOP_TIMEOUT_S
                     )
+                    if self._after_stop is not None:
+                        self._after_stop()
                 except Exception as cleanup_error:
                     self._exit_state = ExecutionExitState.EXIT_UNCONFIRMED
                     raise ExecutionExitUnconfirmedError(
@@ -235,6 +242,12 @@ class NativeExecutionSession:
             if failures:
                 self._exit_state = ExecutionExitState.EXIT_UNCONFIRMED
                 raise ExecutionExitUnconfirmedError(failures)
+            try:
+                if self._after_stop is not None:
+                    self._after_stop()
+            except Exception as exc:
+                self._exit_state = ExecutionExitState.EXIT_UNCONFIRMED
+                raise ExecutionExitUnconfirmedError([("host_resources", exc)]) from exc
             for entry in self._requests.values():
                 if entry.result is not None and not entry.result.done():
                     entry.result.cancel()
@@ -290,13 +303,18 @@ class NativeExecutionSession:
         )
 
     def _register_host_request(self, **kwargs):
-        from jiuwenswarm.governance.tool_context import submitted_tool_authorizer, submitted_model_authorizer
+        from jiuwenswarm.governance.tool_context import (
+            submitted_tool_authorizer, submitted_model_authorizer, submitted_mcp_authorizer,
+        )
         token = uuid.uuid4().hex
         authority = submitted_tool_authorizer()
         model_authority = submitted_model_authorizer()
+        mcp_authority = submitted_mcp_authorizer()
+        self._mcp_resource_governed = self._mcp_resource_governed or mcp_authority is not None
         self._model_resource_governed = self._model_resource_governed or model_authority is not None
         self._resource_governed = self._resource_governed or authority is not None
-        entry = _HostRequest(**kwargs, authority=authority, model_authority=model_authority)
+        entry = _HostRequest(**kwargs, authority=authority, model_authority=model_authority,
+                             mcp_authority=mcp_authority)
 
         async def guarded(operation):
             active = self._native.active_turn
@@ -330,8 +348,35 @@ class NativeExecutionSession:
                 raise ResourceAccessDenied("model execution authority changed")
             return headers
 
+        def guarded_mcp(binding, *, executor_binding, actual_operation, source_execution, execution_slice, native_session):
+            from jiuwenswarm.governance.resources import ResourceAccessDenied
+            active = self._native.active_turn
+            def current():
+                return (
+                    not self._closing and not self._closed and active is not None
+                    and self._native.active_turn is active and not active.abort_requested
+                    and active.content.metadata.get(_REQUEST_KEY) == token
+                    and self._requests.get(token) is entry
+                    and native_session is self
+                    and execution_slice.owner is self and execution_slice.active
+                    and execution_slice.mcp_authorizer is guarded_mcp
+                    and self._exit_state is ExecutionExitState.RUNNING
+                    and execution_slice._task is not None
+                    and not execution_slice._task.done() and not execution_slice._task.cancelling()
+                )
+            if mcp_authority is None or not current():
+                raise ResourceAccessDenied('MCP execution authority unavailable')
+            result = mcp_authority(binding, executor_binding=executor_binding,
+                actual_operation=actual_operation, source_execution=source_execution,
+                execution_slice=execution_slice, native_session=self,
+                is_current_host_request=current)
+            if not current():
+                raise ResourceAccessDenied('MCP execution authority changed')
+            return result
+
         entry.guarded_authority = guarded
         entry.guarded_model_authority = guarded_model
+        entry.guarded_mcp_authority = guarded_mcp
         self._requests[token] = entry
         return token
 
@@ -371,7 +416,7 @@ class NativeExecutionSession:
         from jiuwenswarm.governance.tool_context import NativeExecutionSlice
         from jiuwenswarm.governance.resources import ResourceAccessDenied
         from openjiuwen.harness.execution_subject import current_execution_subject
-        if not (self._resource_governed or self._model_resource_governed):
+        if not (self._resource_governed or self._model_resource_governed or self._mcp_resource_governed):
             return None
         owner = self._tool_owner
         if owner is None or ctx.agent is not owner[0] or ctx.session is not owner[2]:
@@ -387,7 +432,8 @@ class NativeExecutionSession:
                 or active.content.metadata.get(_REQUEST_KEY) != token or entry is None
                 or (subject is not None and subject.kind == 'subagent')):
             raise ResourceAccessDenied('Native execution slice request unavailable')
-        return NativeExecutionSlice(self, entry.guarded_authority, entry.guarded_model_authority, subject)
+        return NativeExecutionSlice(self, entry.guarded_authority, entry.guarded_model_authority, subject,
+                                    mcp_authorizer=entry.guarded_mcp_authority)
 
     async def send_request(self, request: SendInputRequest) -> SendReceipt:
         """Accept a host request without serializing its permission/context objects."""
@@ -570,7 +616,7 @@ class NativeExecutionSession:
                 raise RuntimeError(
                     "Native turn was cancelled before host input dispatch"
                 )
-            if self._resource_governed or self._model_resource_governed:
+            if self._resource_governed or self._model_resource_governed or self._mcp_resource_governed:
                 inputs = dict(host_request.inputs)
                 run = dict(inputs.get('run') or {})
                 context = dict(run.get('context') or {})
