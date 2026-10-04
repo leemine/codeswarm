@@ -107,3 +107,31 @@ async def test_cancellation_keeps_semantics_without_resolver_secret(bound):
         await authority.resolve_for_request(use, destination=use.destination)
     assert not str(error.value)
     assert 'cancel-secret-sentinel' not in ''.join(traceback.format_exception(error.value))
+
+
+def test_secret_free_request_check_reuses_current_decision_without_resolving(bound):
+    authority, use, state, resolver = bound
+    before = authority.check_for_request(use, destination=use.destination)
+    assert before.allowed and before.reference == use.reference
+    resolver.resolve_credential.assert_not_called()
+    state.revision += 1
+    assert authority.check_for_request(use, destination=use.destination) != before
+    state.allowed = False
+    with pytest.raises(ResourceAccessDenied):
+        authority.check_for_request(use, destination=use.destination)
+
+
+@pytest.mark.parametrize('invalid', ['destination', 'use', 'identity'])
+def test_secret_free_check_rejects_wrong_sink_or_original_identity(bound, invalid):
+    authority, use, state, resolver = bound
+    destination = use.destination
+    if invalid == 'destination':
+        destination += '/other'
+    elif invalid == 'use':
+        use = replace(use, reference='mcp:other')
+    else:
+        state.identity = None
+    with pytest.raises(ResourceAccessDenied) as error:
+        authority.check_for_request(use, destination=destination)
+    assert error.value.__context__ is None
+    resolver.resolve_credential.assert_not_called()

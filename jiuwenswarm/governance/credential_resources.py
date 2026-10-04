@@ -15,7 +15,7 @@ from typing import Callable, Literal, Protocol
 from urllib.parse import urlsplit
 
 from .contracts import TrustedIdentity
-from .resources import ResourceAccessDenied, ResourceAuthorizer, ResourceGuard, ResourceRequest, normalized
+from .resources import ResourceAccessDenied, ResourceAuthorizer, ResourceGuard, ResourceRequest, ResourceDecision, normalized
 from .tool_resources import ResourceExecutionContext
 
 
@@ -78,6 +78,25 @@ class BoundCredentialAuthority:
                 or self._identity() != self.execution.identity or self._current() is not True):
             raise ResourceAccessDenied('credential binding is unavailable')
         return decision
+
+    def check_for_request(self, use: CredentialUse, *, destination: str) -> ResourceDecision:
+        """Revalidate a bound sink without resolving or retaining a credential.
+
+        Consumers may compare this immutable decision across a request/response
+        wait. This uses the same authority as credential resolution.
+        """
+        try:
+            if type(use) is not CredentialUse or destination != use.destination:
+                raise ResourceAccessDenied('credential destination is unavailable')
+            return self._check(use)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            cancelled = False
+        # Raise outside the handler: even private exception context is secret-free.
+        if cancelled:
+            raise asyncio.CancelledError()
+        raise ResourceAccessDenied('credential consumption denied')
 
     async def resolve_for_request(self, use: CredentialUse, *, destination: str) -> str:
         """Resolve immediately before a matching sink performs one operation.
