@@ -19,3 +19,13 @@ core 现有 recover 会把整个 blob 反序列化失败与缺失 checkpoint 都
 使用正式非 editable core `fa3490c08c93f32bba8fbfa0efdb499b9050624c`，解释器 `/tmp/r2b-core-fa3490c0-locked-venv/bin/python`；仅 Swarm 候选源码在 PYTHONPATH，无 core overlay。本候选祖先锁仍旧版本，因此这是明确新 core 的受影响源码验证，不是新 Swarm 锁安装或 stable。来源/hash/命令在 `/tmp/r2b-native-goal-read-evidence/`。首次 collection 因全新环境未完成既有 pysbd 预热失败，保留日志；按仓库既有 workflow 预热后正常 pytest 门禁未降低。
 
 Runtime/SessionBoundary/Gateway 最终 sink 接线、stable manifest 追加本测试及正式配对由集成方负责。未运行真实 Provider、权限撤销/延迟/取消探针，未修改主 Runtime、锁或用户环境配置。
+
+## 主 Runtime 与最终投递接线
+
+本集成候选在正式 fa3490c0 锁之上，只开放组织 `command.goal` 的严格 get 参数。原 owner + 项目 read 即可读取，不要求 execute，不新建 Coordinator execution、Binding、facade、MCP 或输出读者。未启动 Runtime 明确拒绝查询，必须由原服务器完成既有启动；读取本身不初始化 Runner/checkpointer。缓存使用原 AgentManager 的私有纯 peek；旧 public get 仍保留原 borrower 生命周期兼容。
+
+Runtime 先固定请求/metadata/catalog/缓存及实际热 Session 或冷 storage，再由原 reader 的首次 checker 建立完整原 principal/owner/project read permit。首权限回调替换 action/profile、同 SID 热 Session 或已配置冷 store 均拒绝，不采用回调后的目标。原语义等价 Single 模式别名可读，Team、其他 Provider、分享执行参数或未证明路由均拒绝。
+
+AgentServer 原 delivery permit 保留实际 reader.final_check；Gateway 各自原 owner permit 固定 metadata 路由，在原 writer 出队时复核。实际发送锁/出站队列组件覆盖成功以及排队后 child/ACL/credential/route 变化拒绝；合成 socket 不等于真实渠道验收。受影响回归 140 passed（/tmp/r2b-goal-read-host-delivery-regression-corrected.log）；新增 UI 模式别名语义调整后相关 30 passed（/tmp/r2b-goal-read-host-mode-resolved.log）。既有 38 reader cases、原 Goal 控制兼容、Project/Session/AgentManager 回归包含在内。第一批 fixture API/ACL 版本错误、路径错误未运行及首回调反例均保留，未改验收门禁。新增文件已同时纳入原 manifest command/discover。
+
+此片尚待精确冻结后非 editable 来源、完整 strict stable 与真实只读 UI 验证。活动 mutation/空闲 resume/EOF 仍未通过组织公共入口；正式 core F37 的 backing Session 同源反例由独立 core 修复片处理，不以本次只读成功替代。R2-B 仍未关闭。
