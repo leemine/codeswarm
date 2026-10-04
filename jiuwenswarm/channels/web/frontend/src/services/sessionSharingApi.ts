@@ -141,6 +141,114 @@ export interface SharedHistoryPage extends SharedSessionTarget {
   next_cursor: string | null;
   read_only: true;
 }
+
+export interface SharingAuditStatus {
+  persisted: boolean;
+  degraded: boolean;
+  reason: 'audit_persisted' | 'audit_storage_invalid';
+  sequence: number | null;
+  event_id: string | null;
+}
+type SharingMutationMethod = 'session.share.create' | 'session.share.update' | 'session.share.revoke';
+export interface SharingCommittedMutation extends SharedSessionTarget {
+  committed: true;
+  method: SharingMutationMethod;
+  revision: number;
+}
+export class SharingMutationCommittedError extends Error {
+  constructor(
+    readonly mutation: SharingCommittedMutation,
+    readonly audit: SharingAuditStatus,
+  ) {
+    super('Sharing changed; execution exit remains unconfirmed');
+  }
+}
+
+function sharingAudit(value: unknown): SharingAuditStatus | undefined {
+  if (value === undefined) return undefined; // Older successful RPC: audit status is unknown.
+  if (!onlyKeys(value, ['persisted', 'degraded', 'reason', 'sequence', 'event_id']))
+    throw new Error('Invalid sharing audit response');
+  const audit = value as SharingAuditStatus;
+  const persisted =
+    audit.persisted === true &&
+    audit.degraded === false &&
+    audit.reason === 'audit_persisted' &&
+    Number.isSafeInteger(audit.sequence) &&
+    audit.sequence! > 0 &&
+    typeof audit.event_id === 'string' &&
+    /^[a-f0-9]{32}$/.test(audit.event_id);
+  const degraded =
+    audit.persisted === false &&
+    audit.degraded === true &&
+    audit.reason === 'audit_storage_invalid' &&
+    audit.sequence === null &&
+    audit.event_id === null;
+  if (!persisted && !degraded) throw new Error('Invalid sharing audit response');
+  return Object.freeze({ ...audit });
+}
+
+async function sharingMutation<T>(
+  method: SharingMutationMethod,
+  params: Record<string, unknown>,
+): Promise<T & { audit?: SharingAuditStatus }> {
+  let requestId: string | undefined;
+  let value: Record<string, unknown>;
+  const matches = (mutation: SharingCommittedMutation) =>
+    onlyKeys(mutation, ['committed', 'method', 'session_id', 'share_id', 'revision']) &&
+    mutation.committed === true &&
+    mutation.method === method &&
+    mutation.session_id === params.session_id &&
+    validText(mutation.share_id) &&
+    Number.isSafeInteger(mutation.revision) &&
+    (method === 'session.share.create'
+      ? mutation.revision === 1
+      : mutation.share_id === params.share_id && mutation.revision === (params.expected_revision as number) + 1);
+  try {
+    value = await webRequest<Record<string, unknown>>(method, params, {
+      onRequestId: (id) => {
+        requestId = id;
+      },
+    });
+  } catch (error) {
+    const failure = error as { code?: string; requestId?: string; payload?: Record<string, unknown> };
+    const payload = failure?.payload;
+    if (
+      requestId &&
+      failure?.requestId === requestId &&
+      failure.code === 'EXIT_UNCONFIRMED' &&
+      payload?.code === 'EXIT_UNCONFIRMED' &&
+      payload.exit_confirmed === false &&
+      onlyKeys(payload, ['code', 'error', 'exit_confirmed', 'mutation', 'audit']) &&
+      matches(payload.mutation as SharingCommittedMutation)
+    ) {
+      const audit = sharingAudit(payload.audit);
+      if (audit)
+        throw new SharingMutationCommittedError(
+          Object.freeze({ ...(payload.mutation as SharingCommittedMutation) }),
+          audit,
+        );
+    }
+    throw error;
+  }
+  const record = method === 'session.share.revoke' ? value : value?.share;
+  const item = record as { session_id?: string; share_id?: string; revision?: number };
+  if (
+    !onlyKeys(value, method === 'session.share.revoke' ? ['share_id', 'revision', 'audit'] : ['share', 'audit']) ||
+    !item ||
+    !validText(item.share_id) ||
+    (method !== 'session.share.revoke' && item.session_id !== params.session_id) ||
+    !matches({
+      committed: true,
+      method,
+      session_id: params.session_id as string,
+      share_id: item.share_id,
+      revision: item.revision!,
+    })
+  )
+    throw new Error('Invalid sharing mutation response');
+  return { ...value, audit: sharingAudit(value.audit) } as T & { audit?: SharingAuditStatus };
+}
+
 export const sessionSharingApi = {
   continuationOptions: async (input: ContinuationOptionsInput): Promise<ContinuationOption[]> => {
     const params = {
@@ -240,7 +348,7 @@ export const sessionSharingApi = {
   list: (sessionId?: string) =>
     webRequest<{ shares: SessionShare[] }>('session.share.list', sessionId ? { session_id: sessionId } : {}),
   create: (sessionId: string, targetActor: string, bounds: SharingBounds) =>
-    webRequest<{ share: SessionShare }>('session.share.create', {
+    sharingMutation<{ share: SessionShare }>('session.share.create', {
       session_id: sessionId,
       target_actor: targetActor,
       history_scope: 'current_snapshot',
@@ -248,7 +356,7 @@ export const sessionSharingApi = {
       expires_at: bounds.expires_at,
     }),
   update: (share: SessionShare, bounds: SharingBounds) =>
-    webRequest<{ share: SessionShare }>('session.share.update', {
+    sharingMutation<{ share: SessionShare }>('session.share.update', {
       session_id: share.session_id,
       share_id: share.share_id,
       expected_revision: share.revision,
@@ -256,7 +364,7 @@ export const sessionSharingApi = {
       expires_at: bounds.expires_at,
     }),
   revoke: (share: SessionShare) =>
-    webRequest<{ share_id: string; revision: number }>('session.share.revoke', {
+    sharingMutation<{ share_id: string; revision: number }>('session.share.revoke', {
       session_id: share.session_id,
       share_id: share.share_id,
       expected_revision: share.revision,

@@ -24,7 +24,8 @@ await i18next
   .init({ lng: 'en', showSupportNotice: false, resources: { en: { translation: {} } } });
 const { ShareSessionDialog } =
   await import('../node_modules/.cache/session-sharing/multi-session/dialogs/ShareSessionDialog.js');
-const { sessionSharingApi } = await import('../node_modules/.cache/session-sharing/services/sessionSharingApi.js');
+const { sessionSharingApi, SharingMutationCommittedError } =
+  await import('../node_modules/.cache/session-sharing/services/sessionSharingApi.js');
 const { webClient } = await import('../node_modules/.cache/session-sharing/services/webClient.js');
 const tick = () =>
   act(async () => {
@@ -63,6 +64,9 @@ test('RPC client uses existing websocket and only whitelisted fields', async () 
   const calls = [];
   webClient.request = async (method, params) => {
     calls.push({ method, params });
+    if (method === 'session.share.create') return { share: { ...share, revision: 1 } };
+    if (method === 'session.share.update') return { share: { ...share, revision: 4 } };
+    if (method === 'session.share.revoke') return { share_id: share.share_id, revision: 4 };
     return {};
   };
   try {
@@ -214,6 +218,172 @@ test('inbox mode discovers shares without creating or selecting a Session', asyn
     assert.equal(find('multi-session-sharing-managed-list'), null);
     assert.ok(find('multi-session-sharing-received-item'));
     assert.equal(find('multi-session-sharing-open'), null);
+  } finally {
+    await unmount();
+  }
+});
+
+const persistedAudit = {
+  persisted: true,
+  degraded: false,
+  reason: 'audit_persisted',
+  sequence: 8,
+  event_id: 'a'.repeat(32),
+};
+const degradedAudit = {
+  persisted: false,
+  degraded: true,
+  reason: 'audit_storage_invalid',
+  sequence: null,
+  event_id: null,
+};
+const mutation = {
+  committed: true,
+  method: 'session.share.revoke',
+  session_id: 'session',
+  share_id: 'grant',
+  revision: 4,
+};
+
+test('RPC distinguishes only exact request/method/revision committed errors', async () => {
+  const original = webClient.request;
+  try {
+    for (const change of ['none', 'request', 'method', 'sid', 'share', 'revision', 'audit', 'code', 'nested']) {
+      webClient.request = async (_method, _params, options) => {
+        options.onRequestId('wire-request');
+        const payload = {
+          code: 'EXIT_UNCONFIRMED',
+          exit_confirmed: false,
+          mutation: { ...mutation },
+          audit: { ...degradedAudit },
+        };
+        if (change === 'method') payload.mutation.method = 'session.share.update';
+        if (change === 'sid') payload.mutation.session_id = 'other';
+        if (change === 'share') payload.mutation.share_id = 'other';
+        if (change === 'revision') payload.mutation.revision = 5;
+        if (change === 'audit') payload.audit.persisted = true;
+        if (change === 'nested') payload.extra = { mutation };
+        throw Object.assign(new Error('never show raw backend text'), {
+          code: change === 'code' ? 'FORBIDDEN' : 'EXIT_UNCONFIRMED',
+          requestId: change === 'request' ? 'wrong' : 'wire-request',
+          payload,
+        });
+      };
+      await assert.rejects(sessionSharingApi.revoke(share), (error) => {
+        assert.equal(error instanceof SharingMutationCommittedError, change === 'none');
+        if (change === 'none') {
+          assert.deepEqual(error.mutation, mutation);
+          assert.deepEqual(error.audit, degradedAudit);
+        }
+        return true;
+      });
+    }
+  } finally {
+    webClient.request = original;
+  }
+});
+
+test('new successful audit status is strict and old success remains unknown', async () => {
+  const original = webClient.request;
+  try {
+    for (const audit of [undefined, persistedAudit, degradedAudit]) {
+      webClient.request = async () => ({ share_id: 'grant', revision: 4, ...(audit ? { audit } : {}) });
+      assert.deepEqual((await sessionSharingApi.revoke(share)).audit, audit);
+    }
+    for (const audit of [
+      null,
+      {},
+      { ...persistedAudit, event_id: null },
+      { ...degradedAudit, sequence: 1 },
+      { ...persistedAudit, body: 'private' },
+    ]) {
+      webClient.request = async () => ({ share_id: 'grant', revision: 4, audit });
+      await assert.rejects(sessionSharingApi.revoke(share));
+    }
+  } finally {
+    webClient.request = original;
+  }
+});
+
+test('committed revoke with degraded audit refreshes only and cannot be retried as a mutation', async () => {
+  let changes = 0;
+  let reads = 0;
+  sessionSharingApi.list = async (id) => {
+    reads += 1;
+    return { shares: id ? [share] : [] };
+  };
+  sessionSharingApi.revoke = async () => {
+    changes += 1;
+    return { share_id: 'grant', revision: 4, audit: degradedAudit };
+  };
+  await mount();
+  try {
+    await act(async () => find('multi-session-sharing-revoke').click());
+    await tick();
+    assert.equal(changes, 1);
+    assert.ok(find('multi-session-sharing-audit-degraded'));
+    assert.equal(find('multi-session-sharing-error'), null);
+    assert.equal(find('multi-session-sharing-revoke').disabled, true);
+    await act(async () => find('multi-session-sharing-revoke').click());
+    await act(async () => find('multi-session-sharing-refresh').click());
+    await tick();
+    assert.equal(changes, 1);
+    assert.ok(reads >= 6);
+    assert.ok(find('multi-session-sharing-audit-degraded'));
+  } finally {
+    await unmount();
+  }
+});
+
+test('exit unconfirmed and audit degradation are both preserved after refresh failure', async () => {
+  let changes = 0;
+  sessionSharingApi.list = async (id) => {
+    if (changes) throw new Error('refresh unavailable');
+    return { shares: id ? [share] : [] };
+  };
+  sessionSharingApi.revoke = async () => {
+    changes += 1;
+    throw new SharingMutationCommittedError(mutation, degradedAudit);
+  };
+  await mount();
+  try {
+    await act(async () => find('multi-session-sharing-revoke').click());
+    await tick();
+    assert.equal(changes, 1);
+    assert.ok(find('multi-session-sharing-exit-unconfirmed'));
+    assert.ok(find('multi-session-sharing-audit-degraded'));
+    assert.equal(find('multi-session-sharing-error').textContent, i18next.t('sessionSharing.refreshError'));
+    assert.equal(find('multi-session-sharing-managed-item'), null);
+    assert.equal(find('multi-session-sharing-target'), null);
+  } finally {
+    await unmount();
+  }
+});
+
+test('late old committed reply cannot clear a new Session operation or display old warnings', async () => {
+  let oldReply, newReply;
+  sessionSharingApi.list = async (id) => ({ shares: id ? [{ ...share, session_id: id, share_id: id }] : [] });
+  sessionSharingApi.revoke = async (item) =>
+    new Promise((resolve) => {
+      if (item.session_id === 'session') oldReply = resolve;
+      else newReply = resolve;
+    });
+  await mount();
+  try {
+    await act(async () => find('multi-session-sharing-revoke').click());
+    await act(async () =>
+      root.render(React.createElement(ShareSessionDialog, { sessionId: 'other', onClose: () => {} })),
+    );
+    await tick();
+    await act(async () => find('multi-session-sharing-revoke').click());
+    await act(async () => oldReply({ share_id: 'session', revision: 4, audit: degradedAudit }));
+    await tick();
+    assert.equal(find('multi-session-sharing-close').disabled, true);
+    assert.equal(find('multi-session-sharing-audit-degraded'), null);
+    await act(async () => newReply({ share_id: 'other', revision: 4, audit: persistedAudit }));
+    await tick();
+    assert.equal(find('multi-session-sharing-close').disabled, false);
+    assert.equal(find('multi-session-sharing-audit-degraded'), null);
   } finally {
     await unmount();
   }

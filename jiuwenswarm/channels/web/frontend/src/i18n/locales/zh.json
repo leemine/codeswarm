@@ -3224,6 +3224,9 @@
     }
   },
   "sessionSharing": {
+    "exitUnconfirmed": "权限变更已生效，但执行退出尚未确认。请刷新当前状态并检查相关执行；不要重复提交此变更。",
+    "auditDegraded": "撤权已生效，但审计存储异常，本次变更未记录到审计历史。请联系管理员检查审计存储，不要重复撤权。",
+    "refreshError": "权限变更已提交，但当前列表刷新失败。请刷新列表，不要重复提交变更。",
     "continuation": {
       "savedRequest": "原请求：{{project}} · {{profile}} · {{model}} · {{title}}",
       "title": "在私有会话中继续",

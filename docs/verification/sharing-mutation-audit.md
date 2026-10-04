@@ -3,7 +3,8 @@
 This slice records confirmed sharing create/update/revoke and continuation
 publication commits. It does **not** complete R2-B4 audit acceptance: request
 admission, denied access, read/execute consumption, delivery, resource/Turn and
-artifact references, query and UI remain integration work.
+artifact references and audit history query/UI remain integration work. Existing
+sharing mutation feedback is integrated as described below.
 
 ## Storage and authority
 
@@ -79,11 +80,11 @@ optional observer with `persisted=False, degraded=True`. This is **not** audit
 success. If the authority file itself cannot be saved, revoke still fails;
 neither a success callback nor a false claim of persisted revocation is made.
 Existing callers without an observer see only the fixed warning; RPC/UI
-degraded-status projection is not implemented in this slice.
+degraded-status projection is now implemented for the three sharing mutation RPCs.
 
 The original optional auto-permission JSONL and its observe-only contract are
 unchanged. They cannot replace this atomic mutation history or prove missing
-consumption/delivery events. There is no audit query/export endpoint or UI yet.
+consumption/delivery events. There is no audit history query/export endpoint or history viewer yet.
 No automatic trimming occurs. Since the sidecar loads and saves whole JSON,
 growth increases authorization/load and write cost; long-term capacity,
 retention and bounded querying need a separately frozen policy before claiming
@@ -99,3 +100,36 @@ nonsecret projection, callback failures, unchanged public return types,
 publication idempotency and pending-on-failure, and inventory proof exclusion
 that still detects all other authority changes. They use isolated files and
 synthetic identities; they do not stand in for real Provider/UI audit acceptance.
+
+## Sharing mutation RPC and UI feedback
+
+The existing create/update/revoke adapter supplies full trusted identity and the
+original request ID/method as host-only audit context. Wire audit fields remain
+rejected. Successful responses add the post-save five-field `audit` receipt;
+legacy responses without this field remain compatible and mean audit unknown.
+
+An update/revoke that committed but cannot confirm affected execution exit
+returns `EXIT_UNCONFIRMED`, `exit_confirmed: false`, and only the exact committed
+mutation `{committed, method, session_id, share_id, revision}` plus audit status.
+Gateway's existing E2A unary path projects that receipt for only the three sharing
+mutation methods, using fixed messages and original request/session/share/revision
+correlation. Unknown fields in mutation/audit and malformed receipts are rejected;
+arbitrary backend error bodies never pass through this path. The original channel
+send, identity, permit and queue guards remain responsible for delivery. This
+receipt is neither a new authorization nor a general error payload exemption.
+
+The original sharing dialog separately displays audit degradation and unconfirmed
+exit. A confirmed mutation triggers only list refresh, never automatic mutation
+retry. Refresh failure preserves both warnings; a locally confirmed revoke stays
+disabled even if a subsequent list is stale. Session changes/unmount invalidate
+late operation replies so they cannot clear another operation or display old
+feedback. The client accepts a committed-error receipt only for its exact wire
+request ID/method/session/share/revision. Create uses the trusted returned ID and
+revision 1; update/revoke require original expected revision + 1.
+
+Additional deterministic suites `test_session_sharing_audit_feedback.py`,
+`test_sharing_audit_feedback.py` and `sessionSharing.test.mjs` cover real sidecar
+mutation through the actual adapter and E2A proxy, degraded revoke, post-commit
+exit failure, projection/correlation rejection, bilingual UI feedback and late
+responses. Provider exit remains synthetic; these tests and frontend build do
+not claim real Provider or browser visual audit acceptance.

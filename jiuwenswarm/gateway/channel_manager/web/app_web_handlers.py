@@ -3037,6 +3037,46 @@ async def _pre_persist_large_media(
     return params
 
 
+def _sharing_mutation_error_payload(value, method, expected):
+    """Project only a correlated committed-change receipt, never error bodies."""
+    if (type(value) is not dict or value.get('code') != 'EXIT_UNCONFIRMED'
+            or value.get('exit_confirmed') is not False):
+        return None
+    mutation, audit = value.get('mutation'), value.get('audit')
+    if (type(mutation) is not dict
+            or set(mutation) != {'committed', 'method', 'session_id', 'share_id', 'revision'}
+            or mutation['committed'] is not True or mutation['method'] != method
+            or mutation['session_id'] != expected['session_id']
+            or type(mutation['session_id']) is not str or not mutation['session_id']
+            or type(mutation['share_id']) is not str or not mutation['share_id']
+            or len(mutation['share_id']) > 200 or len(mutation['session_id']) > 200
+            or type(mutation['revision']) is not int or not 1 <= mutation['revision'] <= 2 ** 53 - 1):
+        return None
+    if any(value != value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value)
+           for value in (mutation['share_id'], mutation['session_id'])):
+        return None
+    if method == 'session.share.create':
+        if mutation['revision'] != 1:
+            return None
+    elif (type(expected['expected_revision']) is not int
+          or mutation['share_id'] != expected['share_id']
+          or mutation['revision'] != expected['expected_revision'] + 1):
+        return None
+    if type(audit) is not dict or set(audit) != {'persisted', 'degraded', 'reason', 'sequence', 'event_id'}:
+        return None
+    persisted = (audit['persisted'] is True and audit['degraded'] is False
+                 and audit['reason'] == 'audit_persisted' and type(audit['sequence']) is int
+                 and 1 <= audit['sequence'] <= 2 ** 53 - 1 and type(audit['event_id']) is str
+                 and re.fullmatch(r'[a-f0-9]{32}', audit['event_id']) is not None)
+    degraded = (audit['persisted'] is False and audit['degraded'] is True
+                and audit['reason'] == 'audit_storage_invalid'
+                and audit['sequence'] is None and audit['event_id'] is None)
+    if not persisted and not degraded:
+        return None
+    return {'code': 'EXIT_UNCONFIRMED', 'exit_confirmed': False,
+            'mutation': dict(mutation), 'audit': dict(audit)}
+
+
 def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     """注册 Web 前端需要的 method 与 on_connect。
     on_config_saved: 可选，config.set 写回后调用的回调；
@@ -4992,8 +5032,34 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         async def handler(ws, req_id, params, session_id, user_id=None):
             from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
 
+            response_channel = channel
+            sharing_mutation = method.value in {
+                'session.share.create', 'session.share.update', 'session.share.revoke',
+            }
+            if sharing_mutation:
+                input_params = params if isinstance(params, dict) else {}
+                expected = {key: input_params.get(key) for key in ('session_id', 'share_id', 'expected_revision')}
+
+                class SharingMutationResponses:
+                    channel_id = channel.channel_id
+
+                    async def send_response(self, response_ws, response_id, **kwargs):
+                        if kwargs.get('ok') is not True:
+                            payload = _sharing_mutation_error_payload(kwargs.get('payload'), method.value, expected)
+                            kwargs['payload'] = payload
+                            kwargs['error'] = ('Sharing changed; execution exit remains unconfirmed. '
+                                               'Refresh; do not repeat the change.' if payload else
+                                               'Sharing request failed; refresh the current state.')
+                            if kwargs.get('code') not in {
+                                'EXIT_UNCONFIRMED', 'FORBIDDEN', 'CONFLICT', 'BAD_REQUEST',
+                                'SERVICE_UNAVAILABLE', 'AGENT_SERVER_TIMEOUT',
+                            }:
+                                kwargs['code'] = 'FORBIDDEN'
+                        await channel.send_response(response_ws, response_id, **kwargs)
+
+                response_channel = SharingMutationResponses()
             await proxy_unary_request(
-                channel=channel,
+                channel=response_channel,
                 agent_client=_resolve(agent_client),
                 ws=ws,
                 req_id=req_id,
@@ -5002,6 +5068,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 user_id=user_id,
                 req_method=method,
                 label=method.value,
+                preserve_error_payload=sharing_mutation,
             )
         return handler
 

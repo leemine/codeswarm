@@ -16,6 +16,7 @@ from jiuwenswarm.governance.session_sharing import (
 )
 from jiuwenswarm.server.runtime.session.history_io import run_history_io
 from jiuwenswarm.server.runtime.session.session_sharing import SessionSharingStore
+from jiuwenswarm.server.runtime.session.sharing_audit import SharingAuditContext, SharingAuditWriteResult
 from .base import GatewayAdapter, build_error_response
 
 _FIELDS = {
@@ -87,6 +88,10 @@ class SessionSharingAdapter(GatewayAdapter):
         if method not in self.methods or not isinstance(params, dict) or set(params) - _FIELDS[method]:
             raise ValueError('invalid sharing request fields')
         identity = self._identity(request)
+        audit_results = []
+        audit_context = (SharingAuditContext(identity, request.request_id, method)
+                         if method != 'session.share.list' else None)
+        mutation = None
         if method == 'session.share.list':
             records = (self.store.list_for_session(self._text(params, 'session_id'), identity)
                        if 'session_id' in params else self.store.list_for_actor(identity))
@@ -114,8 +119,11 @@ class SessionSharingAdapter(GatewayAdapter):
             if self._identity(request) != identity:
                 raise SessionSharingDenied('identity changed')
             record = self.store.grant(session_id, identity, target, actions=actions, history=history,
-                                      expires_at=expires_at, parent_share_id=parent_id)
+                                      expires_at=expires_at, parent_share_id=parent_id,
+                                      audit_context=audit_context, audit_result=audit_results.append)
             result = {'share': self._project(record, identity)}
+            mutation = {'committed': True, 'method': method, 'session_id': session_id,
+                        'share_id': record['share_id'], 'revision': record['revision']}
         else:
             session_id, share_id = self._text(params, 'session_id'), self._text(params, 'share_id')
             revision = params.get('expected_revision')
@@ -132,15 +140,25 @@ class SessionSharingAdapter(GatewayAdapter):
                     raise SessionSharingDenied('share update denied')
                 updated = self.store.revise(share_id, identity, actions=actions,
                                             history=SessionHistoryRange(**record['history']),
-                                            expires_at=expires_at, expected_revision=revision)
+                                            expires_at=expires_at, expected_revision=revision,
+                                            audit_context=audit_context, audit_result=audit_results.append)
                 result = {'share': self._project(updated, identity)}
             else:
-                result = {'share_id': share_id, 'revision': self.store.revoke(share_id, identity, expected_revision=revision)}
+                result = {'share_id': share_id, 'revision': self.store.revoke(share_id, identity,
+                    expected_revision=revision, audit_context=audit_context, audit_result=audit_results.append)}
+            mutation = {'committed': True, 'method': method, 'session_id': session_id,
+                        'share_id': share_id, 'revision': revision + 1}
         # Queued requests and long compiles cannot retain a stale credential.
         if self._identity(request) != identity:
             raise SessionSharingDenied('identity changed')
-        return AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
-                             ok=True, payload=result, metadata=request.metadata)
+        if mutation is not None:
+            if len(audit_results) != 1 or type(audit_results[0]) is not SharingAuditWriteResult:
+                raise SessionSharingDenied('sharing audit result unavailable')
+            result['audit'] = asdict(audit_results[0])
+        response = AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
+                                 ok=True, payload=result, metadata=request.metadata)
+        response._sharing_mutation = mutation  # Private original committed facts, never request params.
+        return response
 
     async def handle(self, request):
         try:
@@ -151,8 +169,11 @@ class SessionSharingAdapter(GatewayAdapter):
                     await self.after_mutation()
                 except Exception:
                     return build_error_response(request,
-                        'Sharing changed; execution exit remains unconfirmed. Refresh and retry cleanup.',
-                        code='EXIT_UNCONFIRMED')
+                        'Sharing changed; execution exit remains unconfirmed. Refresh; do not repeat the change.',
+                        code='EXIT_UNCONFIRMED', extra={
+                            'mutation': result._sharing_mutation,
+                            'audit': result.payload['audit'], 'exit_confirmed': False,
+                        })
             return result
         except SessionSharingConflict:
             return build_error_response(request, 'Sharing revision changed; refresh and retry.', code='CONFLICT')

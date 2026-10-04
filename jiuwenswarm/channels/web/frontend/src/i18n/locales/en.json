@@ -3238,6 +3238,9 @@
     }
   },
   "sessionSharing": {
+    "exitUnconfirmed": "The permission change is committed, but execution exit is not confirmed. Refresh the current state and check the affected execution; do not repeat this change.",
+    "auditDegraded": "Revocation is committed, but audit storage is unavailable and this change was not recorded in audit history. Ask an administrator to check audit storage; do not repeat revocation.",
+    "refreshError": "The permission change is committed, but refreshing the list failed. Refresh the list; do not repeat the change.",
     "continuation": {
       "savedRequest": "Saved request: {{project}} · {{profile}} · {{model}} · {{title}}",
       "title": "Continue in a private conversation",

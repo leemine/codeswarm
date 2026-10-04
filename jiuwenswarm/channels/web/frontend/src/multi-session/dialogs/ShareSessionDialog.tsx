@@ -3,10 +3,12 @@ import { useTranslation } from 'react-i18next';
 import { Dialog } from '../../components/ui/Dialog/Dialog';
 import {
   sessionSharingApi,
+  SharingMutationCommittedError,
   sharingActions,
   type SessionShare,
   type SharingAction,
   type SharedSessionTarget,
+  type SharingAuditStatus,
 } from '../../services/sessionSharingApi';
 import './ShareSessionDialog.css';
 import { ContinuationPane, type OnContinued } from './ContinuationPane';
@@ -37,11 +39,14 @@ export function ShareSessionDialog({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(false);
+  const [feedback, setFeedback] = useState<{ auditDegraded: boolean; exitUnconfirmed: boolean } | null>(null);
+  const [revokedHere, setRevokedHere] = useState<Set<string>>(new Set());
   const [target, setTarget] = useState('');
   const [actions, setActions] = useState<SharingAction[]>(['view']);
   const [expires, setExpires] = useState(() => localDateTime(Date.now() + 86400000));
   const [editing, setEditing] = useState<SessionShare | null>(null);
   const generation = useRef(0);
+  const operationGeneration = useRef(0);
   const localAttempts = useRef<ContinuationAttempts>(new Map());
   const [continuing, setContinuing] = useState<SessionShare | null>(null);
 
@@ -69,25 +74,40 @@ export function ShareSessionDialog({
     setLoading(false);
   }
   useEffect(() => {
+    setBusy(false);
+    setFeedback(null);
+    setRevokedHere(new Set());
     void refresh();
     return () => {
       generation.current += 1;
+      operationGeneration.current += 1;
     };
   }, [sessionId]);
 
-  async function perform(operation: () => Promise<unknown>) {
+  async function perform(operation: () => Promise<{ audit?: SharingAuditStatus }>, revokedShare?: SessionShare) {
     const current = generation.current;
+    const operationId = ++operationGeneration.current;
     setBusy(true);
     setError(false);
-    try {
-      await operation();
-      if (current !== generation.current) return;
+    setFeedback(null);
+    const committed = async (audit: SharingAuditStatus | undefined, exitUnconfirmed: boolean) => {
+      if (revokedShare) setRevokedHere((previous) => new Set([...previous, revokedShare.share_id]));
+      setFeedback({ auditDegraded: audit?.degraded === true, exitUnconfirmed });
       setEditing(null);
       setTarget('');
       setActions(['view']);
-      await refresh();
-    } catch {
+      await refresh(); // Read current state only; never repeat a committed change.
+    };
+    try {
+      const result = await operation();
+      if (current !== generation.current) return;
+      await committed(result.audit, false);
+    } catch (failure) {
       if (current === generation.current) {
+        if (failure instanceof SharingMutationCommittedError) {
+          await committed(failure.audit, true);
+          return;
+        }
         setError(true);
         // Withdraw cached grants after any failed current authorization.
         setManaged([]);
@@ -95,7 +115,7 @@ export function ShareSessionDialog({
         setCanCreate(false);
       }
     } finally {
-      setBusy(false);
+      if (operationId === operationGeneration.current) setBusy(false);
     }
   }
   function edit(share: SessionShare) {
@@ -142,7 +162,17 @@ export function ShareSessionDialog({
         )}
         {error && (
           <p role="alert" className="session-sharing-error" data-testid="multi-session-sharing-error">
-            {t('sessionSharing.error')}
+            {t(feedback ? 'sessionSharing.refreshError' : 'sessionSharing.error')}
+          </p>
+        )}
+        {feedback?.exitUnconfirmed && (
+          <p role="alert" className="session-sharing-error" data-testid="multi-session-sharing-exit-unconfirmed">
+            {t('sessionSharing.exitUnconfirmed')}
+          </p>
+        )}
+        {feedback?.auditDegraded && (
+          <p role="alert" className="session-sharing-error" data-testid="multi-session-sharing-audit-degraded">
+            {t('sessionSharing.auditDegraded')}
           </p>
         )}
         {canCreate && !loading && (
@@ -258,9 +288,9 @@ export function ShareSessionDialog({
                       <button
                         type="button"
                         onClick={() => {
-                          void perform(() => sessionSharingApi.revoke(share));
+                          void perform(() => sessionSharingApi.revoke(share), share);
                         }}
-                        disabled={busy}
+                        disabled={busy || revokedHere.has(share.share_id)}
                         data-testid="multi-session-sharing-revoke"
                       >
                         {t('sessionSharing.revoke')}
