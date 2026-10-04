@@ -51,3 +51,71 @@ owner 列表查询成功后才显示入口；受共享者收件箱不触发 owne
 视觉检查保留证据。合成组件 API 不是实际双用户服务或 Provider 验收。当前仍不包含 admission、
 consume、denied、delivery 全量事件，不能据此宣布完整 R2-B4 审计完成。正式集成后仍需 stable、
 新锁来源核验和按影响面真实验证。
+
+## Owner exit observation foundation (2026-10-04)
+
+The existing schema-1 `sharing_audit` event stream now accepts a narrow typed
+`OwnerLifecycleAuditFacts` union alongside the unchanged sharing mutation and
+continuation publication facts. This foundation has no Runtime, deletion receipt,
+publication transaction, lock or Session state-machine changes. Actual Runtime
+call sites must still be integrated before claiming exit lifecycle coverage.
+
+The host constructs frozen facts from its original owner/cleanup receipt:
+`source_session_id`, `source_project_id`, `owner_revision`, `source_revision`,
+`action` (`cancel` or `delete`), `operation_id`, `generation`, and one of:
+
+| phase | result | Meaning |
+| --- | --- | --- |
+| `exit_requested` | `requested` | The original owner requested resource exit. |
+| `cleanup_retry` | `retrying` | A new attempt is retrying the same owned cleanup. |
+| `exit_unconfirmed` | `unconfirmed` | Resource exit remains unconfirmed. |
+| `exit_confirmed` | `confirmed` | The host has verified actual resource exit. |
+
+Generation is a bounded integer; only cancel without a known execution may use
+`None`. The context contains the original full TrustedIdentity and request/attempt
+correlation. Its method is restricted to `chat.cancel`/`chat.interrupt` for cancel
+or `session.delete` for deletion; absent method denotes a real host API call.
+Neither the facts nor phases may be accepted from wire params. A producer
+terminal, EOF, successful UI event, or audit record never establishes exit.
+
+`append_sharing_audit(data, context, facts)` still changes only the caller's
+original locked sidecar snapshot. It does not save, acquire another lock or
+perform cleanup. The host must save using the original store and notify only
+post-save. An append/save failure cannot undo a completed exit: the host must
+retain the original receipt, surface audit-pending status and retry the original
+facts. This foundation deliberately raises rather than silently degrading such
+an observation. It does not manufacture missing past events or infer lifecycle
+transitions from event order.
+
+Idempotence scans the same validated event list, without another index/store.
+The key is `(session, action, operation_id, generation, phase)`, plus attempt ID
+for requested/retry/unconfirmed observations. Thus new attempts remain visible,
+while repeated confirmation of the original operation returns its original
+event. All immutable facts and the full actor must match; a new owner/source
+revision cannot borrow that operation to rewrite history. Confirmed retries may
+carry a new request/attempt context but retain the first event's correlation.
+Non-terminal retries of one attempt require identical context. Operation IDs
+must come from the original receipt; no lookup of the latest owner is allowed.
+
+Current-owner query permissions are unchanged. Retired/deleted, unknown, or
+currently unauthorized owners cannot read these records through this query.
+The UI projection omits operation IDs, generations, paths, credentials, seed,
+other Session IDs and full subjects. Lifecycle entries use null share/target
+fields. The existing panel renders the four states explicitly; unconfirmed exit
+cannot become a success label. A page containing lifecycle entries declares
+`confirmed_mutations_publications_and_owner_exit_observations_only`; the old
+coverage remains accepted for legacy pages. Neither label claims complete
+admission, denied, consumption, delivery, or activity auditing.
+
+Foundation validation uses an isolated worktree based on swarm `bcbd700f` with
+noneditable installed core `c7fa3781` and explicit swarm source overlay:
+**94 Python tests passed** (16.46 s), including real sidecar/query and concurrent
+idempotent append tests; **56 actual React/Node tests passed**; frontend build
+passed (36.71 s). Dependencies were installed into this worktree using the
+unchanged lock with `npm ci --offline --ignore-scripts`; no shared main cache or
+dist was written. Ruff/diff checks and `testctl plan --profile pr-stable` passed.
+The new server test is included in both existing governance suite discovery and
+command lists. Evidence: `/tmp/r2b-owner-lifecycle-audit/`. The initial sandboxed
+Python run hit its original 180-second timeout at threaded query IO; the unchanged
+suite completed outside the sandbox. No Provider/UI network acceptance or new
+Runtime lifecycle integration is claimed by these component tests.

@@ -253,15 +253,15 @@ export interface SharingAuditEvent {
   sequence: number;
   event_id: string;
   recorded_at: number;
-  action: 'create' | 'update' | 'revoke' | 'continue';
-  phase: 'mutation' | 'publication';
-  result: 'committed';
-  share_id: string;
-  share_revision: number;
+  action: 'create' | 'update' | 'revoke' | 'continue' | 'cancel' | 'delete';
+  phase: 'mutation' | 'publication' | 'exit_requested' | 'cleanup_retry' | 'exit_unconfirmed' | 'exit_confirmed';
+  result: 'committed' | 'requested' | 'retrying' | 'unconfirmed' | 'confirmed';
+  share_id: string | null;
+  share_revision: number | null;
   before_revision: number | null;
   after_revision: number | null;
   actor_id: string;
-  target_actor_id: string;
+  target_actor_id: string | null;
   request_id: string | null;
   method: string;
 }
@@ -269,7 +269,8 @@ export interface SharingAuditPage {
   session_id: string;
   events: SharingAuditEvent[];
   has_more: boolean;
-  coverage: 'confirmed_mutations_and_publications_only';
+  coverage:
+    'confirmed_mutations_and_publications_only' | 'confirmed_mutations_publications_and_owner_exit_observations_only';
 }
 
 function validateAuditPage(value: SharingAuditPage, sessionId: string, limit: number): SharingAuditPage {
@@ -292,7 +293,10 @@ function validateAuditPage(value: SharingAuditPage, sessionId: string, limit: nu
   if (
     !onlyKeys(value, ['session_id', 'events', 'has_more', 'coverage']) ||
     value.session_id !== sessionId ||
-    value.coverage !== 'confirmed_mutations_and_publications_only' ||
+    ![
+      'confirmed_mutations_and_publications_only',
+      'confirmed_mutations_publications_and_owner_exit_observations_only',
+    ].includes(value.coverage) ||
     typeof value.has_more !== 'boolean' ||
     !Array.isArray(value.events) ||
     value.events.length > limit ||
@@ -302,6 +306,40 @@ function validateAuditPage(value: SharingAuditPage, sessionId: string, limit: nu
   const ids = new Set<string>();
   let previous = Infinity;
   for (const event of value.events) {
+    const lifecycle = event.action === 'cancel' || event.action === 'delete';
+    const phases: Record<string, string> = {
+      exit_requested: 'requested',
+      cleanup_retry: 'retrying',
+      exit_unconfirmed: 'unconfirmed',
+      exit_confirmed: 'confirmed',
+    };
+    const validOperation = lifecycle
+      ? value.coverage === 'confirmed_mutations_publications_and_owner_exit_observations_only' &&
+        Object.prototype.hasOwnProperty.call(phases, event.phase) &&
+        phases[event.phase] === event.result &&
+        event.share_id === null &&
+        event.share_revision === null &&
+        event.target_actor_id === null &&
+        event.before_revision === null &&
+        event.after_revision === null &&
+        (event.action === 'cancel'
+          ? ['host_api', 'chat.cancel', 'chat.interrupt']
+          : ['host_api', 'session.delete']
+        ).includes(event.method)
+      : ['create', 'update', 'revoke', 'continue'].includes(event.action) &&
+        event.result === 'committed' &&
+        event.phase === (event.action === 'continue' ? 'publication' : 'mutation') &&
+        validText(event.share_id, 1024) &&
+        Number.isSafeInteger(event.share_revision) &&
+        event.share_revision! >= 1 &&
+        validText(event.target_actor_id, 1024) &&
+        ['host_api', `session.share.${event.action}`].includes(event.method) &&
+        (event.action === 'continue'
+          ? event.before_revision === null && event.after_revision === null
+          : Number.isSafeInteger(event.before_revision) &&
+            event.before_revision! >= 0 &&
+            event.after_revision === event.before_revision! + 1 &&
+            event.after_revision === event.share_revision);
     if (
       !onlyKeys(event, keys) ||
       Object.keys(event).length !== keys.length ||
@@ -312,22 +350,9 @@ function validateAuditPage(value: SharingAuditPage, sessionId: string, limit: nu
       ids.has(event.event_id) ||
       typeof event.recorded_at !== 'number' ||
       !Number.isFinite(new Date(event.recorded_at * 1000).getTime()) ||
-      !['create', 'update', 'revoke', 'continue'].includes(event.action) ||
-      event.result !== 'committed' ||
-      event.phase !== (event.action === 'continue' ? 'publication' : 'mutation') ||
-      !validText(event.share_id, 1024) ||
-      !Number.isSafeInteger(event.share_revision) ||
-      event.share_revision < 1 ||
+      !validOperation ||
       !validText(event.actor_id, 1024) ||
-      !validText(event.target_actor_id, 1024) ||
-      !(event.request_id === null || validText(event.request_id, 1024)) ||
-      !['host_api', `session.share.${event.action}`].includes(event.method) ||
-      (event.action === 'continue'
-        ? event.before_revision !== null || event.after_revision !== null
-        : !Number.isSafeInteger(event.before_revision) ||
-          event.before_revision! < 0 ||
-          event.after_revision !== event.before_revision! + 1 ||
-          event.after_revision !== event.share_revision)
+      !(event.request_id === null || validText(event.request_id, 1024))
     )
       throw new Error('Audit response unavailable');
     ids.add(event.event_id);

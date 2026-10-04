@@ -279,3 +279,62 @@ test('identity invalidation during mutation unlocks closing and ignores its late
   assert.equal(document.querySelector('[data-testid="multi-session-sharing-audit-degraded"]'), null);
   assert.equal(find('toggle'), null);
 });
+
+const lifecycleEvent = (phase = 'exit_unconfirmed', action = 'cancel') => ({
+  ...event(),
+  action,
+  phase,
+  result: {
+    exit_requested: 'requested',
+    cleanup_retry: 'retrying',
+    exit_unconfirmed: 'unconfirmed',
+    exit_confirmed: 'confirmed',
+  }[phase],
+  share_id: null,
+  share_revision: null,
+  before_revision: null,
+  after_revision: null,
+  target_actor_id: null,
+  method: action === 'cancel' ? 'chat.cancel' : 'session.delete',
+});
+const lifecyclePage = (row) => ({
+  ...page('session', [row]),
+  coverage: 'confirmed_mutations_publications_and_owner_exit_observations_only',
+});
+
+test('owner lifecycle parser preserves four distinct states and rejects invented success', async () => {
+  for (const phase of ['exit_requested', 'cleanup_retry', 'exit_unconfirmed', 'exit_confirmed']) {
+    for (const action of ['cancel', 'delete']) {
+      webClient.request = async () => lifecyclePage(lifecycleEvent(phase, action));
+      const parsed = await original.audit('session');
+      assert.equal(parsed.events[0].phase, phase);
+      assert.equal(parsed.events[0].result, lifecycleEvent(phase).result);
+    }
+  }
+  for (const bad of [
+    { ...lifecycleEvent(), result: 'confirmed' },
+    { ...lifecycleEvent(), share_id: 'another-share' },
+    { ...lifecycleEvent(), target_actor_id: 'other-user' },
+    { ...lifecycleEvent(), method: 'session.delete' },
+    { ...lifecycleEvent(), operation_id: 'private-operation' },
+    { ...lifecycleEvent(), phase: 'terminal' },
+  ]) {
+    webClient.request = async () => lifecyclePage(bad);
+    await assert.rejects(original.audit('session'));
+  }
+  webClient.request = async () => page('session', [lifecycleEvent()]);
+  await assert.rejects(original.audit('session'));
+});
+
+for (const phase of ['exit_requested', 'cleanup_retry', 'exit_unconfirmed', 'exit_confirmed']) {
+  test(`original owner panel renders ${phase} without a share or success substitute`, async () => {
+    sessionSharingApi.audit = async () => lifecyclePage(lifecycleEvent(phase));
+    await mount();
+    await click('toggle');
+    assert.equal(find('phase').textContent, i18next.t(`sessionSharing.audit.phase.${phase}`));
+    assert.equal(find('phase').dataset.variant, phase);
+    assert.equal(find('revision'), null);
+    assert.equal(find('actors').textContent, i18next.t('sessionSharing.audit.owner', { actor: 'alice' }));
+    assert.equal(find('coverage').textContent, i18next.t('sessionSharing.audit.lifecycleCoverage'));
+  });
+}

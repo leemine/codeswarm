@@ -85,7 +85,13 @@ export function SharingAuditSection({ sessionId }: { sessionId: string }) {
       </button>
       {expanded && (
         <div data-testid="multi-session-sharing-audit-content">
-          <p data-testid="multi-session-sharing-audit-coverage">{t('sessionSharing.audit.coverage')}</p>
+          <p data-testid="multi-session-sharing-audit-coverage">
+            {t(
+              page?.coverage === 'confirmed_mutations_publications_and_owner_exit_observations_only'
+                ? 'sessionSharing.audit.lifecycleCoverage'
+                : 'sessionSharing.audit.coverage',
+            )}
+          </p>
           <button
             type="button"
             disabled={loading}
@@ -122,11 +128,19 @@ export function SharingAuditSection({ sessionId }: { sessionId: string }) {
                       {new Date(event.recorded_at * 1000).toLocaleString()}
                     </time>
                     <span data-testid="multi-session-sharing-audit-actors">
-                      {t('sessionSharing.audit.actors', { actor: event.actor_id, target: event.target_actor_id })}
+                      {event.target_actor_id === null
+                        ? t('sessionSharing.audit.owner', { actor: event.actor_id })
+                        : t('sessionSharing.audit.actors', { actor: event.actor_id, target: event.target_actor_id })}
                     </span>
-                    <span data-testid="multi-session-sharing-audit-revision">
-                      {t('sessionSharing.audit.revision', { share: event.share_id, revision: event.share_revision })}
-                    </span>
+                    {event.share_id === null ? (
+                      <span data-testid="multi-session-sharing-audit-phase" data-variant={event.phase}>
+                        {t(`sessionSharing.audit.phase.${event.phase}`)}
+                      </span>
+                    ) : (
+                      <span data-testid="multi-session-sharing-audit-revision">
+                        {t('sessionSharing.audit.revision', { share: event.share_id, revision: event.share_revision })}
+                      </span>
+                    )}
                   </li>
                 ))}
               </ul>

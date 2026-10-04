@@ -62,7 +62,8 @@ class SharingAuditContext:
         _text(self.request_id, optional=True)
         _text(self.attempt_id)
         if self.method not in (None, 'session.share.create', 'session.share.update',
-                               'session.share.revoke', 'session.share.continue'):
+                               'session.share.revoke', 'session.share.continue',
+                               'chat.cancel', 'chat.interrupt', 'session.delete'):
             raise SharingAuditError('invalid sharing audit method')
 
 
@@ -154,6 +155,55 @@ class SharingAuditFacts:
             raise SharingAuditError('unexpected mutation publication fields')
 
 
+_LIFECYCLE_RESULTS = {'exit_requested': 'requested', 'cleanup_retry': 'retrying',
+                      'exit_unconfirmed': 'unconfirmed', 'exit_confirmed': 'confirmed'}
+LIFECYCLE_AUDIT_COVERAGE = 'confirmed_mutations_publications_and_owner_exit_observations_only'
+
+
+@dataclass(frozen=True, slots=True)
+class OwnerLifecycleAuditFacts:
+    """Host-only observation copied from the original owner/cleanup receipt.
+
+    This value does not authorize cleanup or establish exit. The Runtime must
+    obtain these facts from its original receipt and actual resource-close
+    result. Never decode it from request params, a producer terminal or latest
+    Session ownership. Append owns neither a lifecycle nor a persistence lock.
+    """
+    source_session_id: str
+    source_project_id: str
+    owner_revision: int
+    source_revision: int
+    action: str
+    phase: str
+    result: str
+    operation_id: str
+    generation: int | None
+
+    def __post_init__(self):
+        if (type(self.action) is not str or type(self.phase) is not str or type(self.result) is not str
+                or self.action not in ('cancel', 'delete')
+                or self.phase not in _LIFECYCLE_RESULTS
+                or self.result != _LIFECYCLE_RESULTS[self.phase]):
+            raise SharingAuditError('invalid owner lifecycle observation')
+        for name in ('source_session_id', 'source_project_id', 'operation_id'):
+            _text(getattr(self, name))
+        for name in ('owner_revision', 'source_revision'):
+            _integer(getattr(self, name))
+        _integer(self.generation, optional=self.action == 'cancel', minimum=0 if self.action == 'cancel' else 1)
+
+
+def _expected_methods(facts):
+    if isinstance(facts, OwnerLifecycleAuditFacts):
+        return ('chat.cancel', 'chat.interrupt') if facts.action == 'cancel' else ('session.delete',)
+    return ('session.share.' + facts.action,)
+
+
+def _lifecycle_key(context, facts):
+    # Authority facts are compared on collision, not used to evade collisions.
+    key = tuple(facts[name] for name in ('source_session_id', 'action', 'operation_id', 'generation', 'phase'))
+    return key if facts['phase'] == 'exit_confirmed' else (*key, context['attempt_id'])
+
+
 @dataclass(frozen=True, slots=True)
 class SharingAuditWriteResult:
     persisted: bool
@@ -186,21 +236,27 @@ def _validate_event(event):
     context = dict(event['context'])
     context['actor'] = _decode_identity(context['actor'])
     SharingAuditContext(**context)
-    _exact(event['facts'], SharingAuditFacts.__dataclass_fields__)
-    facts = dict(event['facts'])
-    facts['target'] = _decode_identity(facts['target'])
-    for name in ('bounds_before', 'bounds_after'):
-        if facts[name] is not None:
-            _exact(facts[name], SharingAuditBounds.__dataclass_fields__)
-            bounds = dict(facts[name])
-            if type(bounds['actions']) is not list:
-                raise SharingAuditError('invalid sharing audit actions')
-            bounds['actions'] = tuple(bounds['actions'])
-            _exact(bounds['history'], SessionHistoryRange.__dataclass_fields__)
-            bounds['history'] = SessionHistoryRange(**bounds['history'])
-            facts[name] = SharingAuditBounds(**bounds)
-    SharingAuditFacts(**facts)
-    if context['method'] is not None and context['method'] != 'session.share.' + facts['action']:
+    if type(event['facts']) is not dict:
+        raise SharingAuditError('invalid sharing audit facts')
+    if event['facts'].get('action') in ('cancel', 'delete'):
+        _exact(event['facts'], OwnerLifecycleAuditFacts.__dataclass_fields__)
+        facts = OwnerLifecycleAuditFacts(**event['facts'])
+    else:
+        _exact(event['facts'], SharingAuditFacts.__dataclass_fields__)
+        decoded = dict(event['facts'])
+        decoded['target'] = _decode_identity(decoded['target'])
+        for name in ('bounds_before', 'bounds_after'):
+            if decoded[name] is not None:
+                _exact(decoded[name], SharingAuditBounds.__dataclass_fields__)
+                bounds = dict(decoded[name])
+                if type(bounds['actions']) is not list:
+                    raise SharingAuditError('invalid sharing audit actions')
+                bounds['actions'] = tuple(bounds['actions'])
+                _exact(bounds['history'], SessionHistoryRange.__dataclass_fields__)
+                bounds['history'] = SessionHistoryRange(**bounds['history'])
+                decoded[name] = SharingAuditBounds(**bounds)
+        facts = SharingAuditFacts(**decoded)
+    if context['method'] is not None and context['method'] not in _expected_methods(facts):
         raise SharingAuditError('sharing audit method mismatch')
     if len(json.dumps(event, ensure_ascii=False, allow_nan=False).encode()) > MAX_EVENT_BYTES:
         raise SharingAuditError('sharing audit event too large')
@@ -241,23 +297,37 @@ def project_audit_event(event: dict) -> dict:
     """Owner UI projection; no seed, file bounds, subject, or other Session IDs."""
     context, facts = event['context'], event['facts']
     result = {name: event[name] for name in ('sequence', 'event_id', 'recorded_at')}
-    result.update({name: facts[name] for name in
-                   ('action', 'phase', 'result', 'share_id', 'share_revision', 'before_revision', 'after_revision')})
-    result.update(actor_id=context['actor']['actor_id'], target_actor_id=facts['target']['actor_id'],
+    result.update({name: facts[name] for name in ('action', 'phase', 'result')})
+    lifecycle_event = facts['action'] in ('cancel', 'delete')
+    result.update({name: None if lifecycle_event else facts[name] for name in
+                   ('share_id', 'share_revision', 'before_revision', 'after_revision')})
+    result.update(actor_id=context['actor']['actor_id'],
+                  target_actor_id=None if lifecycle_event else facts['target']['actor_id'],
                   request_id=context['request_id'], method=context['method'] or 'host_api')
     return result
 
 
-def append_sharing_audit(data: dict, context: SharingAuditContext, facts: SharingAuditFacts,
+def append_sharing_audit(data: dict, context: SharingAuditContext, facts: SharingAuditFacts | OwnerLifecycleAuditFacts,
                          *, recorded_at: float | None = None) -> SharingAuditWriteResult:
     """Stage an event. Its receipt is publishable only AFTER the caller saves."""
     try:
-        if not isinstance(context, SharingAuditContext) or not isinstance(facts, SharingAuditFacts):
+        if not isinstance(context, SharingAuditContext) or not isinstance(facts, (SharingAuditFacts, OwnerLifecycleAuditFacts)):
             raise SharingAuditError('typed sharing audit required')
-        expected_method = 'session.share.' + facts.action
-        if context.method is not None and context.method != expected_method:
+        if context.method is not None and context.method not in _expected_methods(facts):
             raise SharingAuditError('sharing audit method mismatch')
         section = validated_sharing_audit(data)
+        if isinstance(facts, OwnerLifecycleAuditFacts):
+            immutable, correlation = asdict(facts), asdict(context)
+            key = _lifecycle_key(correlation, immutable)
+            for old in section['events']:
+                if old['facts']['action'] not in ('cancel', 'delete'):
+                    continue
+                if _lifecycle_key(old['context'], old['facts']) == key:
+                    if (old['facts'] != immutable or old['context']['actor'] != correlation['actor']
+                            or facts.phase != 'exit_confirmed' and old['context'] != correlation):
+                        raise SharingAuditError('owner lifecycle audit receipt conflict')
+                    # Return the original event; never replace its correlation.
+                    return SharingAuditWriteResult(False, False, 'audit_staged', old['sequence'], old['event_id'])
         event_id = uuid.uuid4().hex
         _integer(section['next_sequence'] + 1)
         event = {'sequence': section['next_sequence'], 'event_id': event_id,

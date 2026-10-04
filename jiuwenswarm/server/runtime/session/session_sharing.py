@@ -26,7 +26,7 @@ from .sharing_audit import (
     SharingAuditBounds, SharingAuditFacts, SharingAuditError, SharingAuditWriteResult,
     SharingAuditContext, AuditResultCallback, append_sharing_audit,
     audit_context as checked_audit_context, notify_audit_result, source_project,
-    audit_query_params, validated_sharing_audit, project_audit_event,
+    audit_query_params, validated_sharing_audit, project_audit_event, LIFECYCLE_AUDIT_COVERAGE,
 )
 
 
@@ -420,7 +420,8 @@ class SessionSharingStore:
                         break
             result = {'session_id': session_id, 'events': [project_audit_event(e) for e in selected[:limit]],
                       'has_more': len(selected) > limit,
-                      'coverage': 'confirmed_mutations_and_publications_only'}
+                      'coverage': (LIFECYCLE_AUDIT_COVERAGE if any(e['facts']['action'] in ('cancel', 'delete')
+                          for e in selected[:limit]) else 'confirmed_mutations_and_publications_only')}
             current_revision = owner_guard()
             if type(current_revision) is not int or current_revision != revision:
                 raise SessionSharingDenied('owner revision changed')

@@ -3258,7 +3258,17 @@
         "create": "Share created",
         "update": "Share updated",
         "revoke": "Share revoked",
-        "continue": "Continuation published"
+        "continue": "Continuation published",
+        "cancel": "Stop session",
+        "delete": "Delete session"
+      },
+      "lifecycleCoverage": "Only confirmed sharing changes, continuation publications, and recorded owner exit observations are included. This is not a full activity log.",
+      "owner": "Owner: {{actor}}",
+      "phase": {
+        "exit_requested": "Exit requested",
+        "cleanup_retry": "Cleanup retry",
+        "exit_unconfirmed": "Exit not confirmed",
+        "exit_confirmed": "Exit confirmed"
       }
     },
     "exitUnconfirmed": "The permission change is committed, but execution exit is not confirmed. Refresh the current state and check the affected execution; do not repeat this change.",

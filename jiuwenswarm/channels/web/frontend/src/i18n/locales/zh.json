@@ -3244,7 +3244,17 @@
         "create": "创建分享",
         "update": "更新分享",
         "revoke": "撤销分享",
-        "continue": "发布继续执行"
+        "continue": "发布继续执行",
+        "cancel": "停止会话",
+        "delete": "删除会话"
+      },
+      "lifecycleCoverage": "仅包含已确认的分享变更、接续发布及已记录的所有者退出情况，不是完整活动审计。",
+      "owner": "所有者：{{actor}}",
+      "phase": {
+        "exit_requested": "已请求退出",
+        "cleanup_retry": "重试清理",
+        "exit_unconfirmed": "退出尚未确认",
+        "exit_confirmed": "退出已确认"
       }
     },
     "exitUnconfirmed": "权限变更已生效，但执行退出尚未确认。请刷新当前状态并检查相关执行；不要重复提交此变更。",
