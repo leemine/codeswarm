@@ -176,3 +176,45 @@ waiting child replay, timeout child within live scope, fixed original request ID
 and actual final wire ID replacement. Evidence:
 `/tmp/r2b-workspace-download-review/e2a-scope-final.log`. No real socket/Provider
 was used for these counterexamples.
+
+## Producer URL integration correction (2026-10-04)
+
+The normal UI run at swarm `c3a972559e89c07ba64986007b8e826c538f2a26`
+produced `chat.file`, but its download button stayed disabled: the actual
+`build_file_download_info` producer still appended legacy `user_id`, while the
+organization UI/HTTP contract accepts only `token`, original `session_id` and
+optional `inline`. The UI boundary was correct and remains unchanged.
+
+The explicit `artifact_issuer` branch now emits the signed token and its original
+Session selector. Token generation still validates the real issuer before URL
+construction. The issuer-free legacy branch retains the original URL helper,
+including optional routing `user_id` and legacy token lifetime behavior. No new
+query fields, issuer API or authorization fallback is added.
+
+New actual metadata-builder tests use a real WorkspaceArtifactIssuer, real owner
+sidecar/resource grants, signing manager and download permit. Both empty and
+nonempty legacy routing users reproduce the original mismatch, then pass with
+exact `token + session_id`; the resulting permit reads the fixture bytes. Two
+legacy builder tests preserve their existing URL and token schemas.
+
+Evidence: `/tmp/r2b-owner-artifact-url/` (`red-no-cov.log`, `affected-green.log`,
+`send-consumer-unprivileged.log`, `source.json`). With formally installed core
+`0c8e14d76cfb18e27592dde991b45b07818960b1` and candidate swarm source:
+
+- Workspace download, delivery, actual artifact-authority review and existing web
+  file-download modules: **125 passed** (one pre-existing Authlib warning).
+- Existing send-file deduplication and execution-consumer modules: **21 passed**.
+- `git diff --check`: passed. No dependency/lock changes.
+
+Commands use `python -m pytest --no-cov -q` and the named modules, with private
+`JIUWENSWARM_WORKSPACE/DATA_DIR/CONFIG_DIR/HOME` and `CONFIG_URL=off`. Initial
+collection without the private template config failed and was corrected without
+changing source configuration. Default full-repository coverage reporting made
+the initial two red tests take 112 seconds; final affected tests disable coverage
+report generation, not test assertions. The sandboxed send-consumer run failed
+one durable-history fixture and stalled on another; the same unmodified 21 tests
+passed outside the sandbox with task-private config. All attempts are retained.
+
+This correction does not claim a new real UI pass. The integration owner must
+rerun the same ordinary authenticated download story and final stable gate on
+the integrated commit. No adversarial or external Provider probe was run here.

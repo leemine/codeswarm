@@ -513,3 +513,31 @@ def test_read_only_project_does_not_gain_workspace_download(setup):
     )
     with pytest.raises(WorkspaceDownloadDenied):
         s.token()
+
+
+@pytest.mark.parametrize("routing_user", ["", "legacy-routing-user"])
+def test_built_owner_artifact_url_uses_exact_session_selector(setup, monkeypatch, routing_user):
+    """Actual metadata production must match the owner UI/HTTP query contract."""
+    from urllib.parse import parse_qs, urlsplit
+    from jiuwenswarm.agents.harness.common.tools import web_file_download
+
+    s = setup
+    monkeypatch.setattr(WebFileDownloadManager, "_instance", s.manager)
+    info = web_file_download.build_file_download_info(
+        str(s.file), s.file.name, "alice-session", user_id=routing_user,
+        artifact_issuer=s.issuer(),
+    )
+    url = urlsplit(info["download_url"])
+    query = parse_qs(url.query, keep_blank_values=True)
+    assert not url.scheme and not url.netloc and not url.fragment
+    assert url.path == "/file-api/download"
+    assert query == {
+        "token": [info["download_token"]],
+        "session_id": ["alice-session"],
+    }
+    signed = s.manager.validate_token(query["token"][0])
+    assert ARTIFACT_NAMESPACE in signed
+    assert signed["sid"] == query["session_id"][0]
+    assert info["size"] == s.file.stat().st_size
+    permit = s.capture(query["token"][0], sid=query["session_id"][0])
+    assert permit.read(0, 7) == b"fixture"

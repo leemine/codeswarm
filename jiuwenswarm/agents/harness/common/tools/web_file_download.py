@@ -406,7 +406,12 @@ def build_file_download_info(
     token = (generate_file_download_token(file_path, session_id, expires_in)
              if artifact_issuer is None else generate_file_download_token(
                  file_path, session_id, expires_in, artifact_issuer=artifact_issuer))
-    download_url = WebFileDownloadManager.get_instance().generate_download_url(token, user_id)
+    if artifact_issuer is not None:
+        # The governed owner route accepts the original Session selector, not
+        # legacy routing identity. Token generation already validates the issuer.
+        download_url = f"/file-api/download?{urlencode({'token': token, 'session_id': session_id})}"
+    else:
+        download_url = WebFileDownloadManager.get_instance().generate_download_url(token, user_id)
 
     file_size = 0
     mime_type = "application/octet-stream"

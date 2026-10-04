@@ -683,3 +683,23 @@ def test_expired_upload_remains_invalid_after_artifact_download(monkeypatch, tmp
     encoded, signature = artifact.split(".")
     altered = encoded + "." + ("0" if signature[0] != "0" else "1") + signature[1:]
     assert web_file_download.validate_file_download_token(altered, check_expiry=False) is None
+
+
+@pytest.mark.parametrize("routing_user", ["", "legacy-routing-user"])
+def test_built_legacy_artifact_retains_original_url_selector(tmp_path, monkeypatch, routing_user):
+    monkeypatch.delenv("JIUWENSWARM_ORGANIZATION_AUTH_FILE", raising=False)
+    manager = WebFileDownloadManager(secret="synthetic-legacy-file-signature")
+    monkeypatch.setattr(WebFileDownloadManager, "_instance", manager)
+    file_path = tmp_path / "legacy.txt"
+    file_path.write_text("legacy fixture", encoding="utf-8")
+    info = web_file_download.build_file_download_info(
+        str(file_path), file_path.name, "legacy-session", user_id=routing_user,
+    )
+    expected = {"token": [info["download_token"]]}
+    if routing_user:
+        expected["user_id"] = [routing_user]
+    assert parse_qs(urlsplit(info["download_url"]).query) == expected
+    signed = manager.validate_token(info["download_token"])
+    assert signed["sid"] == "legacy-session"
+    assert "exp" not in signed
+    assert "workspace_artifact_v1" not in signed
