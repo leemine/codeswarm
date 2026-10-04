@@ -377,6 +377,7 @@ async def test_real_deep_stop_pending_round_must_keep_registration(host, monkeyp
     """Core actual stop/cancel methods, with an owned round's pending finally."""
     from jiuwenswarm.runtime.harness import execution_session
     from openjiuwen.core.controller.modules import task_scheduler
+    from openjiuwen.harness.schema.interaction import ActiveInteractionRound, RoundWorkItem
 
     monkeypatch.setattr(task_scheduler, "_STOP_TIMEOUT_SECONDS", 0.03)
 
@@ -407,8 +408,8 @@ async def test_real_deep_stop_pending_round_must_keep_registration(host, monkeyp
     outer._interaction_emit_tasks = set()
     outer._interaction_session = host.n.session
     host.n.session.close_stream = AsyncMock()
-    outer._active_interaction_round = SimpleNamespace(
-        run_kind="user", task_id="", waiting_for_input=False, work=object()
+    outer._active_interaction_round = ActiveInteractionRound(
+        work=RoundWorkItem.user(request_id='original-stop', inputs={'query': 'fixture'}), task_id='',
     )
     outer._interaction_round_task = round_task
     outer._stopping_interaction_round_tasks = set()
