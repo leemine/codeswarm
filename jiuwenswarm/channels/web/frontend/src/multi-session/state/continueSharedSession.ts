@@ -60,7 +60,7 @@ export async function prepareContinuedConversation(
   ) {
     throw new Error('Continuation owned metadata changed');
   }
-  await request('session.switch', {
+  const switched = await request<unknown>('session.switch', {
     session_id: result.session_id,
     previous_session_id: previous.session_id,
     previous_mode: previous.mode,
@@ -68,6 +68,16 @@ export async function prepareContinuedConversation(
     view_id: previous.view_id,
   });
   check();
+  if (
+    !switched ||
+    typeof switched !== 'object' ||
+    Array.isArray(switched) ||
+    (switched as { switched?: unknown }).switched !== true ||
+    (switched as { session_id?: unknown }).session_id !== result.session_id ||
+    (switched as { mode?: unknown }).mode !== result.mode
+  ) {
+    throw new Error('Continuation session switch was not confirmed');
+  }
   // Deliberately select only the new recipient's fields, never source equipment,
   // memory, pending approval, tools, runtime state or active processing flags.
   return {

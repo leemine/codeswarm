@@ -215,7 +215,9 @@ test('owned metadata and switch are mandatory; sanitize metadata without source 
   };
   const request = async (method, params) => {
     calls.push({ method, params });
-    return metadata;
+    return method === 'session.switch'
+      ? { session_id: result.session_id, mode: result.mode, switched: true }
+      : metadata;
   };
   const session = await prepareContinuedConversation(request, result, input, () => true, {
     session_id: 'current',
@@ -467,7 +469,10 @@ test('late switch completion cannot produce local metadata after generation inva
   let current = true;
   const metadata = { ...result, model: input.model_name, created_at: 'now', updated_at: 'now' };
   const request = async (method) => {
-    if (method === 'session.switch') current = false;
+    if (method === 'session.switch') {
+      current = false;
+      return { session_id: result.session_id, mode: result.mode, switched: true };
+    }
     return metadata;
   };
   await assert.rejects(
@@ -482,7 +487,8 @@ test('late switch completion cannot produce local metadata after generation inva
 test('owned metadata display timestamp compatibility does not relax execution identity checks', async () => {
   const metadata = { ...result, model: input.model_name, created_at: 123, updated_at: null };
   const session = await prepareContinuedConversation(
-    async () => metadata,
+    async (method) =>
+      method === 'session.switch' ? { session_id: result.session_id, mode: result.mode, switched: true } : metadata,
     result,
     input,
     () => true,
@@ -529,5 +535,52 @@ test('navigation remount permanently invalidates prior create callback while pre
     assert.equal(attempts.size, 1);
   } finally {
     await unmount();
+  }
+});
+
+for (const mode of ['agent.work.normal', 'agent.code.normal']) {
+  test(`switch confirms exact server canonical mode ${mode}`, async () => {
+    const requestInput = { ...input, mode };
+    const response = { ...result, mode, work_mode: mode === 'agent.work.normal' ? 'work' : 'code' };
+    const session = await prepareContinuedConversation(
+      async (method) =>
+        method === 'session.switch'
+          ? { session_id: response.session_id, mode, switched: true }
+          : { ...response, model: input.model_name },
+      response,
+      requestInput,
+      () => true,
+      { session_id: 'current', mode: 'agent', view_id: 'view' },
+    );
+    assert.equal(session.mode, mode);
+    assert.equal(session.is_processing, false);
+  });
+}
+
+test('RPC success cannot confirm a failed, missing or mismatched switch payload', async () => {
+  const valid = { session_id: result.session_id, mode: result.mode, switched: true };
+  for (const payload of [
+    null,
+    undefined,
+    {},
+    [],
+    'success',
+    { ...valid, switched: false },
+    { ...valid, switched: 'true' },
+    { session_id: result.session_id, mode: result.mode },
+    { ...valid, session_id: 'other-session' },
+    { ...valid, mode: 'agent' },
+    { ...valid, mode: 'code.normal' },
+  ]) {
+    await assert.rejects(
+      prepareContinuedConversation(
+        async (method) => (method === 'session.switch' ? payload : { ...result, model: input.model_name }),
+        result,
+        input,
+        () => true,
+        { session_id: 'current', mode: 'agent', view_id: 'view' },
+      ),
+      /session switch was not confirmed/,
+    );
   }
 });
