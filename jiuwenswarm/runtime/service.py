@@ -17,7 +17,7 @@ import json
 import logging
 import os
 import uuid
-from contextlib import aclosing
+from contextlib import aclosing, nullcontext
 from contextvars import copy_context
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -698,7 +698,10 @@ class AgentRuntime:
         if self._owner_publication is None:
             return await operation(provision_input)
         check = self._publication_identity_check(provision_input)
-        with self._owner_publication.scope(check):
+        from jiuwenswarm.governance.session_claim import session_create_claim_scope
+        claim_scope = (session_create_claim_scope(check, provision_input)
+                       if isinstance(provision_input, SessionCreateInput) else nullcontext())
+        with self._owner_publication.scope(check), claim_scope:
             prepared = await operation(provision_input)
             try:
                 session_id = prepared.result.session_id

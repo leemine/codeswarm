@@ -48,3 +48,24 @@ async def test_prepared_provision_invalidates_before_delivery_and_commit(invento
     inventory.host.activate_source('alice-one', inventory.project_id, expected_epoch=epoch)
     with pytest.raises(Exception, match='authority changed'):
         runtime.validate_session_provision_for_delivery(result)
+
+
+@pytest.mark.asyncio
+async def test_runtime_create_passes_private_full_identity_and_input_claim(inventory):
+    from jiuwenswarm.governance.session_claim import current_session_create_claim
+    from jiuwenswarm.runtime.session_provisioner import SessionCreateInput
+    identity = inventory.principals['alice'].identity()
+    runtime = AgentRuntime(agent_manager=SimpleNamespace(), initializer=AsyncMock(),
+                           trusted_identity_resolver=lambda _: identity)
+    await runtime.start()
+    class Prepared:
+        state = SessionProvisionState.PREPARED
+        result = SimpleNamespace(session_id='alice-one')
+    async def prepare(value):
+        trusted, fingerprint = current_session_create_claim()
+        assert trusted == identity and len(fingerprint) == 64
+        assert value.user_id == 'untrusted-route'
+        return Prepared()
+    await runtime._prepare_owned_provision(prepare, SessionCreateInput(
+        channel_id='web', project_id=inventory.project_id, create_token='same', user_id='untrusted-route'))
+    assert current_session_create_claim() is None
