@@ -6,7 +6,7 @@ import httpx
 import pytest
 from openjiuwen.harness.engine import HarnessEngine
 from openjiuwen.harness_protocol import AgentExecutionSpec, HarnessContext, HostCapability
-from openjiuwen.harness_providers.opencode import OpenCodeHarness
+from openjiuwen.harness_providers.opencode import OpenCodeHarness, OpenCodeHarnessConfig, OpenCodeModelConfig
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
 from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
 from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
@@ -19,13 +19,14 @@ def fixture_session(root: Path, gateway=None):
         ExecutionConfigSource(explicit=AgentExecutionSpec('opencode', 'r1')),
         subject_id='owner', host_session_id='parent', workspace=str(root),
     )
-    harness = OpenCodeHarness()
+    harness = OpenCodeHarness(OpenCodeHarnessConfig(model=OpenCodeModelConfig('fixture', 'http://127.0.0.1:1')))
     session = ExecutionSession(HarnessEngine(bound.binding, harness),
                                RuntimeWorkspacePaths(root, root, root, root), tool_gateway=gateway)
     async def authorize(_operation):
         return True
     context = HarnessContext(agent_name='agent', agent_id='agent', host_session_id='parent',
-                             system_prompt='', cwd=str(root), tool_authorizer=authorize)
+                             system_prompt='', cwd=str(root), tool_authorizer=authorize,
+                             host_capabilities=frozenset({HostCapability.TOOL_APPROVAL}))
     return session, harness, context
 
 
@@ -35,12 +36,6 @@ async def test_governed_session_binds_private_endpoint_before_start_and_releases
     tool = SimpleNamespace(card=SimpleNamespace(name='echo', description='fixture', input_params={}))
     gateway = ProductToolGateway([tool], scope=ProductToolScope('owner', 'parent', str(tmp_path))) if product else None
     session, harness, context = fixture_session(tmp_path, gateway)
-    if product:
-        with pytest.raises(ValueError, match='native call correlation'):
-            await session._prepare_tool_context(context)
-        assert session._tool_transport is None
-        assert harness._preflight is None
-        return
     try:
         prepared = await session._prepare_tool_context(context)
         endpoint = harness._preflight.endpoint

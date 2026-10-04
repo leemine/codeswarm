@@ -6,12 +6,14 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import re
 import secrets
 import socket
 from typing import Any
 from uuid import uuid4
 
 import mcp.types as types
+import jsonschema
 import uvicorn
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
@@ -60,6 +62,7 @@ class ManagedProductToolTransport:
         self._token = secrets.token_urlsafe(32)
         self._preflight_generation = secrets.token_urlsafe(32)
         self._preflight_handler = None
+        self._product_call_handler = None
         self._accepting_preflight = False
         self._port: int | None = None
         self._socket: socket.socket | None = None
@@ -149,6 +152,13 @@ class ManagedProductToolTransport:
         return {'url': f'http://127.0.0.1:{self._port}{_NATIVE_PREFLIGHT_PATH}',
                 'token': self._token, 'generation': self._preflight_generation}
 
+    def bind_product_calls(self, handler) -> None:
+        """Install one mandatory consumer for original native product calls."""
+        if (not self.started or self._gateway is None
+                or self._product_call_handler is not None or not callable(handler)):
+            raise RuntimeError('product call consumer requires one live binding')
+        self._product_call_handler = handler
+
     async def _stop_locked(self) -> None:
         self._accepting_preflight = False
         server = self._uvicorn
@@ -223,10 +233,14 @@ class ManagedProductToolTransport:
                 result = await handler(payload)
                 if (not self._accepting_preflight or not self.started
                         or self._preflight_handler is not handler
-                        or not isinstance(result, dict) or set(result) != {'allowed', 'nonce'}
+                        or not isinstance(result, dict)
+                        or set(result) not in ({'allowed', 'nonce'}, {'allowed', 'nonce', 'ticket'})
                         or type(result['allowed']) is not bool
                         or not isinstance(result['nonce'], str)
-                        or result['nonce'] != payload.get('nonce')):
+                        or result['nonce'] != payload.get('nonce')
+                        or ('ticket' in result and (result['allowed'] is not True
+                            or not isinstance(result['ticket'], str)
+                            or re.fullmatch(r'pt_[a-f0-9]{64}', result['ticket']) is None))):
                     raise ValueError('request authorization unavailable')
             await respond(200, result)
         except Exception:
@@ -258,20 +272,35 @@ class ManagedProductToolTransport:
                 for item in definitions
             ]
 
-        @mcp_server.call_tool()
+        # The Provider ticket is transport-only, and must be consumed before
+        # schema validation or error rendering. Validate clean inputs below.
+        @mcp_server.call_tool(validate_input=False)
         async def call_tool(
             name: str,
             arguments: dict[str, Any],
         ) -> types.CallToolResult:
             if self._gateway is None:
                 return types.CallToolResult(content=[], isError=True)
-            result = await self._gateway.invoke(
-                ToolInvocation(
-                    call_id=f"mcp-{uuid4().hex}",
-                    name=name,
-                    arguments=arguments,
+            if self._product_call_handler is not None:
+                if not self._accepting_preflight or not self.started:
+                    return types.CallToolResult(content=[], isError=True)
+                result = await self._product_call_handler(name, arguments)
+            else:
+                definitions = await self._gateway.definitions()
+                definition = next((item for item in definitions if item.name == name), None)
+                if definition is not None:
+                    try:
+                        jsonschema.validate(arguments, json_value_to_builtin(definition.input_schema))
+                    except (jsonschema.ValidationError, jsonschema.SchemaError):
+                        return types.CallToolResult(
+                            content=[types.TextContent(type='text', text='Invalid tool arguments')],
+                            isError=True,
+                        )
+                result = await self._gateway.invoke(
+                    ToolInvocation(
+                        call_id=f"mcp-{uuid4().hex}", name=name, arguments=arguments,
+                    )
                 )
-            )
             return types.CallToolResult(
                 content=[types.TextContent(type="text", text=_tool_text(result.content))],
                 isError=result.is_error,

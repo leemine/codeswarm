@@ -125,6 +125,17 @@ class ProductToolGateway:
         self._admit = admit
         self._unsafe_names = frozenset(unsafe_names)
         self._unsafe_lock = asyncio.Lock()
+        self._required_authority_owner = None
+
+    def bind_required_authority(self, owner) -> None:
+        """Require original Provider-call proof for this Session-owned gateway."""
+        if owner is None or self._required_authority_owner is not None:
+            raise ValueError("product authority must bind once to its owner")
+        self._required_authority_owner = owner
+
+    def executor_for(self, invocation: ToolInvocation):
+        """Return the exact frozen executor for private final-boundary proof."""
+        return self._catalog.get(invocation.name)
 
     @property
     def scope(self) -> ProductToolScope:
@@ -138,13 +149,36 @@ class ProductToolGateway:
     async def definitions(self) -> tuple[ToolDefinition, ...]:
         return self._definitions
 
+    async def _required_admitted(self, invocation: ToolInvocation) -> bool:
+        from jiuwenswarm.governance.product_executor import current_product_executor
+        proof = current_product_executor()
+        if self._required_authority_owner is not None:
+            if (proof is None or proof.gateway is not self
+                    or proof.entered
+                    or proof.owner is not self._required_authority_owner
+                    or proof.invocation is not invocation
+                    or proof.executor is not self._catalog.get(invocation.name)):
+                return False
+            try:
+                allowed = await proof.authorize(proof.operation)
+            except Exception:
+                return False
+            if allowed is not True:
+                return False
+            if (current_product_executor() is not proof
+                    or proof.executor is not self._catalog.get(invocation.name)):
+                return False
+        return True
+
     async def _is_admitted(self, invocation: ToolInvocation) -> bool:
+        if not await self._required_admitted(invocation):
+            return False
         if self._admit is None:
             return True
         admitted = self._admit(self._scope, invocation)
         if inspect.isawaitable(admitted):
             admitted = await admitted
-        return admitted is True
+        return admitted is True and await self._required_admitted(invocation)
 
     @staticmethod
     def _denied(invocation: ToolInvocation) -> ToolExecutionResult:
@@ -161,8 +195,6 @@ class ProductToolGateway:
                 is_error=True,
             )
         try:
-            if not await self._is_admitted(invocation):
-                return self._denied(invocation)
             subject = ExecutionSubject(
                 subject_id=self._scope.subject_id,
                 display_name=self._scope.subject_id,
@@ -170,21 +202,17 @@ class ProductToolGateway:
                 session_id=self._scope.host_session_id,
             )
             with execution_subject_scope(subject):
+                if not await self._is_admitted(invocation):
+                    return self._denied(invocation)
                 if invocation.name in self._unsafe_names:
                     async with self._unsafe_lock:
                         # A queued call must not consume a decision made before
                         # another invocation released the execution lock.
                         if not await self._is_admitted(invocation):
                             return self._denied(invocation)
-                        output = await tool.invoke(
-                            _mutable_tool_value(invocation.arguments),
-                            **self._invoke_kwargs,
-                        )
+                        output = await self._invoke_authorized(tool, invocation)
                 else:
-                    output = await tool.invoke(
-                        _mutable_tool_value(invocation.arguments),
-                        **self._invoke_kwargs,
-                    )
+                    output = await self._invoke_authorized(tool, invocation)
             rendered = tool.render_for_llm(output)
             success = getattr(output, "success", True)
             return ToolExecutionResult(
@@ -192,6 +220,8 @@ class ProductToolGateway:
                 is_error=success is not True,
             )
         except Exception as exc:  # noqa: BLE001 - cross the MCP boundary safely
+            if self._required_authority_owner is not None:
+                return self._denied(invocation)
             logger.exception(
                 "Product tool invocation failed: tool=%s session=%s error=%s",
                 invocation.name,
@@ -202,6 +232,18 @@ class ProductToolGateway:
                 content=f"Product tool execution failed: {type(exc).__name__}",
                 is_error=True,
             )
+
+    async def _invoke_authorized(self, tool, invocation):
+        if self._required_authority_owner is None:
+            return await tool.invoke(_mutable_tool_value(invocation.arguments), **self._invoke_kwargs)
+        from jiuwenswarm.governance.product_executor import current_product_executor
+        proof = current_product_executor()
+        if (proof is None or proof.gateway is not self or proof.invocation is not invocation
+                or proof.owner is not self._required_authority_owner or proof.executor is not tool
+                or proof.entered):
+            raise PermissionError('Product executor changed before invocation')
+        proof.entered = True
+        return await proof.invoke(_mutable_tool_value(invocation.arguments), **proof.kwargs)
 
 
 __all__ = [

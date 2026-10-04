@@ -362,13 +362,15 @@ class ExecutionSession:
             raise ValueError("governed OpenCode requires the admitted native harness")
         if context.tools is not None or context.mcp_servers:
             raise ValueError("governed OpenCode has unbound tool sources")
-        if gateway is not None:
-            raise ValueError("governed OpenCode product tools require native call correlation")
         names = ()
         if gateway is not None:
+            if type(gateway) is not ProductToolGateway:
+                raise ValueError("governed OpenCode requires a bound product executor")
             self._validate_gateway_scope(gateway)
             definitions = tuple(await gateway.definitions())
             names = tuple(item.name for item in definitions)
+            if not callable(getattr(harness, 'consume_product_preflight', None)):
+                raise ValueError("governed OpenCode product tools require native call correlation")
         transport = ManagedProductToolTransport(
             gateway, host_session_id=self.binding.host_session_id,
         )
@@ -381,10 +383,55 @@ class ExecutionSession:
         self._native_preflight_bound = True
         if gateway is None:
             return context
+        gateway.bind_required_authority(self)
+        transport.bind_product_calls(self._product_consumer(harness, gateway, context, definitions))
         return dataclasses.replace(
             context, mcp_servers=(transport.server_config(),),
             host_capabilities=context.host_capabilities | {HostCapability.MCP_SERVERS},
         )
+
+    def _product_consumer(self, harness, gateway, context, definitions):
+        import jsonschema
+        from openjiuwen.harness_protocol import ToolExecutionResult, ToolInvocation, json_value_to_builtin
+        from jiuwenswarm.governance.product_executor import ProductExecutorProof, product_executor_scope
+        schemas = {item.name: item.input_schema for item in definitions}
+        scope = gateway.scope
+
+        async def consume(name, wire_arguments):
+            denied = ToolExecutionResult(content='Product execution authority unavailable', is_error=True)
+            if name not in schemas:
+                return denied
+            operation = harness.consume_product_preflight(name, wire_arguments)
+            if operation is None:
+                return denied
+            try:
+                jsonschema.validate(json_value_to_builtin(operation.arguments),
+                                    json_value_to_builtin(schemas[name]))
+            except (jsonschema.ValidationError, jsonschema.SchemaError):
+                return denied
+            # Discard wire arguments, including the ticket, before tool dispatch.
+            invocation = ToolInvocation(operation.call_id, name, operation.arguments)
+            executor = gateway.executor_for(invocation)
+
+            def current():
+                return (
+                    executor is not None and gateway.executor_for(invocation) is executor
+                    and gateway.scope is scope
+                    and self.owns_governed_provider_session(operation.provider_session_id)
+                    and self.engine.harness is harness and self._tool_gateway is gateway
+                    and operation.tool_name == PRODUCT_MCP_SERVER_NAME + '_' + name
+                    and harness.is_product_preflight_current(operation)
+                )
+
+            if not current():
+                return denied
+            proof = ProductExecutorProof(
+                self, gateway, executor, invocation, operation, current, context.tool_authorizer,
+            )
+            with product_executor_scope(proof):
+                return await gateway.invoke(invocation)
+
+        return consume
 
     def _prepare_recovery_context(self, context: HarnessContext) -> HarnessContext:
         recovery = self._recovery
