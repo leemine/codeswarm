@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
-from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
+from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource, load_execution_catalog
 from jiuwenswarm.runtime.harness.execution_session import (
     ExecutionExitState,
     ExecutionExitUnconfirmedError,
@@ -47,7 +47,7 @@ class _Stream:
             yield chunk
 
 
-def _setup(tmp_path, rounds, *, goal=None, gate=None):
+def _setup(tmp_path, rounds, *, goal=None, gate=None, source=None):
     agent = MagicMock(spec=DeepAgent)
     agent.card = SimpleNamespace(id="a")
     agent.ensure_initialized = AsyncMock()
@@ -60,7 +60,7 @@ def _setup(tmp_path, rounds, *, goal=None, gate=None):
         get_session_id=lambda: "s", pre_run=AsyncMock(), post_run=AsyncMock()
     )
     bound = ExecutionBindingStore().bind(
-        ExecutionConfigSource(explicit=AgentExecutionSpec("native", "r1")),
+        source or ExecutionConfigSource(explicit=AgentExecutionSpec("native", "r1")),
         subject_id="alice",
         host_session_id="s",
         workspace=str(tmp_path),
@@ -101,6 +101,60 @@ def _setup(tmp_path, rounds, *, goal=None, gate=None):
 
 def _answer():
     return OutputSchema(type="answer", index=9, payload={"output": "done"})
+
+
+@pytest.mark.asyncio
+async def test_explicit_normal_profile_starts_and_dispatches_without_rewriting_binding(tmp_path):
+    catalog = load_execution_catalog({
+        "permissions": {"enabled": True},
+        "execution": {"default_profile_id": "native-normal", "profiles": {
+            "native-normal": {"provider_id": "native", "config_revision": "b3-v1",
+                              "requested_mode": "normal", "provider_config": {}},
+        }},
+    })
+    source = catalog.source(explicit_profile_id="native-normal")
+    original_spec = source.resolve()
+    execution, agent, session, context, terminal, _ = _setup(
+        tmp_path, [[_answer()]], source=source,
+    )
+    execution.engine.binding.validate_spec(original_spec)
+    assert original_spec.requested_mode == "normal"
+    assert source.resolve() is original_spec
+    await execution.start(context)
+    try:
+        request = SendInputRequest(request_id="profile-normal", inputs={"query": "hello"})
+        receipt = await execution.send_request(request)
+        await asyncio.wait_for(terminal.wait(), 3)
+        agent.start.assert_awaited_once_with(session=session)
+        assert agent.send_input.await_args.args[0] is request
+        assert receipt.turn_id
+        execution.engine.binding.validate_spec(original_spec)
+    finally:
+        await execution.stop()
+    agent.stop.assert_awaited_once()
+    session.post_run.assert_awaited_once()
+
+
+@pytest.mark.parametrize("mode, config", [
+    ("plan", {}), ("auto", {}), ("readonly", {}), ("normal ", {}),
+    ("normal", {"language": "en"}), (None, {"deep_agent": {}}),
+])
+def test_native_profile_still_rejects_non_normal_modes_and_provider_overrides(tmp_path, mode, config):
+    catalog = load_execution_catalog({"execution": {
+        "default_profile_id": "explicit", "profiles": {"explicit": {
+            "provider_id": "native", "config_revision": "r1",
+            "requested_mode": mode, "provider_config": config,
+        }},
+    }})
+    bound = ExecutionBindingStore().bind(
+        catalog.source(explicit_profile_id="explicit"), subject_id="bob",
+        host_session_id="s", workspace=str(tmp_path),
+    )
+    agent_factory, session_factory = MagicMock(), AsyncMock()
+    with pytest.raises(ValueError, match="provider overrides"):
+        NativeExecutionSession(bound, agent_factory=agent_factory, session_factory=session_factory)
+    agent_factory.assert_not_called()
+    session_factory.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1258,12 +1312,13 @@ async def test_answer_then_abort_does_not_dispatch_continuation(tmp_path):
 
 
 @pytest.mark.parametrize("full_access", [False, True])
-def test_native_host_cannot_silently_ignore_explicit_authorization(tmp_path, full_access):
+@pytest.mark.parametrize("requested_mode", [None, "normal"])
+def test_native_host_cannot_silently_ignore_explicit_authorization(tmp_path, full_access, requested_mode):
     from openjiuwen.harness_protocol import ExecutionAuthorization, UnsupportedHarnessCapabilityError
 
     bound = ExecutionBindingStore().bind(
         ExecutionConfigSource(explicit=AgentExecutionSpec(
-            "native", "r1", authorization=ExecutionAuthorization(full_access),
+            "native", "r1", requested_mode=requested_mode, authorization=ExecutionAuthorization(full_access),
         )), subject_id="alice", host_session_id="s", workspace=str(tmp_path),
     )
     factory = AsyncMock()

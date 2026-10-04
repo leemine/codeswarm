@@ -88,7 +88,10 @@ class NativeExecutionSession:
         bound.binding.validate_spec(bound.spec)
         if bound.spec.provider_id != "native":
             raise ValueError("Native host assembly requires provider_id=native")
-        if bound.spec.provider_config or bound.spec.requested_mode is not None:
+        # This host route already assembles the ordinary Single agent. An
+        # explicit normal profile selects that same behavior; retain the
+        # original spec/fingerprint instead of rewriting the user's binding.
+        if bound.spec.provider_config or bound.spec.requested_mode not in (None, "normal"):
             raise ValueError(
                 "Native host assembly uses its existing config; provider overrides are not supported"
             )
