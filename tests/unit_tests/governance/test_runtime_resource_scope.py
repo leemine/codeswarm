@@ -71,3 +71,44 @@ async def test_external_authority_never_borrows_next_turn_callback():
     assert not await adapter._authorize_resource_tool(old)
     assert not await adapter._authorize_resource_tool(replace(old, turn_id=None))
     assert bob.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_default_runtime_maps_only_exact_owned_opencode_session(tmp_path, monkeypatch):
+    from jiuwenswarm.governance.resources import ResourceDefinition
+    from jiuwenswarm.runtime.service import _StoredResourceAuthority
+    monkeypatch.setenv('JIUWENSWARM_DATA_DIR', str(tmp_path / 'data'))
+    monkeypatch.setattr(project_store, 'get_agent_root_dir', lambda: tmp_path / 'projects')
+    project_store.invalidate_cache()
+    project = project_store.create_project('OpenCode Resources', str(tmp_path))
+    access = ProjectAccessStore()
+    access.initialize(project.project_id, 'alice')
+    identity = TrustedIdentity('alice', 'alice', 'host')
+    for revision, (rid, kind, reference, actions) in enumerate([
+        ('tool', 'tool', 'opencode:read', ('invoke',)),
+        ('workspace', 'workspace', str(tmp_path), ('read',)),
+    ]):
+        access.register_resource(project.project_id, ResourceDefinition(rid, kind, reference),
+                                 owner_subject_id='alice', actions=actions, expected_revision=revision)
+    execution = SimpleNamespace(request_id='r', state=SessionExecutionState.RUNNING, cancellation_requested=False)
+    snapshot = SimpleNamespace(generation=1, state=RuntimeSessionState.ACTIVE, executions=(execution,))
+    owner = SimpleNamespace(owns_external_tool_session=lambda actual, sid: actual.session_id == 'private' and sid == 'native-issued')
+    manager = SimpleNamespace(get_agent_for_session_nowait=lambda channel, sid: owner if (channel, sid) == ('web', 'private') else None)
+    runtime = AgentRuntime(initializer=AsyncMock(), agent_manager=manager,
+                           trusted_identity_resolver=lambda _: identity,
+                           resource_authorizer=_StoredResourceAuthority())
+    runtime._started = True
+    monkeypatch.setattr(runtime, '_governance_project', lambda *_args, **_kwargs: project.project_id)
+    monkeypatch.setattr(runtime._session_coordinator, 'snapshot_session', lambda _: snapshot)
+    req = AgentRequest('r', channel_id='web', session_id='private', req_method=ReqMethod.CHAT_SEND)
+    callback = runtime._resource_authorizers_for(req)['opencode']
+    call = BeforeToolContext('a', 'native-issued', 'turn', 'call', 'read', {'filePath': str(tmp_path / 'fixture')})
+    try:
+        assert await callback(call)
+        assert not await callback(replace(call, provider_session_id='private'))
+        access.revoke_resource(project.project_id, identity, 'workspace', subject_id='alice', expected_revision=2)
+        assert not await callback(call)
+        execution.cancellation_requested = True
+        assert not await callback(call)
+    finally:
+        project_store.invalidate_cache()

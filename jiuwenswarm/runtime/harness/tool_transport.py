@@ -45,7 +45,7 @@ class ManagedProductToolTransport:
 
     def __init__(
         self,
-        gateway: ToolGateway,
+        gateway: ToolGateway | None,
         *,
         host_session_id: str,
         server_name: str = PRODUCT_MCP_SERVER_NAME,
@@ -121,6 +121,8 @@ class ManagedProductToolTransport:
                 raise
 
     def server_config(self) -> McpServerConfig:
+        if self._gateway is None:
+            raise RuntimeError("preflight-only transport has no product MCP server")
         if not self.started or self._port is None:
             raise RuntimeError("product MCP transport is not running")
         return McpServerConfig(
@@ -171,14 +173,18 @@ class ManagedProductToolTransport:
                         "product MCP transport exit could not be confirmed"
                     ) from exc
                 except asyncio.CancelledError:
-                    pass
+                    if not task.done() or asyncio.current_task().cancelling():
+                        raise
             except asyncio.CancelledError:
-                pass
+                if not task.done() or asyncio.current_task().cancelling():
+                    raise
             except Exception:
                 # The owned server task has exited abnormally, but its exit is
                 # still confirmed.  Startup/readiness already reports failures
                 # that happen before the transport is published.
                 pass
+        if task is not None and not task.done():
+            raise RuntimeError("product MCP transport exit could not be confirmed")
         if listener is not None:
             listener.close()
         self._uvicorn = None
@@ -240,6 +246,8 @@ class ManagedProductToolTransport:
 
         @mcp_server.list_tools()
         async def list_tools() -> list[types.Tool]:
+            if self._gateway is None:
+                return []
             definitions = await self._gateway.definitions()
             return [
                 types.Tool(
@@ -255,6 +263,8 @@ class ManagedProductToolTransport:
             name: str,
             arguments: dict[str, Any],
         ) -> types.CallToolResult:
+            if self._gateway is None:
+                return types.CallToolResult(content=[], isError=True)
             result = await self._gateway.invoke(
                 ToolInvocation(
                     call_id=f"mcp-{uuid4().hex}",
@@ -287,7 +297,8 @@ class ManagedProductToolTransport:
                 for key, value in scope.get("headers", ())
             }
             supplied = headers.get("authorization", "")
-            if scope.get("path") not in {PRODUCT_MCP_PATH, _NATIVE_PREFLIGHT_PATH} or not hmac.compare_digest(
+            if (scope.get("path") not in {PRODUCT_MCP_PATH, _NATIVE_PREFLIGHT_PATH}
+                    or (scope.get("path") == PRODUCT_MCP_PATH and self._gateway is None)) or not hmac.compare_digest(
                 supplied,
                 f"Bearer {self._token}",
             ):

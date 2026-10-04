@@ -1,4 +1,4 @@
-"""Conservative OpenCode permission summaries and live resource decisions."""
+"""Original OpenCode pre-I/O inputs and live resource decisions."""
 
 from dataclasses import replace
 from types import SimpleNamespace
@@ -25,7 +25,7 @@ def operation(**changes):
             "turn",
             "call",
             "bash",
-            {"metadata": {"command": "printf fixture"}, "patterns": ["printf fixture"]},
+            {"command": "printf fixture", "description": "fixture"},
         ),
         **changes,
     )
@@ -84,10 +84,8 @@ def test_process_grant_is_explicit_and_not_a_workspace_sandbox(host):
         host.execution,
         operation(
             arguments={
-                "metadata": {
-                    "command": "cat /outside/private; curl https://example.invalid"
-                },
-                "patterns": ["cat /outside/private", "curl *"],
+                "command": "cat /outside/private; curl https://example.invalid",
+                "description": "explicit whole process grant",
             }
         ),
     )
@@ -215,3 +213,45 @@ def test_ambiguous_reference_fails_construction():
             },
             owns_session=lambda *_: True,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool,actions", [("read", ("read",)), ("write", ("read", "write")), ("edit", ("read", "write"))])
+async def test_original_file_inputs_require_current_tool_and_workspace_grants(host, tool, actions):
+    host.store.register_resource(host.pid, ResourceDefinition("file-tool", "tool", "opencode:" + tool),
+                                 owner_subject_id="owner", actions=("invoke",), expected_revision=2)
+    host.store.register_resource(host.pid, ResourceDefinition("workspace", "workspace", str(host.work)),
+                                 owner_subject_id="owner", actions=("read", "write"), expected_revision=3)
+    host.resolver = OpenCodeToolResourceResolver(host.store.resource_grants(host.pid, host.identity),
+                                               owns_session=lambda *_: True)
+    file = host.work / "fixture.txt"
+    args = {"filePath": str(file)}
+    if tool == "write":
+        args["content"] = "new"
+    if tool == "edit":
+        args.update(oldString="old", newString="new")
+    call = operation(tool_name=tool, arguments=args)
+    uses = host.resolver.resources_for_tool(host.execution, call)
+    assert [(u.request.action, u.request.path) for u in uses] == [("invoke", None), *[(a, str(file)) for a in actions]]
+    authority = BoundToolResourceAuthority(host.execution, authorizer=host.store, resolver=host.resolver,
+                                          current_identity=lambda: host.identity, is_current_execution=lambda: True)
+    assert await authority(call) is True
+    host.store.revoke_resource(host.pid, host.identity, "workspace", subject_id="owner", expected_revision=4)
+    assert await authority(call) is False
+    outside = host.tmp_path / "outside"
+    outside.mkdir()
+    link = host.work / "link"
+    link.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="outside"):
+        host.resolver.resources_for_tool(host.execution, operation(tool_name=tool, arguments={**args, "filePath": str(link / "file")}))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args", [
+    {"command": "true", "description": "ok", "timeout": True},
+    {"command": "true", "description": "ok", "extra": "forged"},
+    {"command": "", "description": "ok"},
+    {"command": "true", "description": "bad\\x00value".replace("\\x00", "\x00")},
+])
+async def test_invalid_original_schema_denies(host, args):
+    assert await host.authority(operation(arguments=args)) is False

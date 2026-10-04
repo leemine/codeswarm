@@ -472,6 +472,7 @@ async def test_execution_session_mounts_and_releases_bound_product_transport(
             assert gateway.scope.host_session_id == host_session_id == "parent-1"
             self.started = False
             self.stopped = False
+            self.exit_confirmed = False
             captured.transport = self
 
         async def start(self) -> None:
@@ -488,6 +489,7 @@ async def test_execution_session_mounts_and_releases_bound_product_transport(
 
         async def stop(self) -> None:
             self.stopped = True
+            self.exit_confirmed = True
             self.started = False
 
     monkeypatch.setattr(
@@ -594,6 +596,7 @@ async def test_execution_session_releases_product_transport_when_provider_start_
         def __init__(self, _gateway, *, host_session_id) -> None:
             assert host_session_id == "parent-1"
             self.stopped = False
+            self.exit_confirmed = False
             captured.transport = self
 
         async def start(self) -> None:
@@ -609,6 +612,7 @@ async def test_execution_session_releases_product_transport_when_provider_start_
 
         async def stop(self) -> None:
             self.stopped = True
+            self.exit_confirmed = True
 
     monkeypatch.setattr(
         "jiuwenswarm.runtime.harness.execution_session.ManagedProductToolTransport",

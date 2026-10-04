@@ -93,6 +93,7 @@ class ExecutionSession:
         self._detached_output = detached_output
         self._tool_gateway = tool_gateway
         self._tool_transport: ManagedProductToolTransport | None = None
+        self._native_preflight_bound = False
         self._queue_size = max(1, queue_size)
         self._recovery = recovery
         self._output_router: TurnOutputRouter | None = None
@@ -116,6 +117,19 @@ class ExecutionSession:
     @property
     def exit_state(self) -> ExecutionExitState:
         return self._exit_state
+
+    def owns_governed_provider_session(self, provider_session_id: str) -> bool:
+        """Prove this live binding owns the preflight-protected native Session."""
+        transport = self._tool_transport
+        return bool(
+            self.binding.provider_id == "opencode"
+            and self._native_preflight_bound
+            and self._started and not self._closed
+            and self._exit_state is ExecutionExitState.RUNNING
+            and transport is not None and transport.started
+            and provider_session_id
+            and self.engine.harness.provider_session_id == provider_session_id
+        )
 
     async def start(self, context: HarnessContext) -> None:
         """Start exactly one Provider cycle for the bound host Session."""
@@ -251,6 +265,8 @@ class ExecutionSession:
         await stop_one("provider", self.io.stop)
         if self._tool_transport is not None:
             await stop_one("product_mcp", self._tool_transport.stop)
+            if getattr(self._tool_transport, "exit_confirmed", False) is not True:
+                failures.append(("product_mcp", RuntimeError("product MCP transport exit is unconfirmed")))
         close_gateway = getattr(self._tool_gateway, "close", None)
         if callable(close_gateway):
             await stop_one("tool_gateway", close_gateway)
@@ -292,6 +308,11 @@ class ExecutionSession:
 
     async def _prepare_tool_context(self, context: HarnessContext) -> HarnessContext:
         gateway = self._tool_gateway
+        governed_opencode = (
+            self.binding.provider_id == "opencode" and context.tool_authorizer is not None
+        )
+        if governed_opencode:
+            return await self._prepare_opencode_preflight(context, gateway)
         if gateway is None:
             return context
         self._validate_gateway_scope(gateway)
@@ -328,6 +349,41 @@ class ExecutionSession:
             context,
             mcp_servers=(*context.mcp_servers, transport.server_config()),
             host_capabilities=frozenset(capabilities),
+        )
+
+    async def _prepare_opencode_preflight(self, context, gateway):
+        # The endpoint is a live host object, never a persisted Provider option.
+        # Import lazily so legacy providers retain their existing dependencies.
+        from openjiuwen.harness_providers.opencode import (
+            OpenCodeHarness, OpenCodePreflightEndpoint,
+        )
+        harness = self.engine.harness
+        if type(harness) is not OpenCodeHarness:
+            raise ValueError("governed OpenCode requires the admitted native harness")
+        if context.tools is not None or context.mcp_servers:
+            raise ValueError("governed OpenCode has unbound tool sources")
+        if gateway is not None:
+            raise ValueError("governed OpenCode product tools require native call correlation")
+        names = ()
+        if gateway is not None:
+            self._validate_gateway_scope(gateway)
+            definitions = tuple(await gateway.definitions())
+            names = tuple(item.name for item in definitions)
+        transport = ManagedProductToolTransport(
+            gateway, host_session_id=self.binding.host_session_id,
+        )
+        self._tool_transport = transport
+        await transport.start()
+        values = transport.bind_native_preflight(harness.authorize_preflight)
+        harness.bind_preflight_endpoint(OpenCodePreflightEndpoint(
+            **values, product_tool_names=names,
+        ))
+        self._native_preflight_bound = True
+        if gateway is None:
+            return context
+        return dataclasses.replace(
+            context, mcp_servers=(transport.server_config(),),
+            host_capabilities=context.host_capabilities | {HostCapability.MCP_SERVERS},
         )
 
     def _prepare_recovery_context(self, context: HarnessContext) -> HarnessContext:

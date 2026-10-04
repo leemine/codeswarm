@@ -324,17 +324,23 @@ class _StoredResourceAuthority:
 
 
 class _CurrentNativeToolResources:
-    def __init__(self, authority, owns_session):
+    def __init__(self, authority, owns_session, owns_external_session=None):
         self._authority = authority
         self._owns_session = owns_session
+        self._owns_external_session = owns_external_session
 
     def resources_for_tool(self, execution, operation):
         from jiuwenswarm.governance.native_tool_resources import NativeToolResourceResolver
-        if execution.provider_id != "native":
+        from jiuwenswarm.governance.opencode_tool_resources import OpenCodeToolResourceResolver
+        if execution.provider_id not in {"native", "opencode"}:
             raise GovernanceError("Provider resource mapping unavailable")
         # Reload visible reference metadata; ResourceGuard independently checks
         # every actual grant immediately before the concrete tool runs.
         grants = self._authority.resource_grants(execution.project_id, execution.identity)
+        if execution.provider_id == "opencode":
+            return OpenCodeToolResourceResolver(
+                grants, owns_session=self._owns_external_session,
+            ).resources_for_tool(execution, operation)
         return NativeToolResourceResolver(grants, owns_session=self._owns_session).resources_for_tool(execution, operation)
 
 
@@ -512,7 +518,16 @@ class AgentRuntime:
                 owner = lookup(request.channel_id or "default", session_id) if callable(lookup) else None
                 check = getattr(owner, "owns_native_tool_session", None)
                 return callable(check) and check(execution, agent, session) is True
-            resolver = _CurrentNativeToolResources(self._resource_authorizer, owns_session)
+            def owns_external_session(execution, provider_session_id):
+                if not is_current():
+                    return False
+                lookup = getattr(self._agent_manager, "get_agent_for_session_nowait", None)
+                owner = lookup(request.channel_id or "default", session_id) if callable(lookup) else None
+                check = getattr(owner, "owns_external_tool_session", None)
+                return callable(check) and check(execution, provider_session_id) is True
+            resolver = _CurrentNativeToolResources(
+                self._resource_authorizer, owns_session, owns_external_session,
+            )
         from jiuwenswarm.governance.model_credentials import NativeModelCredentialAuthority
         from jiuwenswarm.governance.tool_context import ExecutionResourceAuthorities
         def owns_model_execution(execution, native_session):

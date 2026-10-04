@@ -114,6 +114,17 @@ class EngineAgentAdapter:
     def execution_session(self) -> ExecutionSession | None:
         return self._session
 
+    def owns_external_tool_session(self, execution, provider_session_id) -> bool:
+        session = self._session
+        return bool(
+            self._resource_governed and session is not None
+            and session.binding.host_session_id == execution.session_id
+            and session.binding.provider_id == execution.provider_id
+            and session.binding.subject_id == execution.identity.subject_id
+            and session.binding.workspace == execution.workspace
+            and session.owns_governed_provider_session(provider_session_id)
+        )
+
     @property
     def ui_capability_manifest(self):
         return (
