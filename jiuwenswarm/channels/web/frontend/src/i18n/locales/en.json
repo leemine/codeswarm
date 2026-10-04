@@ -1378,6 +1378,7 @@
       "codex": "Codex",
       "claudeHint": "The SDK is installed automatically when needed; use the built-in CLI, a CLI from PATH, or a specified path.",
       "codexHint": "The SDK is installed automatically when needed; use the built-in CLI, a CLI from PATH, or a specified path.",
+      "codexGovernedUnavailable": "Unavailable for safety: governed organization projects require current authorization for every native tool call. Codex CLI 0.144.4 has tools outside this boundary, so it is unavailable in this mode. Changing the model, installation path or ordinary approval setting does not remove this restriction.",
       "useBuiltin": "Use built-in CLI",
       "detect": "Detect",
       "detectHint": "Leave the path empty to search the system PATH, or enter a CLI executable path to validate it and check its version",

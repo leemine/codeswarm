@@ -4088,6 +4088,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
         {activeNav === 'settings' && (
           <div className="app-section">
             <SettingsPage
+              organizationAuth={organizationAuth}
               definition={settingsPageDefinition}
               isConnected={isConnected}
               connectionState={connectionState}

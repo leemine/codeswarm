@@ -160,6 +160,7 @@ function ExternalCliSettings({
 }) {
   const { t } = useTranslation();
   const {
+    organizationAuth = false,
     isConnected,
     externalCliInstallBusy,
     externalCliInstallStatuses,
@@ -250,6 +251,8 @@ function ExternalCliSettings({
       if (!pendingChoices[agent]) externalCliReplayClaims.delete(agent);
     }
     const replays = EXTERNAL_CLI_AGENT_KINDS.filter((agent) => {
+      // Do not replay a legacy deferred enable into a governed organization.
+      if (organizationAuth && agent === 'codex') return false;
       const pending = pendingChoices[agent];
       if (!pending) return false;
       const status = externalCliInstallStatuses?.[agent]?.status;
@@ -336,7 +339,7 @@ function ExternalCliSettings({
         setSaving(false);
       }
     })();
-  }, [externalCliInstallStatuses, onConfigPatch, pendingChoices, setPendingChoices, t]);
+  }, [externalCliInstallStatuses, onConfigPatch, organizationAuth, pendingChoices, setPendingChoices, t]);
 
   const submit = async () => {
     if (installBusy) {
@@ -345,12 +348,14 @@ function ExternalCliSettings({
     }
     const updates: Record<string, string> = {};
     for (const agent of EXTERNAL_CLI_AGENT_KINDS) {
+      if (organizationAuth && agent === 'codex') continue;
       applyExternalCliAgentAtomicUpdates(updates, agent, draftValues, savedValues);
     }
     if (!Object.keys(updates).length) return;
     // Pre-validate against the latest detect results: fail fast with a
     // localized message before the backend rejects with its raw English error.
     for (const agent of EXTERNAL_CLI_AGENT_KINDS) {
+      if (organizationAuth && agent === 'codex') continue;
       const validation = externalCliSaveValidationMessage(agent, draftValues, detectResults[agent], t);
       if (validation) {
         setSaveError(validation);
@@ -457,6 +462,7 @@ function ExternalCliSettings({
         </div>
       ) : null}
       <ExternalCliAgentsSection
+        organizationAuth={organizationAuth}
         draftValues={draftValues}
         onChange={(key, value) => {
           setDraftValues((current) => ({ ...current, [key]: value }));

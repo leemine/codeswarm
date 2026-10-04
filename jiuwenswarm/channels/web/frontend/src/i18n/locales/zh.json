@@ -1369,6 +1369,7 @@
       "codex": "Codex",
       "claudeHint": "SDK 未安装时将自动安装；CLI 可使用内置版本、系统 PATH 或指定路径。",
       "codexHint": "SDK 未安装时将自动安装；CLI 可使用内置版本、系统 PATH 或指定路径。",
+      "codexGovernedUnavailable": "安全禁用：组织受管项目要求每次原生工具调用都经过当前授权。固定 Codex CLI 0.144.4 尚有工具不经过此边界，暂不可用于此模式；更换模型、安装路径或关闭普通审批均不能解除限制。",
       "useBuiltin": "使用内置 CLI",
       "detect": "检测",
       "detectHint": "未填写路径时从系统 PATH 查找；填写路径后检测指定的 CLI 可执行文件并校验版本",
