@@ -3021,7 +3021,8 @@ class JiuWenSwarm:
         from jiuwenswarm.runtime.harness.native_goal_control import NativeGoalControl
 
         cap = request._native_goal_control
-        if type(cap) is not NativeGoalControl:
+        from jiuwenswarm.runtime.harness.native_goal_idle_control import NativeIdleGoalControl
+        if type(cap) not in {NativeGoalControl, NativeIdleGoalControl}:
             raise PermissionError('Native Goal control capability is invalid')
         root = self._adapter
         sid, rid = request.session_id, request.request_id
@@ -3544,8 +3545,7 @@ class JiuWenSwarm:
             action = str(params.get("action", "get") or "get").strip().lower()
             native = self._cached_native_goal_runtime(request)
             managed_control = (getattr(native, '_require_execution_origin', False)
-                               and (action == 'resume'
-                                    or getattr(native._native, 'active_turn', None) is not None))
+                               and getattr(native._native, 'active_turn', None) is not None)
             if (hasattr(request, '_native_goal_control') or action not in {"set", "resume"}
                     or managed_control):
                 try:

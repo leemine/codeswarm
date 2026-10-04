@@ -2101,7 +2101,7 @@ class AgentRuntime:
         token = set_runtime_context(self, self._agent_manager)
         try:
             goal_parent = self._native_goal_parent(request)
-            if goal_parent is not None:
+            if goal_parent is not None or self._is_idle_native_goal_control(request):
                 async with aclosing(self._stream_native_goal_control(request, goal_parent)) as events:
                     return [event async for event in events]
             work_kind = self._request_work_kind(request)
@@ -2545,7 +2545,7 @@ class AgentRuntime:
         )
 
         goal_parent = self._native_goal_parent(request)
-        if goal_parent is not None:
+        if goal_parent is not None or self._is_idle_native_goal_control(request):
             if background:
                 raise GovernanceError('Native Goal control requires a foreground command')
             async with aclosing(self._stream_native_goal_control(request, goal_parent)) as events:
@@ -2936,24 +2936,39 @@ class AgentRuntime:
             return None
         return self._session_coordinator.native_goal_parent(request.session_id)
 
+    def _is_idle_native_goal_control(self, request):
+        return (self._organization_session_host is not None
+                and request.req_method is ReqMethod.COMMAND_GOAL
+                and request.params.get('action') in {'pause', 'clear'}
+                and not self._request_targets_team(request))
+
     async def _stream_native_goal_control(self, request, parent):
         """Use the existing facade with a temporary, explicitly parented control."""
         from jiuwenswarm.runtime.context import reset_runtime_context, set_runtime_context
         from jiuwenswarm.runtime.events import RuntimeEvent
         from jiuwenswarm.runtime.native_goal import capture_control
 
+        deliveries = []
+
         async def operation():
             token = set_runtime_context(self, self._agent_manager)
             governed = None
+            finish = None
             try:
                 governed = self._prepare_governed_request(request)
-                agent, control = capture_control(self, request, parent)
+                if parent is None:
+                    from jiuwenswarm.runtime.native_goal_idle import capture_control as capture_idle
+                    agent, control, finish = capture_idle(self, request)
+                else:
+                    agent, control = capture_control(self, request, parent)
                 self._commit_governed_request(governed, request)
                 control.check_current()
                 if request.is_stream:
                     async with aclosing(agent.process_message_stream(request)) as chunks:
                         async for chunk in chunks:
                             control.check_result()
+                            if finish is not None:
+                                deliveries.append(finish())
                             if governed is not None and self._submission_guard.outcome(governed) == 'unknown':
                                 self._submission_guard.accepted(governed)
                             yield RuntimeEvent.from_agent_message(chunk,
@@ -2962,6 +2977,8 @@ class AgentRuntime:
                 else:
                     response = await agent.execute_message(request)
                     control.check_result()
+                    if finish is not None:
+                        deliveries.append(finish())
                     if governed is not None:
                         self._submission_guard.accepted(governed)
                     yield RuntimeEvent.from_agent_message(response,
@@ -2974,9 +2991,15 @@ class AgentRuntime:
                 reset_runtime_context(token)
 
         stream = self._session_coordinator.run_stream(request.session_id, request.request_id,
-            SessionWorkKind.GOAL_CONTROL, operation, parent_execution_id=parent.execution_id)
+            SessionWorkKind.GOAL_CONTROL, operation,
+            parent_execution_id=None if parent is None else parent.execution_id)
         async with aclosing(stream):
             async for event in stream:
+                if deliveries:
+                    from jiuwenswarm.governance.session_boundary import bind_goal_mutation_delivery
+                    receipt = deliveries.pop(0)
+                    receipt.final_check()
+                    bind_goal_mutation_delivery(receipt.session_id, receipt.identity, receipt)
                 yield event
 
     async def _stream_session_input_started(

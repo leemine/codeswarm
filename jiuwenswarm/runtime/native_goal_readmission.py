@@ -5,7 +5,6 @@ registry forgets terminal history. That graph proves exit, never new authority.
 """
 from __future__ import annotations
 
-import asyncio
 from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import fields
@@ -103,7 +102,7 @@ async def submit_readmission(runtime, request, child, inputs, *, action):
     producer = owner.task
     principal, generation, record, kind, parent = (owner._execution_authority, owner.generation,
         coordinator._sessions.get(sid), owner.work_kind, owner.parent_execution_id)
-    if (owner.parent_execution_id is not None or producer is not asyncio.current_task()
+    if (owner.parent_execution_id is not None or producer is None or producer.done()
             or owner._native_admission is not None):
         raise GovernanceError('Goal readmission requires a fresh root producer')
     context = copy_context()
