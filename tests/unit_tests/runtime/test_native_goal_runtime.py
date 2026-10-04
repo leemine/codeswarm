@@ -114,7 +114,7 @@ async def test_waiting_goal_control_rechecks_second_credential(goal):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('stream', [False, True])
-@pytest.mark.parametrize('action', ['get', 'pause', 'clear'])
+@pytest.mark.parametrize('action', ['pause', 'clear'])
 async def test_public_runtime_uses_original_facade_for_goal_control(goal, stream, action):
     g, req = goal, request(goal, stream=stream)
     req.params['action'] = action
@@ -132,3 +132,19 @@ async def test_public_runtime_uses_original_facade_for_goal_control(goal, stream
     handle, = g.x.c._registry.select(session_id=g.x.f.sid, request_id='goal-control')
     assert handle.parent_execution_id == g.x.saved['owner'].execution_id
     assert handle._execution_authority is g.x.second and handle._native_admission is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stream', [False, True])
+async def test_public_get_requires_real_readable_session_not_control_fixture(goal, stream):
+    g, req = goal, request(goal, stream=stream)
+    g.x.runtime._started = True
+    req.params['action'] = 'get'
+    before = g.x.f.c.native._native.active_turn
+    with authenticated_scope(g.x.second), pytest.raises(PermissionError):
+        if stream:
+            [event async for event in g.x.runtime.stream(req)]
+        else:
+            await g.x.runtime.invoke(req)
+    assert g.x.f.c.native._native.active_turn is before
+    assert not g.x.c._registry.select(session_id=g.x.f.sid, request_id='goal-control')
