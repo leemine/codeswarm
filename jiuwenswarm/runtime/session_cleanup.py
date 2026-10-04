@@ -19,6 +19,7 @@ _MARKER = object()
 class SessionCleanupAuthority:
     session_id: str
     channel_id: str
+    resource_channel: str
     request_id: str
     method: str
     generation: int | None
@@ -26,6 +27,7 @@ class SessionCleanupAuthority:
     _params: str = field(repr=False)
     _identity: object = field(repr=False)
     _stamp: tuple = field(repr=False)
+    _binding: tuple = field(repr=False)
     _runtime: object = field(repr=False)
     _request: object = field(repr=False)
     _context: object = field(repr=False)
@@ -42,7 +44,10 @@ class SessionCleanupAuthority:
                 or json.dumps(request.params or {}, sort_keys=True, separators=(',', ':')) != self._params
                 or self._context.run(runtime._governance_identity, request) != self._identity
                 or runtime._organization_session_host.cleanup_owner_stamp(
-                    self.session_id, self._identity) != self._stamp):
+                    self.session_id, self._identity) != self._stamp
+                or runtime._organization_session_host.cleanup_owner_binding(
+                    self.session_id, self._identity, expected_stamp=self._stamp) != self._binding
+                or dict(self._binding).get('channel_id') != self.resource_channel):
             raise SessionSharingDenied('original cleanup authority changed')
         if execution:
             current = runtime._session_coordinator.snapshot_session(self.session_id)
@@ -70,16 +75,18 @@ def capture_cleanup(runtime, request):
         return existing
     identity = runtime._governance_identity(request)
     stamp = runtime._organization_session_host.cleanup_owner_stamp(request.session_id, identity)
+    binding = runtime._organization_session_host.cleanup_owner_binding(
+        request.session_id, identity, expected_stamp=stamp)
     session = runtime._session_coordinator.snapshot_session(request.session_id)
     active = tuple(item for item in session.executions if not item.state.terminal) if session else ()
     target = (request.params or {}).get('target_request_id', '')
     if target and any(item.request_id != target for item in active):
         raise SessionSharingDenied('cleanup target is no longer the sole original execution')
     authority = SessionCleanupAuthority(
-        request.session_id, request.channel_id, request.request_id, method,
+        request.session_id, request.channel_id, dict(binding)['channel_id'], request.request_id, method,
         session.generation if session else None, frozenset(item.execution_id for item in active),
         json.dumps(request.params or {}, sort_keys=True, separators=(',', ':')),
-        identity, stamp, runtime, request, copy_context(), _MARKER,
+        identity, stamp, binding, runtime, request, copy_context(), _MARKER,
     )
     authority.check()
     request._cleanup_authority = authority
@@ -93,7 +100,7 @@ async def cancel_owned_session(runtime, request, authority):
     if authority.method not in {'chat.cancel', 'chat.interrupt'}:
         raise SessionSharingDenied('cancel requires a pure cancellation request')
     authority.check()
-    sid, channel = authority.session_id, authority.channel_id
+    sid, channel = authority.session_id, authority.resource_channel
     if authority.generation is None:
         # Never search a default/project Agent or allocate one for cleanup.
         existing = runtime._agent_manager.get_agent_for_session_nowait(channel, sid)
@@ -112,6 +119,7 @@ async def cancel_owned_session(runtime, request, authority):
             await runtime._agent_manager.cleanup_session_runtime(channel_id=channel, session_id=sid)
             authority.check()
             await runtime._forget_agent_execution_owner(channel_id=channel, session_id=sid)
+            authority.check()
             runtime._plan_controller.reset_session(sid)
 
         closed = await runtime._session_coordinator.close_session(

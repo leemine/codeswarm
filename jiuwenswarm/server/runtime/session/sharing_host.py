@@ -37,6 +37,30 @@ def _revision(epoch, acl, session_generation, project_generation):
             | _component(session_generation) << 64 | _component(project_generation))
 
 
+_CLEANUP_BINDING_FIELDS = (
+    'project_id', 'project_dir', 'mode', 'work_mode', 'team_name',
+    'channel_id', 'execution_profile_id', 'execution_config_fingerprint',
+)
+
+
+def _metadata_cleanup_binding(metadata):
+    """Canonical persisted Single binding projection for cleanup/delete only."""
+    if not isinstance(metadata, dict) or not metadata:
+        raise SessionSharingDenied('cleanup target metadata required')
+    value = {key: metadata.get(key) for key in _CLEANUP_BINDING_FIELDS}
+    if any(item is not None and (not isinstance(item, str) or len(item) > 32768)
+           for item in value.values()):
+        raise SessionSharingDenied('invalid cleanup target binding')
+    from jiuwenswarm.common.mode_matrix import is_team_mode
+    if value['team_name'] or is_team_mode(value['mode']):
+        raise SessionSharingDenied('only Single cleanup is supported')
+    for field in ('project_id', 'channel_id', 'mode'):
+        item = value[field]
+        if not isinstance(item, str) or not item or item != item.strip():
+            raise SessionSharingDenied('explicit persisted cleanup binding required')
+    return value
+
+
 class SharingHostService:
     """Synchronous host ports for SessionSharingAdapter and guarded IO.
 
@@ -185,32 +209,53 @@ class SharingHostService:
         or restores a Session. Pending publications cannot be cleaned by callers.
         """
         with self._storage._locked():
-            record, owner, source = self._record(self._storage._load(), session_id, active=False)
-            if (not isinstance(identity, TrustedIdentity) or identity != owner
-                    or self._known_actor(identity) is not True):
-                raise SessionSharingDenied('trusted cleanup owner required')
-            publication = record.get('continuation')
-            if publication is not None:
-                from .continuation_publication import _publication
-                proof = _publication(publication)
-                if (publication['state'] != 'committed' or proof.identity != owner
-                        or proof.request.target_project_id != source['project_id']):
-                    raise SessionSharingDenied('committed cleanup target required')
-            metadata = lifecycle.raw_metadata(session_id)
-            if not metadata or metadata.get('project_id') != source['project_id']:
+            return self._cleanup_owner_stamp_locked(self._storage._load(), session_id, identity)
+
+    def _cleanup_owner_stamp_locked(self, data, session_id, identity):
+        record, owner, source = self._record(data, session_id, active=False)
+        if (not isinstance(identity, TrustedIdentity) or identity != owner
+                or self._known_actor(identity) is not True):
+            raise SessionSharingDenied('trusted cleanup owner required')
+        publication = record.get('continuation')
+        if publication is not None:
+            from .continuation_publication import _publication
+            proof = _publication(publication)
+            if (publication['state'] != 'committed' or proof.identity != owner
+                    or proof.request.target_project_id != source['project_id']):
+                raise SessionSharingDenied('committed cleanup target required')
+        metadata = lifecycle.raw_metadata(session_id)
+        if not metadata or metadata.get('project_id') != source['project_id']:
+            raise SessionSharingDenied('cleanup target binding changed')
+        session_state = lifecycle.state('session', session_id)
+        project_state = lifecycle.state('project', source['project_id'])
+        if session_state.get('deleted') or project_state.get('deleted'):
+            raise SessionSharingDenied('cleanup target was deleted')
+        # Current lifecycle facts, not a restoration of the registration's
+        # old generation. An in-progress block can still stop its old work;
+        # deletion retries remain owned by the original Provisioner.
+        return (record['revision'], source['epoch'], source['project_id'],
+                source['session_generation'], source['project_generation'],
+                _component(session_state.get('generation', 0)),
+                _component(project_state.get('generation', 0)),
+                bool(session_state.get('blocked')), bool(project_state.get('blocked')))
+
+    def cleanup_owner_binding(self, session_id: str, identity: TrustedIdentity, *, expected_stamp: tuple) -> tuple:
+        """Pin cleanup resource routing, never infer a channel or grant access.
+
+        Keep the original nine-field stamp API unchanged. Metadata is read on
+        both sides of the same owner check under the existing sidecar lock; no
+        lifecycle/history lock or await is introduced here.
+        """
+        with self._storage._locked():
+            data = self._storage._load()
+            if self._cleanup_owner_stamp_locked(data, session_id, identity) != expected_stamp:
+                raise SessionSharingDenied('original cleanup owner changed')
+            binding = _metadata_cleanup_binding(lifecycle.raw_metadata(session_id))
+            if (binding['project_id'] != expected_stamp[2]
+                    or self._cleanup_owner_stamp_locked(data, session_id, identity) != expected_stamp
+                    or _metadata_cleanup_binding(lifecycle.raw_metadata(session_id)) != binding):
                 raise SessionSharingDenied('cleanup target binding changed')
-            session_state = lifecycle.state('session', session_id)
-            project_state = lifecycle.state('project', source['project_id'])
-            if session_state.get('deleted') or project_state.get('deleted'):
-                raise SessionSharingDenied('cleanup target was deleted')
-            # Current lifecycle facts, not a restoration of the registration's
-            # old generation. An in-progress block can still stop its old work;
-            # deletion retries remain owned by the original Provisioner.
-            return (record['revision'], source['epoch'], source['project_id'],
-                    source['session_generation'], source['project_generation'],
-                    _component(session_state.get('generation', 0)),
-                    _component(project_state.get('generation', 0)),
-                    bool(session_state.get('blocked')), bool(project_state.get('blocked')))
+            return tuple(binding.items())
 
     def capture_deletion(self, session_id, identity, permit):
         from .deletion_receipt import capture

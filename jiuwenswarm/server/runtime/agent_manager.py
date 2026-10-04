@@ -1020,24 +1020,32 @@ class AgentManager:
         session_id: str,
         reason: str = "session_deleted",
     ) -> bool:
-        """Release subagent control owned by the channel's existing Agent.
+        """Release only cached owners of this exact Session on this channel.
 
-        Product Session deletion historically performed this lookup in
-        AgentServer.  Keeping it here preserves the same first-Agent lookup and
-        adapter selection while hiding Agent/Adapter internals behind the
-        Runtime-owned manager boundary.
+        Never select a channel default or create an Agent. Callers retain the
+        original Runtime generation fence; cache identity is checked across
+        each await so a stale release cannot acknowledge a replacement owner.
         """
-        agent = self.get_agent_nowait(channel_id=channel_id or "")
-        adapter = self._resolve_runtime_adapter(agent)
-        release_runtime = getattr(
-            adapter,
-            "release_subagent_runtime_for_session",
-            None,
-        )
-        if not callable(release_runtime):
+        sid = str(session_id or '').strip()
+        if not sid:
             return False
-        await release_runtime(session_id, reason=reason)
-        return True
+        channel_key = _normalize_channel_id(channel_id)
+        owners = [(key, agent) for key, agent in tuple(self.agents.get(channel_key, {}).items())
+                  if callable(getattr(agent, 'has_session_runtime', None)) and agent.has_session_runtime(sid)]
+        released = False
+        for key, agent in owners:
+            if self.agents.get(channel_key, {}).get(key) is not agent or not agent.has_session_runtime(sid):
+                raise RuntimeError('Session runtime owner changed before subagent release')
+            adapter = self._resolve_runtime_adapter(agent)
+            release_runtime = getattr(adapter, 'release_subagent_runtime_for_session', None)
+            if not callable(release_runtime):
+                continue
+            await release_runtime(sid, reason=reason)
+            if (self.agents.get(channel_key, {}).get(key) is not agent
+                    or self._resolve_runtime_adapter(agent) is not adapter):
+                raise RuntimeError('Session runtime owner changed during subagent release')
+            released = True
+        return released
 
     @staticmethod
     def _resolve_runtime_adapter(agent: Any) -> Any:
