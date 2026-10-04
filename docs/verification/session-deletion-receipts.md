@@ -159,3 +159,9 @@ desktop and 375px actual DeleteDialog renderings were inspected using installed
 Chrome and existing theme tokens. These are deterministic synthetic-exit and
 component evidence, not real Provider/product UI acceptance or integrated stable.
 Evidence and complete commands: `/tmp/r2b-delete-audit-runtime/README.md`.
+The direct Runtime SDK also derives `SessionDeleteResult.audit_pending` from
+the original deletion acknowledgement at its final return boundary. It returns
+explicit true/false for managed deletion; the appended field defaults to None
+for unchanged legacy callers. A retry after actual deletion repairs only the
+original audit context and does not repeat Provider exit or resource release.
+Integrated host/delivery/SDK regression with formal core fba69354: 195 passed.

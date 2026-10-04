@@ -66,6 +66,7 @@ async def test_revoked_source_owner_deletes_through_actual_transaction(deletion)
 async def test_direct_runtime_uses_original_archive_locks_and_receipt(deletion):
     result = await deletion.tx.runtime.delete_session(channel_id='web', session_id=deletion.sid)
     assert result.ok and result.deleted
+    assert result.audit_pending is False
     assert lc.state('session', deletion.sid)['deleted'] is True
     assert txns.owner(deletion.tx)['retired'] is True
 

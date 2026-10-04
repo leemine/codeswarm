@@ -32,6 +32,26 @@ def repair_storage(d, before):
 
 
 @pytest.mark.asyncio
+async def test_direct_sdk_retains_pending_and_repairs_original_audit_without_repeating_exit(deletion, monkeypatch):
+    d = deletion
+    before, original_commit = corrupt_at_commit(d, monkeypatch)
+    result = await d.tx.runtime.delete_session(channel_id='web', session_id=d.sid)
+    assert result.ok and result.deleted and result.audit_pending is True
+    host = d.tx.setup.host
+    pending = copy.deepcopy(host._storage._load()['session_sharing']['owners'][d.sid]['deletion']['audit_pending'])
+    assert pending['context']['request_id'] is None
+    monkeypatch.setattr(host, 'commit_deletion', original_commit)
+    repair_storage(d, before)
+    result = await d.tx.runtime.delete_session(channel_id='web', session_id=d.sid)
+    assert result.ok and result.deleted and result.audit_pending is False
+    confirmed = [event for event in host._storage._load()['sharing_audit']['events']
+                 if event['facts'].get('action') == 'delete' and event['facts']['phase'] == 'exit_confirmed']
+    assert len(confirmed) == 1 and confirmed[0]['context'] == pending['context']
+    d.release.assert_awaited_once()
+    d.tx.manager.stop_existing_session_runtime.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_actual_pending_ack_then_same_sid_repairs_only_original_audit(delivery, monkeypatch):
     x = delivery
     before, original = corrupt_at_commit(x.d, monkeypatch)

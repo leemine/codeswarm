@@ -3195,10 +3195,17 @@ class AgentRuntime:
             try:
                 await SessionArchiveService(self).session(session_id, 'delete', channel_id,
                                                           _deletion_authority=authority)
+                # The direct SDK has no Gateway writer. Reconcile against its
+                # original receipt at this final delivery boundary too.
+                acknowledgement = authority.acknowledge()
+                audit_pending = acknowledgement.get('audit_pending')
+                if type(audit_pending) is not bool:
+                    raise LifecycleError('DELETE_UNCONFIRMED', 'Deletion audit status is unavailable.')
             except LifecycleError as exc:
                 return SessionDeleteResult.failure(session_id, code=exc.code, message=str(exc),
                     recovery_required=True)
-            return SessionDeleteResult(ok=True, session_id=session_id, channel_id=channel_id, deleted=True)
+            return SessionDeleteResult(ok=True, session_id=session_id, channel_id=channel_id,
+                                       deleted=True, audit_pending=audit_pending)
         self._authorize_session_mutation(session_id, channel_id)
         result = await self._session_provisioner.delete_session(
             channel_id=channel_id,
