@@ -36,6 +36,7 @@ from jiuwenswarm.common.ws_diagnostics import (
     describe_ws_peer,
     format_ws_diagnostics,
 )
+from jiuwenswarm.runtime.terminal_outcome import payload_terminal_status
 
 logger = logging.getLogger(__name__)
 
@@ -873,6 +874,11 @@ class WebChannel(BaseWsChannel):
                 if agent_template_name is not None:
                     payload["agent_template_name"] = agent_template_name
             if event_name == "chat.final":
+                # A typed empty final terminates the matching accumulated stream;
+                # retain its outcome without exposing arbitrary Provider fields.
+                terminal_status = payload_terminal_status(msg.payload)
+                if terminal_status is not None:
+                    payload["terminal_status"] = terminal_status
                 cron_extra = msg.payload.get("cron")
                 if isinstance(cron_extra, dict):
                     payload["cron"] = cron_extra

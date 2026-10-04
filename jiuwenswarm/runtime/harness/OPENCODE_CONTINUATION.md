@@ -104,3 +104,27 @@ such adapters. Cold manifests describe configured capabilities, not resource
 permission grants or proof of successful Provider execution. Required ordinary
 B3 browser/CLI validation remains separate from the deterministic cold-read →
 real AgentManager/Runtime factory regression.
+
+### Web terminal projection
+
+The ordinary Web send path preserves the existing typed `terminal_status` on
+`chat.final`, using the shared terminal-outcome parser. External FINISHED sends
+an empty final packet: the preceding `chat.delta` carries the answer, and the
+existing Web UI closes that same request's stream without replacing accumulated
+text. A final packet is not required to repeat the answer. No arbitrary Provider
+fields are added to the Web text-event projection.
+
+`chat.error` already uses the full-payload path; failed/cancelled/unknown status
+and error codes were not lost there. The deterministic regression runs actual
+EngineAgentAdapter output through MessageHandler and WebChannel.send into a
+synthetic socket, covering the completed packet plus existing error paths. It
+also checks that invalid terminal values and private fields do not leak through
+the final text projection. This is transport-contract evidence, not a browser
+or real Provider acceptance result.
+
+The ordinary 4144dc9d / core 8040687b B3 attempts retained separate evidence for
+the original manual-approval assumption, the final-text-only probe assumption,
+and the subsequent observed loss of completed metadata. None completed the
+required second Turn and normal UI deletion story. A newly integrated candidate
+must still pass that full ordinary UI story; this projection fix does not close
+B3, change approval policy, or authorize new real negative probes.
