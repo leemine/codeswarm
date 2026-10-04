@@ -31,6 +31,8 @@ from openjiuwen.harness_protocol import (
     TurnEventKind,
     TurnLifecycleEvent,
     UnsupportedHarnessCapabilityError,
+    freeze_json_object,
+    json_value_to_builtin,
 )
 from openjiuwen.harness_providers.io_adapter import HarnessIOAdapter, ProjectedOutput
 from openjiuwen.harness_providers.native import (
@@ -54,6 +56,22 @@ logger = logging.getLogger(__name__)
 
 _REQUEST_KEY = "native.host_request"
 _TERMINAL = {TurnEventKind.FINISHED, TurnEventKind.FAILED, TurnEventKind.ABORTED}
+
+
+def _initial_goal_operation(action, *, session_id, **kwargs):
+    """Private immutable admission arguments, shared with the actual dispatcher."""
+    if (action != 'set' or not isinstance(session_id, str) or not session_id
+            or set(kwargs) - {'objective', 'overwrite_confirmed', 'token_budget', 'max_attempts'}):
+        raise PermissionError('Managed Native initial Goal arguments are unsupported')
+    values = {'action': action, 'session_id': session_id, 'objective': kwargs.get('objective'),
+              'overwrite_confirmed': kwargs.get('overwrite_confirmed', False),
+              'token_budget': kwargs.get('token_budget'), 'max_attempts': kwargs.get('max_attempts')}
+    if ((values['objective'] is not None and not isinstance(values['objective'], str))
+            or type(values['overwrite_confirmed']) is not bool
+            or any(values[key] is not None and type(values[key]) is not int
+                   for key in ('token_budget', 'max_attempts'))):
+        raise PermissionError('Managed Native initial Goal argument types are unsupported')
+    return freeze_json_object(values)
 
 
 @dataclass(frozen=True, eq=False, repr=False)
@@ -180,6 +198,7 @@ class _HostRequest:
     goal: Callable[[Any], Awaitable[dict[str, Any]]] | None = field(
         default=None, repr=False
     )
+    goal_operation: Any = field(default=None, repr=False)
     attach_goal: bool = False
     result: asyncio.Future | None = field(default=None, repr=False)
     resumes: list[SendInputRequest] = field(default_factory=list, repr=False)
@@ -1028,18 +1047,29 @@ class NativeExecutionSession:
         if action not in {"set", "resume"} or self._goal_dispatcher is None:
             raise ValueError("submit_goal requires a configured set/resume dispatcher")
 
-        async def operation(agent):
-            return await self._goal_dispatcher(action=action, **kwargs)
-
+        goal_operation = None
         if self._require_execution_origin:
             if self._native.active_turn is not None:
                 raise UnsupportedHarnessCapabilityError("Managed Native active Goal control requires an original owner selector")
             if action != "set":
                 raise UnsupportedHarnessCapabilityError("Managed Native idle Goal resume requires a new original admission")
+            goal_operation = _initial_goal_operation(action,
+                session_id=kwargs.get('session_id', self.engine.binding.host_session_id),
+                **{key: value for key, value in kwargs.items() if key != 'session_id'})
+            if goal_operation['session_id'] != self.engine.binding.host_session_id:
+                raise PermissionError('Managed Native initial Goal session differs from Binding')
+            # Snapshot before lifecycle factories/source checkers can reenter.
+            kwargs = {key: value for key, value in json_value_to_builtin(goal_operation).items()
+                      if key in kwargs}
+
+        async def operation(agent):
+            return await self._goal_dispatcher(action=action, **kwargs)
+
+        if self._require_execution_origin:
             if not isinstance(request, SendInputRequest) or not request.request_id:
                 raise PermissionError("Managed Native initial Goal requires its actual request")
         result = asyncio.get_running_loop().create_future()
-        token = self._register_host_request(request=request, goal=operation, result=result)
+        token = self._register_host_request(request=request, goal=operation, goal_operation=goal_operation, result=result)
         try:
             receipt = await self._send(
                 HarnessInput(content="", metadata={_REQUEST_KEY: token}),

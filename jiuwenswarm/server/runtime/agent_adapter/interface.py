@@ -2991,6 +2991,76 @@ class JiuWenSwarm:
         """Process a request through the facade-owned Session scheduler."""
         return await self._process_message(request, schedule_session=True)
 
+    def _cached_native_goal_runtime(self, request):
+        root = getattr(self, '_adapter', None)
+        slots = getattr(root, '_session_adapters', {})
+        child = (root if getattr(root, '_is_session_scoped_adapter', False) is True
+                 else slots.get(request.session_id) if isinstance(slots, dict) else None)
+        return getattr(child, '_native_execution', None)
+
+    def _capture_native_goal_request(self, request):
+        """Capture one Runtime-injected control without allocating any executor."""
+        if not hasattr(request, '_native_goal_control'):
+            params = request.params if isinstance(request.params, dict) else {}
+            if str(params.get('action', 'get') or 'get').strip().lower() != 'get':
+                from jiuwenswarm.governance.organization_auth import configured_authenticator
+                from jiuwenswarm.governance.tool_context import submitted_native_lifecycle_factory
+                native = self._cached_native_goal_runtime(request)
+                if (getattr(native, '_require_execution_origin', False)
+                        or submitted_native_lifecycle_factory() is not None
+                        or configured_authenticator() is not None):
+                    raise PermissionError('Managed Native Goal mutation requires original control admission')
+            return None
+        from jiuwenswarm.runtime.harness.native_goal_control import NativeGoalControl
+
+        cap = request._native_goal_control
+        if type(cap) is not NativeGoalControl:
+            raise PermissionError('Native Goal control capability is invalid')
+        root = self._adapter
+        sid, rid = request.session_id, request.request_id
+        if sid != cap.binding.host_session_id or rid != cap.request_id:
+            raise PermissionError('Native Goal control request differs from its owner')
+        scoped = getattr(root, '_is_session_scoped_adapter', False) is True
+        slots = None if scoped else getattr(root, '_session_adapters', None)
+        child = root if scoped else (slots.get(sid) if isinstance(slots, dict) else None)
+        native = getattr(child, '_native_execution', None)
+        raw = json.dumps(request.params, sort_keys=True, allow_nan=False)
+
+        def facts():
+            return (self._adapter is root and child is not None and native is cap.native
+                    and getattr(child, '_native_execution', None) is native
+                    and getattr(child, '_parent_session_id', None) == sid
+                    and getattr(child, '_instance', None) is cap.agent
+                    and (scoped or (getattr(root, '_session_adapters', None) is slots and slots.get(sid) is child))
+                    and request.session_id == sid and request.request_id == rid
+                    and getattr(request, '_native_goal_control', None) is cap
+                    and json.dumps(request.params, sort_keys=True, allow_nan=False) == raw)
+
+        def check(*, result=False):
+            if not facts():
+                raise PermissionError('Native Goal control route changed')
+            (cap.check_result if result else cap.check_current)()
+            if not facts():
+                raise PermissionError('Native Goal control route changed')
+
+        check()
+        return cap, child, sid, check
+
+    @staticmethod
+    async def _record_native_goal_control_history(request, child, result, check):
+        if (result.get('action') != 'set'
+                or result.get('result_type') in {'goal_error', 'goal_confirm_required'}):
+            return
+        check(result=True)
+        record = getattr(child, '_record_goal_set_history_if_needed', None)
+        if not callable(record):
+            raise RuntimeError('Original Native Goal history writer unavailable')
+        saved = record(request, action='set', result_type=result.get('result_type'),
+                       goal_payload=result.get('goal'))
+        if inspect.isawaitable(saved):
+            await saved
+        check(result=True)
+
     async def execute_message(self, request: AgentRequest) -> AgentResponse:
         """Execute one request when scheduling is owned by AgentRuntime."""
         return await self._process_message(request, schedule_session=False)
@@ -3046,25 +3116,36 @@ class JiuWenSwarm:
         # Non-stream goal command (GET, PAUSE, CLEAR)
         if request.req_method == ReqMethod.COMMAND_GOAL:
             try:
-                adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
-                self._select_execution_before_mcp(adapter, request)
+                captured = self._capture_native_goal_request(request)
                 params = request.params if isinstance(request.params, dict) else {}
                 action = params.get("action", "get")
-                session_id = self._session_manager.get_session_id(request.session_id)
+                if captured is None:
+                    adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+                    self._select_execution_before_mcp(adapter, request)
+                    session_id = self._session_manager.get_session_id(request.session_id)
+                else:
+                    cap, adapter, session_id, check = captured
                 logger.info(
                     "[Goal] COMMAND_GOAL received: request_id=%s action=%s "
                     "resolved_session_id=%s",
                     request.request_id, action, session_id,
                 )
                 # Pass protocol fields straight to the Goal capability adapter.
-                goal_result = await adapter.handle_goal_command_structured(params, session_id)
+                if captured is None:
+                    goal_result = await adapter.handle_goal_command_structured(params, session_id)
+                else:
+                    from . import goal_control
+                    goal_result = await goal_control.dispatch_goal_control(
+                        cap, **goal_control.structured_goal_control_kwargs(params))
+                    check(result=True)
+                    await self._record_native_goal_control_history(request, adapter, goal_result, check)
                 if goal_result is not None:
                     result_type = goal_result.get("result_type")
                     ok = result_type not in {"goal_error", "goal_confirm_required"}
                     # Only set writes user history (objective as the user turn).
                     # pause / resume / clear / get stay control-only.
                     # 忙碌时与流式路径同一 helper：推迟到上一轮收尾再落盘。
-                    if ok and str(action or "").strip().lower() == "set":
+                    if captured is None and ok and str(action or "").strip().lower() == "set":
                         goal_obj = goal_result.get("goal")
                         record_fn = getattr(adapter, "_record_goal_set_history_if_needed", None)
                         if callable(record_fn):
@@ -3117,6 +3198,8 @@ class JiuWenSwarm:
                     }
                     if not ok and human_text:
                         payload["error"] = human_text
+                    if captured is not None:
+                        check(result=True)
                     return AgentResponse(
                         request_id=request.request_id,
                         channel_id=request.channel_id,
@@ -3452,12 +3535,26 @@ class JiuWenSwarm:
         if request.req_method == ReqMethod.COMMAND_GOAL:
             params = request.params if isinstance(request.params, dict) else {}
             action = str(params.get("action", "get") or "get").strip().lower()
-            if action not in {"set", "resume"}:
+            native = self._cached_native_goal_runtime(request)
+            managed_control = (getattr(native, '_require_execution_origin', False)
+                               and (action == 'resume'
+                                    or getattr(native._native, 'active_turn', None) is not None))
+            if (hasattr(request, '_native_goal_control') or action not in {"set", "resume"}
+                    or managed_control):
                 try:
-                    adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
-                    self._select_execution_before_mcp(adapter, request)
-                    session_id = self._session_manager.get_session_id(request.session_id)
-                    goal_result = await adapter.handle_goal_command_structured(params, session_id)
+                    captured = self._capture_native_goal_request(request)
+                    if captured is None:
+                        adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+                        self._select_execution_before_mcp(adapter, request)
+                        session_id = self._session_manager.get_session_id(request.session_id)
+                        goal_result = await adapter.handle_goal_command_structured(params, session_id)
+                    else:
+                        from . import goal_control
+                        cap, adapter, session_id, check = captured
+                        goal_result = await goal_control.dispatch_goal_control(
+                            cap, **goal_control.structured_goal_control_kwargs(params))
+                        check(result=True)
+                        await self._record_native_goal_control_history(request, adapter, goal_result, check)
                     if goal_result is None:
                         yield AgentResponseChunk(
                             request_id=request.request_id,
@@ -3467,6 +3564,15 @@ class JiuWenSwarm:
                         )
                         return
                     result_type = goal_result.get("result_type")
+                    if captured is not None:
+                        check(result=True)
+                    if result_type == 'goal_confirm_required':
+                        yield AgentResponseChunk(request_id=request.request_id, channel_id=request.channel_id,
+                            payload={'event_type': 'goal.confirm_required',
+                                     'existing_goal': goal_result.get('existing_goal'),
+                                     'requested_objective': goal_result.get('requested_objective')},
+                            is_complete=True)
+                        return
                     if result_type == "goal_error":
                         yield AgentResponseChunk(
                             request_id=request.request_id,

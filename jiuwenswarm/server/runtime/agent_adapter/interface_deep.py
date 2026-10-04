@@ -15075,6 +15075,69 @@ class JiuWenSwarmDeepAdapter:
         session_id: str = "default",
     ) -> dict[str, Any] | None:
         """Map JiuwenSwarm protocol fields to the independent Goal methods."""
+        if str(action).strip().lower() != 'get':
+            from jiuwenswarm.governance.organization_auth import configured_authenticator
+            from jiuwenswarm.governance.tool_context import submitted_native_lifecycle_factory
+            native = getattr(self, '_native_execution', None)
+            child = (self if self._is_session_scoped_adapter
+                     else getattr(self, '_session_adapters', {}).get(self._session_adapter_key(session_id)))
+            selected = getattr(child, '_native_execution', None)
+            managed = (getattr(selected, '_require_execution_origin', False)
+                       or submitted_native_lifecycle_factory() is not None
+                       or configured_authenticator() is not None)
+            if managed:
+                from openjiuwen.core.controller.schema.execution_origin import (
+                    current_execution_origin, _capture_live_execution_origin,
+                )
+                from jiuwenswarm.runtime.harness.native_session import _initial_goal_operation, _REQUEST_KEY
+                # Only the original pending admission may perform its initial
+                # set here. Active controls use the facade's explicit capability.
+                source = current_execution_origin()
+                pending = native._native.active_turn if native is not None else None
+                owner = getattr(native, '_tool_owner', None)
+                token = pending.content.metadata.get(_REQUEST_KEY) if pending is not None else None
+                entry = native._requests.get(token) if native is not None else None
+                expected = getattr(entry, 'goal_operation', None)
+                request, lifecycle, owned, result, goal = (
+                    (entry.request, entry.lifecycle, entry.owned, entry.result, entry.goal)
+                    if entry is not None else (None,) * 5)
+                actual = _initial_goal_operation(action, session_id=session_id, objective=objective,
+                    overwrite_confirmed=overwrite_confirmed, token_budget=token_budget, max_attempts=max_attempts)
+                task = asyncio.current_task()
+                manager = self._get_goal_manager()
+                def admitted():
+                    return (self._is_session_scoped_adapter and native is selected
+                            and getattr(self, '_native_execution', None) is native
+                            and owner is not None and native._tool_owner is owner
+                            and owner[0] is self._instance and pending is not None
+                            and native.engine.binding is owner[3]
+                            and self._parent_session_id == session_id == owner[3].host_session_id
+                            and native._native.active_turn is pending
+                            and native._native._capture_owned_turn(pending.turn_id) is pending
+                            and pending._agent is owner[0] and pending._session is owner[2]
+                            and source is not None and pending._origin is source
+                            and current_execution_origin() is source
+                            and task is asyncio.current_task() and task in pending._admissions
+                            and not task.done() and not task.cancelling()
+                            and not pending.abort_requested and pending._exit is None
+                            and not native._closing and not native._closed
+                            and native._requests.get(token) is entry
+                            and pending.content.metadata.get(_REQUEST_KEY) == token
+                            and entry is not None and goal is not None and entry.goal is goal
+                            and entry.request is request and entry.lifecycle is lifecycle
+                            and entry.owned is owned and entry.result is result
+                            and entry.goal_operation is expected and expected == actual
+                            and entry.request is not None and entry.lifecycle is not None
+                            and entry.owned is not None and entry.owned._entry is entry
+                            and entry.owned._pending is pending and entry.owned._native is native
+                            and entry.owned.source is entry.lifecycle.source
+                            and source.host_value is entry.lifecycle.source.host_value
+                            and entry.request.request_id == entry.owned.request_id
+                            and entry.result is not None and not entry.result.done()
+                            and self._get_goal_manager() is manager and manager is not None
+                            and owner[0].goal_manager is manager)
+                if not admitted() or _capture_live_execution_origin() is not source or not admitted():
+                    raise PermissionError('Managed Native initial Goal admission is unavailable')
         if not self._is_session_scoped_adapter:
             session_adapter = await self._get_or_create_session_adapter(session_id)
             try:
