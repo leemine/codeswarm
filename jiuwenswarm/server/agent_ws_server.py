@@ -2405,6 +2405,7 @@ class AgentWebSocketServer:
 
         from jiuwenswarm.governance.organization_auth import configured_authenticator
         permit = None
+        rewind_authority = None
         if configured_authenticator() is not None:
             from jiuwenswarm.governance.session_boundary import admit_session_request, set_delivery_permit
             try:
@@ -2417,6 +2418,9 @@ class AgentWebSocketServer:
                     host=host, envelope_session=(request.session_id if (request.params or {}).get("session_id") else None),
                 )
                 set_delivery_permit(permit)
+                from jiuwenswarm.server.runtime.session.rewind_authority import REWIND_METHODS, capture_rewind_authority
+                if permit.method in REWIND_METHODS:
+                    rewind_authority = capture_rewind_authority(self, request, permit)
                 if request.req_method == ReqMethod.SESSION_DELETE:
                     self._execution_runtime().prepare_session_deletion(request, permit)
                 elif permit.cleanup is not None:
@@ -2543,6 +2547,8 @@ class AgentWebSocketServer:
             # automatic team binding or any other request-side effect. Runtime
             # execution below is told not to trigger this hook a second time.
             await self._trigger_before_chat_request_hook(request)
+            if rewind_authority is not None:
+                rewind_authority.check_initial_context()
 
             if request.req_method == ReqMethod.HEARTBEAT_JOB:
                 await self._handle_heartbeat_job(ws, request, send_lock)
@@ -2570,16 +2576,16 @@ class AgentWebSocketServer:
                 await self._handle_session_input_intent(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.SESSION_REWIND:
-                await self._handle_session_rewind_full(ws, request, send_lock)
+                await self._handle_session_rewind_full(ws, request, send_lock, **({"authorization_check": rewind_authority} if rewind_authority is not None else {}))
                 return
             if request.req_method == ReqMethod.SESSION_REWIND_AND_RESTORE:
-                await self._handle_session_rewind_full(ws, request, send_lock, restore_files=True)
+                await self._handle_session_rewind_full(ws, request, send_lock, restore_files=True, **({"authorization_check": rewind_authority} if rewind_authority is not None else {}))
                 return
             if request.req_method == ReqMethod.SESSION_REWIND_COMPACT:
-                await self._handle_session_rewind_full(ws, request, send_lock, compact=True)
+                await self._handle_session_rewind_full(ws, request, send_lock, compact=True, **({"authorization_check": rewind_authority} if rewind_authority is not None else {}))
                 return
             if request.req_method == ReqMethod.SESSION_REWIND_CONTEXT:
-                await self._handle_session_rewind_context(ws, request, send_lock)
+                await self._handle_session_rewind_context(ws, request, send_lock, **({"authorization_check": rewind_authority} if rewind_authority is not None else {}))
                 return
             if request.req_method == ReqMethod.TEAM_TEMPLATES_LIST:
                 await self._handle_team_templates_list(ws, request, send_lock)
@@ -5770,6 +5776,7 @@ class AgentWebSocketServer:
         self,
         channel_id: str,
         session_id: str | None = None,
+        authorization_check=None,
     ) -> tuple[Any, Any] | None:
         """Return (deep_agent, react_agent) for rewind context rebuild.
 
@@ -5779,6 +5786,16 @@ class AgentWebSocketServer:
         user turn will read — updating them leaves the model still seeing
         rewound turns.
         """
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        from jiuwenswarm.server.runtime.session.rewind_authority import RewindAuthority
+        if authorization_check is not None:
+            if (type(authorization_check) is not RewindAuthority
+                    or authorization_check.session_id != session_id
+                    or authorization_check.channel_id != channel_id):
+                raise PermissionError('original rewind authority required')
+            return authorization_check.resolve()
+        if configured_authenticator() is not None:
+            raise PermissionError('organization rewind requires original authority')
         sid = str(session_id or "").strip()
         agent = (
             self._agent_manager.get_agent_for_session_nowait(
@@ -5858,13 +5875,21 @@ class AgentWebSocketServer:
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock,
         restore_files: bool = False,
         compact: bool = False,
+        authorization_check=None,
     ) -> None:
         """Full rewind: truncate history.json + context_engine + update checkpointer."""
         from jiuwenswarm.agents.harness.common.session_ops_service import (
             rewind_session,
-            rewind_session_context,
+            rewind_session_context, _check_rewind_authority, _rewind_options,
         )
 
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        from jiuwenswarm.server.runtime.session.rewind_authority import RewindAuthority
+        if configured_authenticator() is not None and type(authorization_check) is not RewindAuthority:
+            raise PermissionError('original rewind authority required')
+        _check_rewind_authority(authorization_check)
+        if authorization_check is not None:
+            authorization_check.check_initial_context()
         params = request.params if isinstance(request.params, dict) else {}
         target_sid = str(params.get("session_id") or request.session_id or "").strip()
         turn_index = params.get("turn_index")
@@ -5897,7 +5922,8 @@ class AgentWebSocketServer:
             restore_result: dict[str, Any] = {}
             if restore_files:
                 from jiuwenswarm.agents.harness.common.session_ops_service import restore_session_files
-                restore_result = restore_session_files(session_id=target_sid, turn_index=turn_index)
+                restore_result = restore_session_files(session_id=target_sid, turn_index=turn_index, **_rewind_options(authorization_check),
+                    **({"project_dir": dict(authorization_check._binding)["project_dir"]} if authorization_check is not None else {}))
 
             # Step 2: Truncate history.json (local file operation)
             # "up_to" direction: keep messages from turn_index onward, summarize the prefix.
@@ -5909,10 +5935,10 @@ class AgentWebSocketServer:
                     session_id=target_sid,
                     turn_index=turn_index,
                     direction="up_to",
-                    llm_summary=compact_summary,
+                    llm_summary=compact_summary, **_rewind_options(authorization_check),
                 )
             else:
-                rewind_result = rewind_session(session_id=target_sid, turn_index=turn_index)
+                rewind_result = rewind_session(session_id=target_sid, turn_index=turn_index, **_rewind_options(authorization_check))
 
             # Step 3: Truncate context_engine in-place + persist to checkpointer.
             # rewind_session_context reads the already-truncated history.json and
@@ -5920,9 +5946,10 @@ class AgentWebSocketServer:
             # correct result for both "from" and "up_to" directions.
             context_ok = False
             pair = await self._resolve_rewind_agent(
-                request.channel_id or "default",
-                session_id=target_sid,
+                (authorization_check.channel_id if authorization_check is not None else request.channel_id or "default"),
+                session_id=target_sid, **({"authorization_check": authorization_check} if authorization_check is not None else {}),
             )
+            _check_rewind_authority(authorization_check)
             if pair is None:
                 logger.warning(
                     "[AgentWS] session.rewind: no agent for context rebuild "
@@ -5934,11 +5961,16 @@ class AgentWebSocketServer:
             else:
                 deep_agent, _react_agent = pair
                 try:
+                    if authorization_check is not None:
+                        authorization_check.check_initial_context()
                     context_ok = await rewind_session_context(
                         deep_agent=deep_agent,
                         session_id=target_sid,
-                        turn_index=turn_index,
+                        turn_index=turn_index, **_rewind_options(authorization_check),
                     )
+                    _check_rewind_authority(authorization_check)
+                except PermissionError:
+                    raise
                 except Exception as exc:
                     logger.warning(
                         "[AgentWS] session.rewind context truncation failed: %s", exc,
@@ -5971,10 +6003,10 @@ class AgentWebSocketServer:
                     else f"Summarized {summarized_count} messages up to this point."
                 )
 
-                await run_history_io(append_history_record,
+                await run_history_io(append_history_record, **_rewind_options(authorization_check),
                     session_id=target_sid,
                     request_id=request_id,
-                    channel_id=request.channel_id or "tui",
+                    channel_id=(authorization_check.channel_id if authorization_check is not None else request.channel_id or "tui"),
                     role="assistant",
                     event_type="context.compact_boundary",
                     content="Conversation compacted",
@@ -5988,11 +6020,12 @@ class AgentWebSocketServer:
                         },
                     },
                 )
+                _check_rewind_authority(authorization_check)
 
-                await run_history_io(append_history_record,
+                await run_history_io(append_history_record, **_rewind_options(authorization_check),
                     session_id=target_sid,
                     request_id=request_id,
-                    channel_id=request.channel_id or "tui",
+                    channel_id=(authorization_check.channel_id if authorization_check is not None else request.channel_id or "tui"),
                     role="assistant",
                     event_type="context.rewind_summary",
                     content=short_text,
@@ -6007,12 +6040,13 @@ class AgentWebSocketServer:
                         "is_compact_summary": True,
                     },
                 )
+                _check_rewind_authority(authorization_check)
 
                 if isinstance(compact_summary, str) and compact_summary.strip():
-                    await run_history_io(append_history_record,
+                    await run_history_io(append_history_record, **_rewind_options(authorization_check),
                         session_id=target_sid,
                         request_id=request_id,
-                        channel_id=request.channel_id or "tui",
+                        channel_id=(authorization_check.channel_id if authorization_check is not None else request.channel_id or "tui"),
                         role="assistant",
                         event_type="context.compact_summary",
                         content=compact_summary.strip(),
@@ -6028,9 +6062,11 @@ class AgentWebSocketServer:
                             "transcript_only": True,
                         },
                     )
+                    _check_rewind_authority(authorization_check)
 
                 payload["summarized_messages"] = summarized_count
 
+            _check_rewind_authority(authorization_check)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -6046,6 +6082,8 @@ class AgentWebSocketServer:
                 payload={"error": str(exc), "code": "BAD_REQUEST"},
                 metadata=request.metadata,
             )
+        except PermissionError:
+            raise
         except Exception as exc:
             logger.exception("[AgentWS] session.rewind failed: %s", exc)
             resp = AgentResponse(
@@ -6058,17 +6096,25 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
+            _check_rewind_authority(authorization_check)
             await send_wire_payload(ws, wire)
 
     async def _handle_session_rewind_context(
-        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock, *, authorization_check=None,
     ) -> None:
         """Truncate history.json + in-memory context_engine for a session."""
         from jiuwenswarm.agents.harness.common.session_ops_service import (
             rewind_session,
-            rewind_session_context,
+            rewind_session_context, _check_rewind_authority, _rewind_options,
         )
 
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        from jiuwenswarm.server.runtime.session.rewind_authority import RewindAuthority
+        if configured_authenticator() is not None and type(authorization_check) is not RewindAuthority:
+            raise PermissionError('original rewind authority required')
+        _check_rewind_authority(authorization_check)
+        if authorization_check is not None:
+            authorization_check.check_initial_context()
         params = request.params if isinstance(request.params, dict) else {}
         target_sid = str(params.get("session_id") or request.session_id or "").strip()
         turn_index = params.get("turn_index")
@@ -6094,9 +6140,10 @@ class AgentWebSocketServer:
             return
 
         pair = await self._resolve_rewind_agent(
-            request.channel_id or "default",
-            session_id=target_sid,
+            (authorization_check.channel_id if authorization_check is not None else request.channel_id or "default"),
+            session_id=target_sid, **({"authorization_check": authorization_check} if authorization_check is not None else {}),
         )
+        _check_rewind_authority(authorization_check)
         if pair is None:
             wire = AgentWebSocketServer._send_error_response(
                 ws, request, send_lock, "no agent instance available",
@@ -6110,12 +6157,15 @@ class AgentWebSocketServer:
             # Truncate history.json first so rewind_session_context reads the
             # correct truncated state (the new implementation rebuilds context
             # from history.json on disk).
-            rewind_result = rewind_session(session_id=target_sid, turn_index=turn_index)
+            rewind_result = rewind_session(session_id=target_sid, turn_index=turn_index, **_rewind_options(authorization_check))
+            if authorization_check is not None:
+                authorization_check.check_initial_context()
             context_ok = await rewind_session_context(
                 deep_agent=deep_agent,
                 session_id=target_sid,
-                turn_index=turn_index,
+                turn_index=turn_index, **_rewind_options(authorization_check),
             )
+            _check_rewind_authority(authorization_check)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -6131,6 +6181,8 @@ class AgentWebSocketServer:
                 payload={"error": str(exc), "code": "BAD_REQUEST"},
                 metadata=request.metadata,
             )
+        except PermissionError:
+            raise
         except Exception as exc:
             logger.exception("[AgentWS] session.rewind_context failed: %s", exc)
             resp = AgentResponse(
@@ -6143,6 +6195,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
+            _check_rewind_authority(authorization_check)
             await send_wire_payload(ws, wire)
 
     async def _handle_permissions_config(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:

@@ -535,11 +535,33 @@ def fork_session(
     }
 
 
+class RewindAuthorizationDenied(PermissionError):
+    """A host denial must not be downgraded by legacy best-effort recovery."""
+
+
+def _check_rewind_authority(check):
+    if check is not None:
+        try:
+            check()
+        except PermissionError as exc:
+            raise RewindAuthorizationDenied('original rewind authority changed') from exc
+
+
+def _rewind_options(check):
+    return {'authorization_check': lambda: _check_rewind_authority(check)} if check is not None else {}
+
+
+def _rewind_metadata_options(check):
+    return {'authorization_check': lambda: _check_rewind_authority(check), 'sync_write': True, 'cache_bust': True} if check is not None else {}
+
+
 def rewind_session(
     *,
     session_id: str,
     turn_index: int,
+    authorization_check=None,
 ) -> dict[str, Any]:
+    _check_rewind_authority(authorization_check)
     if turn_index < 1:
         raise ValueError("turn_index must be >= 1")
 
@@ -587,16 +609,19 @@ def rewind_session(
         from jiuwenswarm.server.utils.diff_service import get_diff_service
 
         project_dir = get_diff_service().resolve_project_dir(session_id)
+    except RewindAuthorizationDenied:
+        raise
     except Exception as exc:
         logger.warning("rewind_session: failed to resolve project_dir: %s", exc)
 
-    result = truncate_history_records(session_id=session_id, cut_index=cut_index)
+    result = truncate_history_records(session_id=session_id, cut_index=cut_index, **_rewind_options(authorization_check))
 
     from jiuwenswarm.server.runtime.session.session_metadata import update_session_metadata
 
     update_session_metadata(
         session_id=session_id,
         set_message_count=result["remaining_records"],
+        **_rewind_metadata_options(authorization_check),
     )
 
     # 清理 session-specific file_ops 日志，使 turn diff 显示与截断后的 history 一致
@@ -608,9 +633,12 @@ def rewind_session(
         try:
             from jiuwenswarm.server.utils.diff_service import get_diff_service
 
+            _check_rewind_authority(authorization_check)
             get_diff_service().truncate_file_ops_by_timestamp(
                 session_id, cut_timestamp, project_dir=project_dir, soft=True,
             )
+        except RewindAuthorizationDenied:
+            raise
         except Exception as exc:
             logger.warning("rewind_session: failed to truncate file_ops: %s", exc)
 
@@ -630,7 +658,9 @@ def compact_partial_session(
     turn_index: int,
     direction: str = "from",
     llm_summary: str | None = None,
+    authorization_check=None,
 ) -> dict[str, Any]:
+    _check_rewind_authority(authorization_check)
     if turn_index < 1:
         raise ValueError("turn_index must be >= 1")
 
@@ -680,10 +710,12 @@ def compact_partial_session(
             from jiuwenswarm.server.utils.diff_service import get_diff_service
 
             compact_project_dir = get_diff_service().resolve_project_dir(session_id)
+        except RewindAuthorizationDenied:
+            raise
         except Exception as exc:
             logger.warning("compact_partial_session: failed to resolve project_dir: %s", exc)
 
-        result = truncate_history_records(session_id=session_id, cut_index=target_user_index)
+        result = truncate_history_records(session_id=session_id, cut_index=target_user_index, **_rewind_options(authorization_check))
         remaining = result["remaining_records"]
         removed = result["removed_records"]
 
@@ -691,10 +723,13 @@ def compact_partial_session(
         if cut_timestamp is not None:
             try:
                 from jiuwenswarm.server.utils.diff_service import get_diff_service
+                _check_rewind_authority(authorization_check)
                 get_diff_service().truncate_file_ops_by_timestamp(
                     session_id, cut_timestamp,
                     project_dir=compact_project_dir, soft=True,
                 )
+            except RewindAuthorizationDenied:
+                raise
             except Exception as exc:
                 logger.warning("compact_partial_session: failed to truncate file_ops: %s", exc)
 
@@ -706,13 +741,15 @@ def compact_partial_session(
 
         _WRITE_QUEUE.join()
         with _FILE_LOCK:
-            _write_records_to_path(history_path, kept)
+            _check_rewind_authority(authorization_check)
+            _write_records_to_path(history_path, kept, **_rewind_options(authorization_check))
     else:
         raise ValueError(f"unknown direction: {direction}")
 
     update_session_metadata(
         session_id=session_id,
         set_message_count=remaining,
+        **_rewind_metadata_options(authorization_check),
     )
 
     request_id = str(uuid.uuid4())
@@ -759,6 +796,7 @@ def compact_partial_session(
 
     _WRITE_QUEUE.join()
     with _FILE_LOCK:
+        _check_rewind_authority(authorization_check)
         existing = load_history_records(session_id) if history_path.exists() else []
         if not isinstance(existing, list):
             existing = []
@@ -785,7 +823,7 @@ def compact_partial_session(
             }
             existing.append(compact_summary_record)
 
-        _write_records_to_path(history_path, existing)
+        _write_records_to_path(history_path, existing, **_rewind_options(authorization_check))
 
     return {
         "session_id": session_id,
@@ -1021,6 +1059,7 @@ def restore_session_files(
     turn_index: int,
     project_dir: str | None = None,
     extra_history_roots: list[str] | None = None,
+    authorization_check=None,
 ) -> dict[str, Any]:
     """恢复指定 turn 之后所有被修改的文件到目标 turn 开始前的状态.
 
@@ -1043,6 +1082,7 @@ def restore_session_files(
     """
     from jiuwenswarm.server.utils.diff_service import get_diff_service
 
+    _check_rewind_authority(authorization_check)
     diff_service = get_diff_service()
     files_to_restore = diff_service.get_files_to_restore(
         session_id,
@@ -1069,7 +1109,9 @@ def restore_session_files(
         try:
             if info["action"] == "write":
                 # 文件在目标 turn 前已有内容，写回 old_content
+                _check_rewind_authority(authorization_check)
                 path.parent.mkdir(parents=True, exist_ok=True)
+                _check_rewind_authority(authorization_check)
                 path.write_text(
                     info["restore_content"], encoding="utf-8", newline=""
                 )
@@ -1077,8 +1119,11 @@ def restore_session_files(
             elif info["action"] == "delete":
                 # 文件由 agent 在目标 turn 后创建，删除
                 if path.exists():
+                    _check_rewind_authority(authorization_check)
                     path.unlink()
                     deleted.append(file_path)
+        except RewindAuthorizationDenied:
+            raise
         except Exception as exc:
             errors.append({"file": file_path, "error": str(exc)})
             logger.warning(
@@ -1635,6 +1680,7 @@ async def rewind_session_context(
     deep_agent: "DeepAgent",
     session_id: str,
     turn_index: int,
+    authorization_check=None,
 ) -> bool:
     """Rebuild context_engine from truncated history.json and persist to checkpointer.
 
@@ -1653,6 +1699,7 @@ async def rewind_session_context(
         AssistantMessage,
     )
 
+    _check_rewind_authority(authorization_check)
     react_agent = deep_agent.react_agent
     if react_agent is None:
         logger.warning("rewind_session_context: no react_agent for %s", session_id)
@@ -1685,6 +1732,7 @@ async def rewind_session_context(
             turn_index=turn_index,
             context_messages=[],
             skipped=0,
+            **_rewind_options(authorization_check),
         )
 
     # --- 2. Convert history.json records → openjiuwen BaseMessage list ---
@@ -1705,6 +1753,7 @@ async def rewind_session_context(
         turn_index=turn_index,
         context_messages=context_messages,
         skipped=skipped,
+        **_rewind_options(authorization_check),
     )
 
 
@@ -1742,20 +1791,27 @@ async def _wipe_session_runtime_state(
     session: Any,
     react_agent: Any,
     session_id: str,
+    authorization_check=None,
 ) -> None:
     """Clear context / deep-agent / HITL keys on a live or temp Session."""
     from openjiuwen.harness.schema.state import _SESSION_STATE_KEY
 
     try:
+        _check_rewind_authority(authorization_check)
         session.update_state({"context": None})
+        _check_rewind_authority(authorization_check)
         session.update_state({_SESSION_STATE_KEY: None})
         try:
             from openjiuwen.core.single_agent.interrupt.state import (
                 INTERRUPTION_KEY,
                 INTERRUPT_AUTO_CONFIRM_KEY,
             )
+            _check_rewind_authority(authorization_check)
             session.update_state({INTERRUPTION_KEY: None})
+            _check_rewind_authority(authorization_check)
             session.update_state({INTERRUPT_AUTO_CONFIRM_KEY: None})
+        except RewindAuthorizationDenied:
+            raise
         except Exception as int_exc:
             logger.warning(
                 "rewind_session_context: HITL interrupt wipe failed for %s: %s",
@@ -1764,12 +1820,17 @@ async def _wipe_session_runtime_state(
         try:
             hitl_handler = getattr(react_agent, "_hitl_handler", None)
             if hitl_handler is not None:
+                _check_rewind_authority(authorization_check)
                 hitl_handler.clear(session)
+        except RewindAuthorizationDenied:
+            raise
         except Exception as int_exc:
             logger.warning(
                 "rewind_session_context: in-memory HITL clear failed for %s: %s",
                 session_id, int_exc,
             )
+    except RewindAuthorizationDenied:
+        raise
     except Exception as exc:
         logger.warning("rewind_session_context: state wipe failed for %s: %s", session_id, exc)
 
@@ -1781,12 +1842,19 @@ async def _persist_rewound_session(
     context_engine: Any,
     session_id: str,
     is_live_session: bool,
+    authorization_check=None,
 ) -> bool:
     """Save rebuilt context; commit live sessions without post_run side effects."""
     try:
+        _check_rewind_authority(authorization_check)
         await context_engine.save_contexts(session)
+        _check_rewind_authority(authorization_check)
         try:
+            _check_rewind_authority(authorization_check)
             deep_agent.save_state(session)
+            _check_rewind_authority(authorization_check)
+        except RewindAuthorizationDenied:
+            raise
         except Exception as save_exc:
             logger.warning(
                 "rewind_session_context: deep_agent.save_state failed for %s: %s",
@@ -1797,12 +1865,20 @@ async def _persist_rewound_session(
             # chat must keep using the same Session object.
             commit = getattr(session, "commit", None)
             if callable(commit):
+                _check_rewind_authority(authorization_check)
                 await commit()
+                _check_rewind_authority(authorization_check)
             else:
+                _check_rewind_authority(authorization_check)
                 await session.post_run()
+                _check_rewind_authority(authorization_check)
         else:
+            _check_rewind_authority(authorization_check)
             await session.post_run()
+            _check_rewind_authority(authorization_check)
         return True
+    except RewindAuthorizationDenied:
+        raise
     except Exception as exc:
         logger.warning(
             "rewind_session_context: checkpointer persist failed for %s: %s",
@@ -1819,10 +1895,12 @@ async def _apply_rewound_context(
     turn_index: int,
     context_messages: list[Any],
     skipped: int,
+    authorization_check=None,
 ) -> bool:
     """Clear + rebuild context_engine and sync the Session the next turn will use."""
     from openjiuwen.core.single_agent import create_agent_session
 
+    _check_rewind_authority(authorization_check)
     context_engine = react_agent.context_engine
     context = context_engine.get_context(session_id=session_id)
     if context is not None:
@@ -1830,7 +1908,22 @@ async def _apply_rewound_context(
             "rewind_session_context: clearing old context for %s (%d messages in buffer)",
             session_id, len(context.get_messages()),
         )
+    base_check = authorization_check
+    expected_context = context
+    def context_check():
+        _check_rewind_authority(base_check)
+        if (deep_agent.react_agent is not react_agent or react_agent.context_engine is not context_engine
+                or context_engine.get_context(session_id=session_id) is not expected_context):
+            raise RewindAuthorizationDenied('original rewind context changed')
+    if base_check is not None:
+        context_check()
     await context_engine.clear_context(session_id=session_id)
+    if base_check is not None:
+        _check_rewind_authority(base_check)
+        if context_engine.get_context(session_id=session_id) is not None:
+            raise RewindAuthorizationDenied('rewind context was replaced during clear')
+        expected_context = None
+        authorization_check = context_check
 
     live_session = resolve_live_agent_session(deep_agent, session_id)
     is_live_session = live_session is not None
@@ -1842,8 +1935,13 @@ async def _apply_rewound_context(
         )
     else:
         try:
+            _check_rewind_authority(authorization_check)
             session = create_agent_session(session_id=session_id, card=deep_agent.card)
+            _check_rewind_authority(authorization_check)
             await session.pre_run(inputs=None)
+            _check_rewind_authority(authorization_check)
+        except RewindAuthorizationDenied:
+            raise
         except Exception as exc:
             logger.warning("rewind_session_context: pre_run failed for %s: %s", session_id, exc)
             return False
@@ -1852,14 +1950,24 @@ async def _apply_rewound_context(
         session=session,
         react_agent=react_agent,
         session_id=session_id,
+        **_rewind_options(authorization_check),
     )
 
     try:
-        await context_engine.create_context(
+        _check_rewind_authority(authorization_check)
+        rebuilt = await context_engine.create_context(
             session=session,
             processors=_get_context_processors(react_agent),
             history_messages=context_messages,
         )
+        if base_check is not None:
+            _check_rewind_authority(base_check)
+            if rebuilt is None or context_engine.get_context(session_id=session_id) is not rebuilt:
+                raise RewindAuthorizationDenied('rewind context was replaced during creation')
+            expected_context = rebuilt
+            context_check()
+    except RewindAuthorizationDenied:
+        raise
     except Exception as exc:
         logger.warning("rewind_session_context: create_context failed for %s: %s", session_id, exc)
         return False
@@ -1870,8 +1978,10 @@ async def _apply_rewound_context(
         context_engine=context_engine,
         session_id=session_id,
         is_live_session=is_live_session,
+        **_rewind_options(authorization_check),
     )
 
+    _check_rewind_authority(authorization_check)
     logger.info(
         "rewind_session_context: session=%s turn=%d rebuilt context with %d messages "
         "(skipped %d streaming/metadata records) persist=%s live_session=%s",

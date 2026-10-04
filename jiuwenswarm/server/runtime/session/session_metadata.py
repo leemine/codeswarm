@@ -525,7 +525,8 @@ def _read_metadata_file_in(session_dir: Path) -> dict[str, Any]:
 
 
 def _write_metadata_sync(
-    session_id: str, metadata: dict[str, Any], options: _MetadataWriteOptions | None = None
+    session_id: str, metadata: dict[str, Any], options: _MetadataWriteOptions | None = None,
+    *, authorization_check=None,
 ) -> dict[str, Any]:
     from jiuwenswarm.server.runtime.session import lifecycle as lc
     project_id = lc.project_id_for(metadata)
@@ -534,13 +535,14 @@ def _write_metadata_sync(
         if not previous or lc.project_id_for(previous) != project_id:
             lc.guard(project_id=project_id)
         lc.write_guard(session_id, options.lifecycle_generation if options else None)
-        return _write_metadata_unfenced(session_id, metadata, options)
+        return _write_metadata_unfenced(session_id, metadata, options, authorization_check=authorization_check)
 
 
 def _write_metadata_unfenced(
     session_id: str,
     metadata: dict[str, Any],
     options: _MetadataWriteOptions | None = None,
+    *, authorization_check=None,
 ) -> dict[str, Any]:
     """同步写入会话元数据(由后台 worker 或 fallback 调用)
 
@@ -561,6 +563,8 @@ def _write_metadata_unfenced(
         合并到磁盘当前值,避免旧快照覆盖其他并发更新;会话文件不存在时仍写入
         完整 metadata。
     """
+    if authorization_check is not None:
+        authorization_check()
     options = options or _MetadataWriteOptions()
     # Read-triggered migration must never recreate a deleted/moved directory.
     fpath = (
@@ -569,6 +573,8 @@ def _write_metadata_unfenced(
     )
     to_write = metadata
     with _FILE_LOCK:
+        if authorization_check is not None:
+            authorization_check()
         current: dict[str, Any] | None = None
         if fpath.exists():
             try:
@@ -630,10 +636,16 @@ def _write_metadata_unfenced(
         # Atomic write: write a temp file then rename, so that truncation by
         # write_text can never expose empty content to a concurrent reader
         # (precisely how session identity was being lost).
+        if authorization_check is not None:
+            authorization_check()
         payload = json.dumps(to_write, ensure_ascii=False, indent=2)
         tmp = fpath.with_name(f"{fpath.name}.{os.getpid()}.tmp")
         try:
+            if authorization_check is not None:
+                authorization_check()
             tmp.write_text(payload, encoding="utf-8")
+            if authorization_check is not None:
+                authorization_check()
             _atomic_replace(tmp, fpath)
         except Exception:
             tmp.unlink(missing_ok=True)
@@ -800,6 +812,7 @@ def _enqueue_write(
     sync_write: bool = False,
     preserve_pin_fields: bool = False,
     merge_fields: frozenset[str] | None = None,
+    authorization_check=None,
 ) -> None:
     """将写入操作放入异步队列,队列满时退化为同步写。
 
@@ -810,6 +823,21 @@ def _enqueue_write(
     注意: ``_write_metadata_sync`` 本身不更新缓存,缓存更新统一在此函数
     顶部完成,与异步路径行为一致,避免 ``init_session_metadata`` 污染缓存。
     """
+    if authorization_check is not None:
+        if not sync_write:
+            raise ValueError('governed metadata mutation must be synchronous')
+        authorization_check()
+        from jiuwenswarm.server.runtime.session import lifecycle as lc
+        options = _MetadataWriteOptions(preserve_pin_fields=preserve_pin_fields,
+            rebind_gen_at_enqueue=_get_rebind_gen(session_id),
+            lifecycle_generation=lc.state('session', session_id).get('generation', 0),
+            merge_fields=merge_fields)
+        written = _write_metadata_sync(session_id, metadata, options, authorization_check=authorization_check)
+        authorization_check()
+        with _CACHE_LOCK:
+            _METADATA_CACHE[session_id] = written.copy()
+            _METADATA_CACHE_GENERATIONS[session_id] = options.lifecycle_generation
+        return
     # 立即更新缓存,确保后续读取能看到最新状态
     # 入队前捕获 rebind 版本号: worker 处理时据此判断本快照是否早于一次重绑
     from jiuwenswarm.server.runtime.session import lifecycle as lc
@@ -965,6 +993,7 @@ def update_session_metadata(
     sync_write: bool = False,
     work_mode: str | None = None,
     session_equipment: dict[str, Any] | None = None,
+    authorization_check=None,
 ) -> None:
     """更新会话元数据(异步写入,不阻塞调用方)
 
@@ -1142,6 +1171,7 @@ def update_session_metadata(
         metadata,
         sync_write=sync_write or sync,
         preserve_pin_fields=pinned is None and pin_order is None,
+        **({"authorization_check": authorization_check} if authorization_check is not None else {}),
     )
 
 
