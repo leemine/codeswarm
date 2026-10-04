@@ -1,6 +1,6 @@
 """Static B3 target facts; never create a Session, Model, credential or grant.
 
-The initial combination is Single Native normal with an empty provider config.
+Supported combinations are Single Native normal and governed OpenCode normal.
 These facts do not authorize tools/processes or prove actual model consumption.
 Runtime must revalidate before publication and enforce all execution boundaries.
 """
@@ -52,6 +52,7 @@ class ContinuationTarget:
     resource_requests: tuple[ResourceRequest, ...]
     resource_decisions: tuple[ResourceDecision, ...]
     resource_revision: int
+    provider_id: str
     _selector: object = field(repr=False, compare=False)
 
 
@@ -167,6 +168,30 @@ class ContinuationTargets:
         # all retained request settings so an unchanged name cannot hide drift.
         return binding, _checksum(asdict(binding)), model_entry_fingerprint(config, request_config)
 
+    @staticmethod
+    def _execution(spec, binding):
+        if ('${' in spec.config_revision
+                or spec.authorization is not None and spec.authorization.full_access):
+            raise ValueError('unsupported continuation execution configuration')
+        if spec.provider_id == 'native':
+            if spec.provider_config or spec.requested_mode not in (None, 'normal'):
+                raise ValueError('unsupported Native continuation configuration')
+            return
+        if spec.provider_id != 'opencode' or spec.requested_mode is not None:
+            raise ValueError('unsupported continuation Provider')
+        from openjiuwen.harness_providers.construction import compile_execution, execution_authorization
+        from openjiuwen.harness_providers.opencode import OpenCodeHarness, OpenCodeHarnessConfig
+        from jiuwenswarm.runtime.harness.execution_session import ExecutionSession
+        config = OpenCodeHarnessConfig.from_mapping(compile_execution(spec))
+        model = config.model
+        if (execution_authorization(spec).full_access or config.full_access
+                or config.skills or config.native_plugins or model is None or model.api_key is not None
+                or model.model != binding.model or model.api_base != binding.api_base
+                or not callable(getattr(OpenCodeHarness, '_capture_model_source', None))
+                or not callable(getattr(OpenCodeHarness, '_is_model_source_current', None))
+                or not callable(getattr(ExecutionSession, 'bind_model_gateway', None))):
+            raise ValueError('governed OpenCode model gateway unavailable')
+
     def select(self, request: ContinuationInput) -> ContinuationTarget:
         try:
             return self._select(request)
@@ -210,16 +235,8 @@ class ContinuationTargets:
         spec = catalog.source(
             explicit_profile_id=request.execution_profile_id
         ).resolve()
-        if (
-            spec.provider_id != "native"
-            or spec.provider_config
-            or spec.requested_mode not in (None, "normal")
-            or "${" in spec.config_revision
-            or spec.authorization is not None
-            and spec.authorization.full_access
-        ):
-            raise ValueError("unsupported continuation execution configuration")
         binding, binding_fingerprint, entry_fingerprint = self._model(request)
+        self._execution(spec, binding)
         authority = self._resources
         grants = authority.resource_grants(pid, identity)
         revision = grants.get("resource_revision")
@@ -292,6 +309,7 @@ class ContinuationTargets:
             tuple(requests),
             tuple(decisions),
             revision,
+            spec.provider_id,
             self._marker,
         )
 

@@ -95,7 +95,7 @@ def continuation_options(host, identity_resolver, params):
                 except ResourceAccessDenied:
                     continue
                 targets.append(target)
-                options.append({'execution_profile_id': profile, 'provider_id': 'native',
+                options.append({'execution_profile_id': profile, 'provider_id': target.provider_id,
                                 'mode': target.provision_input.mode, 'model_name': model.selection_key,
                                 'label': model.display_name})
     payload = {**params, 'options': options}

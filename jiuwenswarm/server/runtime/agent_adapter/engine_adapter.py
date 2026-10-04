@@ -77,6 +77,7 @@ class EngineAgentAdapter:
         self._model_gateway_binding = model_gateway_binding
         self._model_authority_factory = model_authority_factory
         self._turn_model_authorities = {}
+        self._continuation_seed_binding = None
         if route.provider_id == "native":
             raise ValueError("EngineAgentAdapter requires an External provider")
         self._route = route
@@ -510,6 +511,57 @@ class EngineAgentAdapter:
             metadata=request.metadata,
         )
 
+    def _capture_continuation(self, request, model_authority):
+        from jiuwenswarm.governance.continuation_context import (
+            ContinuationContextDenied, validate_continuation_context,
+        )
+        handle = getattr(request, '_continuation_context', None)
+        known = self._continuation_seed_binding is not None or getattr(request, '_continuation_execution', None) is not None
+        if handle is None:
+            if known:
+                raise ContinuationContextDenied('original continuation context required')
+            return None
+        session = self._require_session()
+        binding = self._route.bound.binding
+        handle = validate_continuation_context(handle, binding.host_session_id, request.request_id)
+        if (self._route.provider_id != 'opencode' or self._model_gateway_binding is None
+                or model_authority is None or request.session_id != binding.host_session_id
+                or handle.identity != model_authority.credential_authority.execution.identity
+                or handle.identity.subject_id != binding.subject_id
+                or self._route.trusted_subject_id != binding.subject_id
+                or session.binding is not binding):
+            raise ContinuationContextDenied('original continuation execution required')
+        from jiuwenswarm.runtime.harness.context_bridge import render_continuation_history
+        render_continuation_history(handle, session_id=request.session_id, request_id=request.request_id)
+        expected = (session, binding, handle.identity, handle.seed.digest)
+        if self._continuation_seed_binding is None:
+            if session.started:
+                raise ContinuationContextDenied('continuation cannot replace a running context')
+            self._continuation_seed_binding = expected
+        self._check_continuation(request, handle, session)
+        return handle
+
+    def _check_continuation(self, request, handle, session):
+        from jiuwenswarm.governance.continuation_context import ContinuationContextDenied
+        from jiuwenswarm.runtime.harness.context_bridge import render_continuation_history
+        if handle is None:
+            if self._continuation_seed_binding is not None:
+                raise ContinuationContextDenied('original continuation context required')
+            return
+        binding = self._continuation_seed_binding
+        def matches():
+            return (binding is not None and self._continuation_seed_binding is binding
+                    and binding[0] is session and self._session is session
+                    and binding[1] is session.binding and self._route.bound.binding is binding[1]
+                    and binding[2] == handle.identity and binding[3] == handle.seed.digest
+                    and getattr(request, '_continuation_context', None) is handle
+                    and request.session_id == session.binding.host_session_id)
+        if not matches():
+            raise ContinuationContextDenied('continuation execution changed')
+        render_continuation_history(handle, session_id=request.session_id, request_id=request.request_id)
+        if not matches():
+            raise ContinuationContextDenied('continuation execution changed')
+
     def _capture_model_authority(self):
         if self._model_gateway_binding is None:
             from jiuwenswarm.governance.tool_context import current_tool_authorizer
@@ -562,6 +614,7 @@ class EngineAgentAdapter:
             else None
         )
         model_authority = self._capture_model_authority()
+        continuation = self._capture_continuation(request, model_authority)
         if operation is not None or attach:
             if self._model_gateway_binding is not None:
                 raise PermissionError('governed model gateway does not support detached Goal requests')
@@ -595,7 +648,8 @@ class EngineAgentAdapter:
             )
         )
         completed = False
-        stream = self._process_message_stream_impl(request, inputs, model_authority=model_authority)
+        stream = self._process_message_stream_impl(request, inputs, model_authority=model_authority,
+                                                    continuation_context=continuation)
         try:
             async for chunk in stream:
                 if chunk.runtime_completion == "completed":
@@ -675,6 +729,7 @@ class EngineAgentAdapter:
         *,
         goal_attempt=None,
         model_authority=None,
+        continuation_context=None,
     ) -> AsyncIterator[AgentResponseChunk]:
         if self._model_gateway_binding is not None and not isinstance(inputs.get('query'), InteractiveInput):
             from jiuwenswarm.governance.opencode_model_http import model_authority_current
@@ -690,7 +745,16 @@ class EngineAgentAdapter:
                  "project_dir": str(self._surface.identity.paths.project_root)}, params,
             )
             self._surface.validate_mode(mode)
-        await self._ensure_started(session)
+        interactive = isinstance(inputs.get('query'), InteractiveInput)
+        if not interactive:
+            self._check_continuation(request, continuation_context, session)
+        if continuation_context is None:
+            await self._ensure_started(session)
+        else:
+            await self._ensure_started(session, continuation_context=continuation_context,
+                                       continuation_request=request)
+        if not interactive:
+            self._check_continuation(request, continuation_context, session)
         external_input = await build_external_input(
             query=inputs.get("query", ""),
             request_id=request.request_id,
@@ -717,6 +781,7 @@ class EngineAgentAdapter:
             from jiuwenswarm.governance.opencode_model_http import model_authority_current
         if model_authority is not None and not model_authority_current(model_authority):
             raise PermissionError('original model request authority unavailable')
+        self._check_continuation(request, continuation_context, session)
         receipt = await session.send(external_input, immediate=immediate)
         if model_authority is not None:
             self._turn_model_authorities[receipt.turn_id] = model_authority
@@ -1038,7 +1103,7 @@ class EngineAgentAdapter:
             raise RuntimeError("External execution session cleanup is pending")
         return session
 
-    def _external_context(self):
+    def _external_context(self, continuation_context=None):
         from jiuwenswarm.governance.tool_context import current_tool_authorizer
         self._resource_governed = self._resource_governed or current_tool_authorizer(self._route.provider_id) is not None
         binding = self._route.bound.binding
@@ -1050,6 +1115,8 @@ class EngineAgentAdapter:
             surface=self._surface,
             context_snapshot=self._context_snapshot,
             tool_authorizer=self._authorize_resource_tool if self._resource_governed else None,
+            continuation_context=continuation_context,
+            continuation_request_id=continuation_context.request_id if continuation_context is not None else None,
         )
 
     async def _authorize_resource_tool(self, operation):
@@ -1058,7 +1125,7 @@ class EngineAgentAdapter:
         authority = self._turn_resource_authorizers.get(operation.turn_id)
         return authority is not None and await authority(operation) is True
 
-    async def _ensure_started(self, session: ExecutionSession) -> None:
+    async def _ensure_started(self, session: ExecutionSession, *, continuation_context=None, continuation_request=None) -> None:
         if session.started:
             return
         async with self._start_lock:
@@ -1068,7 +1135,16 @@ class EngineAgentAdapter:
             # snapshot below is then retained for every Turn in that cycle.
             self._compile_cold_surface_policy()
             await self._projection.replay_product_artifacts()
-            await session.start(self._external_context())
+            if self._continuation_seed_binding is not None and continuation_context is None:
+                from jiuwenswarm.governance.continuation_context import ContinuationContextDenied
+                raise ContinuationContextDenied('original continuation startup required')
+            if continuation_context is not None:
+                self._check_continuation(continuation_request, continuation_context, session)
+                context = self._external_context(continuation_context)
+                self._check_continuation(continuation_request, continuation_context, session)
+            else:
+                context = self._external_context()
+            await session.start(context)
 
     def _compile_cold_surface_policy(self) -> None:
         if self._surface is None:
