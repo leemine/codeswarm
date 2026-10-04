@@ -803,6 +803,127 @@ class NativeExecutionSession:
         # A late task keeps the original callback, even before its first Model call.
         return bound.model_authorizer or deny_model_consumption
 
+    def _goal_entry_for_slice(self, ctx):
+        """Resolve only an actually executing, originally sourced Goal task."""
+        from openjiuwen.core.controller.modules.task_manager import _current_task_execution
+        from openjiuwen.core.controller.schema.execution_origin import (
+            _capture_live_execution_origin, current_execution_origin,
+        )
+        from openjiuwen.harness.goal.schema import GoalRecord
+        from openjiuwen.core.single_agent.rail.base import InvokeInputs, TaskIterationInputs, RunKind, RunContext
+        from openjiuwen.harness.goal.store import SESSION_GOAL_RECORD_KEY
+        from jiuwenswarm.governance.resources import ResourceAccessDenied
+
+        denied = "Native Goal execution source unavailable"
+        try:
+            source = _capture_live_execution_origin()
+            owner, pending = self._tool_owner, self._native.active_turn
+            if not self._require_execution_origin or source is None or owner is None or pending is None:
+                raise ResourceAccessDenied(denied)
+            agent, _, session, binding = owner
+            inputs = ctx.inputs
+            token = pending.content.metadata.get(_REQUEST_KEY)
+            entry = self._requests.get(token)
+            if entry is None or entry.goal is None or entry.request is None or entry.lifecycle is None:
+                raise ResourceAccessDenied(denied)
+            request, lifecycle, owned, goal = entry.request, entry.lifecycle, entry.owned, entry.goal
+            if owned is None:
+                raise ResourceAccessDenied(denied)
+            round_owner = agent._capture_owned_round(source)
+            if round_owner is None:
+                raise ResourceAccessDenied(denied)
+            work, controller = round_owner.work, round_owner._controller
+            manager, scheduler = controller.task_manager, controller.task_scheduler
+            iteration = type(inputs) is TaskIterationInputs
+            outer = type(inputs) is InvokeInputs
+            if not (iteration or outer):
+                raise ResourceAccessDenied(denied)
+            capture = (_current_task_execution(manager, round_owner.task_id, session)
+                       if iteration else None)
+            if iteration and capture is None:
+                raise ResourceAccessDenied(denied)
+            wrapper = (scheduler._capture_owned_dispatch(capture, session)
+                       if iteration else round_owner._facade_task)
+            goal_manager = agent.goal_manager
+            goal_source = goal_manager._execution_origin
+            goal_facts = (work.context.get('session_id'), work.context.get('goal_id'),
+                          work.context.get('revision'))
+
+            def same_facts():
+                # No checker invocation here: the final pass cannot select fresh
+                # facts after the last potentially mutating source callback.
+                run_context = getattr(inputs, 'run_context', None)
+                context_facts = ({'session_id': run_context.session_id, **run_context.extra}
+                                 if type(run_context) is RunContext else run_context)
+                if not isinstance(context_facts, dict):
+                    return False
+                if outer:
+                    if (type(run_context) is not RunContext or inputs.run_kind is not RunKind.GOAL
+                            or round_owner._facade_task is not wrapper
+                            or inputs.query != work.inputs.get('query')):
+                        return False
+                    if context_facts != dict(work.context):
+                        return False
+                else:
+                    if (inputs.run_kind not in ('goal', RunKind.GOAL) or inputs.loop_event is None
+                            or inputs.loop_event.execution_origin is not source
+                            or round_owner._task_capture is None
+                            or round_owner._task_capture.stored is not capture.stored
+                            or capture.origin is not source
+                            or _current_task_execution(manager, round_owner.task_id, session) is not capture
+                            or manager._check_task_execution(capture) is not capture.stored
+                            or scheduler._capture_owned_dispatch(capture, session) is not wrapper
+                            or round_owner._scheduler_wrapper is not wrapper):
+                        return False
+                raw = session.get_state(SESSION_GOAL_RECORD_KEY)
+                if not isinstance(raw, dict):
+                    return False
+                record = GoalRecord.from_dict(raw)
+                return (
+                    self._tool_owner is owner and ctx.agent is agent and ctx.session is session
+                    and ctx.inputs is inputs and self.engine.binding is binding
+                    and self._native.active_turn is pending and pending._origin is source
+                    and pending._agent is agent and pending._session is session
+                    and self._native._capture_owned_turn(pending.turn_id) is pending
+                    and not pending.abort_requested and pending._exit is None
+                    and current_execution_origin() is source
+                    and self._requests.get(token) is entry and entry.lifecycle is lifecycle
+                    and entry.goal is goal and entry.terminal_kind is None
+                    and entry.owned is owned and owned._pending is pending and owned._entry is entry
+                    and owned._native is self and owned.source is lifecycle.source
+                    and entry.request is request and owned.request_id == request.request_id
+                    and source.host_value is lifecycle.source.host_value
+                    and pending.content.metadata.get(_REQUEST_KEY) == token
+                    and agent._active_interaction_round is round_owner
+                    and round_owner.work is work and round_owner._session is session
+                    and round_owner._controller is controller and agent.loop_controller is controller
+                    and agent._event_manager.active_work is work and work.kind == 'goal'
+                    and work.execution_origin is source
+                    and (context_facts.get('session_id'), context_facts.get('goal_id'),
+                         context_facts.get('revision')) == goal_facts
+                    and (work.context.get('session_id'), work.context.get('goal_id'),
+                         work.context.get('revision')) == goal_facts
+                    and (record.session_id, record.goal_id, record.revision) == goal_facts
+                    and session.get_session_id() == binding.host_session_id == goal_facts[0]
+                    and agent.goal_manager is goal_manager and goal_manager._execution_origin is goal_source
+                    and goal_source[:3] == goal_facts and goal_source[3] is source
+                    and goal_manager._store._session is session
+                    and controller.task_manager is manager and controller.task_scheduler is scheduler
+                    and asyncio.current_task() is wrapper
+                    and wrapper is not None and not wrapper.done() and not wrapper.cancelling()
+                    and self._exit_state is ExecutionExitState.RUNNING and not self._closing and not self._closed
+                )
+
+            if not same_facts():
+                raise ResourceAccessDenied(denied)
+            agent._check_owned_round(round_owner)
+            source._check_current()
+            if not same_facts():
+                raise ResourceAccessDenied(denied)
+            return token, entry
+        except Exception:
+            raise ResourceAccessDenied(denied) from None
+
     def _execution_slice_for(self, ctx):
         from jiuwenswarm.governance.tool_context import NativeExecutionSlice
         from jiuwenswarm.governance.resources import ResourceAccessDenied
@@ -817,6 +938,10 @@ class NativeExecutionSession:
         token = extra.get(_REQUEST_KEY) if isinstance(extra, dict) else None
         active = self._native.active_turn
         entry = self._requests.get(token)
+        run_kind = getattr(ctx.inputs, 'run_kind', None)
+        if (isinstance(extra, dict) and _REQUEST_KEY not in extra
+                and getattr(run_kind, 'value', run_kind) == 'goal'):
+            token, entry = self._goal_entry_for_slice(ctx)
         subject = current_execution_subject()
         if (self._closing or self._closed or self._exit_state is not ExecutionExitState.RUNNING
                 or active is None or active.abort_requested
@@ -890,7 +1015,7 @@ class NativeExecutionSession:
         return True
 
     async def submit_goal(
-        self, action: str, **kwargs: Any
+        self, action: str, *, request: SendInputRequest | None = None, **kwargs: Any
     ) -> tuple[SendReceipt, asyncio.Future]:
         """Dispatch Goal work in the current Turn, or start one while idle.
 
@@ -904,10 +1029,15 @@ class NativeExecutionSession:
         async def operation(agent):
             return await self._goal_dispatcher(action=action, **kwargs)
 
-        if self._require_execution_origin and self._native.active_turn is not None:
-            raise UnsupportedHarnessCapabilityError("Managed Native active Goal control requires an original owner selector")
+        if self._require_execution_origin:
+            if self._native.active_turn is not None:
+                raise UnsupportedHarnessCapabilityError("Managed Native active Goal control requires an original owner selector")
+            if action != "set":
+                raise UnsupportedHarnessCapabilityError("Managed Native idle Goal resume requires a new original admission")
+            if not isinstance(request, SendInputRequest) or not request.request_id:
+                raise PermissionError("Managed Native initial Goal requires its actual request")
         result = asyncio.get_running_loop().create_future()
-        token = self._register_host_request(goal=operation, result=result)
+        token = self._register_host_request(request=request, goal=operation, result=result)
         try:
             receipt = await self._send(
                 HarnessInput(content="", metadata={_REQUEST_KEY: token}),
@@ -977,9 +1107,11 @@ class NativeExecutionSession:
             raise RuntimeError("Native session has not started")
         return await self._goal_dispatcher(action=action, **kwargs)
 
-    async def attach_goal(self) -> SendReceipt:
+    async def attach_goal(self, *, request: SendInputRequest | None = None) -> SendReceipt:
         """Attach the existing active Goal through the same Turn output route."""
-        token = self._register_host_request(attach_goal=True)
+        if self._require_execution_origin:
+            raise UnsupportedHarnessCapabilityError("Managed Native Goal attach requires a new original admission")
+        token = self._register_host_request(request=request, attach_goal=True)
         try:
             receipt = await self._send(
                 HarnessInput(content="", metadata={_REQUEST_KEY: token})
