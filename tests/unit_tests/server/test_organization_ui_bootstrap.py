@@ -165,6 +165,7 @@ async def test_authenticated_web_and_adapter_use_same_secret_free_projection(
         model = direct.payload["models"][0]
         assert model == {
             "model_name": "visible-model",
+            "selection_key": "visible-model#0",
             "model_provider": "OpenAI",
             "alias": "visible-alias",
             "is_default": True,
@@ -308,4 +309,19 @@ def test_projection_never_passes_untyped_catalog_flags(organization, monkeypatch
     shown = result["models"][0]
     assert shown["is_default"] is False and shown["is_free"] is False
     assert type(shown["context_window_tokens"]) is int
+    assert "PRIVATE_" not in json.dumps(result)
+
+
+def test_organization_model_keys_keep_complete_catalog_indices(organization, monkeypatch):
+    entries = [
+        {"model_client_config": {"model_name": "same", "api_key": "PRIVATE_A"}, "alias": "Alice"},
+        {"model_client_config": {"model_name": ""}},
+        {"model_client_config": {"model_name": "same", "api_key": "PRIVATE_B"}, "alias": "Bob"},
+    ]
+    monkeypatch.setattr(config, "get_default_models", lambda _: entries)
+    with organization_auth.authenticated_scope(organization.principal):
+        result = organization_ui_projection("models.list", {})
+    assert [item["selection_key"] for item in result["models"]] == ["same#0", "same#2"]
+    assert [item["model_name"] for item in result["models"]] == ["same", "same"]
+    assert [item["alias"] for item in result["models"]] == ["Alice", "Bob"]
     assert "PRIVATE_" not in json.dumps(result)

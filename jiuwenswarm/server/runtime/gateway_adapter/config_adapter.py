@@ -97,7 +97,7 @@ def organization_ui_projection(method: str, params: object) -> dict[str, Any] | 
         # model credentials or invoke account/remote catalog providers.
         models = get_default_models(mapping(get_config_raw()))
         result = []
-        for entry in models if isinstance(models, list) else []:
+        for index, entry in enumerate(models if isinstance(models, list) else []):
             entry = mapping(entry)
             client = mapping(entry.get("model_client_config"))
             model = mapping(entry.get("model_config_obj"))
@@ -113,6 +113,9 @@ def organization_ui_projection(method: str, params: object) -> dict[str, Any] | 
             result.append(
                 {
                     "model_name": name,
+                    # Same complete-catalog position used by Runtime and the
+                    # persisted Binding; never a filtered UI occurrence index.
+                    "selection_key": f"{name}#{index}",
                     "model_provider": text(client.get("client_provider"), 64),
                     "alias": text(entry.get("alias"), 128),
                     "is_default": entry.get("is_default") is True,
