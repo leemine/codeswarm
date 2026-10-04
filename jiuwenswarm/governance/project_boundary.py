@@ -174,6 +174,15 @@ def authorize_resource_request(
             raise ProjectAccessDenied("project authorization storage unavailable") from exc
     actor_id = identity.actor_id if isinstance(identity, TrustedIdentity) else ""
     action = request_project_action(method)
+    if method == 'command.goal':
+        from .goal_read import validate_goal_get
+        from .session_sharing import SessionSharingDenied
+        try:
+            validate_goal_get(params)
+        except SessionSharingDenied:
+            pass
+        else:
+            action = 'read'
     for project_id in protected:
         decision = access.authorize(project_id, actor_id, action)
         if not actor_id or not decision.allowed:

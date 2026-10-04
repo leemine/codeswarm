@@ -1447,6 +1447,13 @@ class AgentManager:
         session_id: str,
     ) -> "JiuWenSwarm | None":
         """Return the cached channel agent that owns ``session_id`` runtime."""
+        agent = self._peek_agent_for_session_nowait(channel_id, session_id)
+        return self._borrow_agent(agent) if agent is not None else None
+
+    def _peek_agent_for_session_nowait(
+        self, channel_id: str, session_id: str,
+    ) -> "JiuWenSwarm | None":
+        """Inspect the existing cache without extending Agent lifetime."""
         sid = str(session_id or "").strip()
         if not sid:
             return None
@@ -1462,7 +1469,7 @@ class AgentManager:
                 continue
             try:
                 if has_runtime(sid):
-                    return self._borrow_agent(agent)
+                    return agent
             except Exception:
                 logger.exception(
                     "[AgentManager] session runtime lookup failed: "

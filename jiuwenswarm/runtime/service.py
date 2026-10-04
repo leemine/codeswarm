@@ -2081,6 +2081,10 @@ class AgentRuntime:
         _agent_execution: RuntimeAgentExecution | None = None,
     ) -> list[RuntimeEvent]:
         """Execute one non-streaming request and return Runtime events."""
+        if self._organization_session_host is not None and self._is_readonly_goal_get_request(request):
+            from jiuwenswarm.runtime.native_goal_read import read_goal
+            self._require_started()
+            return [await read_goal(self, request)]
         await self.start()
         request = self._governance_owned_request(request)
         if self._is_session_input_request(request):
@@ -2526,6 +2530,13 @@ class AgentRuntime:
         _agent_execution: RuntimeAgentExecution | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         """Execute one request and yield the shared Runtime event stream."""
+        if self._organization_session_host is not None and self._is_readonly_goal_get_request(request):
+            from jiuwenswarm.runtime.native_goal_read import read_goal
+            self._require_started()
+            if background:
+                raise GovernanceError('Goal reading requires a foreground query')
+            yield await read_goal(self, request)
+            return
         await self.start()
         request = self._governance_owned_request(request)
         from jiuwenswarm.runtime.context import (

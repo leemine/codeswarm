@@ -10,7 +10,7 @@ import json
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Callable
 
 from .continuation import ContinuationInput
@@ -147,6 +147,8 @@ class SessionRequestPermit:
     cleanup_params: str | None = None
     deletion_receipt: object | None = None
     workspace_download: object | None = None
+    goal_read_route: object | None = None
+    goal_read_result: object | None = None
 
     def allows_cleanup(self, method: str, params: dict, identity: TrustedIdentity,
                        envelope_session: str | None = None) -> bool:
@@ -168,6 +170,10 @@ class SessionRequestPermit:
         try:
             if self.identity_resolver() != self.identity:
                 return False
+            if self.goal_read_route is not None:
+                self.goal_read_route.check()
+            if self.goal_read_result is not None:
+                self.goal_read_result.final_check()
             if self.workspace_download is not None:
                 self.workspace_download.check()
             if self.inventory_revision is not None and _inventory_revision(self.host) != self.inventory_revision:
@@ -206,6 +212,7 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
         audit_query_params(params)
     owners = []
     workspace_download = None
+    goal_read_route = None
     cleanup = None
     deletion_receipt = None
     share = None
@@ -230,6 +237,19 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
                 cleanup = (sid, None)
         else:
             cleanup = (sid, host.cleanup_owner_stamp(sid, identity))
+    elif method == 'command.goal':
+        from .goal_read import capture_goal_read_route, validate_goal_get
+        validate_goal_get(params)
+        sid = _session(sid or envelope_session)
+        epoch = host.owner_revision(sid, identity)
+        owners.append((sid, epoch))
+
+        def check_goal_owner():
+            if (identity_resolver() != identity or not host.owner_current(sid, identity)
+                    or host.owner_revision(sid, identity) != epoch):
+                raise SessionSharingDenied('Original Goal read owner changed')
+
+        goal_read_route = capture_goal_read_route(sid, params, check_goal_owner)
     elif method == 'file.download_workspace_chunk':
         from .workspace_download import capture_workspace_request
         sid = _session(sid or envelope_session)
@@ -273,7 +293,8 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
     permit = SessionRequestPermit(identity, identity_resolver, host, tuple(owners), share,
                                   _inventory_revision(host) if method in INVENTORY_METHODS else None, method,
                                   share_actions, continuation_input, continuation_options, cleanup,
-                                  json.dumps(params, sort_keys=True, separators=(',', ':')) if cleanup else None, deletion_receipt, workspace_download)
+                                  json.dumps(params, sort_keys=True, separators=(',', ':')) if cleanup else None,
+                                  deletion_receipt, workspace_download, goal_read_route)
     if not permit.revalidate():
         raise SessionSharingDenied('Session authorization denied')
     return permit
@@ -296,6 +317,23 @@ def set_delivery_permit(permit):
     if not isinstance(permit, SessionRequestPermit):
         raise TypeError('host Session permit required')
     _delivery.set(permit)
+
+
+def bind_goal_read_delivery(session_id, identity, result):
+    """Retain the actual reader check in the original AgentServer delivery scope."""
+    from jiuwenswarm.runtime.goal_read import NativeGoalRead
+    if type(result) is not NativeGoalRead:
+        raise TypeError('Actual Native Goal read result required')
+    permit = _delivery.get()
+    if permit is None:  # Direct Runtime caller has no transport delivery scope.
+        return
+    if (permit.method != 'command.goal' or permit.identity != identity
+            or len(permit.owners) != 1 or permit.owners[0][0] != session_id
+            or permit.goal_read_route is None or permit.goal_read_result is not None
+            or not permit.revalidate()):
+        raise SessionSharingDenied('Original Goal delivery permit unavailable')
+    result.final_check()
+    _delivery.set(replace(permit, goal_read_result=result))
 
 
 def delivery_authorized():
