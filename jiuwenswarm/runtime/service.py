@@ -2914,6 +2914,8 @@ class AgentRuntime:
             raise RuntimeError(
                 f"session has no active agent: {request.session_id or 'default'}"
             )
+        from jiuwenswarm.runtime.continuation_control import capture_continuation_control
+        request._continuation_control = capture_continuation_control(self, request, agent)
         deliver = getattr(agent, "deliver_control_input", None)
         if not callable(deliver):
             raise RuntimeError("active agent does not accept control input")
@@ -2981,6 +2983,8 @@ class AgentRuntime:
         agent = lookup(channel_id, request.session_id or "") if callable(lookup) else None
         if agent is None:
             raise RuntimeError(f"session has no active agent: {request.session_id or 'default'}")
+        from jiuwenswarm.runtime.continuation_control import capture_continuation_control
+        request._continuation_control = capture_continuation_control(self, request, agent)
         deliver = getattr(agent, "deliver_control_input", None)
         if not callable(deliver):
             raise RuntimeError("active agent does not accept control input")

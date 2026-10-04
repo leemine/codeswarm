@@ -479,6 +479,26 @@ class RuntimeSessionCoordinator:
                 return True
         return False
 
+    def claimed_control_parent(self, session_id: str, control_id: str):
+        """Return only this task's already-claimed original control parent."""
+        record = self._require_open_session(session_id)
+        matches = [item for item in self._registry.select(
+            session_id=session_id, request_id=control_id,
+            generation=record.generation, active_only=True,
+        ) if item.work_kind is SessionWorkKind.CONTROL_INPUT
+            and item.task is asyncio.current_task() and not item.cancellation_requested]
+        if len(matches) != 1:
+            raise SessionExecutionEndedError("original control claim required")
+        child = matches[0]
+        parent = self._registry.get(child.parent_execution_id)
+        if (parent is None or parent.state.terminal or parent.cancellation_requested
+                or parent.generation != record.generation
+                or parent.session_id != session_id
+                or ((session_id, record.generation, parent.execution_id, control_id)
+                    not in self._control_claims and control_id not in record.stream_control_claims)):
+            raise SessionExecutionEndedError("original control parent unavailable")
+        return parent
+
     async def deliver_control(
         self,
         session_id: str,

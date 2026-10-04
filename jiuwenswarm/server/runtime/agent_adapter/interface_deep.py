@@ -3470,6 +3470,14 @@ class JiuWenSwarmDeepAdapter:
         is busy, a new task needing another epoch must retry after settlement.
         """
 
+        from jiuwenswarm.runtime.continuation_control import continuation_control
+        retained = continuation_control(request, adapter=self)
+        if retained is not None:
+            child = retained.child
+            self._touch_session_adapter(request.session_id)
+            if reserve_activity:
+                child._register_session_agent_task(request.session_id)
+            return child
         cached = self._get_cached_session_adapter(request.session_id)
         smart_lifecycle = self._coordinates_smart_permission_lifecycle(
             get_config(), request.session_id,
@@ -13464,6 +13472,8 @@ class JiuWenSwarmDeepAdapter:
                         active is not None
                         and not native_execution.has_turn_output_owner(active.turn_id)
                     )
+                    from jiuwenswarm.runtime.continuation_control import continuation_control
+                    continuation_control(request, child=self)
                     accepted = await native_execution.answer_request(host_request)
                     if not accepted:
                         raise RuntimeError("interaction answer is no longer pending")

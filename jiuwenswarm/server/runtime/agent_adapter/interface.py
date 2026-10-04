@@ -3381,12 +3381,15 @@ class JiuWenSwarm:
         params = request.params if isinstance(request.params, dict) else {}
         restore_chat_send_equipment_params(session_id, params)
         inputs, _memory_mode, _user_turn = self._build_inputs(request)
-        await self.reconcile_session_mcp(
-            request.session_id,
-            compute_chat_send_mcp_needed(params),
-            model_name=params.get("model_name"),
-            history_before_request_id=request.request_id,
-        )
+        from jiuwenswarm.runtime.continuation_control import continuation_control
+        retained = continuation_control(request, facade=self)
+        if retained is None:
+            await self.reconcile_session_mcp(
+                request.session_id,
+                compute_chat_send_mcp_needed(params),
+                model_name=params.get("model_name"),
+                history_before_request_id=request.request_id,
+            )
         async with aclosing(adapter.process_message_stream_impl(request, inputs)) as stream:
             async for chunk in stream:
                 yield chunk

@@ -1,0 +1,7 @@
+# Original continuation approval routing
+
+The real two-user Native MCP UI path at swarm9dacf66a/core3a3b575f reached the ordinary permission card, then failed because reconciliation compared the new answer request ID with the original continuation context's request ID. Evidence: `/tmp/r2b-native-mcp-ui-run-9dacf66a-retry1` (no MCP call; owned services exited).
+
+The existing Coordinator claim now supplies its exact parent only to the delivering task. Runtime pins the original facade, cached child, immutable Binding, Native Turn, complete authenticated identity and original continuation context. The answer reuses that child without MCP reconciliation, reload or another seed. The same proof is checked immediately before the existing Native answer handoff. Original context validation remains strict; stale approvals, changed identity/source/model, replaced child/Turn or another task cannot borrow the claim. Both unary and streaming control paths use the same registry.
+
+At formal locked core3a3b575f with this swarm source overlay, 161 affected deterministic tests passed (`/tmp/r2b-control-tests3.log`). The first expanded test run retained a fixture error: it supplied `user_inputs` rather than the real `answers` payload; the production input validator was unchanged. Full stable and the real ordinary MCP UI must pass again on the integrated exact candidate. This slice does not close R2-B or any blocked Provider/Team/real adversarial acceptance.
