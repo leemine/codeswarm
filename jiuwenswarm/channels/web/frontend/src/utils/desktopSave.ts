@@ -15,11 +15,18 @@ export interface BlobSaveResult {
 
 export interface BlobSaveOptions {
   preferBrowserFilePicker?: boolean;
+  signal?: AbortSignal;
+  isCurrent?: () => boolean;
+}
+
+function saveIsCurrent(options: BlobSaveOptions): boolean {
+  return !options.signal?.aborted && (options.isCurrent?.() ?? true);
 }
 
 interface BrowserWritableFileStream {
   write: (data: Blob) => Promise<void>;
   close: () => Promise<void>;
+  abort?: () => Promise<void>;
 }
 
 interface BrowserFileHandle {
@@ -69,15 +76,19 @@ export function downloadBlob(blob: Blob, filename: string): void {
   anchor.download = filename;
   anchor.style.display = 'none';
   document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  try {
+    anchor.click();
+  } finally {
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
 }
 
 async function saveBlobWithBrowserFilePicker(
   blob: Blob,
   filename: string,
   picker: BrowserFilePicker,
+  options: BlobSaveOptions,
 ): Promise<DesktopSaveOutcome> {
   try {
     const mimeType = blob.type.split(';', 1)[0] || 'application/octet-stream';
@@ -89,9 +100,19 @@ async function saveBlobWithBrowserFilePicker(
         accept: { [mimeType]: suffixMatch === null ? [] : [suffixMatch[1]] },
       }],
     });
+    if (!saveIsCurrent(options)) return 'cancelled';
     const writable = await handle.createWritable();
+    if (!saveIsCurrent(options)) {
+      await writable.abort?.();
+      return 'cancelled';
+    }
     await writable.write(blob);
+    if (!saveIsCurrent(options)) {
+      await writable.abort?.();
+      return 'cancelled';
+    }
     await writable.close();
+    if (!saveIsCurrent(options)) return 'cancelled';
     return 'saved';
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') return 'cancelled';
@@ -135,24 +156,34 @@ function getDesktopBlobSaveApi(): DesktopBlobSaveApi | null {
   };
 }
 
-async function saveBlobToDesktop(blob: Blob, filename: string, api: DesktopBlobSaveApi): Promise<DesktopSaveOutcome> {
+async function saveBlobToDesktop(
+  blob: Blob,
+  filename: string,
+  api: DesktopBlobSaveApi,
+  options: BlobSaveOptions,
+): Promise<DesktopSaveOutcome> {
   let transferId: string | null = null;
   try {
+    if (!saveIsCurrent(options)) return 'cancelled';
     const startResult = await api.begin_blob_save(filename, blob.type, blob.size);
     if (isDesktopSaveCancelled(startResult)) return 'cancelled';
     if (!isDesktopSaveOk(startResult) || !startResult.transfer_id) return 'failed';
     transferId = startResult.transfer_id;
+    if (!saveIsCurrent(options)) return 'cancelled';
 
     for (let offset = 0; offset < blob.size; offset += DESKTOP_BLOB_CHUNK_SIZE) {
       const chunk = blob.slice(offset, offset + DESKTOP_BLOB_CHUNK_SIZE);
       const encodedChunk = await blobChunkToBase64(chunk);
+      if (!saveIsCurrent(options)) return 'cancelled';
       if (!(await api.append_blob_save(transferId, encodedChunk))) {
         return 'failed';
       }
     }
 
+    if (!saveIsCurrent(options)) return 'cancelled';
     const finishResult = await api.finish_blob_save(transferId);
     transferId = null;
+    if (!saveIsCurrent(options)) return 'cancelled';
     return isDesktopSaveOk(finishResult) ? 'saved' : 'failed';
   } catch (error) {
     console.error('Desktop blob save failed:', error);
@@ -173,11 +204,12 @@ export async function saveBlobWithResult(
   filename: string,
   options: BlobSaveOptions = {},
 ): Promise<BlobSaveResult> {
+  if (!saveIsCurrent(options)) return { outcome: 'cancelled', transport: window.pywebview ? 'desktop' : 'browser-download' };
   if (!window.pywebview) {
     const picker = (window as Window & { showSaveFilePicker?: BrowserFilePicker }).showSaveFilePicker;
     if (options.preferBrowserFilePicker && picker !== undefined) {
       return {
-        outcome: await saveBlobWithBrowserFilePicker(blob, filename, picker.bind(window)),
+        outcome: await saveBlobWithBrowserFilePicker(blob, filename, picker.bind(window), options),
         transport: 'browser-file-picker',
       };
     }
@@ -191,7 +223,7 @@ export async function saveBlobWithResult(
     return { outcome: 'failed', transport: 'desktop' };
   }
   return {
-    outcome: await saveBlobToDesktop(blob, filename, api),
+    outcome: await saveBlobToDesktop(blob, filename, api, options),
     transport: 'desktop',
   };
 }

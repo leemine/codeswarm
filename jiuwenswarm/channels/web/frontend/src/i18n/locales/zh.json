@@ -694,6 +694,10 @@
     }
   },
   "artifacts": {
+    "ownerDownloadNotice": "仅可下载当前私有会话已签发的 Workspace 产物。临时文件及分享、轨迹、Git 导出暂不可用。",
+    "ownerDownloadUnavailable": "该产物暂无可用的已授权 Workspace 下载。",
+    "ownerDownloadFailed": "下载不可用。请检查当前会话及权限后重试。",
+    "ownerPreviewUnavailable": "组织模式的预览暂不可用。请返回产物列表下载已授权的 Workspace 产物。",
     "title": "所有产物",
     "tab": "产物",
     "count": "{{count}} 个产物",

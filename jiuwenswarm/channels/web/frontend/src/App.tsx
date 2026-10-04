@@ -154,6 +154,7 @@ import {
   buildA2UIClientEventContent,
   setA2UIActionHandler,
 } from './features/a2ui/actionBridge';
+import { ArtifactOwnerContext } from './components/ArtifactsPanel/ArtifactOwnerContext';
 import { executeDesktopSave } from './utils/desktopSave';
 import { restoreSessionEquipment } from './utils/enabledExtensions';
 import { generateUuidV4 } from './utils/uuid';
@@ -3785,6 +3786,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
   }, [clearChatPanelResize, showWorkspaceDivider]);
 
   return (
+    <ArtifactOwnerContext.Provider value={{ organizationAuth, sessionId }}>
     <div
       className={`shell shell--icon-rail ${activeNav === 'agents' ? 'shell--agent-management' : ''}`}
       data-testid="app-shell"
@@ -4324,6 +4326,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
       )}
       <LoginDialog />
     </div>
+    </ArtifactOwnerContext.Provider>
   );
 }
 

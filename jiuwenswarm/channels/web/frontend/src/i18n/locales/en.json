@@ -703,6 +703,10 @@
     }
   },
   "artifacts": {
+    "ownerDownloadNotice": "Only issued Workspace artifacts for this private session can be downloaded. Temporary files and share, trace or Git exports are unavailable.",
+    "ownerDownloadUnavailable": "No authorized Workspace download is available for this artifact.",
+    "ownerDownloadFailed": "Download unavailable. Check the current session and permissions, then try again.",
+    "ownerPreviewUnavailable": "Preview is not available in organization mode yet. Return to the artifact list to download an authorized Workspace artifact.",
     "title": "Artifacts",
     "tab": "Artifacts",
     "count": "{{count}} item(s)",
