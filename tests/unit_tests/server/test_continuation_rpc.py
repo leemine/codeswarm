@@ -231,7 +231,8 @@ def test_agentserver_installs_both_runtime_methods():
     from jiuwenswarm.server.runtime.gateway_adapter.base import AdapterRegistry
     server = object.__new__(AgentWebSocketServer)
     server._organization_session_host = SimpleNamespace(store=object(), target_resolver=lambda *_: None,
-                                                        compile_history=lambda *_: None)
+                                                        compile_history=lambda *_: None,
+                                                        owner_revision=lambda *_: None)
     server._adapter_registry = AdapterRegistry()
     server._resolve_trusted_identity = lambda _: BOB
     server._execution_runtime = lambda: object()
