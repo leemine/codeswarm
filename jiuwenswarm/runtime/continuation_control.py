@@ -64,7 +64,8 @@ def capture_continuation_control(runtime, request, facade):
                 or adapter._native_session_routes.get(sid) is not route
                 or adapter._get_cached_session_adapter(sid) is not child
                 or child._native_execution is not native
-                or native.binding is not route[2].binding
+                or native.engine.binding is not route[2].binding
+                or native.engine.binding.host_session_id != sid
                 or native._closing or native._closed
                 or turn is None or native._native.active_turn is not turn
                 or turn.abort_requested
@@ -76,6 +77,7 @@ def capture_continuation_control(runtime, request, facade):
         validate_continuation_context(context, sid, parent.request_id)
 
     check()
+    coordinator.retain_native_control_origin(sid, control_id, native, turn.turn_id)
     retained = object.__new__(_ContinuationControl)
     for key, value in dict(child=child, facade=facade, adapter=adapter,
                            request=request, check=check, seal=_SEAL).items():

@@ -135,6 +135,8 @@ class SessionExecutionHandle:
     terminal_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     retain_owner_task: bool = field(default=False, repr=False)
     retain_after_control: bool = field(default=False, repr=False)
+    preserve_control_origin: bool = field(default=False, repr=False)
+    control_origin_terminal: SessionExecutionState | None = field(default=None, repr=False)
     waiting_control_ids: set[str] = field(default_factory=set, repr=False)
 
     def awaits_control(self, control_id: str) -> bool:

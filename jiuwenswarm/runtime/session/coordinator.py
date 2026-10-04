@@ -499,6 +499,44 @@ class RuntimeSessionCoordinator:
             raise SessionExecutionEndedError("original control parent unavailable")
         return parent
 
+    def retain_native_control_origin(self, session_id, control_id, native, turn_id):
+        """Retain one continuation admission until its real Native Turn ends."""
+        from openjiuwen.harness_protocol import TurnEventKind
+        from jiuwenswarm.runtime.harness.native_session import NativeExecutionSession
+        if type(native) is not NativeExecutionSession:
+            raise RuntimeError("original Native Session required")
+        parent = self.claimed_control_parent(session_id, control_id)
+        record = self._sessions[session_id]
+        def terminal(kind):
+            state = {TurnEventKind.FINISHED: SessionExecutionState.SUCCEEDED,
+                     TurnEventKind.FAILED: SessionExecutionState.FAILED,
+                     TurnEventKind.ABORTED: SessionExecutionState.CANCELLED}.get(kind)
+            if (state is None or self._sessions.get(session_id) is not record
+                    or self._registry.get(parent.execution_id) is not parent
+                    or parent.generation != record.generation or parent.state.terminal):
+                return
+            parent.control_origin_terminal = state
+            self._settle_native_control_origin(record, parent)
+        native.bind_turn_control_owner(turn_id, parent.request_id, parent, terminal)
+        parent.preserve_control_origin = True
+
+    def _settle_native_control_origin(self, record, parent):
+        """Consume an observed terminal only after every control consumer exits."""
+        if (not parent.preserve_control_origin or parent.control_origin_terminal is None
+                or parent.state.terminal
+                or self._sessions.get(record.session_id) is not record
+                or self._registry.get(parent.execution_id) is not parent
+                or parent.generation != record.generation):
+            return
+        if any(item.work_kind is SessionWorkKind.CONTROL_INPUT
+               and item.parent_execution_id == parent.execution_id
+               for item in self._registry.select(session_id=record.session_id,
+                   generation=record.generation, active_only=True)):
+            return
+        self._registry.mark_terminal(parent, parent.control_origin_terminal)
+        self._refresh_session_state(record)
+        self._notify_execution_changed(record)
+
     async def deliver_control(
         self,
         session_id: str,
@@ -590,7 +628,13 @@ class RuntimeSessionCoordinator:
 
             control_id = suspension_key(value) if suspension_key is not None else None
             heartbeat_root = self._heartbeat_root(parent)
-            if control_id and heartbeat_root is not None:
+            if parent.preserve_control_origin:
+                self._registry.resolve_control(parent, request_id)
+                if parent.control_origin_terminal is None and control_id:
+                    self._registry.mark_awaiting_control(parent, control_id)
+                    self._registry.mark_waiting(parent)
+                self._registry.mark_terminal(handle, SessionExecutionState.SUCCEEDED)
+            elif control_id and heartbeat_root is not None:
                 self._registry.resolve_control(parent, request_id)
                 self._registry.mark_awaiting_control(heartbeat_root, control_id)
                 self._registry.mark_waiting(heartbeat_root)
@@ -608,7 +652,7 @@ class RuntimeSessionCoordinator:
                     )
                 elif parent_was_waiting and parent.waiting_control_id:
                     self._registry.mark_waiting(parent)
-            if control_id and heartbeat_root is None:
+            if control_id and heartbeat_root is None and not parent.preserve_control_origin:
                 self._registry.mark_awaiting_control(handle, control_id)
                 self._registry.mark_waiting(handle)
             elif not control_id:
@@ -618,6 +662,7 @@ class RuntimeSessionCoordinator:
             return value
         finally:
             self._control_claims.discard(claim)
+            self._settle_native_control_origin(record, parent)
             self._refresh_session_state(record)
 
     def has_control_target(self, session_id: str, request_id: str) -> bool:
@@ -689,7 +734,8 @@ class RuntimeSessionCoordinator:
                     self._observe_submission_value(handle, item)
                     control_id = suspension_key(item) if suspension_key else None
                     if control_id:
-                        self._registry.mark_awaiting_control(handle, control_id)
+                        owner = parent if parent.preserve_control_origin else handle
+                        self._registry.mark_awaiting_control(owner, control_id)
                         self._refresh_control_gate(record)
                     yield item
             finally:
@@ -712,7 +758,10 @@ class RuntimeSessionCoordinator:
             handle.submission_state = SessionSubmissionState.PROVIDER_ACCEPTED
             handle.control_delivered = True
             self._registry.resolve_control(parent, request_id)
-            if parent_was_waiting and not parent.retain_after_control and not parent.waiting_control_id:
+            if parent.preserve_control_origin:
+                if parent.control_origin_terminal is None and parent.waiting_control_id:
+                    self._registry.mark_waiting(parent)
+            elif parent_was_waiting and not parent.retain_after_control and not parent.waiting_control_id:
                 self._registry.mark_terminal(parent, SessionExecutionState.SUCCEEDED)
             elif parent_was_waiting and parent.waiting_control_id:
                 self._registry.mark_waiting(parent)
@@ -724,6 +773,7 @@ class RuntimeSessionCoordinator:
             record.stream_control_claims.discard(request_id)
             if handle.task is asyncio.current_task():
                 handle.task = None
+            self._settle_native_control_origin(record, parent)
             self._refresh_session_state(record)
 
     def _stream_control_parent(

@@ -66,6 +66,8 @@ class _HostRequest:
     guarded_model_authority: Any = field(default=None, repr=False)
     mcp_authority: Any = field(default=None, repr=False)
     guarded_mcp_authority: Any = field(default=None, repr=False)
+    control_owner: Any = field(default=None, repr=False)
+    control_terminal: Callable | None = field(default=None, repr=False)
 
 
 class NativeExecutionSession:
@@ -283,6 +285,24 @@ class NativeExecutionSession:
         token = self._turn_requests.get(turn_id)
         entry = self._requests.get(token)
         return entry.request.request_id if entry and entry.request else None
+
+    def bind_turn_control_owner(self, turn_id, request_id, owner, on_terminal):
+        """Observe the original Turn through its existing sole event reader."""
+        active = self._native.active_turn
+        token = self._turn_requests.get(turn_id)
+        entry = self._requests.get(token)
+        if (self._closing or self._closed or active is None or active.turn_id != turn_id
+                or active.abort_requested or entry is None or entry.request is None
+                or entry.request.request_id != request_id
+                or active.content.metadata.get(_REQUEST_KEY) != token
+                or not callable(on_terminal)):
+            raise RuntimeError("original Native control Turn unavailable")
+        if entry.control_owner is not None:
+            if entry.control_owner is not owner:
+                raise RuntimeError("Native control owner cannot be replaced")
+            return
+        entry.control_owner = owner
+        entry.control_terminal = on_terminal
 
     def turn_outputs(self, turn_id: str) -> AsyncIterator[ProjectedOutput]:
         """Read one finite Turn; closing this iterator keeps the session alive."""
@@ -645,6 +665,8 @@ class NativeExecutionSession:
             self._terminal_turns.append(event.turn_id)
             token = self._turn_requests.pop(event.turn_id, None)
             entry = self._requests.pop(token, None)
+            if entry is not None and entry.control_terminal is not None:
+                entry.control_terminal(event.event.kind)
             if (
                 entry is not None
                 and entry.result is not None

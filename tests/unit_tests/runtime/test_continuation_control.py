@@ -19,10 +19,18 @@ async def arranged(tx):
     sid = original.session_id
     await tx.runtime.observe_detached_native_turn(sid, tx.owned_execution.execution_id,
         {'event_type': 'chat.ask_user_question', 'request_id': 'question-1'})
-    bound = SimpleNamespace(binding=object())
-    turn = SimpleNamespace(turn_id='native-turn', abort_requested=False)
-    native = SimpleNamespace(binding=bound.binding, _closing=False, _closed=False,
-        _native=SimpleNamespace(active_turn=turn), request_id_for_turn=lambda _: original.request_id)
+    bound = SimpleNamespace(binding=SimpleNamespace(host_session_id=sid))
+    turn = SimpleNamespace(turn_id='native-turn', abort_requested=False,
+        content=SimpleNamespace(metadata={'native.host_request': 'original-token'}))
+    from jiuwenswarm.runtime.harness.native_session import NativeExecutionSession, _HostRequest
+    from openjiuwen.harness.schema.interaction import SendInputRequest
+    native = object.__new__(NativeExecutionSession)
+    native.engine = SimpleNamespace(binding=bound.binding)
+    native._closing = native._closed = False
+    native._native = SimpleNamespace(active_turn=turn)
+    native._turn_requests = {turn.turn_id: 'original-token'}
+    native._requests = {'original-token': _HostRequest(request=SendInputRequest(
+        request_id=original.request_id, inputs={}))}
     child = SimpleNamespace(_native_execution=native, _register_session_agent_task=Mock())
     adapter = SimpleNamespace(_native_session_routes={sid: (None, None, bound, context)},
         _get_cached_session_adapter=Mock(return_value=child), _touch_session_adapter=Mock())
