@@ -223,11 +223,21 @@ class SessionArchiveService:
         *,
         parent_operation: str = "",
         pre_stopped: bool = False,
+        _deletion_authority=None,
     ) -> dict:
         lc.validate_id(session_id)
         # Project lock must precede the session lock; project cascade already
         # owns it and explicitly supplies its operation ID.
-        meta = lc.raw_metadata(session_id)
+        governed = getattr(self.runtime, '_organization_session_host', None) is not None
+        if governed:
+            if action != 'delete' or parent_operation or _deletion_authority is None:
+                raise lc.LifecycleError('FORBIDDEN', 'authenticated Single deletion required')
+            if (_deletion_authority.runtime is not self.runtime
+                    or _deletion_authority.session_id != session_id):
+                raise lc.LifecycleError('FORBIDDEN', 'original deletion target required')
+            _deletion_authority.check_before_begin()
+        meta = (_deletion_authority.descriptor if _deletion_authority is not None
+                else lc.raw_metadata(session_id))
         project_id = lc.project_id_for(meta)
         if not parent_operation:
             async with self.lock("project", project_id):
@@ -238,7 +248,7 @@ class SessionArchiveService:
                     )
                 return await self._session(
                     session_id, action, channel_id, project_id,
-                    pre_stopped=pre_stopped,
+                    pre_stopped=pre_stopped, _deletion_authority=_deletion_authority,
                 )
         return await self._session(
             session_id, action, channel_id, project_id, pre_stopped=pre_stopped
@@ -283,8 +293,15 @@ class SessionArchiveService:
         pre_stopped: bool = False,
         defer_pin_reindex: bool = False,
         preloaded_meta: dict | None = None,
+        _deletion_authority=None,
     ) -> dict:
         async with self.lock("session", session_id):
+            authority = _deletion_authority
+            if authority is not None:
+                authority.check_before_begin()
+                if lc.state('session', session_id).get('deleted') is True:
+                    authority.repair_audit()
+                    return authority.acknowledge()
             active, archived = lc.session_paths(session_id)
             previous = lc.state("session", session_id).get("operation")
             pending = previous and previous["status"] != "completed"
@@ -299,7 +316,7 @@ class SessionArchiveService:
             meta = (
                 preloaded_meta
                 if preloaded_meta is not None
-                else lc.raw_metadata(session_id)
+                else authority.descriptor if authority is not None else lc.raw_metadata(session_id)
             )
             is_cron_session = bool(meta.get("cron_id")) or session_id.startswith(
                 ("cron_", "heartbeat_")
@@ -331,7 +348,7 @@ class SessionArchiveService:
             if action == "archive" and self.runtime.is_session_running(session_id):
                 probe = getattr(self.runtime, "has_parked_team_streams", None)
                 parked_team_streams = callable(probe) and bool(probe(session_id))
-            if self._session_is_busy_for_action(
+            if authority is None and self._session_is_busy_for_action(
                 session_id,
                 action,
                 active,
@@ -347,6 +364,17 @@ class SessionArchiveService:
                 "session", session_id, action, block_execution=action != "archive"
             )
             operation = lc.claim_operation("session", session_id, self._owner_id)
+            if authority is not None:
+                authority.enter(operation)
+                if authority.host.confirms_deletion(authority.receipt):
+                    # All destructive cleanup committed before owner retirement;
+                    # this retry only closes the same original lifecycle fact.
+                    payload = dict(session_id=session_id, ok=True, project_id=project_id)
+                    try:
+                        lc.complete('session', session_id, deleted=True, result=payload)
+                    except Exception:
+                        return authority.acknowledge()
+                    return authority.acknowledge()
             # Moving an archive clears metadata.pinned before reindexing can
             # fail. Persist the requirement before the move so retries retain
             # it, including retries handled by a new service instance.
@@ -360,7 +388,11 @@ class SessionArchiveService:
             mailbox = self._session_message_service() if action == "delete" else None
             if mailbox is not None:
                 # 删除屏障先于 stop 生效：阻止信箱新执行并取消目标消费者。
+                if authority is not None:
+                    authority.check()
                 await mailbox.begin_target_delete(session_id)
+                if authority is not None:
+                    authority.check()
             try:
                 if action == "delete":
                     lc.update(
@@ -368,7 +400,17 @@ class SessionArchiveService:
                     )
                     # 归档区会话没有运行时生产者，无需 stop 与全局 flush 屏障；
                     # 项目级预停止过的会话也不再重复停止，避免二次排队等待。
-                    if active.exists() and not pre_stopped:
+                    if authority is not None:
+                        await authority.quiesce()
+                        from jiuwenswarm.server.runtime.session import session_metadata, session_history
+                        flushed = await asyncio.gather(
+                            asyncio.to_thread(session_metadata.flush_pending_writes, 10),
+                            asyncio.to_thread(session_history.flush_pending_writes, 10),
+                        )
+                        authority.check()
+                        if not all(flushed):
+                            raise lc.LifecycleError('STOP_TIMEOUT', 'accepted writes are still draining')
+                    elif active.exists() and not pre_stopped:
                         await self.stop(
                             session_id, str(meta.get("channel_id") or channel_id)
                         )
@@ -390,9 +432,14 @@ class SessionArchiveService:
                         )
                 if action == "delete":
                     lc.update("session", session_id, phase="delete_directory")
-                    result = await self.runtime.delete_session(
-                        channel_id=channel_id, session_id=session_id
-                    )
+                    if authority is not None:
+                        authority.check()
+                        result = await self.runtime._delete_owned_session(authority)
+                        authority.check()
+                    else:
+                        result = await self.runtime.delete_session(
+                            channel_id=channel_id, session_id=session_id
+                        )
                     if not result.ok:
                         raise lc.LifecycleError(
                             result.error_code or "DELETE_FAILED",
@@ -401,11 +448,15 @@ class SessionArchiveService:
                     if mailbox is not None:
                         # queued/running/waiting_user/unknown 统一记 cancelled 并清正文。
                         await mailbox.on_target_deleted(session_id)
+                        if authority is not None:
+                            authority.check()
+                    if authority is not None:
+                        authority.commit_owner()
                     payload = dict(
                         session_id=session_id, ok=True, project_id=project_id
                     )
                     lc.complete("session", session_id, deleted=True, result=payload)
-                    return payload
+                    return authority.acknowledge() if authority is not None else payload
                 source, destination = (
                     (active, archived) if action == "archive" else (archived, active)
                 )
@@ -469,7 +520,18 @@ class SessionArchiveService:
                     payload["_pins_reindex_required"] = deferred_pin_reindex_required
                 return payload
             except Exception as exc:
-                if mailbox is not None:
+                if authority is not None:
+                    # The resource commit point may have been written before an
+                    # IO error. Only the same authenticated receipt can confirm it.
+                    try:
+                        return authority.acknowledge()
+                    except Exception:
+                        pass
+                    # Do not resurrect a revoked mailbox or rewrite a completed
+                    # operation into failure. Unknown facts retain the existing fence.
+                    if lc.state('session', session_id).get('deleted') is True:
+                        raise lc.LifecycleError('DELETE_COMMIT_PENDING', 'deletion result is unconfirmed') from None
+                if mailbox is not None and authority is None:
                     # 删除失败：解除屏障并恢复该目标的信箱队列消费。
                     try:
                         await mailbox.abort_target_delete(session_id)

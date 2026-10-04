@@ -37,6 +37,7 @@ from openjiuwen.harness.rails import (
 )
 from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 
+from jiuwenswarm.governance.model_consumer import runtime_model_kwargs
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.common.config import (
     get_evolution_review_feedback_min_confidence,
@@ -480,9 +481,10 @@ def _build_evolution_llm_from(model_config: dict[str, Any]) -> tuple[Any, str]:
         )
     )
     client_config = ModelClientConfig(**model_client_config)
-    return Model(
-        model_client_config=client_config, model_config=request_config
-    ), model_name
+    return Model(**runtime_model_kwargs(
+        model_client_config=client_config, model_config=request_config,
+        binding_config={**model_client_config, "model_name": model_name}
+    )), model_name
 
 
 def _build_evolution_approval_stack(

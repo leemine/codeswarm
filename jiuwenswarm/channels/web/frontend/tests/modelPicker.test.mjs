@@ -82,6 +82,8 @@ async function withFixture(run, language = 'en') {
     // 组件里会 new CustomEvent（如 requestLogin 派发的 jiuwen:auth-required），
     // 不挂到全局的话那句直接 ReferenceError
     CustomEvent: dom.window.CustomEvent,
+    MutationObserver: dom.window.MutationObserver,
+    ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
     IS_REACT_ACT_ENVIRONMENT: true,
   })) {
     previousGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
@@ -163,7 +165,7 @@ test('chat and scheduled tasks show identical grouped options, excluding seconda
 test('限时免费模型：没登录拿到之前，这一栏只放一个「获取」入口', async () => {
   await withFixture(async ({ mount, click, byId }) => {
     // 活动在跑但还没登录：免费模型一个都没有
-    useAuthStore.setState({ enabled: true, initialized: true, islogin: false });
+    useAuthStore.setState({ enabled: true, initialized: true, islogin: false, campaignState: 'active' });
     useSessionStore.getState().setAvailableModels(
       catalog.filter((model) => model.is_free !== true),
       'configured-a',
@@ -408,3 +410,29 @@ test('Escape and outside clicks dismiss the portal without changing the controll
     assert.deepEqual(changes, []);
   });
 });
+
+for (const language of ['en', 'zh']) {
+  test(`exact host selection displays recipient even outside defaults and reports removal (${language})`, async () => {
+    await withFixture(async ({ mount, byId }) => {
+      const alice = { ...catalog[0], model_name: 'same', selection_key: 'same#0', alias: 'Alice', is_default: true };
+      const bob = { ...catalog[0], model_name: 'same', selection_key: 'same#2', alias: 'Bob', is_default: false };
+      useSessionStore.getState().setAvailableModels([alice, bob], 'same');
+      useSessionStore.getState().setSelectedModelName(sessionId, 'same#2');
+      await mount(createElement(ChatModelSelector));
+      assert.equal(byId('chat-panel-model-selector-trigger').textContent, 'Bob');
+      assert.equal(useSessionStore.getState().getEffectiveModelName(sessionId), 'same#2');
+      await act(async () => useSessionStore.getState().setAvailableModels([bob, alice], 'same'));
+      assert.equal(byId('chat-panel-model-selector-trigger').textContent, 'Bob');
+      await act(async () => useSessionStore.getState().setAvailableModels([alice], 'same'));
+      assert.match(byId('chat-panel-model-selector-trigger').textContent, /same#2/);
+      assert.match(byId('chat-panel-model-selector-trigger').textContent, language === 'en' ? /unavailable/ : /不可用/);
+      assert.equal(useSessionStore.getState().getEffectiveModelName(sessionId), 'same#2');
+      await act(async () => {
+        useSessionStore.getState().ensureRuntime('unselected');
+        useChatStore.getState().setActiveSessionId('unselected');
+      });
+      assert.equal(byId('chat-panel-model-selector-trigger').textContent, 'Alice');
+      assert.equal(useSessionStore.getState().getEffectiveModelName('unselected'), 'same');
+    }, language);
+  });
+}

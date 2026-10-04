@@ -160,6 +160,14 @@ export function findBatchSessionResult(
   return results.find((entry) => entry && entry.session_id === sessionId) ?? null;
 }
 
+/** A validated committed deletion whose audit still needs durable repair. */
+export class DeletionAuditPendingError extends Error {
+  readonly code = 'DELETE_AUDIT_PENDING';
+  constructor(readonly sessionId: string) {
+    super('Session deleted; deletion audit is pending.');
+  }
+}
+
 export function createArchivedTaskClient(request: ArchiveRequest) {
   return {
     // 归档列表是服务端全量扫描后的分页,慢环境(杀软扫描/冷缓存/大量归档)
@@ -179,8 +187,29 @@ export function createArchivedTaskClient(request: ArchiveRequest) {
     /** 批量恢复（如项目批量归档 toast 的撤销）；逐项结果必须检查 ok。 */
     unarchiveSessions: (sessionIds: string[]) =>
       request<BatchSessionArchiveResponse>('session.unarchive', { session_ids: sessionIds }),
-    deleteSession: (sessionId: string) =>
-      request<{ session_id?: string; project_id?: string }>('session.delete', { session_id: sessionId }),
+    deleteSession: async (sessionId: string, options: { requireExitConfirmation?: boolean } = {}) => {
+      const result = await request<unknown>('session.delete', { session_id: sessionId });
+      if (!result || typeof result !== 'object' || Array.isArray(result)) {
+        throw Object.assign(new Error('Session deletion was not confirmed'), { code: 'DELETE_UNCONFIRMED' });
+      }
+      const payload = result as Record<string, unknown>;
+      if (payload.session_id !== sessionId || !sessionId
+        || (options.requireExitConfirmation === true
+          && (payload.deleted !== true || payload.exit_confirmed !== true))
+        || ('ok' in payload && payload.ok !== true)
+        || ('success' in payload && payload.success !== true)
+        || ('deleted' in payload && payload.deleted !== true)
+        || ('exit_confirmed' in payload && payload.exit_confirmed !== true)
+        || ('audit_pending' in payload && typeof payload.audit_pending !== 'boolean')
+        || (payload.audit_pending === true && (payload.deleted !== true || payload.exit_confirmed !== true))
+        || payload.stop_pending === true || payload.recovery_required === true
+        || payload.error || payload.code) {
+        throw Object.assign(new Error('Session deletion was not confirmed'), { code: 'DELETE_UNCONFIRMED' });
+      }
+      if (payload.audit_pending === true) throw new DeletionAuditPendingError(sessionId);
+      // Legacy success carries only the exact Session ID (and optionally project ID).
+      return payload as { session_id: string; project_id?: string };
+    },
   };
 }
 

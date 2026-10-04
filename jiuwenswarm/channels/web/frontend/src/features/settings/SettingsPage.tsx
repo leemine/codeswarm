@@ -14,6 +14,7 @@ import type { SettingsPageDefinition } from './registry/types';
 import type { SettingsModuleTarget } from './settingsNavigation';
 
 export function SettingsPage({
+  organizationAuth = false,
   definition,
   isConnected,
   connectionState,
@@ -31,6 +32,7 @@ export function SettingsPage({
   onExternalCliDetectResultsChange,
   initialModuleId,
 }: {
+  organizationAuth?: boolean;
   definition: SettingsPageDefinition;
   isConnected: boolean;
   connectionState: WebConnectionState;
@@ -58,6 +60,7 @@ export function SettingsPage({
 }) {
   return (
     <SettingsServicesProvider
+      organizationAuth={organizationAuth}
       isConnected={isConnected}
       connectionState={connectionState}
       request={request}

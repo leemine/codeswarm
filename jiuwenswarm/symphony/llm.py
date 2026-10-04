@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Dict, Iterator, List, Optional
 
+from jiuwenswarm.governance.model_consumer import runtime_model_kwargs
 from jiuwenswarm.common.model_config_validation import (
     probe_model_connection as probe_configured_model_connection,
 )
@@ -229,10 +230,11 @@ class LLMConfig:
             ModelRequestConfig,
         )
 
-        return Model(
+        return Model(**runtime_model_kwargs(
             model_client_config=ModelClientConfig(**self.model_client_kwargs()),
             model_config=ModelRequestConfig(**self.model_request_kwargs()),
-        )
+            binding_config={**self.model_client_kwargs(), "model_name": self.model}
+        ))
 
     def identity_digest(self) -> str:
         """Hash every effective client/request setting without exposing values."""

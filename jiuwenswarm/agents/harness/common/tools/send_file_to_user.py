@@ -54,7 +54,7 @@ def _projected_artifact_delivery_id(artifact_id: str) -> str:
     return f"browser-artifact:{digest}"
 
 
-def looks_like_skill_package(path: str | Path) -> bool:
+def looks_like_skill_package(path: str | Path, *, file_object=None) -> bool:
     """轻量判断交付文件是否为 Skill 包（不解压全量内容）.
 
     - ``.skill`` / ``.skill.zip``：按扩展名视为技能包
@@ -71,9 +71,9 @@ def looks_like_skill_package(path: str | Path) -> bool:
     if not name.endswith(".zip"):
         return False
     try:
-        if not file_path.is_file():
+        if file_object is None and not file_path.is_file():
             return False
-        with zipfile.ZipFile(file_path, "r") as zf:
+        with zipfile.ZipFile(file_object if file_object is not None else file_path, "r") as zf:
             for entry in zf.namelist():
                 parts = [
                     part
@@ -110,6 +110,7 @@ class _SendFileRuntimeEnvelope:
     team_workspace_root: str | None
     require_execution_authorization: bool
     asset_owner: VerifiedDownloadAssetOwner | None
+    artifact_issuer: Any = None
 
 
 # Session-level dedup for send_file_to_user. Compression may drop prior tool
@@ -392,7 +393,8 @@ class SendFileToolkit:
         owns_execution_grant = self._require_execution_authorization
         envelope: _SendFileRuntimeEnvelope | None = None
         try:
-            envelope = self._snapshot_runtime_envelope()
+            envelope = self._snapshot_runtime_envelope(
+                abs_file_path_list=abs_file_path_list, target_channels=target_channels)
             return await self._send_file_with_envelope(
                 envelope,
                 abs_file_path_list=abs_file_path_list,
@@ -521,9 +523,26 @@ class SendFileToolkit:
             raise RuntimeError("Browser Artifact acknowledgement was not persisted")
         await wait_for_history_receipt(receipt)
 
-    def _snapshot_runtime_envelope(self) -> _SendFileRuntimeEnvelope:
+    def _snapshot_runtime_envelope(self, *, abs_file_path_list=None, target_channels=None) -> _SendFileRuntimeEnvelope:
         """Freeze every mutable host field before the first await."""
 
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        artifact_issuer = None
+        if configured_authenticator() is not None:
+            from openjiuwen.core.foundation.tool import current_tool_execution
+            from jiuwenswarm.governance.tool_context import current_native_execution_slice
+            from jiuwenswarm.governance.workspace_artifact_origin import validate_send_file_origin
+            from jiuwenswarm.governance.workspace_download import WorkspaceArtifactIssuer, WorkspaceDownloadDenied
+            bound = current_native_execution_slice()
+            factory = getattr(bound, 'artifact_issuer_factory', None)
+            origin = dict(source_execution=current_tool_execution(), execution_slice=bound,
+                toolkit=self, actual_paths=self._normalize_requested_paths(abs_file_path_list),
+                target_channels=tuple(self._normalize_target_channels(target_channels)),
+                session_id=self.session_id, channel_id=self.channel_id, workspace=self._resolve_project_dir())
+            check = validate_send_file_origin(**origin)
+            artifact_issuer = factory(**origin)
+            if type(artifact_issuer) is not WorkspaceArtifactIssuer or not check():
+                raise WorkspaceDownloadDenied('artifact execution issuer unavailable')
         asset_owner = self._asset_owner
         if self._require_execution_authorization:
             if asset_owner is None:
@@ -547,6 +566,7 @@ class SendFileToolkit:
             team_workspace_root=self._team_workspace_root,
             require_execution_authorization=(self._require_execution_authorization),
             asset_owner=asset_owner,
+            artifact_issuer=artifact_issuer,
         )
 
     async def _send_file_with_envelope(
@@ -562,6 +582,10 @@ class SendFileToolkit:
         target_channel_list = SendFileToolkit._normalize_target_channels(
             target_channels
         )
+        if envelope.artifact_issuer is not None:
+            # No default human/member routing or cross-channel delivery in the
+            # initial organization Workspace download contract.
+            target_channel_list = [envelope.channel_id]
         if target_channel_list:
             logger.info(
                 "[SendFileToolkit] send_file target_channels=%s session_id=%s",
@@ -596,6 +620,13 @@ class SendFileToolkit:
         materialized_files: list[str] = []
         for fp in valid_files:
             try:
+                if envelope.artifact_issuer is not None:
+                    # Original Workspace path only; copying from another root
+                    # must never silently manufacture authority for that root.
+                    if fp not in envelope.artifact_issuer._paths:
+                        raise ValueError("artifact original path changed")
+                    materialized_files.append(fp)
+                    continue
                 materialized_files.append(
                     self._materialize_team_deliverable_from_roots(
                         fp,
@@ -694,12 +725,17 @@ class SendFileToolkit:
                     raise RuntimeError("send_file_asset_owner_missing")
                 expires_at = float(int(time.time()) + _VERIFIED_ASSET_TTL_SECONDS)
                 for file_path in valid_files:
-                    asset = await asyncio.to_thread(
-                        envelope.asset_owner.stage,
-                        Path(file_path),
-                        file_name=Path(file_path).name,
-                        expires_at=expires_at,
-                    )
+                    if envelope.artifact_issuer is not None:
+                        def stage(path=file_path):
+                            return envelope.artifact_issuer.stage_sealed(
+                                envelope.asset_owner, path, file_name=Path(path).name,
+                                expires_at=expires_at)
+                        asset = await self._stage_owned_asset(envelope.asset_owner, stage)
+                    else:
+                        asset = await asyncio.to_thread(
+                            envelope.asset_owner.stage, Path(file_path),
+                            file_name=Path(file_path).name, expires_at=expires_at)
+
                     owned_assets.append(asset)
                     assets_by_path[_normalize_sent_file_path(file_path)] = asset
             files_payload = self._build_files_payload(
@@ -762,6 +798,9 @@ class SendFileToolkit:
             # The Runtime push is the externally visible commit point. Entering
             # it makes delivery uncertain on exceptions, so staged assets must
             # remain valid until TTL instead of being revoked prematurely.
+            if envelope.artifact_issuer is not None and envelope.require_execution_authorization:
+                for path in valid_files:
+                    envelope.artifact_issuer.check_sealed_source(path)
             exposure_started = True
             if not await send_runtime_push(msg):
                 exposure_started = False
@@ -820,7 +859,36 @@ class SendFileToolkit:
                 and envelope.asset_owner is not None
             ):
                 for asset in owned_assets:
-                    envelope.asset_owner.revoke(asset)
+                    try:
+                        envelope.asset_owner.revoke(asset)
+                    except Exception:
+                        logger.error("Unexposed artifact cleanup failed")
+
+    @staticmethod
+    async def _stage_owned_asset(owner, stage):
+        """Drain only this worker on cancellation; never abandon its asset."""
+        task = asyncio.create_task(asyncio.to_thread(stage))
+        try:
+            return await asyncio.shield(task)
+        except BaseException:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            if not task.cancelled():
+                try:
+                    asset = task.result()
+                except BaseException:
+                    pass
+                else:
+                    try:
+                        owner.revoke(asset)
+                    except Exception:
+                        logger.error("Unexposed artifact cleanup failed")
+            raise
 
     @staticmethod
     def _normalize_requested_paths(value: Any) -> tuple[str, ...]:
@@ -867,12 +935,18 @@ class SendFileToolkit:
                     base_name,
                     envelope.session_id,
                     envelope.user_id,
+                    **({"artifact_issuer": envelope.artifact_issuer,
+                        "original_path": file_path, "asset_owner": envelope.asset_owner}
+                       if envelope.artifact_issuer is not None else {}),
                 )
-                probe_path = (
-                    file_path
-                    if Path(file_path).is_file()
-                    else str(asset.sealed_path)
-                )
+                probe_path = (str(asset.sealed_path) if envelope.artifact_issuer is not None
+                    else file_path if Path(file_path).is_file() else str(asset.sealed_path))
+                if envelope.artifact_issuer is not None:
+                    with envelope.artifact_issuer.open_sealed(asset, file_path, owner=envelope.asset_owner) as fd:
+                        with os.fdopen(os.dup(fd), "rb") as verified_file:
+                            is_skill_package = looks_like_skill_package(file_path, file_object=verified_file)
+                else:
+                    is_skill_package = looks_like_skill_package(probe_path)
                 files_payload.append(
                     {
                         "path": asset.sealed_path.as_posix(),
@@ -881,7 +955,7 @@ class SendFileToolkit:
                         "mime_type": download_info["mime_type"],
                         "download_url": download_info["download_url"],
                         "download_token": download_info["download_token"],
-                        "is_skill_package": looks_like_skill_package(probe_path),
+                        "is_skill_package": is_skill_package,
                     }
                 )
             return SendFileToolkit._attach_artifact_metadata(
@@ -901,6 +975,7 @@ class SendFileToolkit:
                     base_name,
                     envelope.session_id,
                     user_id=envelope.user_id,
+                    **({'artifact_issuer': envelope.artifact_issuer} if envelope.artifact_issuer is not None else {}),
                 )
                 files_payload.append(
                     {
@@ -914,6 +989,9 @@ class SendFileToolkit:
                     }
                 )
         except Exception as download_err:
+            if envelope.artifact_issuer is not None:
+                from jiuwenswarm.governance.workspace_download import WorkspaceDownloadDenied
+                raise WorkspaceDownloadDenied('artifact download publication denied') from None
             logger.warning(
                 "[SendFileToolkit] 生成下载信息失败，回退到基础模式: %s",
                 download_err,

@@ -9,7 +9,6 @@ import asyncio
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import asdict
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
 
@@ -241,6 +240,10 @@ class WebSocketAgentServerClient(AgentServerClient):
             for key, value in dict(extra_headers or {}).items()
             if str(value).strip()
         }
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        auth = configured_authenticator()
+        if auth is not None:
+            cleaned_headers["X-Jiuwen-Gateway-Assertion"] = json.dumps(auth.sign({"upgrade": "agentserver"}))
         try:
             from websockets.legacy.client import connect as legacy_connect
             connect_fn = legacy_connect
@@ -285,8 +288,11 @@ class WebSocketAgentServerClient(AgentServerClient):
             if nonce and accepted is True:
                 # Reply on the exact source socket; a replacement connection
                 # must never settle another connection's pending acceptance.
-                await ws.send(json.dumps({"type": "event", "event": E2A_ARTIFACT_ACCEPTED_EVENT,
-                                          "payload": {"nonce": nonce}}))
+                receipt = {"type": "event", "event": E2A_ARTIFACT_ACCEPTED_EVENT,
+                           "payload": {"nonce": nonce}}
+                from jiuwenswarm.governance.organization_auth import configured_authenticator
+                auth = configured_authenticator()
+                await ws.send(json.dumps(auth.sign(receipt) if auth else receipt))
         except Exception:
             logger.exception("Gateway server push not durably accepted")
 
@@ -482,9 +488,15 @@ class WebSocketAgentServerClient(AgentServerClient):
             await self.connect(uri)
 
     async def _send_wire_payload(self, payload: dict[str, Any]) -> None:
+        from jiuwenswarm.governance.workspace_download import check_workspace_send
+        check_workspace_send(self, payload)
         ws = self._ws
         if ws is None:
             raise RuntimeError("未连接 AgentServer，请先调用 connect(uri)")
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        auth = configured_authenticator()
+        if auth is not None:
+            payload = auth.sign(payload)
         try:
             await ws.send(json.dumps(payload, ensure_ascii=False))
         except (ConnectionClosed, OSError) as exc:
@@ -507,6 +519,8 @@ class WebSocketAgentServerClient(AgentServerClient):
         *,
         timeout: float | None = None,
     ) -> AgentResponse:
+        from jiuwenswarm.governance.workspace_download import check_workspace_send
+        check_workspace_send(self, envelope.to_dict())
         await self._ensure_connected_for_request()
         # 非流式 API 必须与 AgentServer 的 unary 路径一致；忽略信封上误带的 is_stream=True。
         envelope.is_stream = False

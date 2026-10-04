@@ -93,6 +93,9 @@ class ExecutionSession:
         self._detached_output = detached_output
         self._tool_gateway = tool_gateway
         self._tool_transport: ManagedProductToolTransport | None = None
+        self._native_preflight_bound = False
+        self._model_gateway_binding = None
+        self._model_authority_for_turn = None
         self._queue_size = max(1, queue_size)
         self._recovery = recovery
         self._output_router: TurnOutputRouter | None = None
@@ -116,6 +119,29 @@ class ExecutionSession:
     @property
     def exit_state(self) -> ExecutionExitState:
         return self._exit_state
+
+    def owns_governed_provider_session(self, provider_session_id: str) -> bool:
+        """Prove this live binding owns the preflight-protected native Session."""
+        transport = self._tool_transport
+        return bool(
+            self.binding.provider_id == "opencode"
+            and self._native_preflight_bound
+            and self._started and not self._closed
+            and self._exit_state is ExecutionExitState.RUNNING
+            and transport is not None and transport.started
+            and provider_session_id
+            and self.engine.harness.provider_session_id == provider_session_id
+        )
+
+    def bind_model_gateway(self, binding, authority_for_turn) -> None:
+        """Bind a host-selected model once before this original Provider cycle."""
+        from jiuwenswarm.governance.model_credentials import ModelCredentialBinding
+        if (type(binding) is not ModelCredentialBinding or not callable(authority_for_turn)
+                or self.binding.provider_id != 'opencode' or self._model_gateway_binding is not None
+                or self._started or self._closed or self._tool_transport is not None):
+            raise ValueError('model gateway binding is unavailable')
+        self._model_gateway_binding = binding
+        self._model_authority_for_turn = authority_for_turn
 
     async def start(self, context: HarnessContext) -> None:
         """Start exactly one Provider cycle for the bound host Session."""
@@ -214,16 +240,42 @@ class ExecutionSession:
         ):
             await self.io.abort(immediate=immediate)
 
-    async def stop(self) -> None:
+    async def stop(self, *, ownership_check: Callable[[], None] | None = None) -> None:
         """Idempotently release only resources owned by this Session."""
-        async with self._lifecycle_lock:
-            if self._closed:
+        engine, binding, io = self.engine, self.binding, self.io
+        router, transport, gateway = self._output_router, self._tool_transport, self._tool_gateway
+        recovery = self._recovery
+
+        def check():
+            if ownership_check is None:
                 return
-            self._exit_state = ExecutionExitState.STOP_REQUESTED
-            router = self._output_router
-            await self._stop_owned_resources(router=router)
-            if self._recovery is not None:
-                await self._recovery.clear_pending_interactions()
+            if ownership_check() is not None:
+                raise RuntimeError("External stop ownership checker must return None")
+            if (self.engine is not engine or self.binding is not binding or self.io is not io
+                    or self._output_router is not router or self._tool_transport is not transport
+                    or self._tool_gateway is not gateway or self._recovery is not recovery):
+                raise RuntimeError("External stop resources changed")
+
+        async with self._lifecycle_lock:
+            try:
+                check()
+                if self._closed:
+                    if ownership_check is not None and self._exit_state is not ExecutionExitState.EXIT_CONFIRMED:
+                        raise RuntimeError("External closed Session exit is unconfirmed")
+                    return
+                self._exit_state = ExecutionExitState.STOP_REQUESTED
+                if ownership_check is None:
+                    router, recovery = self._output_router, self._recovery
+                    await self._stop_owned_resources(router=router)
+                else:
+                    await self._stop_owned_resources(router=router, ownership_check=check)
+                check()
+                if recovery is not None:
+                    await recovery.clear_pending_interactions()
+                    check()
+            except BaseException:
+                self._exit_state = ExecutionExitState.EXIT_UNCONFIRMED
+                raise
             self._output_router = None
             self._provider_started_turns.clear()
             self._started = False
@@ -234,24 +286,32 @@ class ExecutionSession:
         self,
         *,
         router: TurnOutputRouter | None,
+        ownership_check: Callable[[], None] | None = None,
     ) -> None:
         failures: list[tuple[str, Exception]] = []
+        # Capture before the first await. A replacement never becomes this stop's resource.
+        io, transport, gateway = self.io, self._tool_transport, self._tool_gateway
+
+        def check():
+            if ownership_check is not None and ownership_check() is not None:
+                raise RuntimeError("External stop ownership checker must return None")
 
         async def stop_one(name: str, operation: Callable[[], Awaitable[None]]) -> None:
+            check()
             try:
-                await asyncio.wait_for(
-                    operation(),
-                    timeout=RESOURCE_STOP_TIMEOUT_S,
-                )
+                await asyncio.wait_for(operation(), timeout=RESOURCE_STOP_TIMEOUT_S)
             except Exception as exc:
                 failures.append((name, exc))
+            check()
 
         if router is not None:
             await stop_one("output_router", router.stop)
-        await stop_one("provider", self.io.stop)
-        if self._tool_transport is not None:
-            await stop_one("product_mcp", self._tool_transport.stop)
-        close_gateway = getattr(self._tool_gateway, "close", None)
+        await stop_one("provider", io.stop)
+        if transport is not None:
+            await stop_one("product_mcp", transport.stop)
+            if getattr(transport, "exit_confirmed", False) is not True:
+                failures.append(("product_mcp", RuntimeError("product MCP transport exit is unconfirmed")))
+        close_gateway = getattr(gateway, "close", None)
         if callable(close_gateway):
             await stop_one("tool_gateway", close_gateway)
         if failures:
@@ -292,6 +352,13 @@ class ExecutionSession:
 
     async def _prepare_tool_context(self, context: HarnessContext) -> HarnessContext:
         gateway = self._tool_gateway
+        governed_opencode = (
+            self.binding.provider_id == "opencode" and context.tool_authorizer is not None
+        )
+        if self._model_gateway_binding is not None and not governed_opencode:
+            raise ValueError('model gateway requires mandatory native authority')
+        if governed_opencode:
+            return await self._prepare_opencode_preflight(context, gateway)
         if gateway is None:
             return context
         self._validate_gateway_scope(gateway)
@@ -329,6 +396,102 @@ class ExecutionSession:
             mcp_servers=(*context.mcp_servers, transport.server_config()),
             host_capabilities=frozenset(capabilities),
         )
+
+    async def _prepare_opencode_preflight(self, context, gateway):
+        # The endpoint is a live host object, never a persisted Provider option.
+        # Import lazily so legacy providers retain their existing dependencies.
+        from openjiuwen.harness_providers.opencode import (
+            OpenCodeHarness, OpenCodePreflightEndpoint,
+        )
+        harness = self.engine.harness
+        if type(harness) is not OpenCodeHarness:
+            raise ValueError("governed OpenCode requires the admitted native harness")
+        if context.tools is not None or context.mcp_servers:
+            raise ValueError("governed OpenCode has unbound tool sources")
+        names = ()
+        if gateway is not None:
+            if type(gateway) is not ProductToolGateway:
+                raise ValueError("governed OpenCode requires a bound product executor")
+            self._validate_gateway_scope(gateway)
+            definitions = tuple(await gateway.definitions())
+            names = tuple(item.name for item in definitions)
+            if not callable(getattr(harness, 'consume_product_preflight', None)):
+                raise ValueError("governed OpenCode product tools require native call correlation")
+        transport = ManagedProductToolTransport(
+            gateway, host_session_id=self.binding.host_session_id,
+        )
+        self._tool_transport = transport
+        await transport.start()
+        values = transport.bind_native_preflight(harness.authorize_preflight)
+        model_gateway = None
+        if self._model_gateway_binding is not None:
+            original_binding = self.binding
+            def source_current(source):
+                return (self.binding is original_binding and self.engine.harness is harness
+                        and self._tool_transport is transport
+                        and self.owns_governed_provider_session(source.session_id)
+                        and harness._is_model_source_current(source))
+            model_gateway = transport.bind_model_gateway(
+                self._model_gateway_binding, execution_binding=original_binding,
+                capture_source=harness._capture_model_source, is_source_current=source_current,
+                authority_for_turn=self._model_authority_for_turn,
+            )
+        harness.bind_preflight_endpoint(OpenCodePreflightEndpoint(
+            **values, product_tool_names=names,
+            **({"model_gateway": model_gateway} if model_gateway is not None else {}),
+        ))
+        self._native_preflight_bound = True
+        if gateway is None:
+            return context
+        gateway.bind_required_authority(self)
+        transport.bind_product_calls(self._product_consumer(harness, gateway, context, definitions))
+        return dataclasses.replace(
+            context, mcp_servers=(transport.server_config(),),
+            host_capabilities=context.host_capabilities | {HostCapability.MCP_SERVERS},
+        )
+
+    def _product_consumer(self, harness, gateway, context, definitions):
+        import jsonschema
+        from openjiuwen.harness_protocol import ToolExecutionResult, ToolInvocation, json_value_to_builtin
+        from jiuwenswarm.governance.product_executor import ProductExecutorProof, product_executor_scope
+        schemas = {item.name: item.input_schema for item in definitions}
+        scope = gateway.scope
+
+        async def consume(name, wire_arguments):
+            denied = ToolExecutionResult(content='Product execution authority unavailable', is_error=True)
+            if name not in schemas:
+                return denied
+            operation = harness.consume_product_preflight(name, wire_arguments)
+            if operation is None:
+                return denied
+            try:
+                jsonschema.validate(json_value_to_builtin(operation.arguments),
+                                    json_value_to_builtin(schemas[name]))
+            except (jsonschema.ValidationError, jsonschema.SchemaError):
+                return denied
+            # Discard wire arguments, including the ticket, before tool dispatch.
+            invocation = ToolInvocation(operation.call_id, name, operation.arguments)
+            executor = gateway.executor_for(invocation)
+
+            def current():
+                return (
+                    executor is not None and gateway.executor_for(invocation) is executor
+                    and gateway.scope is scope
+                    and self.owns_governed_provider_session(operation.provider_session_id)
+                    and self.engine.harness is harness and self._tool_gateway is gateway
+                    and operation.tool_name == PRODUCT_MCP_SERVER_NAME + '_' + name
+                    and harness.is_product_preflight_current(operation)
+                )
+
+            if not current():
+                return denied
+            proof = ProductExecutorProof(
+                self, gateway, executor, invocation, operation, current, context.tool_authorizer,
+            )
+            with product_executor_scope(proof):
+                return await gateway.invoke(invocation)
+
+        return consume
 
     def _prepare_recovery_context(self, context: HarnessContext) -> HarnessContext:
         recovery = self._recovery

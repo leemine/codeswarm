@@ -174,7 +174,13 @@ async def dispatch_goal_control(
                 max_attempts=max_attempts,
             )
         elif normalized_action == "pause":
-            before = await manager.get()
+            from jiuwenswarm.runtime.harness.native_goal_idle_control import NativeIdleGoalControl
+            if type(manager) is NativeIdleGoalControl:
+                manager.check_current()
+                before = manager.manager.peek()
+                manager.check_current()
+            else:
+                before = await manager.get()
             if before is None:
                 return {
                     "result_type": "goal_error",

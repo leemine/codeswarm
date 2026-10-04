@@ -1,3 +1,9 @@
+import { useSideConversationDeletion, useSessionDeletionReceipt } from './multi-session/state/useSideConversationDeletion';
+import { SharedHistoryDialog } from './multi-session/dialogs/SharedHistoryDialog';
+import { onOrganizationCredentialChange } from './services/organizationCredentialEvents';
+import { ShareSessionDialog } from './multi-session/dialogs/ShareSessionDialog';
+import type { SharedSessionTarget, ContinuedSession, ContinuationInput } from './services/sessionSharingApi';
+import { prepareContinuedConversation, type ContinuationAttempts } from './multi-session/state/continueSharedSession';
 import { AssetPublishHost } from './components/AssetPublishDrawer';
 // Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
@@ -71,7 +77,7 @@ import { readAgentTemplateName } from './features/agentIdentity';
 import { normalizeTeamLeaderIdentity } from './features/teamLeaderIdentity';
 import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages, useResponsiveLayout, useResponsivePanelResize } from './hooks';
 import { webRequest } from './services/webClient';
-import { getArchiveErrorCode } from './features/workspace/archivedTaskClient';
+import { DeletionAuditPendingError, archivedTaskClient, getArchiveErrorCode } from './features/workspace/archivedTaskClient';
 import type { WorkflowRun } from './components/teamArea/workflowTypes';
 import { useTeamPanelState } from './features/teamPanelState';
 import { useSingleAgentPanelState } from './features/singleAgentPanelState';
@@ -148,6 +154,7 @@ import {
   buildA2UIClientEventContent,
   setA2UIActionHandler,
 } from './features/a2ui/actionBridge';
+import { ArtifactOwnerContext } from './components/ArtifactsPanel/ArtifactOwnerContext';
 import { executeDesktopSave } from './utils/desktopSave';
 import { restoreSessionEquipment } from './utils/enabledExtensions';
 import { generateUuidV4 } from './utils/uuid';
@@ -381,7 +388,11 @@ async function waitForShareImageJob(
 function AppContent({
   settingsPageDefinition,
   resolveSettingsRequest,
+  organizationAuth = false,
+  onOpenSharedSession,
 }: {
+  organizationAuth?: boolean;
+  onOpenSharedSession?: (target: SharedSessionTarget) => void;
   settingsPageDefinition: SettingsPageDefinition;
   resolveSettingsRequest: (openSourceRequest: SettingsRequest) => SettingsRequest;
 }) {
@@ -408,6 +419,22 @@ function AppContent({
   const [initialDataLoaded, setInitialDataLoaded] = useState(false);
   const [restartModalOpen, setRestartModalOpen] = useState(false);
   const [restartSuccess, setRestartSuccess] = useState(false);
+  const [sharingInboxOpen, setSharingInboxOpen] = useState(false);
+  const continuationAttempts = useRef<ContinuationAttempts>(new Map());
+  const [sharingDialogSessionId, setSharingDialogSessionId] = useState<string | null>(null);
+  const [sharedHistoryTarget, setSharedHistoryTarget] = useState<SharedSessionTarget | null>(null);
+  useEffect(() => {
+    return onOrganizationCredentialChange(() => {
+      continuationAttempts.current.clear();
+      setSharedHistoryTarget(null);
+      setSharingDialogSessionId(null);
+      setSharingInboxOpen(false);
+    });
+  }, []);
+  useEffect(() => {
+    if (!organizationAuth) setSharedHistoryTarget(null);
+  }, [organizationAuth]);
+
   const [exportingShareSessionIds, setExportingShareSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const [restartSeenDisconnect, setRestartSeenDisconnect] = useState(false);
   const [appliedWithoutRestart, setAppliedWithoutRestart] = useState(false);
@@ -3303,6 +3330,58 @@ function AppContent({
     [performSessionRestore],
   );
 
+  const handleSharedContinuation = useCallback(
+    (result: ContinuedSession, input: Readonly<ContinuationInput>, isCurrent: () => boolean): Promise<void> => {
+      const previousSessionId = sessionIdRef.current;
+      const current = () => isCurrent() && sessionIdRef.current === previousSessionId;
+      const queued = sessionRestoreQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          const metadata = await prepareContinuedConversation(request, result, input, current, {
+            session_id: previousSessionId,
+            mode: useSessionStore.getState().getRuntime(previousSessionId)?.mode ?? mode,
+            view_id: sessionViewIdRef.current,
+          });
+          if (!current()) return;
+          // This new private conversation starts idle. Do not copy the source or
+          // pending composer equipment/state and do not invoke chat.send.
+          const registered = registerCreatedConversation(
+            result.session_id,
+            {
+              mode: result.mode,
+              selectedModelName: result.model_name,
+              projectDir: result.project_dir,
+              persistSession: true,
+            },
+            Date.now(),
+            result.title,
+            result,
+          );
+          Object.assign(registered, metadata);
+          useChatStore.getState().setProcessing(result.session_id, false);
+          useChatStore.getState().setThinking(result.session_id, false);
+          upsertSessionMetadata(registered, { setCurrent: true });
+          useWorkspaceStore.getState().upsertSession(registered, { isNew: true });
+          sessionIdsCreatedInThisPageRef.current.add(result.session_id);
+          continuationAttempts.current.delete(
+            JSON.stringify([input.session_id, input.share_id, input.expected_revision]),
+          );
+          sessionIdRef.current = result.session_id;
+          setSessionId(result.session_id);
+          setChatWelcomeVariant(null);
+          setActiveNav('chat');
+          navigate({ kind: 'chat-session', sessionId: result.session_id });
+          setHistoryBootstrapKey((key) => key + 1);
+          setSharingDialogSessionId(null);
+          setSharingInboxOpen(false);
+          requestComposerFocus();
+        });
+      sessionRestoreQueueRef.current = queued.catch(() => undefined);
+      return queued;
+    },
+    [mode, navigate, request, requestComposerFocus, upsertSessionMetadata],
+  );
+
   const handleOpenContinuedFromSession = useCallback(
     (sourceSessionId: string): void => {
       const sessionStore = useSessionStore.getState();
@@ -3352,7 +3431,7 @@ function AppContent({
     [handleRestoreSession, mode, request],
   );
 
-  const removeSideConversationLocally = useCallback((sideSessionId: string) => {
+  const removeSessionStateLocally = useCallback((sideSessionId: string) => {
     disposeInFlightHistoryHandles(sideSessionId);
     sessionIdsCreatedInThisPageRef.current.delete(sideSessionId);
     useSessionStore.getState().removeSession(sideSessionId);
@@ -3362,14 +3441,20 @@ function AppContent({
     useTodoStore.getState().removeRuntime(sideSessionId);
     useHarnessStore.getState().removeRuntime(sideSessionId);
     useGoalStore.getState().removeRuntime(sideSessionId);
-    sideConversationRef.current = null;
-    setSideConversation(null);
   }, [disposeInFlightHistoryHandles]);
 
-  const deleteSideConversation = useCallback(async (sideSessionId: string): Promise<void> => {
-    await request('session.delete', { session_id: sideSessionId });
-    removeSideConversationLocally(sideSessionId);
-  }, [removeSideConversationLocally, request]);
+  const deleteSideConversation = useSideConversationDeletion(
+    sideConversationRef,
+    setSideConversation,
+    removeSessionStateLocally,
+  );
+
+  const handleSessionDeleted = useSessionDeletionReceipt(
+    sessionIdRef,
+    mode,
+    enterNewConversation,
+    removeSessionStateLocally,
+  );
 
   const handleStartSideConversation = useCallback(async (
     sourceSessionId: string,
@@ -3427,7 +3512,7 @@ function AppContent({
     };
     const registered = registerSideConversation(sideSession);
     if (!registered) {
-      await request('session.delete', { session_id: sideSessionId });
+      await archivedTaskClient.deleteSession(sideSessionId);
       throw new Error('invalid side conversation metadata');
     }
 
@@ -3466,7 +3551,7 @@ function AppContent({
       await deleteSideConversation(side.session.session_id);
     } catch (error) {
       console.error('Failed to close side conversation:', error);
-      window.alert(t(getArchiveErrorCode(error) === 'SESSION_BUSY'
+      window.alert(t(error instanceof DeletionAuditPendingError ? 'multiSession.deleteAuditPending' : getArchiveErrorCode(error) === 'SESSION_BUSY'
         ? 'multiSession.project.errors.deleteSessionBusy'
         : 'multiSession.errors.delete'));
     }
@@ -3478,9 +3563,10 @@ function AppContent({
       return;
     }
     void deleteSideConversation(side.session.session_id).catch((error) => {
-      console.warn('Failed to discard side conversation after navigation:', error);
+      if (error instanceof DeletionAuditPendingError) window.alert(t('multiSession.deleteAuditPending'));
+      else console.warn('Failed to discard side conversation after navigation:', error);
     });
-  }, [deleteSideConversation, sessionId]);
+  }, [deleteSideConversation, sessionId, t]);
 
   const requestSessionNavigation = useCallback((target: Session | 'new', options?: NewConversationOptions) => {
     if (target === 'new') { enterNewConversation(mode, options); return; }
@@ -3595,7 +3681,7 @@ function AppContent({
 
   useEffect(() => {
     const targetSessionId = sessionId;
-    if (!targetSessionId || targetSessionId === NEW_CONVERSATION_ID) return;
+    if (organizationAuth || !targetSessionId || targetSessionId === NEW_CONVERSATION_ID) return;
     if (shareExportMonitorTokensRef.current.has(targetSessionId)) return;
 
     void (async () => {
@@ -3630,10 +3716,17 @@ function AppContent({
         }
       }
     })();
-  }, [monitorAndSaveShareImageJob, sessionId, setShareExportSessionActive]);
+  }, [monitorAndSaveShareImageJob, organizationAuth, sessionId, setShareExportSessionActive]);
 
   const handleExportShare = useCallback(async () => {
     const currentSessionId = sessionIdRef.current;
+    if (organizationAuth) {
+      if (currentSessionId && currentSessionId !== NEW_CONVERSATION_ID) {
+        setSharingInboxOpen(false);
+        setSharingDialogSessionId(currentSessionId);
+      }
+      return;
+    }
     if (
       !currentSessionId
       || currentSessionId === NEW_CONVERSATION_ID
@@ -3671,7 +3764,7 @@ function AppContent({
         setShareExportSessionActive(currentSessionId, false);
       }
     }
-  }, [i18n.language, i18n.resolvedLanguage, isPaused, isProcessing, monitorAndSaveShareImageJob, setShareExportSessionActive, t]);
+  }, [i18n.language, i18n.resolvedLanguage, isPaused, isProcessing, monitorAndSaveShareImageJob, organizationAuth, setShareExportSessionActive, t]);
 
   const routeSessionMissing = routeSessionId !== null
     && initialDataLoaded
@@ -3694,6 +3787,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
   }, [clearChatPanelResize, showWorkspaceDivider]);
 
   return (
+    <ArtifactOwnerContext.Provider value={{ organizationAuth, sessionId }}>
     <div
       className={`shell shell--icon-rail ${activeNav === 'agents' ? 'shell--agent-management' : ''}`}
       data-testid="app-shell"
@@ -3739,6 +3833,8 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 onNew={(options) => requestSessionNavigation('new', options)}
                 onSelect={requestSessionNavigation}
                 onOpenCron={() => handleNavigate('cron')}
+                onOpenSharedSessions={organizationAuth ? () => { setSharingDialogSessionId(null); setSharingInboxOpen(true); } : undefined}
+                onSessionDeleted={handleSessionDeleted}
                 isCronActive={false}
                 collapsed={conversationSidebarCollapsed}
                 floating={conversationSidebarFloating}
@@ -3783,8 +3879,9 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                         isProcessing={isProcessing}
                         onUserAnswer={handleUserAnswer}
                         onExportShare={handleExportShare}
+                        shareActionLabel={organizationAuth ? t('sessionSharing.title') : undefined}
                         isExportingShare={isExportingShare}
-                        canExportShare={Boolean(sessionId && sessionId !== NEW_CONVERSATION_ID && (!isProcessing || isPaused))}
+                        canExportShare={Boolean(sessionId && sessionId !== NEW_CONVERSATION_ID && (organizationAuth || !isProcessing || isPaused))}
                         sessionTitle={sessionTitle}
                         sessionProjectName={sessionProjectName}
                         sessionProject={sessionProject}
@@ -3953,6 +4050,8 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
               onNew={(options) => requestSessionNavigation('new', options)}
               onSelect={requestSessionNavigation}
               onOpenCron={() => handleNavigate('cron')}
+                onOpenSharedSessions={organizationAuth ? () => { setSharingDialogSessionId(null); setSharingInboxOpen(true); } : undefined}
+                onSessionDeleted={handleSessionDeleted}
               isCronActive
               collapsed={conversationSidebarCollapsed}
               floating={conversationSidebarFloating}
@@ -3992,6 +4091,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
         {activeNav === 'settings' && (
           <div className="app-section">
             <SettingsPage
+              organizationAuth={organizationAuth}
               definition={settingsPageDefinition}
               isConnected={isConnected}
               connectionState={connectionState}
@@ -4207,15 +4307,38 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
       />
 
       {/* 登录弹窗：默认不显示，由 requestLogin() 等事件唤起 */}
+      {organizationAuth && (sharingDialogSessionId || sharingInboxOpen) && (
+        <ShareSessionDialog
+          key={`${sharingDialogSessionId ?? 'inbox'}:${sessionId}`}
+          sessionId={sharingDialogSessionId ?? undefined}
+          onClose={() => { setSharingDialogSessionId(null); setSharingInboxOpen(false); }}
+          onContinued={handleSharedContinuation}
+          continuationAttempts={continuationAttempts.current}
+          onOpenSharedSession={(target) => {
+            setSharingDialogSessionId(null);
+            setSharingInboxOpen(false);
+            setSharedHistoryTarget(target);
+            onOpenSharedSession?.(target);
+          }}
+        />
+      )}
+      {organizationAuth && sharedHistoryTarget && (
+        <SharedHistoryDialog target={sharedHistoryTarget} onClose={() => setSharedHistoryTarget(null)} />
+      )}
       <LoginDialog />
     </div>
+    </ArtifactOwnerContext.Provider>
   );
 }
 
 function App({
   settingsPageDefinition,
   resolveSettingsRequest,
+  organizationAuth = false,
+  onOpenSharedSession,
 }: {
+  organizationAuth?: boolean;
+  onOpenSharedSession?: (target: SharedSessionTarget) => void;
   settingsPageDefinition: SettingsPageDefinition;
   resolveSettingsRequest: (openSourceRequest: SettingsRequest) => SettingsRequest;
 }) {
@@ -4223,6 +4346,8 @@ function App({
     <ErrorBoundary>
       <DesktopTextEditContextMenu />
       <AppContent
+        organizationAuth={organizationAuth}
+        onOpenSharedSession={onOpenSharedSession}
         settingsPageDefinition={settingsPageDefinition}
         resolveSettingsRequest={resolveSettingsRequest}
       />
@@ -4244,23 +4369,37 @@ function App({
 function AppWithAuth({
   settingsPageDefinition,
   resolveSettingsRequest,
+  onOpenSharedSession,
 }: {
+  onOpenSharedSession?: (target: SharedSessionTarget) => void;
   settingsPageDefinition: SettingsPageDefinition;
   resolveSettingsRequest: (openSourceRequest: SettingsRequest) => SettingsRequest;
 }) {
   const [authStatus, setAuthStatus] = useState<'checking' | 'loggedOut' | 'loggedIn' | 'noIam'>('checking');
   const [remote, setRemote] = useState(false);
+  const [organization, setOrganization] = useState(false);
 
   useEffect(() => {
-    if (window.jiuwenDesktop?.isElectron) {
-      setAuthStatus('noIam');
-      return;
-    }
     let cancelled = false;
     // 先拿 web-config: 如果 iam_enabled=false, 直接跳过鉴权探测
-    fetch('/api/web-config', { credentials: 'same-origin' })
-      .then((r) => r.json())
+    fetch('/api/v1/auth/organization/status', { credentials: 'same-origin' })
+      .then((response) => response.ok ? response.json() : { enabled: false })
+      .then((status) => {
+        if (cancelled) return null;
+        if (status.enabled) {
+          setOrganization(true);
+          setAuthStatus(status.authenticated ? 'loggedIn' : 'loggedOut');
+          return null;
+        }
+        if (window.jiuwenDesktop?.isElectron) {
+          setAuthStatus('noIam');
+          return null;
+        }
+        return fetch('/api/web-config', { credentials: 'same-origin' });
+      })
+      .then((r) => r ? r.json() : null)
       .then((cfg) => {
+        if (cfg === null) return;
         if (cancelled) return;
         if (cfg && typeof cfg.remote === 'boolean') setRemote(cfg.remote);
         if (cfg && cfg.iam_enabled === false) {
@@ -4309,12 +4448,17 @@ function AppWithAuth({
     );
   }
   if (authStatus === 'loggedOut') {
-    return <LoginPage />;
+    return <LoginPage organization={organization} />;
   }
   return (
     <>
-      {remote && <LogoutButton />}
-      <App settingsPageDefinition={settingsPageDefinition} resolveSettingsRequest={resolveSettingsRequest} />
+      {(remote || organization) && <LogoutButton organization={organization} />}
+      <App
+        organizationAuth={organization}
+        onOpenSharedSession={onOpenSharedSession}
+        settingsPageDefinition={settingsPageDefinition}
+        resolveSettingsRequest={resolveSettingsRequest}
+      />
       <AssetPublishHost />
     </>
   );

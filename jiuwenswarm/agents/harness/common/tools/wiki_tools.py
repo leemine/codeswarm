@@ -24,6 +24,7 @@ from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import SysOperationRail
 from openjiuwen.harness.schema.config import SubAgentConfig
+from jiuwenswarm.governance.model_consumer import runtime_model_kwargs
 from jiuwenswarm.common.config import (
     get_config,
     get_configured_read_image_multimodal,
@@ -371,6 +372,7 @@ def _get_default_model() -> Model:
 
     client_config = model_conf.get("model_client_config", {})
     req_config = model_conf.get("model_config_obj", {})
+    binding_config = dict(client_config)  # Preserve catalog metadata before legacy defaults.
 
     if client_config.get("custom_headers") == "":
         del client_config["custom_headers"]
@@ -389,10 +391,11 @@ def _get_default_model() -> Model:
         model_name=model_name,
     )
 
-    return Model(
+    return Model(**runtime_model_kwargs(
         model_client_config=ModelClientConfig(**client_config),
         model_config=ModelRequestConfig(**runtime_req_config),
-    )
+        binding_config=binding_config,
+    ))
 
 
 def _resolve_workspace(workspace: str) -> Path:

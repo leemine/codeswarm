@@ -13,6 +13,8 @@ import { SettingsSaveQueue } from './SettingsSaveQueue';
 import { SettingsUnsavedChangesRegistry } from './SettingsUnsavedChangesRegistry';
 
 export type SettingsServices = {
+  /** Trusted organization bootstrap; unrelated to legacy IAM login. */
+  organizationAuth?: boolean;
   isConnected: boolean;
   connectionState: WebConnectionState;
   request: SettingsRequest;
@@ -54,6 +56,7 @@ export function SettingsServicesProvider({
   const value = useMemo(
     () => ({ ...services, saveQueue: saveQueueRef.current!, unsavedChanges: changesRef.current! }),
     [
+      services.organizationAuth,
       services.connectionState,
       services.externalCliDetectResults,
       services.externalCliInstallBusy,

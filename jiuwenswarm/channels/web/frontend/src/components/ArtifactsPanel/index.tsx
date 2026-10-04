@@ -8,6 +8,8 @@ import { FileIcon } from '../FileIcon';
 import { buildArtifacts, type ArtifactItem } from './artifactCollection';
 import { artifactDownloadUrl } from './filePreviewModel';
 import { openFileInDesktopBrowser } from '../../features/desktopBrowserFile';
+import { useArtifactOwnerDownload } from './ArtifactOwnerContext';
+import { ownerDownloadUrl } from './ownerDownload';
 
 export { fileArtifactId } from './artifactCollection';
 export { ArtifactExpandedPanel } from './ArtifactExpandedPanel';
@@ -41,8 +43,14 @@ export function ArtifactList({
 }) {
   const { t } = useTranslation();
   const artifacts = useSessionArtifacts();
+  const owner = useArtifactOwnerDownload();
 
   const handleDownload = async (artifact: ArtifactItem) => {
+    if (owner.organizationAuth) {
+      const outcome = await owner.download(artifact);
+      if (outcome === 'failed') window.alert(t('artifacts.ownerDownloadFailed'));
+      return;
+    }
     const downloadUrl = artifactDownloadUrl(artifact);
     if (!downloadUrl) return;
 
@@ -65,6 +73,11 @@ export function ArtifactList({
 
   return (
     <div className={clsx('min-h-0 overflow-y-auto', className)} data-testid="artifact-list-scroll">
+      {owner.organizationAuth && (
+        <p className="px-2 text-sm text-text-muted" data-testid="artifact-owner-download-notice">
+          {t('artifacts.ownerDownloadNotice')}
+        </p>
+      )}
       {artifacts.length === 0 ? (
         <div className="flex h-full items-center justify-center px-5 text-center text-sm text-text-muted" data-testid="artifact-list-empty">
           {t('artifacts.empty')}
@@ -79,7 +92,7 @@ export function ArtifactList({
                 data-testid="artifact-list-item"
                 data-variant={artifact.id}
                 onClick={() => {
-                  if (openFileInDesktopBrowser({ name: artifact.name, download_url: artifact.downloadUrl })) return;
+                  if (!owner.organizationAuth && openFileInDesktopBrowser({ name: artifact.name, download_url: artifact.downloadUrl })) return;
                   onSelectArtifact?.(artifact.id);
                 }}
                 role="button"
@@ -87,7 +100,7 @@ export function ArtifactList({
                 onKeyDown={e => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
-                    if (openFileInDesktopBrowser({ name: artifact.name, download_url: artifact.downloadUrl })) return;
+                    if (!owner.organizationAuth && openFileInDesktopBrowser({ name: artifact.name, download_url: artifact.downloadUrl })) return;
                     onSelectArtifact?.(artifact.id);
                   }
                 }}
@@ -99,10 +112,11 @@ export function ArtifactList({
                 <button
                   type="button"
                   className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-muted opacity-0 group-hover:opacity-100 hover:bg-secondary hover:text-text disabled:cursor-not-allowed disabled:opacity-40"
-                  title={t('artifacts.download')}
+                  title={t(owner.organizationAuth && !ownerDownloadUrl(artifact, owner.sessionId)
+                    ? 'artifacts.ownerDownloadUnavailable' : 'artifacts.download')}
                   aria-label={t('artifacts.download')}
                   data-testid="artifact-list-item-download"
-                  disabled={!artifact.downloadUrl && !artifact.path}
+                  disabled={owner.organizationAuth ? !ownerDownloadUrl(artifact, owner.sessionId) : !artifact.downloadUrl && !artifact.path}
                   onClick={e => {
                     e.stopPropagation();
                     void handleDownload(artifact);

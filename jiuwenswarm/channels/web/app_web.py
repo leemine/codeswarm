@@ -535,6 +535,27 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     def _is_ws_route(self) -> bool:
         return urlparse(self.path).path.startswith("/ws")
 
+    def _reject_organization_local_files(self) -> bool:
+        """Legacy installation-wide paths are not organization-authorized resources."""
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is not None and (self._is_file_api_route() or self._is_share_api_route()):
+            parsed = urlparse(self.path)
+            if parsed.path == '/file-api/download' and self.command in {'GET', 'HEAD'}:
+                try:
+                    from jiuwenswarm.gateway.channel_manager.web.workspace_download_http import capture_http_download
+                    query = parse_qs(parsed.query, keep_blank_values=True)
+                    if any(len(values) != 1 for values in query.values()):
+                        raise PermissionError('duplicate download selector')
+                    _, permit = capture_http_download(self.headers,
+                        {key: values[0] for key, values in query.items()})
+                    self._proxy_http(workspace_permit=permit)
+                except Exception:
+                    self._write_json(403, {'error': 'Workspace download denied'})
+                return True
+            self._write_json(403, {"error": "organization_scoped_file_access_required"})
+            return True
+        return False
+
     def _is_file_api_route(self) -> bool:
         return urlparse(self.path).path.startswith("/file-api/")
 
@@ -624,7 +645,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(data)
 
-    def _proxy_http(self) -> None:
+    def _proxy_http(self, *, workspace_permit=None) -> None:
         outer_host = self._clean_outer_host()
         if outer_host is None:
             self._write_proxy_error(400, "invalid Host header")
@@ -663,8 +684,20 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 forward_headers[key] = value
             forward_headers["Host"] = outer_host
 
+            if workspace_permit is not None:
+                from jiuwenswarm.gateway.channel_manager.web.workspace_download_http import require_loopback_url
+                import ipaddress
+                require_loopback_url(self.api_target, schemes={'http', 'https'})
+                workspace_permit.check()
+                conn.connect()
+                if not ipaddress.ip_address(conn.sock.getpeername()[0]).is_loopback:
+                    raise PermissionError('local download Gateway required')
+                workspace_permit.check()
             conn.request(self.command, self.path, body=body, headers=forward_headers)
             resp = conn.getresponse()
+            if workspace_permit is not None:
+                self._proxy_workspace_response(resp, workspace_permit)
+                return
             resp_body = resp.read()
 
             self.send_response(resp.status, resp.reason)
@@ -680,6 +713,49 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             self._write_proxy_error(502, "proxy http error")
         finally:
             conn.close()
+
+    def _proxy_workspace_response(self, response, permit):
+        """Deliver bounded bytes only while the original local owner is current."""
+        from jiuwenswarm.governance.workspace_download import MAX_DOWNLOAD_CHUNK_BYTES
+        from jiuwenswarm.gateway.channel_manager.web.container_file_http import _parse_single_byte_range
+        started = False
+        try:
+            permit.check()
+            selected = _parse_single_byte_range(self.headers.get('Range', ''), permit.size) if self.headers.get('Range') else None
+            expected_status = 416 if self.headers.get('Range') and selected is None else (206 if selected else 200)
+            expected_size = 0 if expected_status == 416 else (selected[1] - selected[0] + 1 if selected else permit.size)
+            if response.status != expected_status or response.getheader('Content-Length') != str(expected_size):
+                self._write_json(403, {'error': 'Workspace download denied'})
+                return
+            permit.check()
+            self.send_response(response.status)
+            for key in ('Content-Type', 'Content-Length', 'Content-Disposition', 'Content-Range',
+                        'Accept-Ranges', 'Cache-Control', 'X-Content-Type-Options'):
+                value = response.getheader(key)
+                if value is not None:
+                    self.send_header(key, value)
+            permit.check()
+            started = True  # end_headers may partially write before raising.
+            self.end_headers()
+            if self.command == 'HEAD':
+                return
+            remaining = expected_size
+            while remaining:
+                permit.check()
+                data = response.read(min(MAX_DOWNLOAD_CHUNK_BYTES, remaining))
+                permit.check()
+                if not data:
+                    raise PermissionError('incomplete Workspace download')
+                self.wfile.write(data)
+                remaining -= len(data)
+        except Exception:
+            if started:
+                self.close_connection = True
+            else:
+                # BaseHTTPRequestHandler buffers status/headers until end_headers.
+                # Discard the rejected response before writing a fresh denial.
+                self._headers_buffer = []
+                self._write_json(403, {'error': 'Workspace download denied'})
 
     def _proxy_auth_http(self) -> None:
         """反向代理 /auth-api/* 到 control-panel (IAM)。
@@ -2096,6 +2172,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         self._write_json(status, payload)
 
     def do_GET(self) -> None:  # noqa: N802
+        if self._reject_organization_local_files():
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/oauth/hub/callback":
             from jiuwenswarm.channels.web.hub_oauth import complete
@@ -2138,6 +2216,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self) -> None:  # noqa: N802
+        if self._reject_organization_local_files():
+            return
         parsed = urlparse(self.path)
         if parsed.path in {"/marketplace-oauth/hub/start", "/marketplace-oauth/hub/result"}:
             from jiuwenswarm.channels.web.hub_oauth import result, start
@@ -2175,6 +2255,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         self.send_error(405, "method not allowed")
 
     def do_PUT(self) -> None:  # noqa: N802
+        if self._reject_organization_local_files():
+            return
         if self._dispatch_proxy():
             return
         self.send_error(405, "method not allowed")
@@ -2185,6 +2267,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         self.send_error(405, "method not allowed")
 
     def do_DELETE(self) -> None:  # noqa: N802
+        if self._reject_organization_local_files():
+            return
         if self._dispatch_proxy():
             return
         self.send_error(405, "method not allowed")
@@ -2195,6 +2279,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         self.send_error(405, "method not allowed")
 
     def do_HEAD(self) -> None:  # noqa: N802
+        if self._reject_organization_local_files():
+            return
         parsed = urlparse(self.path)
         if self._is_share_api_route():
             self._handle_share_api_get(parsed)

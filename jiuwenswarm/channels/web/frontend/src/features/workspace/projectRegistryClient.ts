@@ -2,6 +2,24 @@ import { webRequest } from '../../services/webClient';
 import type { Session } from '../../types';
 import type { ProjectInfo, WorkMode } from './projectTypes';
 
+export interface ProjectSource {
+  source_id: string;
+  revision: number;
+  title: string;
+  origin: string;
+  content: string;
+  trust: 'untrusted';
+}
+export interface ProjectContent {
+  project_id: string;
+  revision: number;
+  latest_revision: number;
+  instructions: string;
+  sources: ProjectSource[];
+  can_write: boolean;
+  versions: { revision: number; updated_at: number }[];
+}
+
 export interface ProjectSessionBatchResult {
   project_id: string;
   succeeded_count: number;
@@ -10,6 +28,16 @@ export interface ProjectSessionBatchResult {
 }
 
 export const projectRegistryClient = {
+  getContent: (projectId: string, revision?: number) =>
+    webRequest<ProjectContent>('project.content.get', {
+      project_id: projectId,
+      ...(revision === undefined ? {} : { revision }),
+    }),
+  updateContent: (
+    projectId: string,
+    content: { instructions: string; sources: ProjectSource[]; expected_revision: number },
+  ) =>
+    webRequest<ProjectContent>('project.content.update', { project_id: projectId, ...content }),
   list: (filter: 'all' | 'pinned' | 'unpinned' = 'all', workMode?: WorkMode) =>
     webRequest<{ projects: ProjectInfo[] }>('project.list', {
       filter,

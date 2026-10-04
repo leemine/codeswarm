@@ -1,0 +1,9 @@
+# 原执行凭据的入队归属
+
+Runtime 为原 SessionCoordinator 安装一次私有同步捕获回调。原 _new_execution 在影响已有等待执行或注册新handle之前，重新验证当前 AuthenticatedPrincipal，并将原对象保留于 handle 私有、repr隐藏字段。相同actor的不同凭据保持不同对象；不按actor/subject重建认证，不建立第二registry，不改变公开snapshot/metadata/wire。无principal的legacy/系统工作不猜测owner。
+
+捕获只用于实际admission。begin_detached_turn由Provider事件观察驱动，明确不从长驻事件pump继承的context复制凭据；其原Turn→凭据归属仍待实际Native entry接线，不能以None推断安全或退出完成。控制请求保留自己的原凭据，绝不改写父执行凭据。捕获失败时原等待父执行不取消、不恢复，也不遗留control claim；原stream control的claim/resume移到成功创建child之后。
+
+凭据只作为原Registry的私有执行来源；此片没有启动凭据撤回monitor或宣称Provider退出。后续必须结合原PendingTurn/ExecutionOrigin fence及submission/wrapper实际退出，才能启用活动凭据撤权。原持久共享撤权watch保持独立。
+
+确定性验证使用真实临时组织认证文件、实际AgentRuntime/Coordinator/Registry，涵盖同actor两个凭据、当前凭据失效后拒绝admission且不影响原等待项、unary/stream控制失败无claim泄漏且可重试、原父凭据不被控制请求替换、无principal和被动观察者行为。外部Provider未启动；不作为完整活动退出验收。

@@ -1,0 +1,22 @@
+TAP version 13
+# Subtest: tests/authStore.test.mjs
+ok 1 - tests/authStore.test.mjs
+  ---
+  duration_ms: 1682.438549
+  type: 'test'
+  ...
+# Subtest: tests/i18nLocales.test.mjs
+ok 2 - tests/i18nLocales.test.mjs
+  ---
+  duration_ms: 192.5304
+  type: 'test'
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 2
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1692.677386

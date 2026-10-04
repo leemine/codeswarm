@@ -44,7 +44,7 @@ python3 tools/archivectl.py recover artifacts/test-runs/<interrupted-run>
 
 重跑时使用 `--parent-run-id <run-id>` 建立关联。`TESTCTL_PYTHON=/absolute/path/to/python` 可以显式选择受控 Python；工具保留符号链接入口，避免丢失虚拟环境语义。
 
-`TESTCTL_NETWORK_MODE=strict` 使用 Bubblewrap 网络 namespace，能力不足会将必需套件标为 `BLOCKED`。未设置时为 `audit`，不具备强隔离保证。pytest 使用 signal 单例超时；本地 HTTP 服务可由 suite 的 `services` 声明，动态端口由服务绑定端口 0 并通过 `TESTCTL_PORT=<port>` 报告。
+`TESTCTL_NETWORK_MODE=strict` 使用 Bubblewrap 网络和 PID namespace（`--die-with-parent`），能力不足会将必需套件标为 `BLOCKED`。未设置时为 `audit`，不具备强隔离保证。pytest 使用 signal 单例超时；本地 HTTP 服务可由 suite 的 `services` 声明，动态端口由服务绑定端口 0 并通过 `TESTCTL_PORT=<port>` 报告。
 
 在允许无密码 `sudo` 的专用 CI runner 上，可显式设置 `TESTCTL_BWRAP_SUDO=1`，使 strict 模式以 `sudo -n -E bwrap` 建立网络 namespace。普通本地运行保持非特权路径；若特权 probe 不可用，仍明确标为 `BLOCKED`，不会悄悄降级到 audit。
 
@@ -77,3 +77,16 @@ npm run build --prefix jiuwenswarm/channels/web/frontend
 范围与严格预期计数：`local-cli` 2、`goal` 12（渠道7 + Native4 + 用户输入优先1）、`heartbeat` 4、`ui` 2、`all` 18（goal + heartbeat + ui）。本地未提交开发可显式加 `--allow-dirty`，CI 要求干净 checkout。runner 核对 core 声明/锁/实际非 editable 导入、测试前后源码与前端指纹、收集/JUnit逐例身份、零 skip、进程清理和归档脱敏。只上传清理后的摘要和有限证据，不上传配置、Provider home 或原始聊天日志。必要救援清理也令任务失败。
 
 普通 full-python 的 opt-in skip 仅说明用例已纳入收集；真实验收通过必须另有本工作流或同入口本地执行的结果证据。新的 workflow 文件入库并不等于远端模型 secrets 已配置或真实 CI 已通过。
+
+
+### 超时、实时日志与自有进程清理
+
+套件开始即创建归档日志，执行中约每 250ms 保存已收到的输出，不再等 suite 结束才写文件。
+达到原 manifest 的 shard deadline 后仍记为 `timeout`，即使已有部分通过的 JUnit；不会延长
+suite 或 CI job 的验收时限。只终止本次新建的进程组，输出管道收尾最多再等待 2 秒，父进程
+回收也有界；不能确认清理的结果带 `cleanup_incomplete`/`cleanup_errors` 并保留诊断输出。
+`audit` 下脱离进程组的子孙可能仍然持有管道，此时明确报告清理不完整，不将父进程退出当成功。
+strict 的独立 PID namespace 使本套件 `setsid` 子孙也随 namespace 退出；不扫描或终止用户其他进程。
+
+该修复由合成进程树、实际本机 Bubblewrap 和确定性 runner 测试验证，不能替代新候选的 CI stable。
+原 PR33 远端日志未能提供阻塞栈，已确认的是 strict 执行阶段超时；不据合成反例断言远端某个用例失败。

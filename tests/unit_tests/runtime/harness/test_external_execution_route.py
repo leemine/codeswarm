@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -32,6 +33,7 @@ from openjiuwen.core.session.stream.base import OutputSchema
 from openjiuwen.harness_providers.io_adapter import ProjectedOutput
 
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
+from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
 from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
 from jiuwenswarm.runtime.harness.execution_session import (
@@ -55,6 +57,42 @@ from jiuwenswarm.runtime.harness.recovery_store import (
     ExecutionRecoveryUnavailableError,
 )
 from jiuwenswarm.runtime.plan import PlanModeController, PlanStateResult
+
+
+async def _web_frame_for_chunk(chunk: AgentResponseChunk) -> dict[str, Any]:
+    """Exercise the original MessageHandler -> WebChannel.send socket path."""
+    from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
+    from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannel, WebChannelConfig
+    from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+    from jiuwenswarm.gateway.routing.keys import RoutingKey
+
+    class Socket:
+        closed = False
+        remote_address = ("127.0.0.1", 12345)
+
+        def __init__(self) -> None:
+            self.frames: list[dict[str, Any]] = []
+            self.delivered = asyncio.Event()
+
+        async def send(self, value: str) -> None:
+            self.frames.append(json.loads(value))
+            self.delivered.set()
+
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    socket = Socket()
+    key = RoutingKey(
+        channel_id="web", app_id="default", user_id="owner", session_id="session-1",
+        agent_ref=None,
+    )
+    await channel.register_ws(socket, key)
+    try:
+        message = MessageHandler._chunk_to_message(chunk, "session-1")
+        await channel.send(message)
+        await asyncio.wait_for(socket.delivered.wait(), timeout=2)
+        assert len(socket.frames) == 1
+        return socket.frames[0]
+    finally:
+        await channel.unregister_ws(socket)
 
 
 def _route(
@@ -742,6 +780,9 @@ async def test_execution_session_retries_unconfirmed_provider_exit(
             await self.closed.wait()
             raise StopAsyncIteration
 
+        async def aclose(self) -> None:
+            self.closed.set()
+
     class Harness:
         card = SimpleNamespace(name="fake")
         state = HarnessState.TERMINATED
@@ -794,6 +835,8 @@ async def test_execution_session_retries_unconfirmed_provider_exit(
         )
     )
 
+    event_tasks = (session.io._event_task, other.io._event_task)
+
     with pytest.raises(ExecutionExitUnconfirmedError) as caught:
         await session.stop()
     assert caught.value.code == "EXECUTION_EXIT_UNCONFIRMED"
@@ -810,6 +853,7 @@ async def test_execution_session_retries_unconfirmed_provider_exit(
     assert harness.stop_calls == 2
     await other.stop()
     assert other_harness.stop_calls == 1
+    assert all(task is not None and task.done() and task.exception() is None for task in event_tasks)
 
 
 @pytest.mark.asyncio
@@ -894,6 +938,9 @@ async def test_execution_session_stop_timeout_is_unconfirmed_and_retryable(
             await self.closed.wait()
             raise StopAsyncIteration
 
+        async def aclose(self) -> None:
+            self.closed.set()
+
     class Harness:
         card = SimpleNamespace(name="fake")
         state = HarnessState.TERMINATED
@@ -932,6 +979,7 @@ async def test_execution_session_stop_timeout_is_unconfirmed_and_retryable(
         )
     )
 
+    event_task = session.io._event_task
     stopping = asyncio.create_task(session.stop())
     await entered.wait()
     assert session.exit_state is ExecutionExitState.STOP_REQUESTED
@@ -944,6 +992,7 @@ async def test_execution_session_stop_timeout_is_unconfirmed_and_retryable(
     await session.stop()
     assert session.exit_state is ExecutionExitState.EXIT_CONFIRMED
     assert harness.stop_calls == 2
+    assert event_task is not None and event_task.done() and event_task.exception() is None
 
 
 @pytest.mark.asyncio
@@ -1134,6 +1183,19 @@ async def test_engine_adapter_streams_projected_output_and_terminal_final(
     assert chunks[-1].is_complete is True
     assert chunks[-1].runtime_completion == "completed"
 
+    delta = await _web_frame_for_chunk(chunks[2])
+    final = await _web_frame_for_chunk(chunks[-1])
+    assert delta["event"] == "chat.delta"
+    assert delta["payload"]["content"] == "hello"
+    assert final["event"] == "chat.final"
+    assert final["payload"] == {
+        "session_id": "session-1", "request_id": "request-1",
+        "content": "", "terminal_status": "completed",
+    }
+    # The Web UI ends the matching stream while retaining its accumulated text;
+    # an empty final packet must not need to duplicate the preceding delta.
+    assert delta["payload"]["request_id"] == final["payload"]["request_id"]
+
 
 @pytest.mark.asyncio
 async def test_external_projection_preserves_normalized_terminal_error() -> None:
@@ -1167,6 +1229,14 @@ async def test_external_projection_preserves_normalized_terminal_error() -> None
         "code": "EXECUTION_FAILED",
         "terminal_status": "failed",
     }
+
+    frame = await _web_frame_for_chunk(AgentResponseChunk(
+        request_id="request-1", channel_id="web", payload=payload, is_complete=True,
+    ))
+    assert frame["event"] == "chat.error"
+    assert frame["payload"]["terminal_status"] == "failed"
+    assert frame["payload"]["code"] == "EXECUTION_FAILED"
+    assert frame["payload"]["error"] == payload["error"]
 
 
 @pytest.mark.asyncio
@@ -1204,6 +1274,14 @@ async def test_external_projection_distinguishes_cancelled_terminal() -> None:
         "code": "EXECUTION_CANCELLED",
         "terminal_status": "cancelled",
     }
+
+    frame = await _web_frame_for_chunk(AgentResponseChunk(
+        request_id="request-1", channel_id="web", payload=payload, is_complete=True,
+    ))
+    assert frame["event"] == "chat.error"
+    assert frame["payload"]["terminal_status"] == "cancelled"
+    assert frame["payload"]["code"] == "EXECUTION_CANCELLED"
+    assert frame["payload"]["error"] == payload["error"]
 
 
 @pytest.mark.asyncio
@@ -1294,6 +1372,12 @@ async def test_engine_adapter_reports_eof_without_terminal_as_unknown(
     assert chunks[-1].is_complete is True
     assert chunks[-1].runtime_completion == "unknown"
     assert session.abandoned == ["turn-1"]
+
+    frame = await _web_frame_for_chunk(chunks[-1])
+    assert frame["event"] == "chat.error"
+    assert frame["payload"]["terminal_status"] == "unknown"
+    assert frame["payload"]["code"] == "EXECUTION_TERMINAL_UNKNOWN"
+    assert frame["payload"]["request_id"] == "request-1"
 
 
 @pytest.mark.asyncio
@@ -1732,3 +1816,22 @@ async def test_external_route_skips_native_deep_agent_plan_state() -> None:
 
     assert result == PlanStateResult()
     assert exited == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_name", ["chat.final", "chat.delta"])
+@pytest.mark.parametrize("status", ["completed", "not-a-terminal", {"private": True}])
+async def test_web_final_terminal_metadata_is_explicit_and_typed(event_name, status):
+    chunk = AgentResponseChunk(
+        request_id="request-1", channel_id="web",
+        payload={
+            "event_type": event_name, "content": "", "terminal_status": status,
+            "private_provider_record": {"hidden": True},
+        },
+        is_complete=event_name == "chat.final",
+    )
+    frame = await _web_frame_for_chunk(chunk)
+    expected = {"session_id": "session-1", "request_id": "request-1", "content": ""}
+    if event_name == "chat.final" and status == "completed":
+        expected["terminal_status"] = "completed"
+    assert frame["payload"] == expected

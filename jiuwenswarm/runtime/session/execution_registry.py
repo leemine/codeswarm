@@ -86,6 +86,17 @@ class SessionExecutionRegistry:
         if handle.state.terminal:
             handle.terminal_event.set()
             return
+        admission = handle._native_admission
+        if (admission is not None and state is SessionExecutionState.SUCCEEDED
+                and handle.control_origin_terminal is not None):
+            # Consuming the error output successfully does not turn the
+            # original Provider's FAILED/ABORTED receipt into success.
+            state = handle.control_origin_terminal
+        if admission is not None and not admission.terminal_ready():
+            # A producer result/EOF/cancel ACK cannot release a live Provider.
+            # Keep this original handle until both actual tails are confirmed.
+            admission.deferred_terminal = (state, error)
+            return
         handle.state = state
         handle.waiting_control_id = None
         handle.waiting_control_ids.clear()

@@ -23,6 +23,7 @@ from openjiuwen.core.foundation.llm.schema.config import (
 )
 from openjiuwen.rsi.harness_rsi.auto_harness.schema import load_auto_harness_config
 
+from jiuwenswarm.governance.model_consumer import runtime_model_kwargs
 from jiuwenswarm.common.auth.model_catalog import is_login_model
 from jiuwenswarm.common.config import (
     get_config,
@@ -1400,10 +1401,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             max_retries=0,
             verify_ssl=verify_ssl,
         )
-        llm = Model(
+        llm = Model(**runtime_model_kwargs(
             model_config=model_request_config,
-            model_client_config=model_client_config,
-        )
+            model_client_config=model_client_config
+        ))
 
         try:
             probe = await probe_model_connection(

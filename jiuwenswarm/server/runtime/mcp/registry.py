@@ -673,6 +673,9 @@ def connect_mcp(name: str, *, install_only: bool = False) -> dict[str, Any]:
     installed + authenticated but manages skills itself. Default False keeps
     the full connect flow unchanged.
     """
+    from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+
+    require_legacy_mcp_access()
     n = str(name or "").strip()
     if not n:
         raise ValueError("mcp name is required")
@@ -944,6 +947,9 @@ def _connect_cli(name: str, step_index: int, *, install_only: bool = False) -> d
 
     Returns an auth_required sentinel or a final result dict.
     """
+    from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+
+    require_legacy_mcp_access()
     from jiuwenswarm.server.runtime.mcp.cli_driver import CliDriver
 
     n = str(name or "").strip()
@@ -1021,6 +1027,9 @@ def _finalize_cli(name: str, install_result: Any, *, install_only: bool = False)
     suppresses the skill side-effects. Used when another feature manages
     skills itself.
     """
+    from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+
+    require_legacy_mcp_access()
     from jiuwenswarm.server.runtime.mcp.skill_installer import (
         install_mcp_skills,
     )
@@ -1095,6 +1104,9 @@ def complete_cli_auth(name: str, step_index: int, *, install_only: bool = False)
     Polls status; on success advances to the next auth step or finalizes.
     Returns the same shape as :func:`_connect_cli`.
     """
+    from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+
+    require_legacy_mcp_access()
     from jiuwenswarm.server.runtime.mcp.cli_driver import CliDriver
 
     n = str(name or "").strip()

@@ -979,6 +979,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   // 必须在渲染阶段同步更新，否则 effect 执行之前收到的事件会被错误过滤
   const userInputVersionRef = useRef(0);
   const activeRequestIdRef = useRef<string | undefined>(undefined);
+  // Original local chat wire IDs, scoped by Session; events never invent an ID.
+  const submittedChatRequestsRef = useRef(new Map<string, string>());
+  const cancelRequestTargetsRef = useRef(new Map<string, { sessionId: string; target?: string }>());
+  const clearSubmittedChatRequest = useCallback((sessionId: string, payload: Record<string, unknown>) => {
+    const requestId = getPayloadRequestId(payload);
+    if (requestId && submittedChatRequestsRef.current.get(sessionId) === requestId) {
+      submittedChatRequestsRef.current.delete(sessionId);
+    }
+  }, []);
   // 立即同步更新，不等待 effect
 
   const [isConnected, setIsConnected] = useState(false);
@@ -1787,7 +1796,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ...(sessionRt?.enableSwarmflow && sessionRt.swarmflowBudget != null
             ? { swarmflow_budget: sessionRt.swarmflowBudget }
             : {}),
-        });
+        }, { onRequestId: (id) => submittedChatRequestsRef.current.set(sessionId, id) });
         if (sessionMetadata) {
           useSessionStore.getState().setSessionMetadata(sessionId, null);
         }
@@ -1878,7 +1887,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ...agentSelectionPayload,
           ...agentGroupSelectionPayload,
           ...resolvePlanEntryPayload(sessionId, outgoingMode),
-        });
+        }, { onRequestId: (id) => submittedChatRequestsRef.current.set(sessionId, id) });
         if (agentGroupSelectionPayload.agent_group_name) {
           await reconcileAgentGroupBinding(sessionId);
         }
@@ -1971,6 +1980,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       options?: { newInput?: string }
     ) => {
       const newInput = options?.newInput;
+      const cancelTarget = intent === 'cancel' ? submittedChatRequestsRef.current.get(sessionId) : undefined;
       if (intent === 'supplement' && newInput) {
         resetContextCompressionTurn(sessionId);
         userInputVersionRef.current += 1;
@@ -1990,6 +2000,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           session_id: sessionId,
           intent,
           ...getSessionWorkContext(sessionId),
+          ...(cancelTarget ? { target_request_id: cancelTarget } : {}),
         };
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
         if (['pause', 'resume', 'cancel', 'supplement'].includes(intent)) {
@@ -2013,7 +2024,25 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const selectedModel = useSessionStore.getState().getEffectiveModelName(sessionId);
           if (selectedModel) params.model_name = selectedModel;
         }
-        await request('chat.interrupt', params);
+        const result = await request<{ success?: unknown } | null>(
+          'chat.interrupt',
+          params,
+          intent === 'cancel'
+            ? {
+                onRequestId: (id) => {
+                  const requests = cancelRequestTargetsRef.current;
+                  while (requests.size >= 128) requests.delete(requests.keys().next().value!);
+                  requests.set(id, { sessionId, target: cancelTarget });
+                },
+              }
+            : undefined,
+        );
+        // The legacy Gateway acknowledges receipt with accepted:true. Cancellation
+        // is confirmed separately by interrupt_result; receipt alone is not exit.
+        if (intent === 'cancel') {
+          const current = submittedChatRequestsRef.current.get(sessionId);
+          return result?.success === true && (!current || current === cancelTarget);
+        }
         if (intent === 'supplement') {
           // 成功发出后才消费 explicit-entry 标记（与 sendMessage 一致），失败时保留以便重试。
           consumePlanEntryMark(sessionId, String(params.mode));
@@ -3869,6 +3898,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
       }),
       webClient.on('execution.error', ({ payload }) => {
+        const errorSessionId = getPayloadSessionId(payload);
+        if (errorSessionId) clearSubmittedChatRequest(errorSessionId, payload);
         const goal = payload.goal;
         if (goal !== undefined) {
           applyGoalSnapshot(payload);
@@ -3967,6 +3998,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // 加载历史消息时忽略处理状态更新
         if (useChatStore.getState().getRuntime(sessionId)?.isLoadingHistory) return;
         const isProcessingNow = Boolean(payload.is_processing);
+        if (payload.is_processing === false) clearSubmittedChatRequest(sessionId, payload);
 
         // 服务器在跨会话执行前先推送带原始问题的 processing=true。把它显式
         // 追加为一个新 user turn，并关闭可能残留的旧 stream 游标；历史消息本身
@@ -4201,6 +4233,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.error', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
+        clearSubmittedChatRequest(sessionId, payload);
         if (pendingAgentGroupBindingRef.current.has(sessionId)) {
           void reconcileAgentGroupBinding(sessionId);
         }
@@ -4391,6 +4424,20 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('chat.interrupt_result', payload)) return;
         // 切换模式时忽略中断结果
         if (useChatStore.getState().getRuntime(sessionId)?.switchingMode) return;
+        const cancelRequestId = getPayloadRequestId(payload);
+        const original = cancelRequestId ? cancelRequestTargetsRef.current.get(cancelRequestId) : undefined;
+        if (
+          payload.intent === 'cancel' && cancelRequestId && !original
+          && submittedChatRequestsRef.current.has(sessionId)
+        ) return;
+        if (payload.intent === 'cancel' && original) {
+          cancelRequestTargetsRef.current.delete(cancelRequestId!);
+          const current = submittedChatRequestsRef.current.get(sessionId);
+          if (original.sessionId !== sessionId || (current && current !== original.target)) return;
+          if (payload.success === true && current === original.target) {
+            submittedChatRequestsRef.current.delete(sessionId);
+          }
+        }
         flushPendingStreamDelta(sessionId);
         const resultPayload = payload as unknown as InterruptResultPayload;
         useChatStore.getState().setInterruptResult(sessionId, resultPayload);
@@ -4447,6 +4494,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             }
           }
         } else if (resultPayload.intent === 'cancel') {
+          if (resultPayload.success !== true) return;
+          useSubagentStore.getState().markRunningSubagentsCancelled(sessionId);
           if (shouldClearPermissionQuestionsForLifecycleEvent('cancel', resultPayload.success)) {
             useChatStore.getState().clearPermissionQuestions(sessionId);
           }
@@ -5104,6 +5153,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       setIsConnected(connected);
       setConnected(connected);
       if (!connected && (state === 'reconnecting' || state === 'closed')) {
+        submittedChatRequestsRef.current.clear();
+        cancelRequestTargetsRef.current.clear();
         streamDeltaBatcherRef.current?.flushAll();
         clearPendingSubagentCorrelations();
         onDisconnectRef.current?.();

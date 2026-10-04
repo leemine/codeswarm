@@ -566,6 +566,7 @@ from jiuwenswarm.common.config import (
     resolve_env_vars,
 )
 from jiuwenswarm.common.mcp_config import (
+    require_legacy_mcp_access,
     build_mcp_credential_resolver,
     build_mcp_server_config,
     extract_enabled_mcp_server_entries,
@@ -1141,7 +1142,9 @@ def _mcc_looks_usable(mcc: dict) -> bool:
     return bool(api_key)
 
 
-def build_model_from_entry(mcc: dict, mco: dict) -> Model:
+def build_model_from_entry(
+    mcc: dict, mco: dict, *, model_entry_fingerprint: str | None = None,
+) -> Model:
     """根据单个模型条目的 model_client_config / model_config_obj 构建 Model 实例。
 
     模块级公开函数：除本适配器外，模型缓存构建（``agent_ws_server`` /
@@ -1193,7 +1196,12 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
         model_name=name,
     )
     m_config = ModelRequestConfig(**request_kwargs)
-    model = Model(model_client_config=ModelClientConfig(**mcc_fields), model_config=m_config)
+    from jiuwenswarm.governance.model_consumer import runtime_model_kwargs
+    model = Model(**runtime_model_kwargs(
+        ModelClientConfig(**mcc_fields), m_config, binding_config=mcc,
+        **({"model_entry_fingerprint": model_entry_fingerprint}
+           if model_entry_fingerprint is not None else {}),
+    ))
     return model
 
 
@@ -2058,7 +2066,7 @@ class JiuWenSwarmDeepAdapter:
         self._root_instance_lock: asyncio.Lock | None = None
         self._session_adapters: dict[str, JiuWenSwarmDeepAdapter] = {}
         self._session_adapter_locks: dict[str, asyncio.Lock] = {}
-        self._native_session_routes: dict[str, tuple[Any, Any, Any]] = {}
+        self._native_session_routes: dict[str, tuple[Any, ...]] = {}
         self._session_adapter_last_used: dict[str, float] = {}
         self._session_adapter_config_version: int = 0
         self._session_adapter_versions: dict[str, int] = {}
@@ -3271,6 +3279,38 @@ class JiuWenSwarmDeepAdapter:
         control = controls.get(sid)
         return bool(control is not None and control.list_live())
 
+    async def stop_existing_session_adapter(self, session_id: str) -> bool:
+        """Strict owner cleanup; no idle/Heartbeat/permission retention bypass.
+
+        Runtime already prevents new work for this generation. The old object
+        and Binding remain owned until actual Native tasks have exited.
+        """
+        sid = self._session_adapter_key(session_id)
+        if self._is_session_scoped_adapter:
+            if self._session_adapter_key(self._parent_session_id) != sid:
+                return False
+            await self.stop_interaction(require_owned_exit=True)
+            await self.cleanup()
+            return True
+        original = self._session_adapters.get(sid)
+        lock = self._session_adapter_locks.get(sid)
+        if original is None:
+            if lock is not None:
+                raise RuntimeError('Session adapter creation or cleanup is pending')
+            return False
+        if lock is None:
+            raise RuntimeError('existing Session adapter lock unavailable')
+        async with lock:
+            if self._session_adapters.get(sid) is not original:
+                raise RuntimeError('Session adapter changed before stop')
+            await original.stop_interaction(require_owned_exit=True)
+            await original.cleanup()
+            self._drop_session_adapter_cache_entry(sid, remove_lock=False, remove_runtime_state=False)
+        if self._is_session_lock_idle(sid, lock):
+            self._session_adapter_locks.pop(sid, None)
+        self._native_session_routes.pop(sid, None)
+        return True
+
     async def cleanup_session_adapter(self, session_id: str | None) -> bool:
         """Release an idle session-scoped adapter without deleting session history."""
         sid = self._session_adapter_key(session_id)
@@ -3430,6 +3470,14 @@ class JiuWenSwarmDeepAdapter:
         is busy, a new task needing another epoch must retry after settlement.
         """
 
+        from jiuwenswarm.runtime.continuation_control import continuation_control
+        retained = continuation_control(request, adapter=self)
+        if retained is not None:
+            child = retained.child
+            self._touch_session_adapter(request.session_id)
+            if reserve_activity:
+                child._register_session_agent_task(request.session_id)
+            return child
         cached = self._get_cached_session_adapter(request.session_id)
         smart_lifecycle = self._coordinates_smart_permission_lifecycle(
             get_config(), request.session_id,
@@ -3477,6 +3525,13 @@ class JiuWenSwarmDeepAdapter:
     def select_execution_for_request(self, request: AgentRequest) -> None:
         """Pin an admitted Native session before MCP can create its child."""
         bound = getattr(request, "_bound_execution", None)
+        continuation = getattr(request, "_continuation_context", None)
+        if continuation is not None:
+            from jiuwenswarm.governance.continuation_context import validate_continuation_context
+
+            validate_continuation_context(continuation, request.session_id, request.request_id)
+            if bound is None:
+                raise PermissionError("continuation requires its bound Native route")
         if bound is None:
             return
         if bound.spec.provider_id != "native":
@@ -3488,10 +3543,13 @@ class JiuWenSwarmDeepAdapter:
             getattr(request, "_execution_source"),
             getattr(request, "_execution_bindings"),
             bound,
+            continuation,
         )
         existing = self._native_session_routes.get(sid)
         if existing is not None and existing[2].binding is not bound.binding:
             raise RuntimeError("session execution binding changed")
+        if existing is not None and len(existing) > 3 and existing[3] is not None and continuation is None:
+            raise PermissionError("continuation context cannot be removed")
         child = self._session_adapters.get(sid)
         if child is not None and getattr(child, "_native_execution", None) is None:
             raise RuntimeError("session already uses the legacy interaction route")
@@ -3519,6 +3577,23 @@ class JiuWenSwarmDeepAdapter:
         )
         lock = self._session_adapter_locks.setdefault(sid, asyncio.Lock())
         async with lock:
+            # Capture the original request's live input before any creation or
+            # reload await. Never borrow a newer request's seed from this route.
+            native_route = self._native_session_routes.get(sid)
+            continuation = native_route[3] if native_route and len(native_route) > 3 else None
+
+            def validate_continuation_route():
+                if continuation is not None:
+                    from jiuwenswarm.governance.continuation_context import (
+                        ContinuationContextDenied, validate_continuation_context,
+                    )
+
+                    if (not history_before_request_id
+                            or self._native_session_routes.get(sid) is not native_route):
+                        raise ContinuationContextDenied("continuation request route changed")
+                    validate_continuation_context(continuation, sid, history_before_request_id)
+
+            validate_continuation_route()
             existing = self._session_adapters.get(sid)
             # Same-class child cleanup remains serialized by this session lock.
             if (
@@ -3593,6 +3668,16 @@ class JiuWenSwarmDeepAdapter:
                     existing,
                     host_external_input=host_external_input,
                 )
+                if continuation is not None:
+                    from jiuwenswarm.agents.harness.common.session_ops_service import warmup_session_context
+
+                    validate_continuation_route()
+                    await warmup_session_context(
+                        deep_agent=existing._instance, session_id=sid,
+                        history_before_request_id=history_before_request_id,
+                        continuation_context=continuation,
+                    )
+                    validate_continuation_route()
                 self._touch_session_adapter(sid)
                 if reserve_activity:
                     existing._register_session_agent_task(  # pylint: disable=protected-access
@@ -3601,110 +3686,127 @@ class JiuWenSwarmDeepAdapter:
                 return existing
 
             adapter = self._new_session_scoped_adapter(sid)
-            restored_profile = self._load_skill_retrieval_session_profile(sid)
-            restored_mcp_names = (
-                {
-                    str(name).strip()
-                    for name in restored_profile.get("initial_mcp_names", [])
-                    if str(name).strip()
-                }
-                if restored_profile is not None
-                else set(requested_mcp_scan_names or ())
-            )
-            adapter.restore_skill_retrieval_session(
-                restored_profile,
-                restored_mcp_names,
-                model_name,
-            )
-            config = (
-                dict(self._session_instance_config)
-                if isinstance(self._session_instance_config, dict)
-                else None
-            )
-            create_started_at = time.monotonic()
-            if permission_project_dir is not None:
-                config = {**(config or {}), "project_dir": permission_project_dir}
-            await adapter.create_instance(
-                config,
-                mode=self._session_instance_mode,
-                sub_mode=self._session_instance_sub_mode,
-                **self._session_instance_extra_create_kwargs(),
-            )
-            adapter.persist_skill_retrieval_session_profile()
-            instance_ready_at = time.monotonic()
-
-            native_route = self._native_session_routes.get(sid)
-            if native_route is None:
-                await adapter.start_interaction(session_id=sid)
-            else:
-                from openjiuwen.harness_protocol import HarnessContext
-
-                await self._reload_session_adapter_if_stale(
-                    sid, adapter, host_external_input=host_external_input,
-                )
-                source, bindings, bound = native_route
-                card = getattr(adapter._instance, "card", None)
-                context = HarnessContext(
-                    agent_name=adapter._agent_name,
-                    agent_id=str(getattr(card, "id", "") or adapter._agent_name),
-                    host_session_id=sid,
-                    cwd=bound.binding.workspace,
-                    system_prompt="",
-                )
-                execution = await adapter.start_native_interaction(
-                    source=source,
-                    bindings=bindings,
-                    subject_id=bound.binding.subject_id,
-                    workspace=bound.binding.workspace,
-                    context=context,
-                )
-                from jiuwenswarm.server.runtime.agent_adapter.native_detached_projection import (
-                    NativeDetachedProjection,
-                )
-                from jiuwenswarm.runtime.context import get_current_runtime
-
-                execution.enable_turn_outputs(
-                    detached_output=NativeDetachedProjection(
-                        sid, adapter, runtime=get_current_runtime(),
-                        request_id_for_turn=execution.request_id_for_turn,
-                    )
-                )
-            interaction_ready_at = time.monotonic()
-
-            self._session_adapters[sid] = adapter
-            # A brand-new session adapter is created from ``_session_instance_config``
-            # (which may predate the latest global reload). If a global reload left a
-            # pending ``config_base``, apply it now so the new session reflects the
-            # same configuration as already-existing sessions that reload lazily.
-            # ``_reload_session_adapter_if_stale`` owns the version bookkeeping
-            # (including the no-pending case, where it silently catches up).
-            if native_route is None:
-                await self._reload_session_adapter_if_stale(
-                    sid,
-                    adapter,
-                    host_external_input=host_external_input,
-                )
-            # 服务重启 / adapter 被驱逐后重建时，context_engine 内存池为空，
-            # 而 chat.send 主路径不会回灌磁盘 history.jsonl——继续历史会话时
-            # 模型将拿到空上下文。这里在新建 adapter 后从磁盘恢复上下文
-            # （全新会话磁盘无历史，warmup 内部会静默跳过）。
             try:
-                from jiuwenswarm.agents.harness.common.session_ops_service import (
-                    warmup_session_context,
+                restored_profile = self._load_skill_retrieval_session_profile(sid)
+                restored_mcp_names = (
+                    {
+                        str(name).strip()
+                        for name in restored_profile.get("initial_mcp_names", [])
+                        if str(name).strip()
+                    }
+                    if restored_profile is not None
+                    else set(requested_mcp_scan_names or ())
                 )
+                adapter.restore_skill_retrieval_session(
+                    restored_profile,
+                    restored_mcp_names,
+                    model_name,
+                )
+                config = (
+                    dict(self._session_instance_config)
+                    if isinstance(self._session_instance_config, dict)
+                    else None
+                )
+                create_started_at = time.monotonic()
+                if permission_project_dir is not None:
+                    config = {**(config or {}), "project_dir": permission_project_dir}
+                await adapter.create_instance(
+                    config,
+                    mode=self._session_instance_mode,
+                    sub_mode=self._session_instance_sub_mode,
+                    **self._session_instance_extra_create_kwargs(),
+                )
+                adapter.persist_skill_retrieval_session_profile()
+                instance_ready_at = time.monotonic()
 
-                await warmup_session_context(
-                    deep_agent=getattr(adapter, "_instance", None),
-                    session_id=sid,
-                    history_before_request_id=history_before_request_id,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[JiuWenSwarmDeepAdapter] session context warmup failed: "
-                    "session_id=%s error=%s",
-                    sid,
-                    exc,
-                )
+                validate_continuation_route()
+                if native_route is None:
+                    await adapter.start_interaction(session_id=sid)
+                else:
+                    from openjiuwen.harness_protocol import HarnessContext
+
+                    await self._reload_session_adapter_if_stale(
+                        sid, adapter, host_external_input=host_external_input,
+                    )
+                    validate_continuation_route()
+                    source, bindings, bound = native_route[:3]
+                    card = getattr(adapter._instance, "card", None)
+                    context = HarnessContext(
+                        agent_name=adapter._agent_name,
+                        agent_id=str(getattr(card, "id", "") or adapter._agent_name),
+                        host_session_id=sid,
+                        cwd=bound.binding.workspace,
+                        system_prompt="",
+                    )
+                    execution = await adapter.start_native_interaction(
+                        source=source,
+                        bindings=bindings,
+                        subject_id=bound.binding.subject_id,
+                        workspace=bound.binding.workspace,
+                        context=context,
+                    )
+                    from jiuwenswarm.server.runtime.agent_adapter.native_detached_projection import (
+                        NativeDetachedProjection,
+                    )
+                    from jiuwenswarm.runtime.context import get_current_runtime
+
+                    execution.enable_turn_outputs(
+                        detached_output=NativeDetachedProjection(
+                            sid, adapter, runtime=get_current_runtime(),
+                            request_id_for_turn=execution.request_id_for_turn,
+                        )
+                    )
+                interaction_ready_at = time.monotonic()
+
+                if continuation is None:
+                    self._session_adapters[sid] = adapter
+                # A brand-new session adapter is created from ``_session_instance_config``
+                # (which may predate the latest global reload). If a global reload left a
+                # pending ``config_base``, apply it now so the new session reflects the
+                # same configuration as already-existing sessions that reload lazily.
+                # ``_reload_session_adapter_if_stale`` owns the version bookkeeping
+                # (including the no-pending case, where it silently catches up).
+                if native_route is None:
+                    await self._reload_session_adapter_if_stale(
+                        sid,
+                        adapter,
+                        host_external_input=host_external_input,
+                    )
+                # 服务重启 / adapter 被驱逐后重建时，context_engine 内存池为空，
+                # 而 chat.send 主路径不会回灌磁盘 history.jsonl——继续历史会话时
+                # 模型将拿到空上下文。这里在新建 adapter 后从磁盘恢复上下文
+                # （全新会话磁盘无历史，warmup 内部会静默跳过）。
+                try:
+                    from jiuwenswarm.agents.harness.common.session_ops_service import (
+                        warmup_session_context,
+                    )
+
+                    validate_continuation_route()
+                    await warmup_session_context(
+                        deep_agent=getattr(adapter, "_instance", None),
+                        session_id=sid,
+                        history_before_request_id=history_before_request_id,
+                        **({"continuation_context": continuation} if continuation is not None else {}),
+                    )
+                    validate_continuation_route()
+                except Exception as exc:
+                    if continuation is not None:
+                        raise
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] session context warmup failed: "
+                        "session_id=%s error=%s",
+                        sid,
+                        exc,
+                    )
+            except BaseException:
+                if continuation is not None:
+                    try:
+                        await adapter.cleanup()
+                    except BaseException:
+                        logger.warning("continuation adapter cleanup failed")
+                raise
+            if continuation is not None:
+                self._session_adapters[sid] = adapter
             if requested_mcp_scan_names is not None or restored_profile is not None:
                 adapter.mark_session_mcp_reconcile_started()
             self._touch_session_adapter(sid)
@@ -4475,6 +4577,10 @@ class JiuWenSwarmDeepAdapter:
         in ``self.agents`` has no adapter yet).
         """
         try:
+            require_legacy_mcp_access()
+        except PermissionError:
+            return False
+        try:
             from jiuwenswarm.server.runtime.mcp.state_store import (
                 list_connected_mcps,
             )
@@ -4510,6 +4616,10 @@ class JiuWenSwarmDeepAdapter:
         """Token env keys an MCP owns: CredentialStore keys + schema's
         required field keys (covers the post-delete case where disconnect
         wants to clear env vars whose stored value is already gone)."""
+        try:
+            require_legacy_mcp_access()
+        except PermissionError:
+            return []
         n = str(name or "").strip()
         if not n:
             return []
@@ -4956,6 +5066,7 @@ class JiuWenSwarmDeepAdapter:
         return out
 
     async def _register_mcp_server(self, cfg: McpServerConfig, *, tag: str) -> bool:
+        require_legacy_mcp_access()
         if self._instance is None:
             return False
         # stdio: command 必须可执行（npx/uvx/node 等），否则 SDK 启动子进程会
@@ -4982,6 +5093,7 @@ class JiuWenSwarmDeepAdapter:
                 cfg.server_name, cfg.client_type, cfg.server_path, reason,
             )
             return False
+        require_legacy_mcp_access()
         try:
             result = await Runner.resource_mgr.add_mcp_server(cfg, tag=tag)
             ok = True
@@ -5122,6 +5234,7 @@ class JiuWenSwarmDeepAdapter:
         register; return True so the connect handler's apply_mcp_change
         succeeds instead of raising "register rejected".
         """
+        require_legacy_mcp_access()
         entry = get_mcp_server_config(name)
         if not entry:
             logger.debug(
@@ -5228,6 +5341,10 @@ class JiuWenSwarmDeepAdapter:
         request's disk-history boundary into context warmup.
         """
         needed_set = {str(n).strip() for n in (needed or []) if isinstance(n, str) and str(n).strip()}
+        if needed_set:
+            # Do not build a child with optimistic bundled Skill roots, then
+            # swallow register denial and continue with an unauthorized MCP.
+            require_legacy_mcp_access()
         child = await self._get_or_create_session_adapter(
             session_id,
             model_name=model_name,
@@ -5309,6 +5426,10 @@ class JiuWenSwarmDeepAdapter:
         首轮对话 reconcile 命中 existing-entry 不重 spawn。失败隔离：单个 MCP
         预热失败不阻断其余、不降级 state。
         """
+        try:
+            require_legacy_mcp_access()
+        except PermissionError:
+            return
         if self._mcp_prewarm_task is not None and not self._mcp_prewarm_task.done():
             return
         self._mcp_prewarm_task = asyncio.create_task(
@@ -5334,6 +5455,10 @@ class JiuWenSwarmDeepAdapter:
         field, config.yaml is tui-only). Per-MCP failure isolation: a bad
         entry logs and continues without starving the rest.
         """
+        try:
+            require_legacy_mcp_access()
+        except PermissionError:
+            return
         # state.json first so a name present in BOTH files resolves to the
         # state.json entry (user's latest via web connect / TUI add) —
         # config.yaml is legacy stock, state.json is the active source.
@@ -5412,6 +5537,10 @@ class JiuWenSwarmDeepAdapter:
     async def _sync_mcp_servers_for_runtime(
         self, config_base: dict[str, Any], *, tag: str = "agent.reload"
     ) -> None:
+        try:
+            require_legacy_mcp_access()
+        except PermissionError:
+            return
         if self._instance is None:
             return
         # Desired differs by channel (not adapter scope):
@@ -6733,6 +6862,16 @@ class JiuWenSwarmDeepAdapter:
         请求未显式携带 model_name 时：最近一次已应用模型 → 会话 metadata.model
         → 适配器默认模型。避免 command.goal / 中断恢复在适配器重建后掉回默认。
         """
+        continuation = getattr(request, "_continuation_execution", None)
+        if continuation is not None:
+            from jiuwenswarm.runtime.continuation_execution import require_continuation_execution
+            from jiuwenswarm.governance.resources import ResourceAccessDenied
+
+            continuation = require_continuation_execution(continuation)
+            if (continuation.session_id != request.session_id
+                    or continuation.request_id != request.request_id):
+                raise ResourceAccessDenied("continuation model request changed")
+            return continuation.build_model()
         requested = self._requested_model_name(request)
         scoped = self._request_scoped_login_model(request, requested)
         if scoped is not None:
@@ -9122,6 +9261,11 @@ class JiuWenSwarmDeepAdapter:
         except Exception as exc:
             logger.warning("%s Failed to attach AgentObservabilityRail: %s", log_prefix, exc)
         stage_timer.mark("observability_rail")
+
+        from jiuwenswarm.agents.harness.common.rails.permissions.resource_authority_rail import (
+            ensure_native_tool_authority,
+        )
+        rails_list = ensure_native_tool_authority(rails_list)
 
         total_ms = stage_timer.total_ms()
         log_rail_build = _stage_breakdown_logger(total_ms, _SLOW_RAIL_BUILD_MS)
@@ -12243,6 +12387,29 @@ class JiuWenSwarmDeepAdapter:
             return False
         return has_runtime_capability
 
+    def owns_native_model_session(self, execution, native_session) -> bool:
+        if not self._is_session_scoped_adapter:
+            child = self._get_cached_session_adapter(execution.session_id)
+            return child is not None and child.owns_native_model_session(execution, native_session)
+        native = getattr(self, "_native_execution", None)
+        if native is None or native_session is not native:
+            return False
+        owner = getattr(native, "_tool_owner", None)
+        return bool(owner is not None and self.owns_native_tool_session(execution, owner[1], owner[2]))
+
+    def owns_native_tool_session(self, execution, agent, session) -> bool:
+        """Resolve the existing Session adapter without allocating or adopting one."""
+        if not self._is_session_scoped_adapter:
+            child = self._get_cached_session_adapter(execution.session_id)
+            return child is not None and child.owns_native_tool_session(execution, agent, session)
+        native = getattr(self, "_native_execution", None)
+        owner = getattr(native, "_tool_owner", None)
+        return bool(
+            owner is not None and self._instance is owner[0]
+            and self._parent_session_id == execution.session_id
+            and native.owns_tool_session(execution, agent, session)
+        )
+
     def build_native_execution(self, bound: Any, *, event_observer: Any = None) -> Any:
         """Build an unstarted protocol execution from this session's assembled agent.
 
@@ -12276,9 +12443,39 @@ class JiuWenSwarmDeepAdapter:
                 kv_cache_runtime=get_kv_cache_runtime(),
             )
 
+        mcp_registrations = []
+
+        def after_stop() -> None:
+            # These records belong to this exact execution, including callers
+            # using prepare_native_session directly instead of the facade.
+            for registration in reversed(mcp_registrations):
+                registration.close()
+            mcp_registrations.clear()
+
         async def before_start(instance: Any, session: Any) -> None:
             agent_factory(None)
             await self.install_session_input_guard()
+            from jiuwenswarm.governance.organization_auth import configured_authenticator
+            if configured_authenticator() is not None:
+                from jiuwenswarm.server.runtime.session.lifecycle import raw_metadata
+                from jiuwenswarm.governance.mcp_credentials import configured_native_mcp_catalog
+                from jiuwenswarm.server.runtime.mcp.native_registration import install_native_mcp_tools
+                metadata = raw_metadata(bound.binding.host_session_id)
+                project_id = metadata.get('project_id') if isinstance(metadata, dict) else None
+                if not isinstance(project_id, str) or not project_id:
+                    raise PermissionError('Native MCP catalog requires the original managed Session')
+                registrations = []
+                try:
+                    for entry in configured_native_mcp_catalog(project_id):
+                        registrations.append(install_native_mcp_tools(
+                            agent=instance.react_agent, session=session, native_session=execution,
+                            execution_binding=bound.binding, project_id=project_id,
+                            connection=entry.binding, manifest=entry.manifest))
+                except BaseException:
+                    for registration in reversed(registrations):
+                        registration.close()
+                    raise
+                mcp_registrations.extend(registrations)
 
         async def dispatch_guard(request: Any, *, send: Any) -> Any:
             agent_factory(None)
@@ -12288,13 +12485,17 @@ class JiuWenSwarmDeepAdapter:
             agent_factory(None)
             return await self._dispatch_goal_control(**kwargs)
 
-        return NativeExecutionSession(
+        from jiuwenswarm.governance.tool_context import submitted_native_lifecycle_factory
+
+        execution = NativeExecutionSession(
             bound, agent_factory=agent_factory,
-            session_factory=session_factory, before_start=before_start,
+            require_execution_origin=submitted_native_lifecycle_factory() is not None,
+            session_factory=session_factory, before_start=before_start, after_stop=after_stop,
             dispatch_guard=dispatch_guard,
             goal_dispatcher=goal_dispatcher,
             event_observer=event_observer,
         )
+        return execution
 
     async def start_native_interaction(
         self, *, source: Any, bindings: Any, subject_id: str,
@@ -12384,22 +12585,72 @@ class JiuWenSwarmDeepAdapter:
             project_dir=project_dir,
         )
 
-    async def stop_interaction(self) -> None:
+    @staticmethod
+    def _native_owned_exit_tasks(agent) -> set:
+        """Only tasks already owned by this Native instance; no global scan."""
+        tasks = set()
+        if agent is None:
+            return tasks
+        for name in ('_interaction_round_task', '_interaction_supervisor_task',
+                     '_interaction_forwarder_task', '_stream_process_task'):
+            task = getattr(agent, name, None)
+            if isinstance(task, asyncio.Task):
+                tasks.add(task)
+        tasks.update(task for task in getattr(agent, '_interaction_emit_tasks', ())
+                     if isinstance(task, asyncio.Task))
+        scheduler = getattr(getattr(agent, 'loop_controller', None), 'task_scheduler', None)
+        for entry in getattr(scheduler, '_running_tasks', {}).values():
+            if isinstance(entry, tuple) and len(entry) == 2 and isinstance(entry[1], asyncio.Task):
+                tasks.add(entry[1])
+        task = getattr(scheduler, '_scheduler_task', None)
+        if isinstance(task, asyncio.Task):
+            tasks.add(task)
+        return tasks
+
+    async def stop_interaction(self, *, require_owned_exit: bool = False) -> None:
         """Stop this adapter's DeepAgent interaction loop if it was started."""
         execution = getattr(self, "_native_execution", None)
         if execution is not None:
             bindings = self._native_execution_bindings
+            pending = set(getattr(self, '_native_pending_exit_tasks', set()))
+            strict = require_owned_exit or bool(pending) or getattr(self, '_native_strict_exit_required', False)
+            native_agent = execution._native.agent if strict else None
+            if strict:
+                self._native_strict_exit_required = True
+                pending.update(self._native_owned_exit_tasks(native_agent))
+                self._native_pending_exit_tasks = pending
             native_stream = getattr(self, "_native_interaction_stream", None)
             if native_stream is not None:
                 await native_stream.dispose()
                 self._native_interaction_stream = None
             await execution.stop()
+            if strict:
+                from jiuwenswarm.runtime.harness.execution_session import ExecutionExitState
+                # The original scheduler can have accepted owned work while
+                # its existing stop was draining. Capture that same object too.
+                pending.update(self._native_owned_exit_tasks(native_agent))
+                self._native_pending_exit_tasks = pending
+                if execution.exit_state is not ExecutionExitState.EXIT_CONFIRMED:
+                    raise RuntimeError('Native provider exit is not confirmed')
+            if pending:
+                from jiuwenswarm.runtime.harness.execution_session import RESOURCE_STOP_TIMEOUT_S
+                if asyncio.current_task() in pending:
+                    raise RuntimeError('Native owned task cannot confirm its own exit')
+                remaining = {task for task in pending if not task.done()}
+                if remaining:
+                    _, remaining = await asyncio.wait(remaining, timeout=RESOURCE_STOP_TIMEOUT_S)
+                if remaining:
+                    raise RuntimeError('Native owned execution tasks have not exited')
+                self._native_pending_exit_tasks = set()
+            self._native_strict_exit_required = False
             self._native_execution = None
             self._native_execution_bindings = None
             bindings.release(execution.engine.binding)
             return
         if self._instance is None:
             return
+        if require_owned_exit:
+            raise RuntimeError('strict Native execution owner unavailable')
         await self._instance.stop()
 
     async def cleanup(self) -> None:
@@ -13199,6 +13450,31 @@ class JiuWenSwarmDeepAdapter:
         )
 
 
+    async def _submit_native_goal_request(self, request, inputs, *, action, **kwargs):
+        """Keep the actual request identity at the managed Goal admission edge."""
+        native = self._native_execution
+        owned = {}
+        if getattr(native, "_require_execution_origin", False):
+            if action == "resume":
+                from jiuwenswarm.runtime.context import get_current_runtime
+                from jiuwenswarm.runtime.native_goal_readmission import submit_readmission
+                return await submit_readmission(get_current_runtime(), request, self, inputs, action="resume")
+            owned["request"] = SendInputRequest(
+                request_id=request.request_id, inputs=inputs,
+            )
+        return await native.submit_goal(action, **owned, **kwargs)
+
+    async def _attach_native_goal_request(self, request, inputs):
+        """Explicit idle attachment gets its own Runtime admission."""
+        native = self._native_execution
+        if getattr(native, "_require_execution_origin", False):
+            from jiuwenswarm.runtime.context import get_current_runtime
+            from jiuwenswarm.runtime.native_goal_readmission import submit_readmission
+            receipt, result = await submit_readmission(get_current_runtime(), request, self, inputs, action="attach")
+            await result
+            return receipt
+        return await native.attach_goal()
+
     async def _attach_and_send_inputs(
         self,
         request: AgentRequest,
@@ -13224,6 +13500,8 @@ class JiuWenSwarmDeepAdapter:
                         active is not None
                         and not native_execution.has_turn_output_owner(active.turn_id)
                     )
+                    from jiuwenswarm.runtime.continuation_control import continuation_control
+                    continuation_control(request, child=self)
                     accepted = await native_execution.answer_request(host_request)
                     if not accepted:
                         raise RuntimeError("interaction answer is no longer pending")
@@ -14822,6 +15100,69 @@ class JiuWenSwarmDeepAdapter:
         session_id: str = "default",
     ) -> dict[str, Any] | None:
         """Map JiuwenSwarm protocol fields to the independent Goal methods."""
+        if str(action).strip().lower() != 'get':
+            from jiuwenswarm.governance.organization_auth import configured_authenticator
+            from jiuwenswarm.governance.tool_context import submitted_native_lifecycle_factory
+            native = getattr(self, '_native_execution', None)
+            child = (self if self._is_session_scoped_adapter
+                     else getattr(self, '_session_adapters', {}).get(self._session_adapter_key(session_id)))
+            selected = getattr(child, '_native_execution', None)
+            managed = (getattr(selected, '_require_execution_origin', False)
+                       or submitted_native_lifecycle_factory() is not None
+                       or configured_authenticator() is not None)
+            if managed:
+                from openjiuwen.core.controller.schema.execution_origin import (
+                    current_execution_origin, _capture_live_execution_origin,
+                )
+                from jiuwenswarm.runtime.harness.native_session import _initial_goal_operation, _REQUEST_KEY
+                # Only the original pending admission may perform its initial
+                # set here. Active controls use the facade's explicit capability.
+                source = current_execution_origin()
+                pending = native._native.active_turn if native is not None else None
+                owner = getattr(native, '_tool_owner', None)
+                token = pending.content.metadata.get(_REQUEST_KEY) if pending is not None else None
+                entry = native._requests.get(token) if native is not None else None
+                expected = getattr(entry, 'goal_operation', None)
+                request, lifecycle, owned, result, goal = (
+                    (entry.request, entry.lifecycle, entry.owned, entry.result, entry.goal)
+                    if entry is not None else (None,) * 5)
+                actual = _initial_goal_operation(action, session_id=session_id, objective=objective,
+                    overwrite_confirmed=overwrite_confirmed, token_budget=token_budget, max_attempts=max_attempts)
+                task = asyncio.current_task()
+                manager = self._get_goal_manager()
+                def admitted():
+                    return (self._is_session_scoped_adapter and native is selected
+                            and getattr(self, '_native_execution', None) is native
+                            and owner is not None and native._tool_owner is owner
+                            and owner[0] is self._instance and pending is not None
+                            and native.engine.binding is owner[3]
+                            and self._parent_session_id == session_id == owner[3].host_session_id
+                            and native._native.active_turn is pending
+                            and native._native._capture_owned_turn(pending.turn_id) is pending
+                            and pending._agent is owner[0] and pending._session is owner[2]
+                            and source is not None and pending._origin is source
+                            and current_execution_origin() is source
+                            and task is asyncio.current_task() and task in pending._admissions
+                            and not task.done() and not task.cancelling()
+                            and not pending.abort_requested and pending._exit is None
+                            and not native._closing and not native._closed
+                            and native._requests.get(token) is entry
+                            and pending.content.metadata.get(_REQUEST_KEY) == token
+                            and entry is not None and goal is not None and entry.goal is goal
+                            and entry.request is request and entry.lifecycle is lifecycle
+                            and entry.owned is owned and entry.result is result
+                            and entry.goal_operation is expected and expected == actual
+                            and entry.request is not None and entry.lifecycle is not None
+                            and entry.owned is not None and entry.owned._entry is entry
+                            and entry.owned._pending is pending and entry.owned._native is native
+                            and entry.owned.source is entry.lifecycle.source
+                            and source.host_value is entry.lifecycle.source.host_value
+                            and entry.request.request_id == entry.owned.request_id
+                            and entry.result is not None and not entry.result.done()
+                            and self._get_goal_manager() is manager and manager is not None
+                            and owner[0].goal_manager is manager)
+                if not admitted() or _capture_live_execution_origin() is not source or not admitted():
+                    raise PermissionError('Managed Native initial Goal admission is unavailable')
         if not self._is_session_scoped_adapter:
             session_adapter = await self._get_or_create_session_adapter(session_id)
             try:
@@ -15249,7 +15590,7 @@ class JiuWenSwarmDeepAdapter:
                 else:
                     from openjiuwen.harness_protocol import DeliveryMode
 
-                    receipt = await native_execution.attach_goal()
+                    receipt = await self._attach_native_goal_request(request, inputs)
                     if receipt.accepted_mode is not DeliveryMode.STEER:
                         interaction_stream = _NativeTurnOutput(
                             native_execution, receipt.turn_id
@@ -15455,10 +15796,19 @@ class JiuWenSwarmDeepAdapter:
                 # A queued follow-up needs its own Turn reader in the normal
                 # stream path; this ACK-only path is for active-turn steering.
                 return False
+            control = getattr(request, "_native_steer_control", None)
+            if getattr(native_execution, "_require_execution_origin", False):
+                from jiuwenswarm.runtime.harness.native_session import NativeSteerControl
+                if type(control) is not NativeSteerControl:
+                    raise PermissionError("Managed Native input requires its original control")
+            if control is not None:
+                control.check_current(native_execution, request.request_id)
             if native_execution._native.active_turn is None:
                 return False
             prepared = await self._prepare_root_input_dispatch(request, inputs)
             try:
+                if control is not None:
+                    control.check_current(native_execution, request.request_id)
                 await native_execution.send_request(
                     SendInputRequest(
                         request_id=request.request_id,
@@ -15466,8 +15816,16 @@ class JiuWenSwarmDeepAdapter:
                             request, prepared, mode
                         ),
                         mode=mode,
-                    )
+                    ),
+                    **({"control": control} if control is not None else {}),
                 )
+                if control is not None:
+                    try:
+                        control.check_current(native_execution, request.request_id)
+                    except Exception as exc:
+                        raise SessionInputDeliveryUnknown(
+                            "original Native steer owner changed after submission; do not retry automatically"
+                        ) from exc
                 return True
             finally:
                 self._permission_dispatch.finalize(prepared)
@@ -16296,8 +16654,9 @@ class JiuWenSwarmDeepAdapter:
                 else:
                     from openjiuwen.harness_protocol import DeliveryMode
 
-                    receipt, control_result = await native_execution.submit_goal(
-                        str(pending_goal_op.get("action") or "get"),
+                    receipt, control_result = await self._submit_native_goal_request(
+                        request, inputs,
+                        action=str(pending_goal_op.get("action") or "get"),
                         **goal_kwargs,
                     )
                     if receipt.accepted_mode is not DeliveryMode.STEER:
@@ -16427,7 +16786,7 @@ class JiuWenSwarmDeepAdapter:
                 else:
                     from openjiuwen.harness_protocol import DeliveryMode
 
-                    receipt = await native_execution.attach_goal()
+                    receipt = await self._attach_native_goal_request(request, inputs)
                     if receipt.accepted_mode is not DeliveryMode.STEER:
                         interaction_stream = _NativeTurnOutput(
                             native_execution, receipt.turn_id

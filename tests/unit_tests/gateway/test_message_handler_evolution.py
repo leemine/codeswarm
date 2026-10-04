@@ -989,8 +989,15 @@ async def test_default_cancel_publishes_interrupt_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fire_and_forget_cancel_publishes_interrupt_result() -> None:
+@pytest.mark.parametrize("success", [False, True])
+async def test_fire_and_forget_cancel_publishes_interrupt_result(monkeypatch, success) -> None:
     handler = _TestMessageHandler.create()
+    response = {
+        "event_type": "chat.interrupt_result",
+        "success": success,
+        "message": "任务已取消" if success else "当前没有可取消的团队任务",
+    }
+    monkeypatch.setattr(_FakeAgentClient, "response_payload", response)
 
     await handler.cancel_agent_work_for_session(
         _control_message(),
@@ -998,14 +1005,9 @@ async def test_fire_and_forget_cancel_publishes_interrupt_result() -> None:
         agent_notify="fire_and_forget",
     )
 
-    out = await handler.consume_robot_messages(timeout=0)
+    out = await handler.consume_robot_messages(timeout=1)
     assert out is not None
-    assert out.payload == {
-        "event_type": "chat.interrupt_result",
-        "intent": "cancel",
-        "success": True,
-        "message": "任务已取消",
-    }
+    assert out.payload == {**response, "intent": "cancel"}
     await asyncio.sleep(0)
     assert len(_FakeAgentClient.sent_requests) == 1
 
@@ -1036,18 +1038,17 @@ async def test_fire_and_forget_cancel_forwards_cancelled_tools() -> None:
             agent_notify="fire_and_forget",
         )
 
-        interrupt_out = await handler.consume_robot_messages(timeout=0)
+        # The background response publishes cancelled tool results before its
+        # confirmed interrupt result. Await both instead of optimistic success.
+        tool_out = await handler.consume_robot_messages(timeout=1)
+        interrupt_out = await handler.consume_robot_messages(timeout=1)
         assert interrupt_out is not None
-        assert interrupt_out.payload["event_type"] == "chat.interrupt_result"
-
-        # Wait for fire-and-forget task to publish tool_result
-        tool_out = None
-        deadline = asyncio.get_running_loop().time() + 2.0
-        while asyncio.get_running_loop().time() < deadline:
-            tool_out = await handler.consume_robot_messages(timeout=0.05)
-            if tool_out is not None:
-                break
-            await asyncio.sleep(0.01)
+        assert interrupt_out.payload == {
+            "event_type": "chat.interrupt_result",
+            "intent": "cancel",
+            "success": True,
+            "message": "任务已取消",
+        }
 
         assert tool_out is not None
         assert tool_out.event_type.value == "chat.tool_result"

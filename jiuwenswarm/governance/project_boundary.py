@@ -18,7 +18,7 @@ class ProjectAccessDenied(PermissionError):
 
 
 _READ_METHODS = frozenset({
-    "session.list", "session.archived.list", "session.get_metadata",
+    "session.share.audit.list", "session.list", "session.archived.list", "session.get_metadata",
     "session.preview", "session.plan_status", "history.get",
     "history.list_turns", "files.list", "files.get", "file.download_verified_chunk",
     "path.get", "path.select_directory", "path.select_files", "document.formats",
@@ -66,6 +66,7 @@ def _referenced_values(value: Any, keys: frozenset[str]) -> set[str]:
 
 def authorize_resource_request(
     request: Any, identity: TrustedIdentity | None, *, access_store: Any = None,
+    session_permit: Any = None,
 ) -> None:
     """Re-read current ACL before dispatch; missing identity never grants access.
 
@@ -75,6 +76,37 @@ def authorize_resource_request(
     """
     method = getattr(getattr(request, "req_method", None), "value", "")
     if not method.startswith(_RESOURCE_PREFIXES):
+        return
+    from .organization_auth import configured_authenticator
+    from .session_boundary import SHARE_METHODS, SessionRequestPermit, is_cleanup_request
+    if configured_authenticator() is not None:
+        params = request.params if isinstance(request.params, dict) else {}
+        try:
+            cleanup = is_cleanup_request(method, params)
+        except PermissionError as exc:
+            raise ProjectAccessDenied('invalid cleanup request') from exc
+        if method == 'file.download_workspace_chunk':
+            if (not isinstance(session_permit, SessionRequestPermit)
+                    or session_permit.identity != identity
+                    or session_permit.method != method
+                    or session_permit.workspace_download is None
+                    or session_permit.workspace_download.session_id != request.session_id
+                    or not session_permit.revalidate()):
+                raise ProjectAccessDenied('Workspace download authorization required')
+            # The exact consumer already checked execute + workspace/read on
+            # its original Binding, including both actor and subject grants.
+            return
+        if cleanup:
+            if (not isinstance(session_permit, SessionRequestPermit)
+                    or not session_permit.allows_cleanup(method, params, identity, request.session_id)):
+                raise ProjectAccessDenied('exact current cleanup permit required')
+            # The original owner may stop its existing work despite source/ACL
+            # revocation. This does not authorize content or a new execution.
+            return
+    if configured_authenticator() is not None and (method in SHARE_METHODS or method == "session.list"):
+        # Persistent sharing evaluates the source owner's current project ACL;
+        # a recipient does not inherit project membership. Session inventory
+        # now filters durable ownership before reading or counting metadata.
         return
     # ProjectAdapter performs its own operation-specific checks and filtering.
     if method.startswith("project.") and method not in {
@@ -142,6 +174,15 @@ def authorize_resource_request(
             raise ProjectAccessDenied("project authorization storage unavailable") from exc
     actor_id = identity.actor_id if isinstance(identity, TrustedIdentity) else ""
     action = request_project_action(method)
+    if method == 'command.goal':
+        from .goal_read import validate_goal_get
+        from .session_sharing import SessionSharingDenied
+        try:
+            validate_goal_get(params)
+        except SessionSharingDenied:
+            pass
+        else:
+            action = 'read'
     for project_id in protected:
         decision = access.authorize(project_id, actor_id, action)
         if not actor_id or not decision.allowed:

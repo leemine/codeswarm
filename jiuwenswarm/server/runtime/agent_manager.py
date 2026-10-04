@@ -243,7 +243,7 @@ class AgentManager:
         # 上一次默认模型的连接身份快照 (diff_key -> ModelClientConfig), 用于
         # 模型热更新后关闭"已被删除/改掉凭证"的 LLM 连接 (增量关闭)。
         self._last_model_conn_configs: dict[tuple, Any] = {}
-        self._session_create_tokens: dict[tuple[str, str], tuple[Any, Any]] = {}
+        self._session_create_tokens: dict[tuple, tuple[Any, Any]] = {}
         self._session_create_token_lock = asyncio.Lock()
         from jiuwenswarm.server.runtime.agent_warm_pool import AgentWarmPool
 
@@ -849,6 +849,33 @@ class AgentManager:
                 except Exception:
                     logger.exception("[AgentManager] cancel_inflight_work failed")
 
+    async def stop_existing_session_runtime(self, *, channel_id: str = "", session_id: str) -> bool:
+        """Stop exact cached Session owners; never create or select a fallback.
+
+        Runtime must already hold this generation QUIESCING. Cache replacements,
+        unknown stop capability, and retained resources fail closed for retry.
+        """
+        sid = str(session_id or '').strip()
+        if not sid:
+            raise ValueError('existing Session required')
+        channel_key = _normalize_channel_id(channel_id)
+        channel_agents = self.agents.get(channel_key, {})
+        owners = [(key, agent) for key, agent in tuple(channel_agents.items())
+                  if callable(getattr(agent, 'has_session_runtime', None)) and agent.has_session_runtime(sid)]
+        if not owners:
+            return False
+        for key, agent in owners:
+            if self.agents.get(channel_key, {}).get(key) is not agent:
+                raise RuntimeError('Session runtime owner changed before stop')
+            stop = getattr(agent, 'stop_existing_session_runtime', None)
+            if not callable(stop):
+                raise RuntimeError('existing Session has no strict stop port')
+            await stop(sid)
+            if (self.agents.get(channel_key, {}).get(key) is not agent
+                    or agent.has_session_runtime(sid)):
+                raise RuntimeError('Session runtime exit is not confirmed')
+        return True
+
     async def cleanup_session_runtime(self, *, channel_id: str = "", session_id: str) -> bool:
         """Release in-memory runtime for one session across existing channel agents.
 
@@ -993,24 +1020,32 @@ class AgentManager:
         session_id: str,
         reason: str = "session_deleted",
     ) -> bool:
-        """Release subagent control owned by the channel's existing Agent.
+        """Release only cached owners of this exact Session on this channel.
 
-        Product Session deletion historically performed this lookup in
-        AgentServer.  Keeping it here preserves the same first-Agent lookup and
-        adapter selection while hiding Agent/Adapter internals behind the
-        Runtime-owned manager boundary.
+        Never select a channel default or create an Agent. Callers retain the
+        original Runtime generation fence; cache identity is checked across
+        each await so a stale release cannot acknowledge a replacement owner.
         """
-        agent = self.get_agent_nowait(channel_id=channel_id or "")
-        adapter = self._resolve_runtime_adapter(agent)
-        release_runtime = getattr(
-            adapter,
-            "release_subagent_runtime_for_session",
-            None,
-        )
-        if not callable(release_runtime):
+        sid = str(session_id or '').strip()
+        if not sid:
             return False
-        await release_runtime(session_id, reason=reason)
-        return True
+        channel_key = _normalize_channel_id(channel_id)
+        owners = [(key, agent) for key, agent in tuple(self.agents.get(channel_key, {}).items())
+                  if callable(getattr(agent, 'has_session_runtime', None)) and agent.has_session_runtime(sid)]
+        released = False
+        for key, agent in owners:
+            if self.agents.get(channel_key, {}).get(key) is not agent or not agent.has_session_runtime(sid):
+                raise RuntimeError('Session runtime owner changed before subagent release')
+            adapter = self._resolve_runtime_adapter(agent)
+            release_runtime = getattr(adapter, 'release_subagent_runtime_for_session', None)
+            if not callable(release_runtime):
+                continue
+            await release_runtime(sid, reason=reason)
+            if (self.agents.get(channel_key, {}).get(key) is not agent
+                    or self._resolve_runtime_adapter(agent) is not adapter):
+                raise RuntimeError('Session runtime owner changed during subagent release')
+            released = True
+        return released
 
     @staticmethod
     def _resolve_runtime_adapter(agent: Any) -> Any:
@@ -1250,11 +1285,16 @@ class AgentManager:
         # persist_session 不属于 WarmKey：同一预热 Agent 可服务开启或关闭的
         # Session，避免为布尔开关复制预热槽。但它属于 session.create 的幂等
         # 身份，同一 create_token 不允许用不同值重试。
+        from jiuwenswarm.governance.session_claim import current_session_create_claim
+        trusted_claim = current_session_create_claim()
         create_signature = (
             key, bool(prewarm_eligible), bool(persist_session), execution_profile_id,
+            trusted_claim[1] if trusted_claim is not None else None,
         )
-        token_key = (key.channel_id, token)
+        token_key = (key.channel_id, trusted_claim[0] if trusted_claim is not None else None, token)
         async with self._session_create_token_lock:
+            if current_session_create_claim() != trusted_claim:
+                raise PermissionError('Session creation identity changed while waiting')
             if token:
                 existing = self._session_create_tokens.get(token_key)
                 if existing is not None:
@@ -1276,6 +1316,8 @@ class AgentManager:
                 )
             if token:
                 self._session_create_tokens[token_key] = (create_signature, claim)
+            # The provisioner's owner-publication check revalidates after this
+            # await and owns compensation of the returned allocation receipt.
             return claim
 
     async def wait_for_session_prewarm(self, session_id: str | None) -> None:
@@ -1405,6 +1447,13 @@ class AgentManager:
         session_id: str,
     ) -> "JiuWenSwarm | None":
         """Return the cached channel agent that owns ``session_id`` runtime."""
+        agent = self._peek_agent_for_session_nowait(channel_id, session_id)
+        return self._borrow_agent(agent) if agent is not None else None
+
+    def _peek_agent_for_session_nowait(
+        self, channel_id: str, session_id: str,
+    ) -> "JiuWenSwarm | None":
+        """Inspect the existing cache without extending Agent lifetime."""
         sid = str(session_id or "").strip()
         if not sid:
             return None
@@ -1420,7 +1469,7 @@ class AgentManager:
                 continue
             try:
                 if has_runtime(sid):
-                    return self._borrow_agent(agent)
+                    return agent
             except Exception:
                 logger.exception(
                     "[AgentManager] session runtime lookup failed: "

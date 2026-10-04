@@ -1406,6 +1406,10 @@ async def test_cancelled_tui_explicit_create_waiter_does_not_release_owner_lock(
 async def test_handle_tui_explicit_create_preserves_existing_project_binding(
     monkeypatch, tmp_path
 ):
+    from jiuwenswarm.server.runtime.session import project_store
+    registry = tmp_path / "projects.json"
+    registry.write_text(json.dumps({"projects": [{"project_id": "proj_original", "work_mode": "code"}]}))
+    monkeypatch.setattr(project_store, "_projects_file", lambda: registry)
     server = AgentWebSocketServerHarness()
     fake_manager = FakeAgentManager(session_id="must-not-be-used")
     server.set_agent_manager_for_test(fake_manager)
@@ -1546,6 +1550,10 @@ async def test_handle_explicit_session_create_rejects_unsupported_identity(
 async def test_handle_session_create_injected_default_work_mode_does_not_mismatch_code_project(
     monkeypatch, tmp_path
 ):
+    from jiuwenswarm.server.runtime.session import project_store
+    registry = tmp_path / "projects.json"
+    registry.write_text(json.dumps({"projects": [{"project_id": "proj_code", "work_mode": "code"}]}))
+    monkeypatch.setattr(project_store, "_projects_file", lambda: registry)
     server = AgentWebSocketServerHarness()
     fake_manager = FakeAgentManager(session_id="sess_code_project")
     server.set_agent_manager_for_test(fake_manager)
@@ -3823,7 +3831,7 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
     )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
-        lambda _session_id: {"mode": "agent.plan"},
+        lambda _session_id, cache_bust=False, enable_writeback=True: {"mode": "agent.plan"},
     )
     monkeypatch.setattr(
         interface_deep_module,

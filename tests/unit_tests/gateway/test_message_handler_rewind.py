@@ -52,3 +52,29 @@ async def test_rewind_remote_business_error_is_not_reported_as_unavailable() -> 
     await handler._rewind_slash_notice({}, "feishu", "conversation-1", msg, turn_index=99)
 
     assert handler.notices == [{"error": "目标轮次不存在", "code": "BAD_REQUEST"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('transport_error', [False, True])
+async def test_organization_direct_rewind_never_uses_shared_directory_fallback(monkeypatch, transport_error):
+    from unittest.mock import Mock
+    from jiuwenswarm.governance import organization_auth
+    from jiuwenswarm.gateway.routing import e2a_proxy
+    from jiuwenswarm.agents.harness.common import session_ops_service
+
+    handler = _RewindHandler.create()
+    msg = SimpleNamespace(channel_id='feishu', session_id='conversation-1')
+    handler._channel_states['feishu:conversation-1'] = SimpleNamespace(session_id='target-session')
+    monkeypatch.setattr(organization_auth, 'configured_authenticator', lambda: object())
+    monkeypatch.setattr(e2a_proxy, 'is_legacy_shared_directory_client', lambda _: True)
+    local_rewind = Mock(side_effect=AssertionError('organization mode must never truncate local history'))
+    monkeypatch.setattr(session_ops_service, 'rewind_session', local_rewind)
+    if transport_error:
+        async def unavailable(_env):
+            raise ConnectionError('fixture unavailable')
+        monkeypatch.setattr(handler, '_send_non_stream_agent_request', unavailable)
+
+    await handler._rewind_slash_notice({}, 'feishu', 'conversation-1', msg, turn_index=1)
+
+    local_rewind.assert_not_called()
+    assert handler.notices == [e2a_proxy.organization_local_fallback_denial()]

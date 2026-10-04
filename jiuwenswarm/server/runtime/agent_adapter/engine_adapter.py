@@ -67,7 +67,17 @@ class EngineAgentAdapter:
     event projection are composed here without constructing a DeepAgent.
     """
 
-    def __init__(self, route: AdmittedExecutionRoute, *, tool_gateway=None) -> None:
+    def __init__(self, route: AdmittedExecutionRoute, *, tool_gateway=None,
+                 model_gateway_binding=None, model_authority_factory=None) -> None:
+        if model_gateway_binding is not None or model_authority_factory is not None:
+            from jiuwenswarm.governance.model_credentials import ModelCredentialBinding
+            if (route.provider_id != 'opencode' or type(model_gateway_binding) is not ModelCredentialBinding
+                    or not callable(model_authority_factory)):
+                raise ValueError('explicit OpenCode model authority required')
+        self._model_gateway_binding = model_gateway_binding
+        self._model_authority_factory = model_authority_factory
+        self._turn_model_authorities = {}
+        self._continuation_seed_binding = None
         if route.provider_id == "native":
             raise ValueError("EngineAgentAdapter requires an External provider")
         self._route = route
@@ -103,6 +113,8 @@ class EngineAgentAdapter:
         self._ordinary_send_attempted = False
         self._ordinary_request = None
         self._history_release = {}
+        self._resource_governed = False
+        self._turn_resource_authorizers = {}
 
     @property
     def route(self) -> AdmittedExecutionRoute:
@@ -111,6 +123,17 @@ class EngineAgentAdapter:
     @property
     def execution_session(self) -> ExecutionSession | None:
         return self._session
+
+    def owns_external_tool_session(self, execution, provider_session_id) -> bool:
+        session = self._session
+        return bool(
+            self._resource_governed and session is not None
+            and session.binding.host_session_id == execution.session_id
+            and session.binding.provider_id == execution.provider_id
+            and session.binding.subject_id == execution.identity.subject_id
+            and session.binding.workspace == execution.workspace
+            and session.owns_governed_provider_session(provider_session_id)
+        )
 
     @property
     def ui_capability_manifest(self):
@@ -266,6 +289,8 @@ class EngineAgentAdapter:
             raise RuntimeError(
                 "External construction did not retain its admitted binding"
             )
+        if self._model_gateway_binding is not None:
+            session.bind_model_gateway(self._model_gateway_binding, self._turn_model_authorities.get)
         return session
 
     def _release_external_owner(self, runtime, owner, request, *, goal=None) -> None:
@@ -298,6 +323,8 @@ class EngineAgentAdapter:
 
     async def complete_detached_turn(self, turn_id: str) -> None:
         """Called by the original projection only after durable terminal output."""
+        self._turn_resource_authorizers.pop(turn_id, None)
+        self._turn_model_authorities.pop(turn_id, None)
         if (self._ordinary_owner is None or turn_id != self._ordinary_turn
                 or turn_id not in self._ordinary_terminal):
             return
@@ -484,6 +511,80 @@ class EngineAgentAdapter:
             metadata=request.metadata,
         )
 
+    def _capture_continuation(self, request, model_authority):
+        from jiuwenswarm.governance.continuation_context import (
+            ContinuationContextDenied, validate_continuation_context,
+        )
+        handle = getattr(request, '_continuation_context', None)
+        known = self._continuation_seed_binding is not None or getattr(request, '_continuation_execution', None) is not None
+        if handle is None:
+            if known:
+                raise ContinuationContextDenied('original continuation context required')
+            return None
+        session = self._require_session()
+        binding = self._route.bound.binding
+        handle = validate_continuation_context(handle, binding.host_session_id, request.request_id)
+        if (self._route.provider_id != 'opencode' or self._model_gateway_binding is None
+                or model_authority is None or request.session_id != binding.host_session_id
+                or handle.identity != model_authority.credential_authority.execution.identity
+                or handle.identity.subject_id != binding.subject_id
+                or self._route.trusted_subject_id != binding.subject_id
+                or session.binding is not binding):
+            raise ContinuationContextDenied('original continuation execution required')
+        from jiuwenswarm.runtime.harness.context_bridge import render_continuation_history
+        render_continuation_history(handle, session_id=request.session_id, request_id=request.request_id)
+        expected = (session, binding, handle.identity, handle.seed.digest)
+        if self._continuation_seed_binding is None:
+            if session.started:
+                raise ContinuationContextDenied('continuation cannot replace a running context')
+            self._continuation_seed_binding = expected
+        self._check_continuation(request, handle, session)
+        return handle
+
+    def _check_continuation(self, request, handle, session):
+        from jiuwenswarm.governance.continuation_context import ContinuationContextDenied
+        from jiuwenswarm.runtime.harness.context_bridge import render_continuation_history
+        if handle is None:
+            if self._continuation_seed_binding is not None:
+                raise ContinuationContextDenied('original continuation context required')
+            return
+        binding = self._continuation_seed_binding
+        def matches():
+            return (binding is not None and self._continuation_seed_binding is binding
+                    and binding[0] is session and self._session is session
+                    and binding[1] is session.binding and self._route.bound.binding is binding[1]
+                    and binding[2] == handle.identity and binding[3] == handle.seed.digest
+                    and getattr(request, '_continuation_context', None) is handle
+                    and request.session_id == session.binding.host_session_id)
+        if not matches():
+            raise ContinuationContextDenied('continuation execution changed')
+        render_continuation_history(handle, session_id=request.session_id, request_id=request.request_id)
+        if not matches():
+            raise ContinuationContextDenied('continuation execution changed')
+
+    def _capture_model_authority(self):
+        if self._model_gateway_binding is None:
+            from jiuwenswarm.governance.tool_context import current_tool_authorizer
+            if self._route.provider_id == 'opencode' and current_tool_authorizer('opencode') is not None:
+                raise PermissionError('protected OpenCode requires its original model gateway')
+            return None
+        from jiuwenswarm.governance.opencode_model_http import model_authority_current
+        import inspect
+        cancelled = False
+        try:
+            value = self._model_authority_factory()
+            if inspect.iscoroutine(value):
+                value.close()
+            if model_authority_current(value):
+                return value
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            pass
+        if cancelled:
+            raise asyncio.CancelledError()
+        raise PermissionError('model request authority unavailable')
+
     async def process_message_stream_impl(
         self, request: AgentRequest, inputs: dict[str, Any]
     ) -> AsyncIterator[AgentResponseChunk]:
@@ -512,7 +613,11 @@ class EngineAgentAdapter:
             if runtime
             else None
         )
+        model_authority = self._capture_model_authority()
+        continuation = self._capture_continuation(request, model_authority)
         if operation is not None or attach:
+            if self._model_gateway_binding is not None:
+                raise PermissionError('governed model gateway does not support detached Goal requests')
             if self._goal_runtime is None or runtime is None or owner is None:
                 raise RuntimeError(
                     "External Goal requires its admitted Runtime producer"
@@ -543,7 +648,8 @@ class EngineAgentAdapter:
             )
         )
         completed = False
-        stream = self._process_message_stream_impl(request, inputs)
+        stream = self._process_message_stream_impl(request, inputs, model_authority=model_authority,
+                                                    continuation_context=continuation)
         try:
             async for chunk in stream:
                 if chunk.runtime_completion == "completed":
@@ -571,13 +677,33 @@ class EngineAgentAdapter:
                             self._ordinary_turn
                         ) = None
 
-    async def _stop_owned_execution_once(self, session: ExecutionSession) -> None:
-        await session.stop()
+    async def _stop_owned_execution_once(self, session: ExecutionSession, *, ownership_check=None) -> None:
+        runtime, gateway = self._subagent_runtime, self._tool_gateway
+
+        def check():
+            if ownership_check is not None and ownership_check() is not None:
+                raise RuntimeError("External stop ownership checker must return None")
+
+        check()
+        if ownership_check is None:
+            await session.stop()
+        else:
+            await session.stop(ownership_check=ownership_check)
+        check()
+        if ownership_check is not None and (
+                self._subagent_runtime is not runtime or self._tool_gateway is not gateway):
+            raise RuntimeError("External adapter resources changed during stop")
         if session.exit_state is not ExecutionExitState.EXIT_CONFIRMED:
             raise RuntimeError("External stop did not confirm execution exit")
+        self._turn_resource_authorizers.clear()
+        self._turn_model_authorities.clear()
         await self.release_subagent_runtime_for_session(
-            session.binding.host_session_id, reason="parent_ended"
+            session.binding.host_session_id, reason="parent_ended",
+            **({"ownership_check": ownership_check} if ownership_check is not None else {}),
         )
+        check()
+        if ownership_check is not None and self._tool_gateway is not gateway:
+            raise RuntimeError("External tool gateway changed during stop")
         if self._ordinary_owner is not None and session is self._session:
             self._release_external_owner(self._ordinary_runtime, self._ordinary_owner, self._ordinary_request)
             self._ordinary_owner = self._ordinary_runtime = self._ordinary_turn = None
@@ -620,7 +746,13 @@ class EngineAgentAdapter:
         inputs: dict[str, Any],
         *,
         goal_attempt=None,
+        model_authority=None,
+        continuation_context=None,
     ) -> AsyncIterator[AgentResponseChunk]:
+        if self._model_gateway_binding is not None and not isinstance(inputs.get('query'), InteractiveInput):
+            from jiuwenswarm.governance.opencode_model_http import model_authority_current
+            if not model_authority_current(model_authority):
+                raise PermissionError('original model request authority required')
         session = self._require_session()
         params = request.params if isinstance(request.params, dict) else {}
         if self._surface is not None:
@@ -631,7 +763,16 @@ class EngineAgentAdapter:
                  "project_dir": str(self._surface.identity.paths.project_root)}, params,
             )
             self._surface.validate_mode(mode)
-        await self._ensure_started(session)
+        interactive = isinstance(inputs.get('query'), InteractiveInput)
+        if not interactive:
+            self._check_continuation(request, continuation_context, session)
+        if continuation_context is None:
+            await self._ensure_started(session)
+        else:
+            await self._ensure_started(session, continuation_context=continuation_context,
+                                       continuation_request=request)
+        if not interactive:
+            self._check_continuation(request, continuation_context, session)
         external_input = await build_external_input(
             query=inputs.get("query", ""),
             request_id=request.request_id,
@@ -650,7 +791,20 @@ class EngineAgentAdapter:
         immediate = str(params.get("input_mode") or "").strip().lower() == "steer"
         if goal_attempt is None and self._ordinary_owner is not None:
             self._ordinary_send_attempted = True
+        from jiuwenswarm.governance.tool_context import current_tool_authorizer
+        authority = current_tool_authorizer(self._route.provider_id)
+        if self._resource_governed and authority is None:
+            raise PermissionError("protected execution requires current resource authority")
+        if model_authority is not None:
+            from jiuwenswarm.governance.opencode_model_http import model_authority_current
+        if model_authority is not None and not model_authority_current(model_authority):
+            raise PermissionError('original model request authority unavailable')
+        self._check_continuation(request, continuation_context, session)
         receipt = await session.send(external_input, immediate=immediate)
+        if model_authority is not None:
+            self._turn_model_authorities[receipt.turn_id] = model_authority
+        if authority is not None:
+            self._turn_resource_authorizers[receipt.turn_id] = authority
         if goal_attempt is not None:
             goal_attempt.bind_turn(receipt.turn_id)
         elif self._ordinary_owner is not None:
@@ -779,6 +933,9 @@ class EngineAgentAdapter:
                     runtime_completion="unknown",
                 )
         finally:
+            if terminal_seen:
+                self._turn_resource_authorizers.pop(receipt.turn_id, None)
+                self._turn_model_authorities.pop(receipt.turn_id, None)
             if not terminal_seen:
                 session.abandon_output(receipt.turn_id)
             forget_submission = getattr(session, "forget_submission", None)
@@ -875,6 +1032,35 @@ class EngineAgentAdapter:
         # projection. Connection loss is not a user cancellation.
         return None
 
+    async def stop_existing_session_adapter(self, session_id: str) -> bool:
+        """Strictly stop this retained External owner, without selecting a replacement."""
+        route, session = self._route, self._session
+        binding = route.bound.binding
+        if binding.host_session_id != session_id:
+            return False
+        if not isinstance(session, ExecutionSession) or session.binding is not binding:
+            raise RuntimeError("strict External execution owner unavailable")
+        engine, transport = session.engine, session._tool_transport
+
+        def check():
+            if (self._route is not route or self._session is not session
+                    or route.bound.binding is not binding or session.engine is not engine
+                    or session.binding is not binding or session._tool_transport is not transport):
+                raise RuntimeError("External Session owner changed during stop")
+
+        try:
+            check()
+            await self._stop_owned_execution_once(session, ownership_check=check)
+            check()
+            cleanup_staged_inputs(route.runtime_paths, session_id=session_id)
+        except BaseException:
+            # Retain the captured owner for retry; never drop an unconfirmed resource.
+            session._closed = False
+            session._exit_state = ExecutionExitState.EXIT_UNCONFIRMED
+            raise
+        self._session = None
+        return True
+
     async def cleanup_session_adapter(self, session_id: str) -> bool:
         session = self._session
         if self._route.bound.binding.host_session_id != session_id:
@@ -899,6 +1085,7 @@ class EngineAgentAdapter:
         session_id: str | None,
         *,
         reason: str = "parent_ended",
+        ownership_check=None,
     ) -> None:
         runtime = self._subagent_runtime
         if runtime is None:
@@ -907,7 +1094,14 @@ class EngineAgentAdapter:
             str(session_id) != self._route.bound.binding.host_session_id
         ):
             return
+        if ownership_check is not None and ownership_check() is not None:
+            raise RuntimeError("External stop ownership checker must return None")
         await runtime.close(reason)
+        if ownership_check is not None:
+            if ownership_check() is not None:
+                raise RuntimeError("External stop ownership checker must return None")
+            if self._subagent_runtime is not runtime:
+                raise RuntimeError("External subagent owner changed during stop")
         self._subagent_runtime = None
         self._browser_admission = None
 
@@ -964,7 +1158,9 @@ class EngineAgentAdapter:
             raise RuntimeError("External execution session cleanup is pending")
         return session
 
-    def _external_context(self):
+    def _external_context(self, continuation_context=None):
+        from jiuwenswarm.governance.tool_context import current_tool_authorizer
+        self._resource_governed = self._resource_governed or current_tool_authorizer(self._route.provider_id) is not None
         binding = self._route.bound.binding
         return build_external_context(
             paths=self._route.runtime_paths,
@@ -973,9 +1169,18 @@ class EngineAgentAdapter:
             provider_id=binding.provider_id,
             surface=self._surface,
             context_snapshot=self._context_snapshot,
+            tool_authorizer=self._authorize_resource_tool if self._resource_governed else None,
+            continuation_context=continuation_context,
+            continuation_request_id=continuation_context.request_id if continuation_context is not None else None,
         )
 
-    async def _ensure_started(self, session: ExecutionSession) -> None:
+    async def _authorize_resource_tool(self, operation):
+        # Provider-cycle contexts outlive individual Turns. Never reuse the
+        # first browser credential or deliver a late check to the next Turn.
+        authority = self._turn_resource_authorizers.get(operation.turn_id)
+        return authority is not None and await authority(operation) is True
+
+    async def _ensure_started(self, session: ExecutionSession, *, continuation_context=None, continuation_request=None) -> None:
         if session.started:
             return
         async with self._start_lock:
@@ -984,18 +1189,17 @@ class EngineAgentAdapter:
             # Configuration switches change only the next provider cycle. The
             # snapshot below is then retained for every Turn in that cycle.
             self._compile_cold_surface_policy()
-            binding = session.binding
             await self._projection.replay_product_artifacts()
-            await session.start(
-                build_external_context(
-                    paths=self._route.runtime_paths,
-                    host_session_id=binding.host_session_id,
-                    channel_id=self._route.channel_id,
-                    provider_id=binding.provider_id,
-                    surface=self._surface,
-                    context_snapshot=self._context_snapshot,
-                )
-            )
+            if self._continuation_seed_binding is not None and continuation_context is None:
+                from jiuwenswarm.governance.continuation_context import ContinuationContextDenied
+                raise ContinuationContextDenied('original continuation startup required')
+            if continuation_context is not None:
+                self._check_continuation(continuation_request, continuation_context, session)
+                context = self._external_context(continuation_context)
+                self._check_continuation(continuation_request, continuation_context, session)
+            else:
+                context = self._external_context()
+            await session.start(context)
 
     def _compile_cold_surface_policy(self) -> None:
         if self._surface is None:
