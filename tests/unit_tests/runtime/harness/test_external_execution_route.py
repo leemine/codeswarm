@@ -742,6 +742,9 @@ async def test_execution_session_retries_unconfirmed_provider_exit(
             await self.closed.wait()
             raise StopAsyncIteration
 
+        async def aclose(self) -> None:
+            self.closed.set()
+
     class Harness:
         card = SimpleNamespace(name="fake")
         state = HarnessState.TERMINATED
@@ -794,6 +797,8 @@ async def test_execution_session_retries_unconfirmed_provider_exit(
         )
     )
 
+    event_tasks = (session.io._event_task, other.io._event_task)
+
     with pytest.raises(ExecutionExitUnconfirmedError) as caught:
         await session.stop()
     assert caught.value.code == "EXECUTION_EXIT_UNCONFIRMED"
@@ -810,6 +815,7 @@ async def test_execution_session_retries_unconfirmed_provider_exit(
     assert harness.stop_calls == 2
     await other.stop()
     assert other_harness.stop_calls == 1
+    assert all(task is not None and task.done() and task.exception() is None for task in event_tasks)
 
 
 @pytest.mark.asyncio
@@ -894,6 +900,9 @@ async def test_execution_session_stop_timeout_is_unconfirmed_and_retryable(
             await self.closed.wait()
             raise StopAsyncIteration
 
+        async def aclose(self) -> None:
+            self.closed.set()
+
     class Harness:
         card = SimpleNamespace(name="fake")
         state = HarnessState.TERMINATED
@@ -932,6 +941,7 @@ async def test_execution_session_stop_timeout_is_unconfirmed_and_retryable(
         )
     )
 
+    event_task = session.io._event_task
     stopping = asyncio.create_task(session.stop())
     await entered.wait()
     assert session.exit_state is ExecutionExitState.STOP_REQUESTED
@@ -944,6 +954,7 @@ async def test_execution_session_stop_timeout_is_unconfirmed_and_retryable(
     await session.stop()
     assert session.exit_state is ExecutionExitState.EXIT_CONFIRMED
     assert harness.stop_calls == 2
+    assert event_task is not None and event_task.done() and event_task.exception() is None
 
 
 @pytest.mark.asyncio
