@@ -28,3 +28,81 @@ Tests use real temporary sidecar, metadata and lifecycle files with synthetic id
 Runtime/SessionArchive/Provisioner/AgentServer/Gateway integration and actual Native task exit remain separate required verification. The ports do not make background recovery a trusted user, reopen source permissions, implement archive restore, or broaden this slice to Team, cron or bulk deletion.
 
 A restart retry that claims/adopts a newer lifecycle generation intentionally cannot send success using its old pre-claim permit: the exact final ACK check rejects that permit. A new incoming retry against the same service observes the now-stable generation and can confirm the completed result. This is safe but does not claim first-retry delivery succeeds across a takeover. Tests cover old-permit rejection and a new same-generation receipt ACK; no automatic latest-generation substitution is allowed.
+
+## Original receipt audit transactions (2026-10-04)
+
+`SharingHostService.begin_deletion`, `adopt_deletion`, and `commit_deletion` now
+accept optional host-created `audit_context` and post-save `audit_result`
+keywords. They retain their existing result types. The original receipt supplies
+full identity, source/owner revisions, Session/project, operation and generation;
+wire fields cannot select those audit facts. A missing context records a real
+host API call with deterministic receipt/phase/generation attempt correlation.
+
+Begin appends only `exit_requested`; adoption appends `cleanup_retry`. Both stage
+the event in the original locked snapshot and save it with their original owner
+mutation. Bad audit blocks these new destructive admissions before persistence.
+No new lifecycle owner, queue, index or database is introduced. Repeating one
+attempt returns its original audit event; explicit distinct attempts remain
+separate. Callbacks run only after a successful save, outside the sidecar lock.
+
+Commit retains the original identity/receipt/operation/project/file-removal
+checks. Only when retirement's original conditions hold does the same save
+append `exit_confirmed` and persist `retired=True`. The caller still owns actual
+resource quiescence; begin, a producer terminal or audit phase cannot establish
+that exit. These ports do not replace the original Runtime/Provider close chain.
+
+If audit staging fails after resources/files were already disposed, commit
+preserves the original audit bytes and atomically persists retirement plus an
+optional private `audit_pending` extension inside the original deletion receipt.
+This frozen extension contains the original deletion nonce, context and facts.
+It is not authority and cannot widen the receipt. Unknown, malformed, foreign,
+or inconsistent pending content is rejected, never reset. The legacy schema-1
+record without this optional field remains accepted. Authority comparison may
+exclude this one extension only after strict validation; all original authority
+fields still compare exactly.
+
+After that successful save, `DeletionAuditPending(receipt)` reports the committed
+retirement and missing audit explicitly. The Runtime integrator must preserve
+this exception/status rather than let the old generic `confirms_deletion` branch
+turn it into ordinary success. A save failure remains an ordinary uncertain IO
+failure; no durable outcome is guessed from a returned Python value.
+
+`host.deletion_audit_pending(receipt)` provides a strict, live-identity and exact
+retired-receipt reconciliation flag, including the write-then-exception case.
+A failed read remains unknown. `False` means no stored pending observation; it
+does not assert complete historical audit.
+
+`host.supplement_deletion_audit(receipt, *, audit_result=None)` reads only the
+stored original observation, appends it and removes pending in one original
+save. It takes no replacement context/facts from wire or a newer request. A
+recovered admission-only receipt may use this audit-only port without receiving
+content or destructive cleanup authority. Repeated commits with pending use the
+same repair path, ignoring any newer audit context. Legacy retired records with
+no pending are no-ops and never receive reconstructed historical events.
+
+A later lifecycle claim never rewrites a pending confirmation's generation.
+Adoption reports pending until the original observation is repaired. Repair can
+use the recovered exact receipt while retaining its earlier confirmed generation;
+new cleanup attempts are recorded separately only after original repair. Both
+repair save-before-failure and save-after-failure preserve idempotence.
+
+Integration note: in the baseline `runtime/session_delete_authority.py:131-139`,
+`commit_owner` catches all exceptions and suppresses them when
+`confirms_deletion` is true. The Runtime owner must handle `DeletionAuditPending`
+first; for an unknown ordinary save failure, a true deletion confirmation still
+requires the strict pending query. Pending or unknown audit status must preserve
+the original receipt and must not become a normal complete-audit response. That
+Runtime/transport integration is intentionally outside this persistence slice.
+
+Persistence-slice validation: **174 tests passed** in 33.60 seconds, including
+real temporary sidecar/metadata/lifecycle files, original Runtime deletion and
+AgentServer/Gateway receipt tests. New cases cover atomic event+mutation saves,
+corrupt-audit admission blocking, persisted pending after actual retirement,
+restart/claim generation preservation, save-before/save-after ambiguity,
+original-context repair and unknown pending rejection. Provider exit remains a
+synthetic fixture; this slice does not claim real Provider or UI acceptance.
+Source: isolated branch based on swarm `7f29ca3a`, explicit swarm source overlay
+with noneditable installed core `c7fa3781fa576492827f07f33dcb576c186be296`.
+Evidence: `/tmp/r2b-delete-receipt-audit/`; Ruff, diff checks and existing
+`pr-stable` plan validation passed. Full integrated stable and Runtime pending
+response wiring remain required. No lifecycle timeout or whitelist changed.

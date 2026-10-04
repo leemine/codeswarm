@@ -10,11 +10,16 @@ import copy
 import json
 import uuid
 from contextvars import copy_context
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from jiuwenswarm.governance.contracts import TrustedIdentity
 from jiuwenswarm.governance.session_sharing import SessionSharingDenied
 from . import lifecycle
+from .sharing_audit import (
+    SharingAuditContext, SharingAuditError, SharingAuditWriteResult,
+    OwnerLifecycleAuditFacts, append_sharing_audit, audit_context as checked_audit_context,
+    notify_audit_result,
+)
 
 _MARKER = object()
 _BINDING = ('project_id', 'project_dir', 'mode', 'work_mode', 'team_name',
@@ -51,7 +56,8 @@ def _binding(metadata):
 
 
 def _parse(value):
-    if type(value) is not dict or set(value) != _FIELDS or type(value['schema']) is not int or value['schema'] != 1:
+    if (type(value) is not dict or set(value) not in (_FIELDS, _FIELDS | {'audit_pending'})
+            or type(value['schema']) is not int or value['schema'] != 1):
         _deny('invalid deletion receipt schema')
     for key in ('deletion_id', 'session_id', 'operation_id'):
         if not isinstance(value[key], str) or not value[key] or len(value[key]) > 256:
@@ -90,7 +96,72 @@ def _parse(value):
         _deny('invalid deletion request parameters')
     if not valid or canonical != value['request_params']:
         _deny('invalid deletion request parameters')
+    if 'audit_pending' in value:
+        _parse_pending(value['audit_pending'], value)
     return copy.deepcopy(value)
+
+
+
+def _parse_pending(pending, value):
+    """Strict non-authority receipt extension; never repair unknown contents."""
+    if (type(pending) is not dict or set(pending) != {'deletion_id', 'context', 'facts'}
+            or pending['deletion_id'] != value['deletion_id']
+            or type(pending['context']) is not dict
+            or set(pending['context']) != set(SharingAuditContext.__dataclass_fields__)
+            or type(pending['facts']) is not dict
+            or set(pending['facts']) != set(OwnerLifecycleAuditFacts.__dataclass_fields__)):
+        _deny('invalid deletion pending audit')
+    context = dict(pending['context'])
+    identity = context.get('actor')
+    if type(identity) is not dict or set(identity) != {'actor_id', 'subject_id', 'authority'}:
+        _deny('invalid deletion pending audit identity')
+    context['actor'] = TrustedIdentity(**identity)
+    context = SharingAuditContext(**context)
+    facts = OwnerLifecycleAuditFacts(**pending['facts'])
+    if (asdict(context.actor) != value['identity'] or context.method not in (None, 'session.delete')
+            or facts.action != 'delete' or facts.phase != 'exit_confirmed'
+            or facts.source_session_id != value['session_id']
+            or facts.source_project_id != value['binding']['project_id']
+            or facts.owner_revision != value['owner_revision']
+            or facts.source_revision != value['source_epoch']
+            or facts.operation_id != value['operation_id']
+            or not value['initial_generation'] <= facts.generation <= value['generation']):
+        _deny('deletion pending audit does not match original receipt')
+    return context, facts
+
+
+def _authority_record(value):
+    return {key: item for key, item in value.items() if key != 'audit_pending'}
+
+
+class DeletionAuditPending(RuntimeError):
+    """Retirement is persisted; original audit observation still needs repair."""
+    def __init__(self, receipt):
+        super().__init__('deletion committed; audit persistence pending')
+        self.receipt = receipt
+        self.audit = SharingAuditWriteResult(False, True, 'audit_storage_invalid')
+
+
+def _audit_facts(value, phase):
+    return OwnerLifecycleAuditFacts(value['session_id'], value['binding']['project_id'],
+        value['owner_revision'], value['source_epoch'], 'delete', phase,
+        {'exit_requested': 'requested', 'cleanup_retry': 'retrying', 'exit_confirmed': 'confirmed'}[phase],
+        value['operation_id'], value['generation'])
+
+
+def _audit_context(value, phase, supplied):
+    identity = TrustedIdentity(**value['identity'])
+    context = checked_audit_context(identity, supplied) if supplied is not None else SharingAuditContext(
+        identity, attempt_id=f"delete:{value['deletion_id']}:{value['generation']}:{phase}")
+    if context.method not in (None, 'session.delete'):
+        _deny('deletion audit requires its original request context')
+    return context
+
+
+def _stage_audit(data, context, facts):
+    previous = data.get('sharing_audit')
+    result = append_sharing_audit(data, context, facts)
+    return result, data.get('sharing_audit') is not previous
 
 
 def _operation(sid, supplied=None):
@@ -196,8 +267,7 @@ def capture(host, sid, identity, permit):
         op.get('operation_id') if op.get('status') != 'completed' else None, uuid.uuid4().hex, _MARKER)
 
 
-def begin(host, original, operation):
-    from dataclasses import asdict
+def begin(host, original, operation, *, audit_context=None, audit_result=None):
     if type(original) is not DeletionCapture:
         _deny('original deletion capture required')
     _live(host, original)
@@ -212,28 +282,37 @@ def begin(host, original, operation):
         source_session_generation=original._stamp[3], source_project_generation=original._stamp[4],
         project_generation=original._stamp[6], operation_id=op['operation_id'], generation=op['generation'], initial_generation=op['generation'], binding=binding,
         original_stamp=list(original._stamp), request_params=original._params))
+    context = _audit_context(value, 'exit_requested', audit_context)
+    facts = _audit_facts(value, 'exit_requested')
     with host._storage._locked():
         data = host._storage._load()
         record, owner, source = host._record(data, original.session_id, active=False)
         prior = record.get('deletion')
         if prior is not None:
-            if _parse(prior) != value:
+            if _authority_record(_parse(prior)) != value:
                 _deny('another deletion owns this Session')
             result = _handle(host, value, original._identity, original._resolver, original._context)
             _check_record(host, data, result)
-            return result
-        if (owner != original._identity or record['revision'] != original._stamp[0]
-                or (source['epoch'], source['project_id'], source['session_generation'], source['project_generation'])
-                != original._stamp[1:5]
-                or lifecycle.state('project', source['project_id']).get('generation', 0) != original._stamp[6]
-                or _binding(lifecycle.raw_metadata(original.session_id)) != binding):
-            _deny()
-        _operation(original.session_id, operation)
-        _live(host, original)
-        source.update(epoch=value['source_epoch'], active=False, history=None)
-        record['deletion'] = value
-        host._storage._save(data)
-    return _handle(host, value, original._identity, original._resolver, original._context)
+            audit, added = _stage_audit(data, context, facts)
+            if added:
+                host._storage._save(data)
+        else:
+            if (owner != original._identity or record['revision'] != original._stamp[0]
+                    or (source['epoch'], source['project_id'], source['session_generation'], source['project_generation'])
+                    != original._stamp[1:5]
+                    or lifecycle.state('project', source['project_id']).get('generation', 0) != original._stamp[6]
+                    or _binding(lifecycle.raw_metadata(original.session_id)) != binding):
+                _deny()
+            _operation(original.session_id, operation)
+            _live(host, original)
+            # Before destructive work, invalid audit blocks admission atomically.
+            audit, _ = _stage_audit(data, context, facts)
+            source.update(epoch=value['source_epoch'], active=False, history=None)
+            record['deletion'] = value
+            host._storage._save(data)
+            result = _handle(host, value, original._identity, original._resolver, original._context)
+    notify_audit_result(audit_result, audit)
+    return result
 
 
 def _check_record(host, data, receipt, *, retired=False, operation=True):
@@ -241,7 +320,10 @@ def _check_record(host, data, receipt, *, retired=False, operation=True):
         _deny('original deletion receipt required')
     expected = _parse(json.loads(receipt._record_json))
     record = host.store._section(data)['owners'].get(receipt.session_id)
-    if type(record) is not dict or _parse(record.get('deletion')) != expected:
+    if type(record) is not dict:
+        _deny()
+    stored = _parse(record.get('deletion'))
+    if _authority_record(stored) != _authority_record(expected) or 'audit_pending' in stored and not retired:
         _deny()
     source = record.get('source', {})
     _number(record.get('revision'), 1)
@@ -304,8 +386,10 @@ def check(host, receipt, *, for_admission=False):
     _live(host, receipt)
 
 
-def commit(host, receipt):
+def commit(host, receipt, *, audit_context=None, audit_result=None):
     _live(host, receipt)
+    pending = False
+    audit = None
     with host._storage._locked():
         data = host._storage._load()
         existing = host.store._section(data)['owners'].get(receipt.session_id, {})
@@ -313,12 +397,76 @@ def commit(host, receipt):
         if any(path.exists() for path in lifecycle.session_paths(receipt.session_id)):
             _deny('Session files must be removed before retirement')
         _live(host, receipt)
+        stored = _parse(record['deletion'])
         if record.get('retired') is True:
-            return
-        if receipt._admission_only or receipt.generation != value['generation']:
-            _deny('deletion recovery must be adopted before commit')
-        record.update(retired=True, revision=value['owner_revision']+1)
-        host._storage._save(data)
+            if 'audit_pending' not in stored:
+                return  # Legacy completion is not reconstructed as past audit.
+            # Retry only the original persisted observation, never new context.
+            audit = _supplement_locked(host, data, record, stored, receipt)
+        else:
+            if receipt._admission_only or receipt.generation != value['generation']:
+                _deny('deletion recovery must be adopted before commit')
+            context = _audit_context(value, 'exit_confirmed', audit_context)
+            facts = _audit_facts(value, 'exit_confirmed')
+            try:
+                audit, _ = _stage_audit(data, context, facts)
+            except SharingAuditError:
+                observation = {'deletion_id': value['deletion_id'],
+                               'context': asdict(context), 'facts': asdict(facts)}
+                _parse_pending(observation, value)
+                record['deletion'] = {**_authority_record(value), 'audit_pending': observation}
+                pending = True
+            record.update(retired=True, revision=value['owner_revision']+1)
+            host._storage._save(data)
+    if pending:
+        raise DeletionAuditPending(receipt)
+    if audit is not None:
+        notify_audit_result(audit_result, audit)
+
+
+def _supplement_locked(host, data, record, stored, receipt):
+    context, facts = _parse_pending(stored['audit_pending'], stored)
+    try:
+        audit, _ = _stage_audit(data, context, facts)
+    except SharingAuditError:
+        raise DeletionAuditPending(receipt) from None
+    del record['deletion']['audit_pending']
+    host._storage._save(data)
+    return audit
+
+
+def supplement(host, receipt, *, audit_result=None):
+    """Read only the original persisted pending observation; no wire input.
+
+    This may run with a recovered admission-only receipt but grants no content,
+    execution or destructive cleanup authority. It never replays deletion.
+    """
+    _live(host, receipt)
+    with host._storage._locked():
+        data = host._storage._load()
+        record, _ = _check_record(host, data, receipt, retired=True)
+        if any(path.exists() for path in lifecycle.session_paths(receipt.session_id)):
+            _deny('Session files reappeared before audit repair')
+        stored = _parse(record['deletion'])
+        if 'audit_pending' not in stored:
+            return None
+        _live(host, receipt)
+        audit = _supplement_locked(host, data, record, stored, receipt)
+    notify_audit_result(audit_result, audit)
+    return audit
+
+
+def audit_pending(host, receipt):
+    """Strict reconciliation flag; false is NOT a full audit completeness claim."""
+    _live(host, receipt)
+    with host._storage._locked():
+        data = host._storage._load()
+        record, _ = _check_record(host, data, receipt, retired=True)
+        if any(path.exists() for path in lifecycle.session_paths(receipt.session_id)):
+            _deny('Session files reappeared before audit reconciliation')
+        pending = 'audit_pending' in _parse(record['deletion'])
+        _live(host, receipt)
+        return pending
 
 
 def confirms(host, receipt):
@@ -331,12 +479,8 @@ def confirms(host, receipt):
         return False
 
 
-def adopt(host, receipt, operation):
-    """Explicitly adopt the original operation after its owner-lock takeover.
-
-    The caller must hold the original execution-owner lock. A generation claim
-    can advance by one; it never changes the deletion nonce, owner or source.
-    """
+def adopt(host, receipt, operation, *, audit_context=None, audit_result=None):
+    """Adopt the original operation; audit must be available before new cleanup."""
     _live(host, receipt)
     op = _operation(receipt.session_id, operation)
     with host._storage._locked():
@@ -347,12 +491,23 @@ def adopt(host, receipt, operation):
         if (op['operation_id'] != value['operation_id']
                 or op['generation'] not in {receipt.generation, receipt.generation+1}):
             _deny('another operation cannot adopt deletion')
-        if op['generation'] != value['generation']:
-            value['generation'] = op['generation']
+        stored = _parse(record['deletion'])
+        if 'audit_pending' in stored:
+            # Preserve its original confirmed generation and context, even when
+            # a new lifecycle owner has already claimed another generation.
+            raise DeletionAuditPending(receipt)
+        changed = op['generation'] != value['generation']
+        value = _authority_record(value)
+        value['generation'] = op['generation']
+        context = _audit_context(value, 'cleanup_retry', audit_context)
+        audit, added = _stage_audit(data, context, _audit_facts(value, 'cleanup_retry'))
+        _live(host, receipt)
+        if changed or added:
             record['deletion'] = value
-            _live(host, receipt)
             host._storage._save(data)
-    return _handle(host, value, receipt._identity, receipt._resolver, receipt._context)
+    result = _handle(host, value, receipt._identity, receipt._resolver, receipt._context)
+    notify_audit_result(audit_result, audit)
+    return result
 
 
 def confirm_for_permit(host, permit):

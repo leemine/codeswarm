@@ -269,25 +269,33 @@ class SharingHostService:
         from .deletion_receipt import capture
         return capture(self, session_id, identity, permit)
 
-    def begin_deletion(self, capture, operation):
+    def begin_deletion(self, capture, operation, *, audit_context=None, audit_result=None):
         from .deletion_receipt import begin
-        return begin(self, capture, operation)
+        return begin(self, capture, operation, audit_context=audit_context, audit_result=audit_result)
 
     def resume_deletion(self, session_id, identity, *, identity_resolver):
         from .deletion_receipt import resume
         return resume(self, session_id, identity, identity_resolver=identity_resolver)
 
-    def adopt_deletion(self, receipt, operation):
+    def adopt_deletion(self, receipt, operation, *, audit_context=None, audit_result=None):
         from .deletion_receipt import adopt
-        return adopt(self, receipt, operation)
+        return adopt(self, receipt, operation, audit_context=audit_context, audit_result=audit_result)
 
     def check_deletion(self, receipt, *, for_admission=False):
         from .deletion_receipt import check
         return check(self, receipt, for_admission=for_admission)
 
-    def commit_deletion(self, receipt):
+    def commit_deletion(self, receipt, *, audit_context=None, audit_result=None):
         from .deletion_receipt import commit
-        return commit(self, receipt)
+        return commit(self, receipt, audit_context=audit_context, audit_result=audit_result)
+
+    def supplement_deletion_audit(self, receipt, *, audit_result=None):
+        from .deletion_receipt import supplement
+        return supplement(self, receipt, audit_result=audit_result)
+
+    def deletion_audit_pending(self, receipt):
+        from .deletion_receipt import audit_pending
+        return audit_pending(self, receipt)
 
     def confirms_deletion(self, receipt):
         from .deletion_receipt import confirms
