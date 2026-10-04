@@ -677,15 +677,33 @@ class EngineAgentAdapter:
                             self._ordinary_turn
                         ) = None
 
-    async def _stop_owned_execution_once(self, session: ExecutionSession) -> None:
-        await session.stop()
+    async def _stop_owned_execution_once(self, session: ExecutionSession, *, ownership_check=None) -> None:
+        runtime, gateway = self._subagent_runtime, self._tool_gateway
+
+        def check():
+            if ownership_check is not None and ownership_check() is not None:
+                raise RuntimeError("External stop ownership checker must return None")
+
+        check()
+        if ownership_check is None:
+            await session.stop()
+        else:
+            await session.stop(ownership_check=ownership_check)
+        check()
+        if ownership_check is not None and (
+                self._subagent_runtime is not runtime or self._tool_gateway is not gateway):
+            raise RuntimeError("External adapter resources changed during stop")
         if session.exit_state is not ExecutionExitState.EXIT_CONFIRMED:
             raise RuntimeError("External stop did not confirm execution exit")
         self._turn_resource_authorizers.clear()
         self._turn_model_authorities.clear()
         await self.release_subagent_runtime_for_session(
-            session.binding.host_session_id, reason="parent_ended"
+            session.binding.host_session_id, reason="parent_ended",
+            **({"ownership_check": ownership_check} if ownership_check is not None else {}),
         )
+        check()
+        if ownership_check is not None and self._tool_gateway is not gateway:
+            raise RuntimeError("External tool gateway changed during stop")
         if self._ordinary_owner is not None and session is self._session:
             self._release_external_owner(self._ordinary_runtime, self._ordinary_owner, self._ordinary_request)
             self._ordinary_owner = self._ordinary_runtime = self._ordinary_turn = None
@@ -1014,6 +1032,35 @@ class EngineAgentAdapter:
         # projection. Connection loss is not a user cancellation.
         return None
 
+    async def stop_existing_session_adapter(self, session_id: str) -> bool:
+        """Strictly stop this retained External owner, without selecting a replacement."""
+        route, session = self._route, self._session
+        binding = route.bound.binding
+        if binding.host_session_id != session_id:
+            return False
+        if not isinstance(session, ExecutionSession) or session.binding is not binding:
+            raise RuntimeError("strict External execution owner unavailable")
+        engine, transport = session.engine, session._tool_transport
+
+        def check():
+            if (self._route is not route or self._session is not session
+                    or route.bound.binding is not binding or session.engine is not engine
+                    or session.binding is not binding or session._tool_transport is not transport):
+                raise RuntimeError("External Session owner changed during stop")
+
+        try:
+            check()
+            await self._stop_owned_execution_once(session, ownership_check=check)
+            check()
+            cleanup_staged_inputs(route.runtime_paths, session_id=session_id)
+        except BaseException:
+            # Retain the captured owner for retry; never drop an unconfirmed resource.
+            session._closed = False
+            session._exit_state = ExecutionExitState.EXIT_UNCONFIRMED
+            raise
+        self._session = None
+        return True
+
     async def cleanup_session_adapter(self, session_id: str) -> bool:
         session = self._session
         if self._route.bound.binding.host_session_id != session_id:
@@ -1038,6 +1085,7 @@ class EngineAgentAdapter:
         session_id: str | None,
         *,
         reason: str = "parent_ended",
+        ownership_check=None,
     ) -> None:
         runtime = self._subagent_runtime
         if runtime is None:
@@ -1046,7 +1094,14 @@ class EngineAgentAdapter:
             str(session_id) != self._route.bound.binding.host_session_id
         ):
             return
+        if ownership_check is not None and ownership_check() is not None:
+            raise RuntimeError("External stop ownership checker must return None")
         await runtime.close(reason)
+        if ownership_check is not None:
+            if ownership_check() is not None:
+                raise RuntimeError("External stop ownership checker must return None")
+            if self._subagent_runtime is not runtime:
+                raise RuntimeError("External subagent owner changed during stop")
         self._subagent_runtime = None
         self._browser_admission = None
 

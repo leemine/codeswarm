@@ -4943,8 +4943,14 @@ class JiuWenSwarm:
 
     async def stop_existing_session_runtime(self, session_id: str) -> bool:
         """Stop only already-owned processors and the exact existing adapter."""
-        processor_cleaned = await self._session_manager.close_session(session_id)
-        adapter = self._adapter
+        adapter, manager = self._adapter, self._session_manager
+
+        def check():
+            if self._adapter is not adapter or self._session_manager is not manager:
+                raise RuntimeError('Session facade owner changed during stop')
+
+        processor_cleaned = await manager.close_session(session_id)
+        check()
         adapter_cleaned = False
         if adapter is not None:
             has_runtime = getattr(adapter, 'has_session_runtime', None)
@@ -4955,6 +4961,7 @@ class JiuWenSwarm:
                 if not callable(stop):
                     raise RuntimeError('existing adapter has no strict stop port')
                 adapter_cleaned = bool(await stop(session_id))
+                check()
         if self.has_session_runtime(session_id):
             raise RuntimeError('Session runtime exit is not confirmed')
         return processor_cleaned or adapter_cleaned

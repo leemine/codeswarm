@@ -128,3 +128,31 @@ and the subsequent observed loss of completed metadata. None completed the
 required second Turn and normal UI deletion story. A newly integrated candidate
 must still pass that full ordinary UI story; this projection fix does not close
 B3, change approval policy, or authorize new real negative probes.
+
+### Strict External deletion port
+
+`EngineAgentAdapter.stop_existing_session_adapter` is the strict existing-owner
+port used by the original facade and owned Session deletion. It captures the
+original route, Session, Binding and transport, and reuses the existing owned
+stop and staged-input cleanup. A missing Session is not proof of exit; unknown
+or failed exit retains the object and EXIT_UNCONFIRMED for retry. No legacy
+cleanup fallback or new Provider construction occurs in this port.
+
+The private optional `ExecutionSession.stop(ownership_check=...)` hook checks the
+same owner after its original lifecycle-lock wait and before/after each owned
+resource stop. Resources are captured before awaits, so a changed transport is
+never selected by an old stop. The facade likewise captures its adapter and
+SessionManager before waiting for old processors. The existing SessionManager
+captures/pops its original processor/queue/task before its first wait; this fix
+does not introduce another queue or cancellation state. Ordinary stop callers
+retain the default no-keyword path.
+
+On the 6011fae8 / core 8040687b ordinary dual-browser run, both actual OpenCode
+Turns, read approval/result, Bob credentials, sealed seed and typed visible
+completed replies passed. Normal UI deletion failed with DELETE_UNCONFIRMED:
+the persisted lifecycle error was `existing adapter has no strict stop port`.
+Service/CLI cleanup afterwards is not counted as confirmed UI deletion. The
+strict-port regression uses real facade, adapter, Session and ManagedTransport
+code with synthetic Provider stop/client tasks (no actual CLI or listener),
+including timeout retry and replacement checks. A new integrated-source normal
+UI deletion run and stable checks are still required before closing that gate.

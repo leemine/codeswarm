@@ -240,16 +240,42 @@ class ExecutionSession:
         ):
             await self.io.abort(immediate=immediate)
 
-    async def stop(self) -> None:
+    async def stop(self, *, ownership_check: Callable[[], None] | None = None) -> None:
         """Idempotently release only resources owned by this Session."""
-        async with self._lifecycle_lock:
-            if self._closed:
+        engine, binding, io = self.engine, self.binding, self.io
+        router, transport, gateway = self._output_router, self._tool_transport, self._tool_gateway
+        recovery = self._recovery
+
+        def check():
+            if ownership_check is None:
                 return
-            self._exit_state = ExecutionExitState.STOP_REQUESTED
-            router = self._output_router
-            await self._stop_owned_resources(router=router)
-            if self._recovery is not None:
-                await self._recovery.clear_pending_interactions()
+            if ownership_check() is not None:
+                raise RuntimeError("External stop ownership checker must return None")
+            if (self.engine is not engine or self.binding is not binding or self.io is not io
+                    or self._output_router is not router or self._tool_transport is not transport
+                    or self._tool_gateway is not gateway or self._recovery is not recovery):
+                raise RuntimeError("External stop resources changed")
+
+        async with self._lifecycle_lock:
+            try:
+                check()
+                if self._closed:
+                    if ownership_check is not None and self._exit_state is not ExecutionExitState.EXIT_CONFIRMED:
+                        raise RuntimeError("External closed Session exit is unconfirmed")
+                    return
+                self._exit_state = ExecutionExitState.STOP_REQUESTED
+                if ownership_check is None:
+                    router, recovery = self._output_router, self._recovery
+                    await self._stop_owned_resources(router=router)
+                else:
+                    await self._stop_owned_resources(router=router, ownership_check=check)
+                check()
+                if recovery is not None:
+                    await recovery.clear_pending_interactions()
+                    check()
+            except BaseException:
+                self._exit_state = ExecutionExitState.EXIT_UNCONFIRMED
+                raise
             self._output_router = None
             self._provider_started_turns.clear()
             self._started = False
@@ -260,26 +286,32 @@ class ExecutionSession:
         self,
         *,
         router: TurnOutputRouter | None,
+        ownership_check: Callable[[], None] | None = None,
     ) -> None:
         failures: list[tuple[str, Exception]] = []
+        # Capture before the first await. A replacement never becomes this stop's resource.
+        io, transport, gateway = self.io, self._tool_transport, self._tool_gateway
+
+        def check():
+            if ownership_check is not None and ownership_check() is not None:
+                raise RuntimeError("External stop ownership checker must return None")
 
         async def stop_one(name: str, operation: Callable[[], Awaitable[None]]) -> None:
+            check()
             try:
-                await asyncio.wait_for(
-                    operation(),
-                    timeout=RESOURCE_STOP_TIMEOUT_S,
-                )
+                await asyncio.wait_for(operation(), timeout=RESOURCE_STOP_TIMEOUT_S)
             except Exception as exc:
                 failures.append((name, exc))
+            check()
 
         if router is not None:
             await stop_one("output_router", router.stop)
-        await stop_one("provider", self.io.stop)
-        if self._tool_transport is not None:
-            await stop_one("product_mcp", self._tool_transport.stop)
-            if getattr(self._tool_transport, "exit_confirmed", False) is not True:
+        await stop_one("provider", io.stop)
+        if transport is not None:
+            await stop_one("product_mcp", transport.stop)
+            if getattr(transport, "exit_confirmed", False) is not True:
                 failures.append(("product_mcp", RuntimeError("product MCP transport exit is unconfirmed")))
-        close_gateway = getattr(self._tool_gateway, "close", None)
+        close_gateway = getattr(gateway, "close", None)
         if callable(close_gateway):
             await stop_one("tool_gateway", close_gateway)
         if failures:
