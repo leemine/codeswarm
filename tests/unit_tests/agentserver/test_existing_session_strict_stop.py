@@ -110,7 +110,7 @@ async def test_late_lock_wait_does_not_stop_replaced_child():
 
 
 @pytest.mark.asyncio
-async def test_core_stop_can_return_with_owned_tool_task_alive_and_host_refuses_false_exit(monkeypatch):
+async def test_core_stop_timeout_keeps_original_owner_until_owned_tool_exits(monkeypatch):
     started, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
     async def stubborn_tool():
         started.set()
@@ -124,6 +124,8 @@ async def test_core_stop_can_return_with_owned_tool_task_alive_and_host_refuses_
     scheduler = object.__new__(TaskScheduler)
     scheduler._running = True
     scheduler._running_tasks = {'synthetic-tool': (object(), tool)}
+    scheduler._owned_execution_tasks = {tool}
+    scheduler._stopping_tasks = set()
     scheduler._lock = asyncio.Lock()
     scheduler._scheduler_task = None
     agent = SimpleNamespace(loop_controller=SimpleNamespace(task_scheduler=scheduler))
@@ -136,11 +138,13 @@ async def test_core_stop_can_return_with_owned_tool_task_alive_and_host_refuses_
     manager, _, root, child = tree(execution)
     bindings = child._native_execution_bindings
     monkeypatch.setattr(execution_session, 'RESOURCE_STOP_TIMEOUT_S', 0.02)
+    monkeypatch.setattr('openjiuwen.core.controller.modules.task_scheduler._STOP_TIMEOUT_SECONDS', 0.02)
     try:
-        with pytest.raises(RuntimeError, match='owned execution tasks have not exited'):
+        from openjiuwen.core.common.exception.errors import BaseError
+        with pytest.raises(BaseError, match='exit is unconfirmed'):
             await manager.stop_existing_session_runtime(channel_id='web', session_id='s')
         assert cancelled.is_set() and not tool.done()
-        assert execution.exit_state is ExecutionExitState.EXIT_CONFIRMED
+        assert execution.exit_state is ExecutionExitState.RUNNING
         assert child._native_execution is execution and root._session_adapters['s'] is child
         assert tool in child._native_pending_exit_tasks
         bindings.release.assert_not_called()
