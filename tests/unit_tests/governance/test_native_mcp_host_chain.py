@@ -1,9 +1,9 @@
 """Native MCP host composition, without a real Provider.
 
 Runtime/coordinator, authentication/owner storage, resource authorization, Native
-protocol dispatch, AbilityManager, MCPTool and the MCP SDK are real. DeepAgent's
-model-free queue/stream, Session allocation, permission-input dispatch wrapper and
-remote HTTP server are fixtures. The stop gate binds actual DeepAgent stop methods.
+protocol dispatch, DeepAgent queue/TaskLoop/scheduler/stop, AbilityManager, MCPTool
+and the MCP SDK are real. Reactor, Session IO, event bus, allocation,
+permission-input wrapper and remote HTTP server are fixtures.
 """
 
 import asyncio
@@ -12,13 +12,12 @@ import json
 import time
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from openjiuwen.core.foundation.llm import ToolCall
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
-from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.interaction import SendInputRequest
 from openjiuwen.harness_protocol import (
     AgentExecutionSpec,
@@ -31,7 +30,7 @@ from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.governance.organization_auth import (
     OrganizationAuthenticator,
-    CONFIG_ENV,
+    CONFIG_ENV, authenticated_scope,
 )
 from jiuwenswarm.governance.resources import ResourceDefinition
 from jiuwenswarm.governance.tool_context import (
@@ -54,7 +53,7 @@ from tests.unit_tests.agentserver.mcp import (
     test_native_registration as registration_fixtures,
 )
 from tests.unit_tests.governance.test_mcp_credentials import raw_config
-from tests.unit_tests.runtime.harness.test_native_session import _Stream, _answer
+from tests.unit_tests.governance._managed_native_fixture import model_free_agent, ownership
 
 
 native = registration_fixtures.native
@@ -117,28 +116,13 @@ async def host(native, monkeypatch):
     )
     sharing.register_owner_and_source("sid", principal.identity(), n.pid)
     monkeypatch.setattr(session_boundary, "organization_sharing_host", lambda: sharing)
-    outer = MagicMock(spec=DeepAgent)
-    outer.card = SimpleNamespace(id="outer", name="outer")
-    outer.react_agent = n.agent
-    outer.ensure_initialized = AsyncMock()
-    queue = asyncio.Queue()
-
-    async def worker():
-        while (item := await queue.get()) is not None:
-            await process_input(item)
-
-    async def start_worker(**kwargs):
-        outer._interaction_supervisor_task = asyncio.create_task(worker())
-
-    async def stop_worker():
-        await queue.put(None)
-        await outer._interaction_supervisor_task
-
-    outer.start = AsyncMock(side_effect=start_worker)
-    outer.stop = AsyncMock(side_effect=stop_worker)
-    outer.cancel_round = AsyncMock()
-    n.session.pre_run = AsyncMock()
-    n.session.post_run = AsyncMock()
+    async def synthetic_model(inputs, session=None, **kwargs):
+        await process_input(inputs)
+        return {"output": "synthetic MCP complete"}
+    n.agent.invoke = synthetic_model
+    outer = model_free_agent(n.agent, n.session, monkeypatch)
+    # Keep actual start/stop implementations, including scheduler/round drain.
+    start_worker, stop_worker = outer.start, outer.stop
     state = SimpleNamespace(
         done=None,
         terminal=None,
@@ -147,9 +131,6 @@ async def host(native, monkeypatch):
         slices=[],
         error=None,
         request_no=0,
-    )
-    outer.attach_output = AsyncMock(
-        side_effect=lambda: _Stream([_answer()], state.done)
     )
     adapter = object.__new__(interface_deep.JiuWenSwarmDeepAdapter)
     adapter._instance = outer
@@ -165,17 +146,15 @@ async def host(native, monkeypatch):
     monkeypatch.setattr(
         kv_cache_application_runtime, "get_kv_cache_runtime", lambda: None
     )
-    manager = SimpleNamespace(
-        get_agent_for_session_nowait=lambda channel, sid: (
-            adapter if (channel, sid) == ("web", "sid") else None
-        )
-    )
+    owned = ownership(adapter, "sid")
+    manager = owned.manager
     runtime = AgentRuntime(
         initializer=AsyncMock(),
         agent_manager=manager,
         trusted_identity_resolver=lambda _: principal.identity(),
         project_authorizer=n.store,
         resource_authorizer=_StoredResourceAuthority(),
+        organization_session_host=sharing,
     )
     runtime._started = True
     await runtime._session_coordinator.register_session("sid", "web")
@@ -210,16 +189,21 @@ async def host(native, monkeypatch):
     monkeypatch.setattr(
         native_registration, "install_native_mcp_tools", observe_install
     )
-    execution = await adapter.start_native_interaction(
-        source=ExecutionConfigSource(
-            explicit=AgentExecutionSpec("native", "host-combination")
-        ),
-        bindings=bindings,
-        subject_id="bob",
-        workspace=str(n.work),
-        context=context,
-        event_observer=observe,
-    )
+    initial_request = AgentRequest("startup", channel_id="web", session_id="sid", req_method=ReqMethod.CHAT_SEND)
+    # Real Runtime resource bundle selects managed construction; invocation gets
+    # a fresh bundle from its original authenticated Coordinator producer below.
+    with authenticated_scope(principal), tool_authority_scope(
+            None, provider_authorizers=runtime._resource_authorizers_for(initial_request)):
+        execution = await adapter.start_native_interaction(
+            source=ExecutionConfigSource(
+                explicit=AgentExecutionSpec("native", "host-combination")
+            ),
+            bindings=bindings,
+            subject_id="bob",
+            workspace=str(n.work),
+            context=context,
+            event_observer=observe,
+        )
     (record,) = installed[0].records
     assert (
         record.agent is n.agent
@@ -229,14 +213,14 @@ async def host(native, monkeypatch):
     assert record.execution_binding is execution.engine.binding
 
     async def process_input(request):
-        state.delivered.append(request)
+        state.delivered.append(SimpleNamespace(inputs=request))
         try:
             # Fixture DeepAgent uses the production iteration slice admission;
             # original request was delivered by real SerializedTurnHarness.
             ctx = SimpleNamespace(
                 agent=outer,
                 session=n.session,
-                inputs=SimpleNamespace(run_context=request.inputs["run"]["context"]),
+                inputs=SimpleNamespace(run_context=request["run_context"]),
             )
             handle = begin_native_execution_slice(ctx)
             try:
@@ -259,7 +243,6 @@ async def host(native, monkeypatch):
         finally:
             state.done.set()
 
-    outer.send_input = AsyncMock(side_effect=queue.put)
 
     async def invoke(*, mcp_only=False):
         state.request_no += 1
@@ -280,27 +263,37 @@ async def host(native, monkeypatch):
                 )
 
                 bundle = ExecutionResourceAuthorities(
-                    {}, mcp_authorizer=bundle.mcp_authorizer
+                    {}, mcp_authorizer=bundle.mcp_authorizer,
+                    native_lifecycle_factory=bundle.native_lifecycle_factory
                 )
             with tool_authority_scope(None, provider_authorizers=bundle):
                 receipt = await execution.send_request(
                     SendInputRequest(request_id=rid, inputs={"query": "ordinary"})
                 )
+            owner, = runtime._session_coordinator._registry.select(session_id="sid", request_id=rid)
+            assert owner._execution_authority is principal
+            assert owner._native_admission.owned_turn.turn_id == receipt.turn_id
+            assert bundle.native_lifecycle_factory is not None
             await asyncio.wait_for(state.done.wait(), 3)
             await asyncio.wait_for(state.terminal.wait(), 3)
+            await asyncio.wait_for(owner._native_admission.confirmed.wait(), 3)
             if state.error:
                 raise state.error
             return receipt, state.result, bundle
 
-        return await runtime._session_coordinator.run_unary(
-            "sid", rid, SessionWorkKind.CHAT_UNARY, body
-        )
+        with authenticated_scope(principal):
+            return await runtime._session_coordinator.run_unary(
+                "sid", rid, SessionWorkKind.CHAT_UNARY, body
+            )
 
-    yield SimpleNamespace(**locals())
-    if adapter._native_execution is not None:
-        outer.stop = AsyncMock(side_effect=stop_worker)
-        await adapter.stop_interaction()
-    session_metadata.remove_session_metadata_cache("sid")
+    try:
+        yield SimpleNamespace(**locals())
+    finally:
+        if adapter._native_execution is not None:
+            outer.stop = stop_worker
+            await asyncio.wait_for(adapter.stop_interaction(), 5)
+        await runtime._session_coordinator.close()
+        session_metadata.remove_session_metadata_cache("sid")
 
 
 @pytest.mark.asyncio
@@ -310,7 +303,7 @@ async def test_runtime_request_to_actual_native_factory_and_sdk(host):
     assert receipt.turn_id
     assert len(host.n.sent) == 4 and host.n.closed == 1
     delivered = host.state.delivered[0]
-    assert delivered.inputs["run"]["context"]["extra"]["native.host_request"]
+    assert delivered.inputs["run_context"].extra["native.host_request"]
     bound = host.state.slices[0]
     assert bound.owner is host.execution and not bound.active
     assert bound.mcp_authorizer is not bundle.mcp_authorizer
@@ -397,39 +390,10 @@ async def test_real_deep_stop_pending_round_must_keep_registration(host, monkeyp
     round_task = asyncio.create_task(round_work())
     await started.wait()
     outer = host.outer
-    outer._interaction_start_lock = asyncio.Lock()
-    outer._interaction_started = True
-    outer._event_manager = SimpleNamespace(
-        discard_all_work=lambda: None, mark_finished=lambda _: None
-    )
-    outer._interaction_output = SimpleNamespace(shutdown=AsyncMock())
-    outer._try_transition_interaction_phase = lambda _: True
-    outer._interaction_forwarder_task = None
-    outer._interaction_emit_tasks = set()
-    outer._interaction_session = host.n.session
-    host.n.session.close_stream = AsyncMock()
     outer._active_interaction_round = ActiveInteractionRound(
         work=RoundWorkItem.user(request_id='original-stop', inputs={'query': 'fixture'}), task_id='',
     )
     outer._interaction_round_task = round_task
-    outer._stopping_interaction_round_tasks = set()
-    if hasattr(DeepAgent, "_drain_stopping_interaction_rounds"):
-        outer._drain_stopping_interaction_rounds = (
-            DeepAgent._drain_stopping_interaction_rounds.__get__(outer, DeepAgent)
-        )
-    outer.loop_controller = SimpleNamespace(
-        stop=AsyncMock(),
-        unbind_session=AsyncMock(),
-        task_scheduler=SimpleNamespace(_running_tasks={}, _scheduler_task=None),
-    )
-    outer.abort = AsyncMock()
-    outer._cancel_active_round = DeepAgent._cancel_active_round.__get__(
-        outer, DeepAgent
-    )
-    outer._stop_interaction_locked = DeepAgent._stop_interaction_locked.__get__(
-        outer, DeepAgent
-    )
-    outer.stop = DeepAgent.stop.__get__(outer, DeepAgent)
     try:
         with pytest.raises(Exception):
             await host.adapter.stop_interaction(require_owned_exit=True)
@@ -449,7 +413,7 @@ async def test_real_deep_stop_pending_round_must_keep_registration(host, monkeyp
 async def test_mcp_only_bundle_actual_send_still_carries_original_host_token(host):
     _, result, bundle = await host.invoke(mcp_only=True)
     delivered = host.state.delivered[0]
-    assert delivered.inputs["run"]["context"]["extra"]["native.host_request"]
+    assert delivered.inputs["run_context"].extra["native.host_request"]
     assert host.state.slices[0].owner is host.execution
     assert host.state.slices[0].mcp_authorizer is not None
     assert (
@@ -459,15 +423,22 @@ async def test_mcp_only_bundle_actual_send_still_carries_original_host_token(hos
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_fails", [False, True])
-async def test_startup_failure_registration_cleanup_and_retry(host, cleanup_fails):
+async def test_startup_failure_registration_cleanup_and_retry(host, cleanup_fails, monkeypatch):
     await host.adapter.stop_interaction()
+    # A closed DeepAgent is terminal, so use a newly assembled actual instance
+    # for startup rollback instead of failing before any owned task was started.
+    host.outer = model_free_agent(host.n.agent, host.n.session, monkeypatch)
+    host.adapter._instance = host.outer
+    host.start_worker, host.stop_worker = host.outer.start, host.outer.stop
     bound = host.bindings.bind(
         ExecutionConfigSource(explicit=AgentExecutionSpec("native", "retry-start")),
         subject_id="bob",
         host_session_id="sid",
         workspace=str(host.n.work),
     )
-    execution = host.adapter.build_native_execution(bound)
+    with authenticated_scope(host.principal), tool_authority_scope(
+            None, provider_authorizers=host.runtime._resource_authorizers_for(host.initial_request)):
+        execution = host.adapter.build_native_execution(bound)
 
     async def fail_start(**kwargs):
         await host.start_worker(**kwargs)

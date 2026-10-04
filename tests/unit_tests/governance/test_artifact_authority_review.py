@@ -7,7 +7,7 @@ import asyncio
 import json
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from openjiuwen.core.foundation.llm import ToolCall
@@ -17,12 +17,10 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackEvent,
 )
 from openjiuwen.core.sys_operation.cwd import _cwd_state, init_cwd
-from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.interaction import SendInputRequest
 from openjiuwen.harness_protocol import (
     AgentExecutionSpec,
     HarnessContext,
-    TurnEventKind,
 )
 
 from jiuwenswarm.agents.harness.common.rails.permissions.resource_authority_rail import (
@@ -55,7 +53,9 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
 )
 from tests.unit_tests.governance import test_workspace_download as downloads
-from tests.unit_tests.runtime.harness.test_native_session import _Stream
+from tests.unit_tests.governance._managed_native_fixture import model_free_agent, ownership
+from jiuwenswarm.governance.organization_auth import authenticated_scope
+from jiuwenswarm.runtime.session.model import SessionWorkKind
 
 credentials, setup = downloads.credentials, downloads.setup
 
@@ -80,24 +80,14 @@ async def chain(setup, monkeypatch):
         ability_manager=ability,
         agent_callback_manager=Callbacks(),
     )
-    outer = MagicMock(spec=DeepAgent)
-    outer.card = SimpleNamespace(id="outer")
-    outer.react_agent = inner
-    sent = asyncio.Event()
-    outer.ensure_initialized = AsyncMock()
-    outer.start = AsyncMock()
-    outer.stop = AsyncMock()
-    outer.send_input = AsyncMock(side_effect=lambda *a, **k: sent.set())
-    outer.cancel_round = AsyncMock()
-    gate = asyncio.Event()
-    outer.attach_output = AsyncMock(return_value=_Stream([], gate))
-    session = SimpleNamespace(
-        get_session_id=lambda: sid,
-        get_agent_id=lambda: "root",
-        get_state=lambda *a, **k: None,
-        pre_run=AsyncMock(),
-        post_run=AsyncMock(),
-    )
+    sent, gate = asyncio.Event(), asyncio.Event()
+    async def synthetic_model(inputs, session=None, **kwargs):
+        sent.set()
+        await gate.wait()
+        return {"output": "synthetic"}
+    inner.invoke = synthetic_model
+    session = SimpleNamespace(get_session_id=lambda: sid, get_agent_id=lambda: "root")
+    outer = model_free_agent(inner, session, monkeypatch)
     bound = ExecutionBindingStore().bind(
         ExecutionConfigSource(explicit=AgentExecutionSpec("native", "review")),
         subject_id=s.alice.identity().subject_id,
@@ -113,18 +103,15 @@ async def chain(setup, monkeypatch):
         agent_factory=lambda _: outer,
         session_factory=AsyncMock(return_value=session),
         dispatch_guard=guard,
+        require_execution_origin=True,
     )
     adapter = JiuWenSwarmDeepAdapter.__new__(JiuWenSwarmDeepAdapter)
     adapter._is_session_scoped_adapter = True
     adapter._parent_session_id = sid
     adapter._instance = outer
     adapter._native_execution = native
-    selected = [adapter]
-    manager = SimpleNamespace(
-        get_agent_for_session_nowait=lambda channel, lookup_sid: (
-            selected[0] if channel == "web" and lookup_sid == sid else None
-        )
-    )
+    owned = ownership(adapter, sid)
+    manager = owned.manager
     runtime = AgentRuntime(
         agent_manager=manager,
         initializer=AsyncMock(),
@@ -141,9 +128,6 @@ async def chain(setup, monkeypatch):
         req_method=ReqMethod.CHAT_SEND,
         params={"project_id": s.project.project_id, "mode": "agent.work.normal"},
     )
-    handle = runtime.begin_detached_native_turn(
-        sid, "synthetic-native", request.request_id
-    )
     s.access.register_resource(
         s.project.project_id,
         ResourceDefinition("send-file", "tool", "native:send_file_to_user"),
@@ -151,36 +135,49 @@ async def chain(setup, monkeypatch):
         actions=("invoke",),
         expected_revision=2,
     )
-    authorities = runtime._resource_authorizers_for(request)
     await native.start(
-        HarnessContext(
-            agent_name="root",
-            agent_id="root",
-            host_session_id=sid,
-            cwd=str(s.root),
-            system_prompt="",
-        )
+        HarnessContext(agent_name="root", agent_id="root", host_session_id=sid,
+                       cwd=str(s.root), system_prompt="")
     )
-    with tool_authority_scope(None, provider_authorizers=authorities):
-        await native.send_request(
-            SendInputRequest(
-                request_id=request.request_id, inputs={"query": "synthetic"}
-            )
-        )
+    captured = {}
+    async def body():
+        authorities = runtime._resource_authorizers_for(request)
+        captured["authorities"] = authorities
+        with tool_authority_scope(None, provider_authorizers=authorities):
+            await native.send_request(SendInputRequest(
+                request_id=request.request_id, inputs={"query": "synthetic"}))
+        handle, = runtime._session_coordinator._registry.select(
+            session_id=sid, request_id=request.request_id)
+        captured["handle"] = handle
+        # Original Runtime producer stays owned until the real Native observer
+        # confirms the exact queued/round/wrapper/output exit.
+        await handle._native_admission.confirmed.wait()
+    with authenticated_scope(s.alice):
+        producer = asyncio.create_task(runtime._session_coordinator.run_unary(
+            sid, request.request_id, SessionWorkKind.CHAT_UNARY, body))
     await asyncio.wait_for(sent.wait(), 3)
+    handle = captured["handle"]
+    authorities = captured["authorities"]
+    assert handle._execution_authority is s.alice
+    assert handle._native_admission.owned_turn.request_id == request.request_id
+    assert authorities.native_lifecycle_factory is not None
     token = native._native.active_turn.content.metadata["native.host_request"]
+    original_entry = native._requests[token]
     ctx = SimpleNamespace(
         agent=outer,
         session=session,
         inputs=SimpleNamespace(run_context={"extra": {"native.host_request": token}}),
     )
+    successors = []
     seen = []
     mutation = [None]
     mutation_done = []
 
     async def consume(self, envelope, **kwargs):
         if mutation[0] is not None:
-            mutation[0]()
+            changed = mutation[0]()
+            if asyncio.iscoroutine(changed):
+                await changed
             mutation_done.append(True)
         payload = self._build_files_payload(
             envelope, valid_files=[str(s.file)], assets_by_path={}
@@ -220,8 +217,17 @@ async def chain(setup, monkeypatch):
     try:
         yield SimpleNamespace(**locals())
     finally:
+        # Undo only the deliberate missing-entry mutation for real observer
+        # cleanup. Never resurrect a completed request or replace a successor.
+        if native._native.active_turn is handle._native_admission.owned_turn._pending:
+            native._requests.setdefault(token, original_entry)
         gate.set()
         await native.stop()
+        await asyncio.wait_for(producer, 3)
+        for successor, release in successors:
+            release.set()
+            await asyncio.wait_for(successor, 3)
+        await runtime._session_coordinator.close()
         ability.teardown_tools()
         _cwd_state.reset(cwd_token)
 
@@ -258,7 +264,7 @@ async def test_original_runtime_native_toolexecution_can_issue_workspace_selecto
 async def test_original_source_changes_before_issue_are_denied(chain, change):
     c = chain
 
-    def mutate():
+    async def mutate():
         if change == "identity":
             c.s.current[0] = c.s.bob.identity
         elif change == "subject":
@@ -273,15 +279,14 @@ async def test_original_source_changes_before_issue_are_denied(chain, change):
                 c.sid, c.s.alice.identity(), expected_revision=1, expected_epoch=1
             )
         elif change == "admission":
-            c.runtime.finish_detached_native_turn(
-                c.sid, c.handle.execution_id, TurnEventKind.FINISHED
-            )
+            c.gate.set()
+            await asyncio.wait_for(c.producer, 3)
         elif change == "native_turn":
             c.native._requests.pop(c.token)
         elif change == "slice":
             current_native_execution_slice().active = False
         elif change == "route":
-            c.selected[0] = object()
+            c.owned.root._session_adapters[c.sid] = object()
         elif change == "tool_args":
             c.toolkit.channel_id = "other"
         elif change in {"tool_revoke", "workspace_revoke", "workspace_regrant"}:
@@ -306,12 +311,32 @@ async def test_original_source_changes_before_issue_are_denied(chain, change):
                     delegable=True,
                 )
         elif change == "request_rebind":
-            c.runtime.finish_detached_native_turn(
-                c.sid, c.handle.execution_id, TurnEventKind.FINISHED
-            )
-            c.runtime.begin_detached_native_turn(
-                c.sid, "new-turn", "replacement-request"
-            )
+            c.gate.set()
+            await asyncio.wait_for(c.producer, 3)
+
+            arrived, release = asyncio.Event(), asyncio.Event()
+            async def next_model(inputs, session=None, **kwargs):
+                arrived.set()
+                await release.wait()
+                return {"output": "replacement"}
+            c.inner.invoke = next_model
+            next_request = AgentRequest(
+                "replacement-request", channel_id="web", session_id=c.sid,
+                req_method=ReqMethod.CHAT_SEND,
+                params={"project_id": c.s.project.project_id})
+            async def next_operation():
+                resources = c.runtime._resource_authorizers_for(next_request)
+                with tool_authority_scope(None, provider_authorizers=resources):
+                    await c.native.send_request(SendInputRequest(
+                        next_request.request_id, {"query": "replacement"}))
+                owner, = c.runtime._session_coordinator._registry.select(
+                    session_id=c.sid, request_id=next_request.request_id)
+                await owner._native_admission.confirmed.wait()
+            with authenticated_scope(c.s.alice):
+                successor = asyncio.create_task(c.runtime._session_coordinator.run_unary(
+                    c.sid, next_request.request_id, SessionWorkKind.CHAT_UNARY, next_operation))
+            c.successors.append((successor, release))
+            await asyncio.wait_for(arrived.wait(), 3)
             c.request.request_id = "replacement-request"
 
     c.mutation[0] = mutate
