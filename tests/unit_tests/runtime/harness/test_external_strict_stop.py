@@ -217,3 +217,84 @@ async def test_old_transport_completed_during_replace_does_not_certify_new_owner
     assert not x.session.closed and x.session.exit_state is ExecutionExitState.EXIT_UNCONFIRMED
     assert x.adapter._session is replacement.session
     replacement.harness.stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_external_stop_retires_exact_manager_cache_before_rebinding(tmp_path, monkeypatch):
+    from jiuwenswarm.server.runtime.agent_manager import AgentManager
+
+    # Keep the actual Manager cache/lock and facade cleanup chain. Only initial
+    # provider allocation is a local synthetic harness; no CLI is launched.
+    def facade_init(self):
+        self._adapter = None
+        self._runtime_execution_route = None
+        self._session_manager = SessionManager()
+
+    async def create_instance(self, _config, **kwargs):
+        route = kwargs['execution_route']
+        self._runtime_execution_route = route
+        self._adapter = EngineAgentAdapter(route)
+        harness = SimpleNamespace(stop=AsyncMock())
+        owned = ExecutionSession(HarnessEngine(route.bound.binding, harness), route.runtime_paths)
+        owned.io._stopped = False
+        owned._started = True
+        owned._exit_state = ExecutionExitState.RUNNING
+        self._adapter._session = owned
+
+    monkeypatch.setattr(JiuWenSwarm, '__init__', facade_init)
+    monkeypatch.setattr(JiuWenSwarm, 'create_instance', create_instance)
+    manager = AgentManager()
+    first_route = _route(tmp_path, provider_id='opencode')
+    other_route = _route(tmp_path, provider_id='opencode', session_id='other')
+    old = await manager.get_agent(channel_id='web', mode='agent', execution_route=first_route)
+    other = await manager.get_agent(channel_id='web', mode='agent', execution_route=other_route)
+    old_adapter, old_session = old._adapter, old._adapter._session
+    other_session = other._adapter._session
+    assert await manager.stop_existing_session_runtime(channel_id='web', session_id='session-1')
+    assert old_adapter._session is None and old_adapter._heartbeat_stopped_session is old_session
+    assert old_session.closed and old_session.exit_state is ExecutionExitState.EXIT_CONFIRMED
+    replacement_route = _route(tmp_path, provider_id='opencode')
+    assert replacement_route.bound.binding == first_route.bound.binding
+    assert replacement_route.bound.binding is not first_route.bound.binding
+    # The original strict identity check still rejects replacing a cached root.
+    with pytest.raises(RuntimeError, match='route changed'):
+        old_adapter.bind_route(replacement_route)
+    assert await manager.cleanup_session_runtime(channel_id='web', session_id='session-1')
+    assert old not in manager.agents['web'].values()
+    assert other in manager.agents['web'].values() and not other_session.closed
+    assert not await manager.cleanup_session_runtime(channel_id='web', session_id='session-1')
+    fresh = await manager.get_agent(channel_id='web', mode='agent', execution_route=replacement_route)
+    assert fresh is not old and fresh._adapter is not old_adapter
+    fresh._adapter.bind_route(replacement_route)
+    assert fresh._adapter._session.binding is replacement_route.bound.binding
+    await manager.cleanup_session_runtime(channel_id='web', session_id='session-1')
+    await manager.cleanup_session_runtime(channel_id='web', session_id='other')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('proof', ['absent', 'duck', 'binding', 'open', 'unknown', 'confirmed'])
+async def test_cleanup_only_consumes_original_confirmed_execution_receipt(tmp_path, proof):
+    from jiuwenswarm.server.runtime.agent_manager import AgentManager
+
+    x = tree(tmp_path)
+    x.facade._runtime_execution_route = x.route
+    await x.adapter.stop_existing_session_adapter('session-1')
+    if proof == 'absent':
+        x.adapter._heartbeat_stopped_session = None
+    elif proof == 'duck':
+        x.adapter._heartbeat_stopped_session = SimpleNamespace(
+            binding=x.route.bound.binding, closed=True, exit_state=ExecutionExitState.EXIT_CONFIRMED)
+    elif proof == 'binding':
+        replacement = _route(tmp_path, provider_id='opencode')
+        x.session.engine = HarnessEngine(replacement.bound.binding, x.harness)
+    elif proof == 'open':
+        x.session._closed = False
+    elif proof == 'unknown':
+        x.session._exit_state = ExecutionExitState.EXIT_UNCONFIRMED
+    manager = AgentManager()
+    manager.agents = {'web': {'original': x.facade}}
+    assert not await x.adapter.cleanup_session_adapter('other')
+    assert (await manager.cleanup_session_runtime(channel_id='web', session_id='session-1')) is (proof == 'confirmed')
+    assert ('original' in manager.agents.get('web', {})) is (proof != 'confirmed')
+    if proof != 'confirmed':
+        assert x.facade._adapter is x.adapter and x.adapter._session is None

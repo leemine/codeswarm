@@ -1066,7 +1066,16 @@ class EngineAgentAdapter:
         if self._route.bound.binding.host_session_id != session_id:
             return False
         if session is None and self._subagent_runtime is None:
-            return False
+            # Strict stop already cleared the active reference. Consume only
+            # its retained original exit proof so Manager can retire this root;
+            # an empty adapter (or an equivalent replacement Binding) is not proof.
+            stopped = self._heartbeat_stopped_session
+            return (
+                isinstance(stopped, ExecutionSession)
+                and stopped.binding is self._route.bound.binding
+                and stopped.closed is True
+                and stopped.exit_state is ExecutionExitState.EXIT_CONFIRMED
+            )
         if session is not None:
             await self._stop_owned_execution_once(session)
             self._session = None
