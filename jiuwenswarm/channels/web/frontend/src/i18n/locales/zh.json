@@ -3510,6 +3510,7 @@
     "review": "审核"
   },
   "multiSession": {
+    "cleanupOnlySession": "仅可清理的会话",
     "deleteAuditPending": "会话已删除，删除审计仍待补写。",
     "deleteAuditPendingDialog": "会话已删除，删除审计仍待补写。重试只补写审计；关闭此对话框后将失去此重试入口。",
     "retryDeletionAudit": "重试保存审计",

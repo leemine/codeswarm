@@ -3524,6 +3524,7 @@
     "review": "Review"
   },
   "multiSession": {
+    "cleanupOnlySession": "Conversation available for deletion only",
     "deleteAuditPending": "Session deleted. Its deletion audit is still pending.",
     "deleteAuditPendingDialog": "Session deleted. Its deletion audit is still pending. Retry saves the audit only; closing this dialog loses this retry entry.",
     "retryDeletionAudit": "Retry saving audit",

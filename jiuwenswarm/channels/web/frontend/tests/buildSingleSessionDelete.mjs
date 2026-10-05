@@ -4,6 +4,8 @@ await build({
     'src/multi-session/sidebar/ConversationSidebar.tsx',
     'src/features/workspace/archivedTaskClient.ts',
     'src/stores/workspaceStore.ts',
+    'src/stores/sessionStore.ts',
+    'src/features/workspace/projectRegistryClient.ts',
     'src/stores/cronStore.ts',
     'src/components/ui/Toast/toastStore.ts',
     'src/multi-session/state/useSideConversationDeletion.ts',

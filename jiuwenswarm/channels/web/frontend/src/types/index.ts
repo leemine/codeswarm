@@ -14,6 +14,8 @@ export * from '../features/workspace/projectTypes';
 
 // 会话类型
 export interface Session {
+  /** Owner cleanup inventory only; does not grant conversation read or execution. */
+  cleanup_only?: boolean;
   session_id: string;
   title: string;
   project_id: string;

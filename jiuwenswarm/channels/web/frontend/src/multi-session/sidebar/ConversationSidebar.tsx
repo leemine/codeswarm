@@ -239,7 +239,8 @@ function ConversationListItem({
     offsetY: 2,
     align: 'left',
   });
-  const title = getSessionTitle(session, t('multiSession.untitled'));
+  const title = session.cleanup_only === true
+    ? t('multiSession.cleanupOnlySession') : getSessionTitle(session, t('multiSession.untitled'));
   const titleTooltipHandlers = {
     onMouseEnter: (event: React.MouseEvent<HTMLSpanElement>) => {
       const el = event.currentTarget;
@@ -264,7 +265,9 @@ function ConversationListItem({
   const indicator = getSessionIndicator(runtime, unread, session.is_processing === true, Boolean(errorMessage));
 
   let status: React.ReactNode;
-  if (indicator === 'waiting') {
+  if (session.cleanup_only === true) {
+    status = null;
+  } else if (indicator === 'waiting') {
     status = (
       <span className="conversation-list-item__status-waiting" title={getTaskStatusLabel(indicator, t)} data-testid="multi-session-conversation-list-item-status-waiting">
         <span>{t('multiSession.status.waiting')}</span>
@@ -299,7 +302,7 @@ function ConversationListItem({
       data-testid="multi-session-conversation-list-item"
       data-variant={session.session_id}
     >
-      <button type="button" className="conversation-list-item__main" onClick={onSelect} data-testid="multi-session-conversation-list-item-main">
+      <button type="button" className="conversation-list-item__main" disabled={session.cleanup_only === true} onClick={onSelect} data-testid="multi-session-conversation-list-item-main">
         <span className="conversation-list-item__title" data-testid="multi-session-conversation-list-item-title" data-tooltip="" {...titleTooltipHandlers}>
           {title}
         </span>
@@ -349,7 +352,7 @@ function ConversationListItem({
           />
         </DropdownMenuContent>
       </DropdownMenu>
-      <button
+      {session.cleanup_only !== true ? <button
         type="button"
         className="conversation-list-item__pin-action"
         onClick={(event) => {
@@ -362,7 +365,7 @@ function ConversationListItem({
         {...itemTooltipHandlers}
       >
         {session.pinned ? <UnpinIcon aria-hidden /> : <PinIcon aria-hidden />}
-      </button>
+      </button> : null}
       {itemTooltip}
       {truncationTooltip}
     </div>
@@ -944,6 +947,14 @@ export function ConversationSidebar({
   } = useWorkspaceStore();
 
   useEffect(() => {
+    if (!deleteSessionTarget || deleteSessionTarget.cleanup_only === true) return;
+    const restricted = Object.values(projectSessions).flat().find((session) => (
+      session.session_id === deleteSessionTarget.session_id && session.cleanup_only === true
+    ));
+    if (restricted) setDeleteSessionTarget(restricted);
+  }, [projectSessions, deleteSessionTarget]);
+
+  useEffect(() => {
     if (!workModeMenuOpen) return;
     const close = (event: MouseEvent) => {
       if (!workModeMenuRef.current?.contains(event.target as Node)) setWorkModeMenuOpen(false);
@@ -1404,7 +1415,7 @@ export function ConversationSidebar({
         nested={nested}
         unread={unreadSessions.has(session.session_id)}
         now={relativeTimeNow}
-        onSelect={() => onSelect(session)}
+        onSelect={() => { if (session.cleanup_only !== true) onSelect(session); }}
         onPin={() => void handlePinSession(session)}
         onArchive={() => void handleArchiveSession(session)}
         onDelete={cronSession ? () => {
@@ -1430,7 +1441,9 @@ export function ConversationSidebar({
           setDeleteSessionBusy(deleteSessionPending.current.has(session.session_id));
           setDeleteSessionError(null);
         } : undefined}
-        menuItems={cronSession
+        menuItems={session.cleanup_only === true
+          ? deletableSingle ? [{ action: 'delete', label: t('multiSession.delete'), danger: true }] : []
+          : cronSession
           ? getConversationMenuItems(Boolean(session.pinned), t, { archivable: false, deletable: true })
           : projectMenu
           ? getProjectSessionMenuItems(Boolean(session.pinned), t, { deletable: deletableSingle })
@@ -1875,7 +1888,8 @@ export function ConversationSidebar({
       ) : null}
       {deleteSessionTarget ? (
         <DeleteDialog
-          title={getSessionTitle(deleteSessionTarget, t('multiSession.untitled'))}
+          title={deleteSessionTarget.cleanup_only === true ? t('multiSession.cleanupOnlySession')
+            : getSessionTitle(deleteSessionTarget, t('multiSession.untitled'))}
           deleting={deleteSessionBusy}
           error={deleteSessionError}
           notice={deleteSessionAuditPending ? t('multiSession.deleteAuditPendingDialog') : null}
