@@ -285,7 +285,7 @@ async def test_web_channel_cron_push_targets_only_its_agentos_user(monkeypatch):
     # broadcast compatibility path; keep the test independent from ws writers.
     monkeypatch.setattr(WebChannel, "clients", property(lambda _: {alice, bob}))
     sent: list[object] = []
-    monkeypatch.setattr(channel, "_enqueue_send", lambda ws, frame: sent.append(ws))
+    monkeypatch.setattr(channel, "_enqueue_send", lambda ws, frame, **kwargs: sent.append(ws))
     msg = Message(
         id="cron-a",
         type="event",

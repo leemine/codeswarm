@@ -327,7 +327,14 @@ class WebClient {
         messageType: 'req',
         data: message,
       });
-      this.ws?.send(JSON.stringify(message));
+      try {
+        options.onRequestId?.(id);
+        this.ws?.send(JSON.stringify(message));
+      } catch (error) {
+        window.clearTimeout(timeoutId);
+        this.pending.delete(id);
+        reject(error);
+      }
     });
   }
 

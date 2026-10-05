@@ -117,3 +117,25 @@ test('pending new conversation keeps a manually selected model when the default 
 
   useSessionStore.getState().removeRuntime('new');
 });
+
+test('host exact selection survives default filtering, refresh, removal and same-name entries', () => {
+  const store = useSessionStore.getState();
+  const alice = { ...models[0], model_name: 'same', selection_key: 'same#0', is_default: true };
+  const bob = { ...models[1], model_name: 'same', selection_key: 'same#2', is_default: false };
+  store.ensureRuntime('bound');
+  store.ensureRuntime('ordinary');
+  store.setAvailableModels([alice, bob], 'same');
+  store.setSelectedModelName('bound', 'same#2');
+  assert.equal(resolveChatModelSelection([alice], 'same#2', 'same', [alice, bob]), bob);
+  assert.equal(useSessionStore.getState().getEffectiveModelName('bound'), 'same#2');
+  store.setAvailableModels([bob, alice], 'same');
+  assert.equal(useSessionStore.getState().getEffectiveModelName('bound'), 'same#2');
+  store.setAvailableModels([alice], 'same');
+  assert.equal(resolveChatModelSelection([alice], 'same#2', 'same', [alice]), null);
+  assert.equal(useSessionStore.getState().getEffectiveModelName('bound'), 'same#2');
+  assert.equal(useSessionStore.getState().getEffectiveModelName('ordinary'), 'same');
+  store.setSelectedModelName('ordinary', 'old-unknown-bare-name');
+  assert.equal(useSessionStore.getState().getEffectiveModelName('ordinary'), 'same');
+  store.removeRuntime('bound');
+  store.removeRuntime('ordinary');
+});

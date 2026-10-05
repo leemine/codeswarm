@@ -216,6 +216,9 @@ def _binary_dir_from_package() -> str | None:
 
 
 def default_runner(command: str, timeout: float = 120.0, env: dict[str, str] | None = None) -> CommandResult:
+    from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+
+    require_legacy_mcp_access()
     try:
         proc = subprocess.run(  # noqa: S603 - command from trusted cli.json
             _safe_split_command(command),
@@ -434,6 +437,9 @@ class CliDriver:
         runner: CommandRunner | None = None,
         proc_runner: "ProcRunner | None" = None,
     ) -> None:
+        from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+
+        require_legacy_mcp_access()
         self.name = str(name or "").strip()
         self.manifest = manifest or load_cli_manifest(self.name) or CliManifest()
         # Credential-derived env to inject into spawned CLI subprocesses. Some
@@ -487,6 +493,9 @@ class CliDriver:
         OAuth CLIs) or the store is unreadable; None means "inherit parent
         env", the pre-existing behavior.
         """
+        from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+
+        require_legacy_mcp_access()
         if not self.name:
             return None
         try:
@@ -628,6 +637,9 @@ class CliDriver:
         auth_required sentinel. The proc is stashed in ``_PENDING_AUTH_PROCS``
         for :meth:`auth_proc_done` / :meth:`status` to poll.
         """
+        from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+
+        require_legacy_mcp_access()
         if self._proc_runner is not None:
             # Test path: injector returns (proc, initial_output_string).
             proc, out = self._proc_runner(cmd)

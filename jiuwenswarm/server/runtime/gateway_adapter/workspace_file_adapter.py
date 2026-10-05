@@ -111,12 +111,41 @@ class WorkspaceFileAdapter(GatewayAdapter):
             ReqMethod.FILE_IMPORT_URL.value,
             ReqMethod.FILE_UPLOAD_CHUNK.value,
             ReqMethod.FILE_DOWNLOAD_VERIFIED_CHUNK.value,
+            ReqMethod.FILE_DOWNLOAD_WORKSPACE_CHUNK.value,
             ReqMethod.IM_FILE_PERSIST.value,
         }
     )
 
+    def __init__(self, *, sharing_host=None, identity_resolver=None):
+        self._sharing_host = sharing_host
+        self._identity_resolver = identity_resolver
+
+    async def _handle_workspace_download_chunk(self, request):
+        from jiuwenswarm.governance.workspace_download import capture_workspace_request
+        try:
+            if self._sharing_host is None or not callable(self._identity_resolver):
+                raise PermissionError('original host required')
+            permit = capture_workspace_request(self._sharing_host,
+                lambda: self._identity_resolver(request), request.session_id, request.params)
+            if dict(permit._source.binding)['channel_id'] != request.channel_id:
+                raise PermissionError('original channel required')
+            offset, limit = request.params['offset'], request.params['limit']
+            data = await asyncio.to_thread(permit.read, offset, limit)
+            permit.check()
+            response = AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
+                payload={'data': base64.b64encode(data).decode('ascii'), 'offset': offset,
+                    'size': permit.size, 'name': permit.name,
+                    'mime_type': mimetypes.guess_type(permit.name)[0] or 'application/octet-stream',
+                    'eof': offset + len(data) == permit.size}, metadata=request.metadata)
+            response._delivery_guard = permit.check
+            return response
+        except Exception:
+            return build_error_response(request, 'Workspace download denied', code='FORBIDDEN')
+
     async def handle(self, request: AgentRequest) -> AgentResponse:
         method = request.req_method
+        if method == ReqMethod.FILE_DOWNLOAD_WORKSPACE_CHUNK:
+            return await self._handle_workspace_download_chunk(request)
         if method == ReqMethod.MEDIA_PERSIST:
             return await self._handle_media_persist(request)
         if method == ReqMethod.DOCUMENT_PERSIST:

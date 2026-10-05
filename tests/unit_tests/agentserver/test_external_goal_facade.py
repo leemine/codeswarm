@@ -130,3 +130,93 @@ def test_attach_resolves_assessor_only_when_admitted_owner_can_start(monkeypatch
     else:
         resolver.assert_not_called()
         adapter.set_goal_assessor_factory.assert_not_called()
+
+
+@pytest.fixture
+async def governed_external_goal(tmp_path, monkeypatch, request):
+    from tests.unit_tests.runtime.harness import test_external_goal_runtime as component
+    from tests.unit_tests.runtime.harness.test_external_execution_route import _route
+    provider_id = request.param
+    monkeypatch.setattr(component, '_route', lambda root: _route(root, provider_id=provider_id))
+    # Real Engine/ExecutionSession/GoalManager/SerializedTurnHarness and original
+    # Runtime Coordinator; only Provider responses and assessment are fixtures.
+    async for value in component.chain.__wrapped__(tmp_path, monkeypatch):
+        yield value
+
+
+@pytest.mark.parametrize('governed_external_goal', ['opencode', 'codex'], indirect=True)
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('action', ['pause', 'clear'])
+async def test_trusted_external_goal_control_is_not_native_admission(
+    governed_external_goal, monkeypatch, stream, action,
+):
+    from jiuwenswarm.governance.tool_context import ExecutionResourceAuthorities, tool_authority_scope
+    from jiuwenswarm.governance import organization_auth
+    from tests.unit_tests.runtime.harness.test_external_goal_runtime import request as goal_request
+    c = governed_external_goal
+    facade = JiuWenSwarm()
+    facade._adapter = c.adapter
+    facade._sdk_name = 'harness'
+    original = await c.adapter._goal_runtime.manager.set('original External objective')
+    item = goal_request('external-control', action=action)
+    item._execution_route = c.adapter._route
+    item._bound_execution = c.adapter._route.bound
+    item.is_stream = stream
+    factory = Mock(side_effect=AssertionError('External must not bind Native lifecycle'))
+    monkeypatch.setattr(organization_auth, 'configured_authenticator', lambda: object())
+    with tool_authority_scope(None, provider_authorizers=ExecutionResourceAuthorities(
+        {}, native_lifecycle_factory=factory,
+    )):
+        if stream:
+            chunks = [part async for part in facade.process_message_stream(item)]
+            assert len(chunks) == 1 and chunks[0].is_complete
+            result = chunks[0].payload
+            assert result['event_type'] == 'goal.snapshot'
+        else:
+            response = await facade.execute_message(item)
+            assert response.ok
+            result = response.payload
+    assert result['action'] == action
+    factory.assert_not_called()
+    assert facade._adapter is c.adapter
+    assert all(not provider.sent for provider in c.providers)
+    if action == 'clear':
+        assert c.adapter._goal_runtime.manager.peek() is None
+        assert result['cleared_goal']['goal_id'] == original.goal_id
+    else:
+        assert c.adapter._goal_runtime.manager.peek().goal_id == original.goal_id
+        assert result['goal']['status'] == 'paused'
+
+
+@pytest.mark.parametrize('governed_external_goal', ['opencode'], indirect=True)
+@pytest.mark.parametrize('route_kind', ['user_fields', 'fake_route', 'missing_bound', 'different_binding'])
+async def test_external_exemption_preserves_original_adapter_route_validation(
+    governed_external_goal, monkeypatch, route_kind,
+):
+    from jiuwenswarm.governance import organization_auth
+    from tests.unit_tests.runtime.harness.test_external_goal_runtime import request as goal_request
+    from tests.unit_tests.runtime.harness.test_external_execution_route import _route
+    c = governed_external_goal
+    facade = JiuWenSwarm()
+    facade._adapter = c.adapter
+    facade._sdk_name = 'harness'
+    await c.adapter._goal_runtime.manager.set('original External objective')
+    item = goal_request('external-control', action='clear')
+    item.params.update(provider_id='opencode', mode='opencode')
+    if route_kind == 'fake_route':
+        item._execution_route = SimpleNamespace(provider_id='opencode', bound=c.adapter._route.bound)
+        item._bound_execution = c.adapter._route.bound
+    elif route_kind == 'missing_bound':
+        item._execution_route = c.adapter._route
+    elif route_kind == 'different_binding':
+        # A genuine but different host binding reaches Engine.bind_route and is
+        # rejected there; Native exemption does not replace External admission.
+        route = _route(c.adapter._route.runtime_paths.runtime_workspace_root.parent,
+                       provider_id='opencode', subject_id='different-owner')
+        item._execution_route = route
+        item._bound_execution = route.bound
+    monkeypatch.setattr(organization_auth, 'configured_authenticator', lambda: object())
+    response = await facade.execute_message(item)
+    assert response.ok is False
+    assert c.adapter._goal_runtime.manager.peek().objective == 'original External objective'
+    assert all(not provider.sent for provider in c.providers)

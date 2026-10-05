@@ -124,6 +124,7 @@ SWARM_BROWSER_AGENT = _code_subagents.SWARM_BROWSER_AGENT
 # Swarm-owned no-parameter class rails declared in ``builtin_rails``.
 RESPONSE_PROMPT = _builtin_rails.RESPONSE_PROMPT
 STREAM_EVENT = _builtin_rails.STREAM_EVENT
+RESOURCE_AUTHORITY = _builtin_rails.RESOURCE_AUTHORITY
 AVATAR_PROMPT = _builtin_rails.AVATAR_PROMPT
 MULTIMODAL_IMAGE = _builtin_rails.MULTIMODAL_IMAGE
 

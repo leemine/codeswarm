@@ -45,6 +45,7 @@ from openjiuwen.extensions.external_provider.openai_auth.openai_account_models i
     OpenAIAccountModelListError,
 )
 
+from jiuwenswarm.governance.model_consumer import runtime_model_kwargs
 from jiuwenswarm.common.auth.model_catalog import is_login_model
 from jiuwenswarm.common.config import (
     DEFAULT_SWARMFLOW_ENABLED,
@@ -3036,6 +3037,46 @@ async def _pre_persist_large_media(
     return params
 
 
+def _sharing_mutation_error_payload(value, method, expected):
+    """Project only a correlated committed-change receipt, never error bodies."""
+    if (type(value) is not dict or value.get('code') != 'EXIT_UNCONFIRMED'
+            or value.get('exit_confirmed') is not False):
+        return None
+    mutation, audit = value.get('mutation'), value.get('audit')
+    if (type(mutation) is not dict
+            or set(mutation) != {'committed', 'method', 'session_id', 'share_id', 'revision'}
+            or mutation['committed'] is not True or mutation['method'] != method
+            or mutation['session_id'] != expected['session_id']
+            or type(mutation['session_id']) is not str or not mutation['session_id']
+            or type(mutation['share_id']) is not str or not mutation['share_id']
+            or len(mutation['share_id']) > 200 or len(mutation['session_id']) > 200
+            or type(mutation['revision']) is not int or not 1 <= mutation['revision'] <= 2 ** 53 - 1):
+        return None
+    if any(value != value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value)
+           for value in (mutation['share_id'], mutation['session_id'])):
+        return None
+    if method == 'session.share.create':
+        if mutation['revision'] != 1:
+            return None
+    elif (type(expected['expected_revision']) is not int
+          or mutation['share_id'] != expected['share_id']
+          or mutation['revision'] != expected['expected_revision'] + 1):
+        return None
+    if type(audit) is not dict or set(audit) != {'persisted', 'degraded', 'reason', 'sequence', 'event_id'}:
+        return None
+    persisted = (audit['persisted'] is True and audit['degraded'] is False
+                 and audit['reason'] == 'audit_persisted' and type(audit['sequence']) is int
+                 and 1 <= audit['sequence'] <= 2 ** 53 - 1 and type(audit['event_id']) is str
+                 and re.fullmatch(r'[a-f0-9]{32}', audit['event_id']) is not None)
+    degraded = (audit['persisted'] is False and audit['degraded'] is True
+                and audit['reason'] == 'audit_storage_invalid'
+                and audit['sequence'] is None and audit['event_id'] is None)
+    if not persisted and not degraded:
+        return None
+    return {'code': 'EXIT_UNCONFIRMED', 'exit_confirmed': False,
+            'mutation': dict(mutation), 'audit': dict(audit)}
+
+
 def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     """注册 Web 前端需要的 method 与 on_connect。
     on_config_saved: 可选，config.set 写回后调用的回调；
@@ -3175,7 +3216,24 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     if callable(register_disconnect):
         register_disconnect(_on_disconnect)
 
+    async def _organization_bootstrap_response(ws, req_id, params, method):
+        from jiuwenswarm.server.runtime.gateway_adapter.config_adapter import organization_ui_projection
+        try:
+            projection = organization_ui_projection(method, params)
+        except PermissionError:
+            await channel.send_response(ws, req_id, ok=False, error="organization configuration access denied", code="FORBIDDEN")
+            return True
+        except Exception:
+            await channel.send_response(ws, req_id, ok=False, error="organization bootstrap unavailable", code="INTERNAL_ERROR")
+            return True
+        if projection is None:
+            return False
+        await channel.send_response(ws, req_id, ok=True, payload=projection)
+        return True
+
     async def _config_get(ws, req_id, params, session_id):
+        if await _organization_bootstrap_response(ws, req_id, params, "config.get"):
+            return
         # 返回 _CONFIG_SET_ENV_MAP 里所有键对应的环境变量当前值
         payload = {
             param_key: (os.getenv(env_key) or "")
@@ -3965,7 +4023,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "[config.validate_model] skip budget floor from reasoning plan",
                 exc_info=True,
             )
-        llm = Model(model_config=model_request_config, model_client_config=model_client_config)
+        llm = Model(**runtime_model_kwargs(model_config=model_request_config, model_client_config=model_client_config))
 
         try:
             await probe_model_connection(
@@ -4000,6 +4058,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         一旦机器上存在两个活跃会话（换个浏览器再登一次就够了），那个假设会拒绝
         猜是谁，于是登录了却一个免费模型都列不出来。
         """
+        if await _organization_bootstrap_response(ws, req_id, params, "models.list"):
+            return
         try:
             config = get_config()
             auth_session = getattr(ws, "_jiuwen_auth_session", "") or None
@@ -4687,6 +4747,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             is_legacy_shared_directory_client(real_client)
             and not getattr(real_client, "server_ready", True)
         ):
+            from jiuwenswarm.gateway.routing.e2a_proxy import organization_local_fallback_denial
+
+            denied = organization_local_fallback_denial()
+            if denied is not None:
+                await channel.send_response(ws, req_id, ok=False, error=denied["error"], code=denied["code"])
+                return
             from jiuwenswarm.server.runtime.gateway_adapter.base import parse_int_param
             from jiuwenswarm.server.runtime.session.session_info import to_session_info
             from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata
@@ -4849,6 +4915,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             is_legacy_shared_directory_client(real_client)
             and not getattr(real_client, "server_ready", True)
         ):
+            from jiuwenswarm.gateway.routing.e2a_proxy import organization_local_fallback_denial
+
+            denied = organization_local_fallback_denial()
+            if denied is not None:
+                await channel.send_response(ws, req_id, ok=False, error=denied["error"], code=denied["code"])
+                return
             from jiuwenswarm.server.runtime.session.session_rename import apply_session_rename
 
             ok, payload, error, code = apply_session_rename(
@@ -4892,6 +4964,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             is_legacy_shared_directory_client(real_client)
             and not getattr(real_client, "server_ready", True)
         ):
+            from jiuwenswarm.gateway.routing.e2a_proxy import organization_local_fallback_denial
+
+            denied = organization_local_fallback_denial()
+            if denied is not None:
+                await channel.send_response(ws, req_id, ok=False, error=denied["error"], code=denied["code"])
+                return
             raw_params = params if isinstance(params, dict) else {}
             sid = raw_params.get("session_id")
             pinned = raw_params.get("pinned")
@@ -4954,8 +5032,34 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         async def handler(ws, req_id, params, session_id, user_id=None):
             from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
 
+            response_channel = channel
+            sharing_mutation = method.value in {
+                'session.share.create', 'session.share.update', 'session.share.revoke',
+            }
+            if sharing_mutation:
+                input_params = params if isinstance(params, dict) else {}
+                expected = {key: input_params.get(key) for key in ('session_id', 'share_id', 'expected_revision')}
+
+                class SharingMutationResponses:
+                    channel_id = channel.channel_id
+
+                    async def send_response(self, response_ws, response_id, **kwargs):
+                        if kwargs.get('ok') is not True:
+                            payload = _sharing_mutation_error_payload(kwargs.get('payload'), method.value, expected)
+                            kwargs['payload'] = payload
+                            kwargs['error'] = ('Sharing changed; execution exit remains unconfirmed. '
+                                               'Refresh; do not repeat the change.' if payload else
+                                               'Sharing request failed; refresh the current state.')
+                            if kwargs.get('code') not in {
+                                'EXIT_UNCONFIRMED', 'FORBIDDEN', 'CONFLICT', 'BAD_REQUEST',
+                                'SERVICE_UNAVAILABLE', 'AGENT_SERVER_TIMEOUT',
+                            }:
+                                kwargs['code'] = 'FORBIDDEN'
+                        await channel.send_response(response_ws, response_id, **kwargs)
+
+                response_channel = SharingMutationResponses()
             await proxy_unary_request(
-                channel=channel,
+                channel=response_channel,
                 agent_client=_resolve(agent_client),
                 ws=ws,
                 req_id=req_id,
@@ -4964,6 +5068,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 user_id=user_id,
                 req_method=method,
                 label=method.value,
+                preserve_error_payload=sharing_mutation,
             )
         return handler
 
@@ -5685,6 +5790,42 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
 
     async def _chat_interrupt(ws, req_id, params, session_id):
+        from jiuwenswarm.governance.organization_auth import configured_authenticator, connection_principal
+        from jiuwenswarm.governance.session_boundary import is_cleanup_request
+        if configured_authenticator() is not None and is_cleanup_request("chat.interrupt", params):
+            from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+            from jiuwenswarm.common.schema.message import ReqMethod
+            from jiuwenswarm.gateway.routing.agent_request_timeout import send_agent_request_with_timeout
+            permit = getattr(ws, "_jiuwen_session_permits", {}).get(req_id)
+            success = False
+            try:
+                identity = connection_principal(ws).identity()
+                if permit is None or not permit.allows_cleanup("chat.interrupt", params, identity, session_id):
+                    raise PermissionError("original cleanup request required")
+                client = _resolve(agent_client)
+                if client is None or getattr(client, "server_ready", True) is False:
+                    raise ConnectionError("cleanup transport unavailable")
+                envelope = e2a_from_agent_fields(
+                    request_id=req_id, channel_id=channel.channel_id, session_id=session_id,
+                    req_method=ReqMethod.CHAT_CANCEL, params=dict(params), is_stream=False,
+                    timestamp=time.time(), user_id=channel._connection_user_id(ws),
+                )
+                response = await send_agent_request_with_timeout(client, envelope, label="session.cleanup")
+                result = response.payload
+                success = (permit.allows_cleanup("chat.interrupt", params,
+                           connection_principal(ws).identity(), session_id)
+                           and response.request_id == req_id and response.channel_id == channel.channel_id
+                           and response.ok is True
+                           and isinstance(result, dict) and result.get("session_id") == session_id
+                           and result.get("event_type") == "chat.interrupt_result"
+                           and result.get("intent") == "cancel" and result.get("success") is True
+                           and result.get("exit_confirmed") is True)
+            except Exception:
+                # Backend errors and payloads may contain private state. Only
+                # the fixed unconfirmed result is allowed across this boundary.
+                success = False
+            channel.send_cleanup_result(ws, req_id, permit, success=success)
+            return
         intent = params.get("intent") if isinstance(params, dict) else None
         payload = {"accepted": True, "session_id": session_id}
         if isinstance(intent, str) and intent:
@@ -6956,6 +7097,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         ProjectMethod.PROJECT_EXTENSIONS_GET,
         ProjectMethod.PROJECT_EXTENSIONS_UPDATE,
         ProjectMethod.PROJECT_ACL_UPDATE,
+        ProjectMethod.PROJECT_CONTENT_GET,
+        ProjectMethod.PROJECT_CONTENT_UPDATE,
+        ProjectMethod.SESSION_SHARE_AUDIT_LIST,
+        ProjectMethod.SESSION_SHARE_LIST,
+        ProjectMethod.SESSION_SHARE_CREATE,
+        ProjectMethod.SESSION_SHARE_UPDATE,
+        ProjectMethod.SESSION_SHARE_REVOKE,
+        ProjectMethod.SESSION_SHARE_HISTORY_GET,
+        ProjectMethod.SESSION_SHARE_CONTINUATION_OPTIONS,
+        ProjectMethod.SESSION_SHARE_CONTINUE,
     ):
         channel.register_method(method.value, _project_extension_handler(method))
     channel.register_method("project.list", _project_list)

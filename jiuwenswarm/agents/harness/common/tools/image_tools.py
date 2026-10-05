@@ -18,6 +18,7 @@ from openjiuwen.core.foundation.tool import McpServerConfig, tool
 from openjiuwen.core.runner import Runner
 import requests
 
+from jiuwenswarm.governance.model_consumer import model_request_authority, runtime_model_kwargs
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_image_gen_model_config_from_yaml,
@@ -128,6 +129,8 @@ def _make_missing_key_error() -> str:
 
 
 async def _invoke_openai_vision(src: str, q: str) -> str:
+    # No scoped credential/resource transport is available for this image path.
+    model_request_authority(None)  # Legacy no-op; governed mode rejects before IO.
     api_key, api_base, model = _get_vision_api_credentials()
     if not api_key:
         return _make_missing_key_error()
@@ -167,6 +170,8 @@ async def _invoke_openai_vision(src: str, q: str) -> str:
 
 
 async def _invoke_gemini_vision(src: str, q: str) -> str:
+    # No scoped credential/resource transport is available for this image path.
+    model_request_authority(None)  # Legacy no-op; governed mode rejects before IO.
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
     if not gemini_key:
         return "[ERROR]: GEMINI_API_KEY is not configured for Gemini vision."
@@ -305,6 +310,8 @@ def _build_vqa_prompt(ocr_result: str, question: str) -> str:
     ),
 )
 async def visual_question_answering(image_path_or_url: str, question: str) -> str:
+    # No scoped credential/resource transport is available for this image path.
+    model_request_authority(None)  # Legacy no-op; governed mode rejects before IO.
     from jiuwenswarm.common.config import get_config
     try:
         apply_vision_model_config_from_yaml(get_config())
@@ -334,6 +341,8 @@ async def _invoke_model_image_generation(prompt: str, size: str = "1024x1024", q
     Returns:
         dict with 'image_path' or 'error' key
     """
+    # No scoped credential/resource transport is available for this image path.
+    model_request_authority(None)  # Legacy no-op; governed mode rejects before IO.
     from openjiuwen.core.foundation.llm import ModelClientConfig, Model, UserMessage, ModelRequestConfig
 
     # 与主链路（apply_image_gen_model_config_from_yaml）同源：直接读 config.yaml
@@ -379,10 +388,10 @@ async def _invoke_model_image_generation(prompt: str, size: str = "1024x1024", q
             model=model,
         )
 
-        model_instance = Model(
+        model_instance = Model(**runtime_model_kwargs(
             model_config=model_config,
             model_client_config=model_client_config
-        )
+        ))
 
         messages = [UserMessage(content=prompt)]
 
@@ -467,6 +476,8 @@ async def generate_image(
     Returns:
         Path to the generated image file or error message
     """
+    # No scoped credential/resource transport is available for this image path.
+    model_request_authority(None)  # Legacy no-op; governed mode rejects before IO.
     from jiuwenswarm.common.config import get_config
     try:
         apply_image_gen_model_config_from_yaml(get_config())

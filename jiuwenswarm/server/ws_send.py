@@ -95,6 +95,14 @@ def _build_oversized_fallback(
 
 async def send_wire_payload(ws: Any, wire: dict[str, Any]) -> bool:
     """Send one bounded wire payload, replacing oversized data with an error."""
+    from jiuwenswarm.governance.session_boundary import delivery_authorized
+    if not delivery_authorized():
+        # Never forward a buffered private body after revocation. A bounded
+        # generic denial is safe even when admission never produced a permit.
+        wire = encode_agent_response_for_wire(AgentResponse(
+            request_id=str(wire.get("request_id") or ""), channel_id=str(wire.get("channel") or ""),
+            ok=False, payload={"code": "FORBIDDEN", "error": "Session authorization denied."},
+        ), response_id=str(wire.get("response_id") or wire.get("request_id") or ""))
     serialized = json.dumps(wire, ensure_ascii=False)
     actual_bytes = len(serialized.encode("utf-8"))
     if actual_bytes <= AGENT_WS_SEND_BUDGET_BYTES:
@@ -129,3 +137,43 @@ async def send_wire_payload(ws: Any, wire: dict[str, Any]) -> bool:
         )
     await ws.send(fallback_json)
     return False
+
+
+async def send_service_ready(ws: Any, *, heartbeat_protocol: int, heartbeat_ready: bool) -> None:
+    """Host-only fixed control handshake, with no Session or user data."""
+    if type(heartbeat_protocol) is not int or not 0 <= heartbeat_protocol <= 1000 or type(heartbeat_ready) is not bool:
+        raise ValueError("invalid service readiness metadata")
+    await ws.send(json.dumps({"type": "event", "event": "connection.ack", "payload": {
+        "status": "ready", "heartbeat_job_owner": "agentserver",
+        "heartbeat_job_protocol": heartbeat_protocol, "heartbeat_job_ready": heartbeat_ready,
+    }}))
+
+
+async def send_deletion_result(ws: Any, *, authority, request) -> bool:
+    """Send only a confirmed, content-free result of the original Single delete.
+
+    The normal owner permit correctly becomes invalid after retirement. This
+    sink checks that same permit's exact durable deletion facts; it is not a
+    generic permission exemption for responses or Session events.
+    """
+    from jiuwenswarm.runtime.session_delete_authority import OwnedSessionDeletion
+    allowed = False
+    try:
+        if type(authority) is OwnedSessionDeletion and authority.request is request:
+            authority.acknowledge()
+            audit_pending = authority.host.deletion_audit_pending_for_permit(authority._permit)
+            allowed = type(audit_pending) is bool
+    except Exception:
+        pass
+    payload = ({'session_id': authority.session_id, 'deleted': True, 'exit_confirmed': True,
+                'audit_pending': audit_pending}
+               if allowed else {'code': 'DELETE_UNCONFIRMED', 'error': 'Deletion result is unavailable.'})
+    wire = encode_agent_response_for_wire(AgentResponse(
+        request_id=request.request_id, channel_id=request.channel_id,
+        ok=allowed, payload=payload,
+    ), response_id=request.request_id)
+    serialized = json.dumps(wire, ensure_ascii=False)
+    if len(serialized.encode('utf-8')) > AGENT_WS_SEND_BUDGET_BYTES:
+        return await send_wire_payload(ws, _build_oversized_fallback(wire, len(serialized.encode('utf-8'))))
+    await ws.send(serialized)
+    return allowed

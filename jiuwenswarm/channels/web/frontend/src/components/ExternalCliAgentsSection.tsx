@@ -141,6 +141,7 @@ export function externalCliSaveValidationMessage(
 }
 
 type ExternalCliAgentsSectionProps = {
+  organizationAuth?: boolean;
   draftValues: Record<string, string>;
   onChange: (key: string, value: string) => void;
   onDetect?: (cliAgent: ExternalCliAgentKind, cliPath?: string) => Promise<ExternalCliDetectResult>;
@@ -154,6 +155,7 @@ type ExternalCliAgentsSectionProps = {
 };
 
 export function ExternalCliAgentsSection({
+  organizationAuth = false,
   draftValues,
   onChange,
   onDetect,
@@ -207,7 +209,7 @@ export function ExternalCliAgentsSection({
 
   const detect = useCallback(
     async (cliAgent: ExternalCliAgentKind, cliPath?: string) => {
-      if (!onDetect) return;
+      if (!onDetect || (organizationAuth && cliAgent === 'codex')) return;
       const requestId = detectRequestIdsRef.current[cliAgent] + 1;
       detectRequestIdsRef.current[cliAgent] = requestId;
       setDetecting((prev) => ({ ...prev, [cliAgent]: true }));
@@ -236,7 +238,7 @@ export function ExternalCliAgentsSection({
         }
       }
     },
-    [onDetect, onResultsChange],
+    [onDetect, onResultsChange, organizationAuth],
   );
 
   const clearDetectResult = useCallback(
@@ -313,13 +315,13 @@ export function ExternalCliAgentsSection({
   }, [claudeCliPath, detect, onDetect]);
 
   useEffect(() => {
-    if (!onDetect) return undefined;
+    if (!onDetect || organizationAuth) return undefined;
     const timer = window.setTimeout(
       () => void detect('codex', codexCliPath),
       EXTERNAL_CLI_AUTO_DETECT_DELAY_MS,
     );
     return () => window.clearTimeout(timer);
-  }, [codexCliPath, detect, onDetect]);
+  }, [codexCliPath, detect, onDetect, organizationAuth]);
 
   const statusClass = (status?: ExternalCliDetectResult['status']) => {
     if (status === 'ok') return 'text-ok';
@@ -376,9 +378,11 @@ export function ExternalCliAgentsSection({
         const useBuiltinKey = externalCliKey(cliAgent, 'use_builtin');
         const cliPathKey = externalCliKey(cliAgent, 'cli_path');
         const enabled = draftValues[enabledKey] === 'true';
+        const governedUnavailable = organizationAuth && cliAgent === 'codex';
+        const agentDisabled = disabled || governedUnavailable;
         const useBuiltin = draftValues[useBuiltinKey] === 'true';
         const result = results[cliAgent];
-        const displayResult = useBuiltin ? undefined : result;
+        const displayResult = useBuiltin || governedUnavailable ? undefined : result;
         const message = resultMessage(displayResult, useBuiltin, cliAgent, draftValues[cliPathKey] ?? '');
         const label = cliAgent === 'claude' ? t('config.externalCli.claude') : t('config.externalCli.codex');
         // Detected PATH is only copyable when the input still shows it as a
@@ -404,7 +408,7 @@ export function ExternalCliAgentsSection({
                 aria-checked={enabled}
                 aria-label={t(`config.booleanLabels.externalCli${cliAgent === 'claude' ? 'Claude' : 'Codex'}`)}
                 onClick={() => onChange(enabledKey, enabled ? 'false' : 'true')}
-                disabled={disabled}
+                disabled={agentDisabled}
                 data-testid="settings-panel-external-cli-agent-toggle"
                 data-variant={cliAgent}
                 className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent focus:outline-none ${enabled ? 'bg-[var(--color-toggle-enabled)]' : 'bg-[var(--color-toggle-disabled)]'} disabled:cursor-not-allowed disabled:opacity-60`}
@@ -414,12 +418,22 @@ export function ExternalCliAgentsSection({
                 />
               </button>
             </div>
+            {governedUnavailable ? (
+              <div
+                className="text-sm text-warn"
+                role="status"
+                data-testid="settings-panel-external-cli-agent-unavailable"
+                data-variant={cliAgent}
+              >
+                {t('config.externalCli.codexGovernedUnavailable')}
+              </div>
+            ) : null}
             <div className="flex flex-wrap items-center gap-3">
               <label className="inline-flex items-center gap-2 text-xs text-text">
                 <input
                   type="checkbox"
                   checked={useBuiltin}
-                  disabled={disabled || !enabled}
+                  disabled={agentDisabled || !enabled}
                   onChange={(event) => onChange(useBuiltinKey, event.target.checked ? 'true' : 'false')}
                   className="h-3.5 w-3.5 rounded border-border"
                   data-testid="settings-panel-external-cli-agent-use-builtin-input"
@@ -427,17 +441,17 @@ export function ExternalCliAgentsSection({
                 />
                 {t('config.externalCli.useBuiltin')}
               </label>
-              {!useBuiltin ? (
+              {!useBuiltin && !governedUnavailable ? (
                 <button
                   type="button"
                   className="settings-button settings-button--secondary inline-flex shrink-0 flex-nowrap items-center gap-1.5 whitespace-nowrap !px-2.5 !py-1 text-xs"
-                  disabled={disabled || !enabled || !onDetect || detecting[cliAgent]}
+                  disabled={agentDisabled || !enabled || !onDetect || detecting[cliAgent]}
                   onClick={() => void detect(cliAgent, draftValues[cliPathKey] || '')}
                   title={
-                    disabled || !enabled || !onDetect ? undefined : t('config.externalCli.detectHint')
+                    agentDisabled || !enabled || !onDetect ? undefined : t('config.externalCli.detectHint')
                   }
                   aria-label={
-                    disabled || !enabled || !onDetect ? undefined : t('config.externalCli.detectHint')
+                    agentDisabled || !enabled || !onDetect ? undefined : t('config.externalCli.detectHint')
                   }
                   data-testid="settings-panel-external-cli-agent-detect-btn"
                   data-variant={cliAgent}
@@ -450,7 +464,7 @@ export function ExternalCliAgentsSection({
                   {t('config.externalCli.detect')}
                 </button>
               ) : null}
-              {!useBuiltin ? (
+              {!useBuiltin && !governedUnavailable ? (
                 <span
                   className={`text-xs ${statusClass(displayResult?.status)}`}
                   data-testid="settings-panel-external-cli-agent-status"
@@ -470,12 +484,12 @@ export function ExternalCliAgentsSection({
                 </span>
               ) : null}
             </div>
-            {!useBuiltin ? (
+            {!useBuiltin && !governedUnavailable ? (
               <div className="flex items-center gap-2">
                 <input
                   type="text"
                   value={draftValues[cliPathKey] ?? ''}
-                  disabled={disabled || !enabled}
+                  disabled={agentDisabled || !enabled}
                   onChange={(event) => changeCliPath(cliAgent, cliPathKey, event.target.value)}
                   placeholder={displayResult?.path || t('config.externalCli.cliPathPlaceholder', { agent: cliAgent })}
                   data-testid="settings-panel-external-cli-agent-cli-path-input"
@@ -486,7 +500,7 @@ export function ExternalCliAgentsSection({
                   <button
                     type="button"
                     className="inline-flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md border border-border bg-bg text-text-muted hover:bg-secondary/30 disabled:opacity-50"
-                    disabled={disabled}
+                    disabled={agentDisabled}
                     onClick={() => void copyDetectedPath(cliAgent, detectedPath)}
                     title={
                       disabled
@@ -511,9 +525,9 @@ export function ExternalCliAgentsSection({
                 <button
                   type="button"
                   className="inline-flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md border border-border bg-bg text-text-muted hover:bg-secondary/30 disabled:opacity-50"
-                  disabled={disabled || !enabled || !onSelectFile || selecting[cliAgent]}
-                  title={disabled || !enabled || !onSelectFile ? undefined : t('config.externalCli.selectFile')}
-                  aria-label={disabled || !enabled || !onSelectFile ? undefined : t('config.externalCli.selectFile')}
+                  disabled={agentDisabled || !enabled || !onSelectFile || selecting[cliAgent]}
+                  title={agentDisabled || !enabled || !onSelectFile ? undefined : t('config.externalCli.selectFile')}
+                  aria-label={agentDisabled || !enabled || !onSelectFile ? undefined : t('config.externalCli.selectFile')}
                   onClick={() => void selectFile(cliAgent, cliPathKey)}
                   data-testid="settings-panel-external-cli-agent-select-file-btn"
                   data-variant={cliAgent}
@@ -526,7 +540,7 @@ export function ExternalCliAgentsSection({
                 </button>
               </div>
             ) : null}
-            {message ? <div className="text-[11px] leading-4 text-text-muted">{message}</div> : null}
+            {message && !governedUnavailable ? <div className="text-[11px] leading-4 text-text-muted">{message}</div> : null}
           </div>
         );
       })}

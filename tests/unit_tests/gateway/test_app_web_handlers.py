@@ -4054,3 +4054,22 @@ async def test_pre_persist_large_media_splits_or_keeps_oversized_images(
     assert "_persisted" not in items[1]
     assert items[1]["base64Data"] == small_b64
     assert 1 not in uploaded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["session.share.list", "session.share.create", "session.share.update", "session.share.revoke", "session.share.history.get"])
+async def test_all_sharing_methods_forward_to_agentserver(monkeypatch, method):
+    from unittest.mock import AsyncMock
+    proxy = AsyncMock()
+    monkeypatch.setattr("jiuwenswarm.gateway.routing.e2a_proxy.proxy_unary_request", proxy)
+    channel = FakeWebChannel()
+    client = object()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, agent_client=client))
+    params = {"session_id": "private", "share_id": "fixed-share"}
+    ws = object()
+    await channel.methods[method](ws, "request", params, "transport-placeholder", user_id="routing-only")
+    forwarded = proxy.await_args.kwargs
+    assert forwarded["req_method"].value == method
+    assert forwarded["params"] is params
+    assert forwarded["agent_client"] is client
+    assert forwarded["ws"] is ws

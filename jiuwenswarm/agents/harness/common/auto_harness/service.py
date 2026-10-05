@@ -56,6 +56,7 @@ from openjiuwen.rsi.harness_rsi.auto_harness.stages.activate import ExtendActiva
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.session.stream.base import OutputSchema
 
+from jiuwenswarm.governance.model_consumer import model_request_authority, runtime_model_kwargs
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.common.utils import get_user_workspace_dir
@@ -960,6 +961,7 @@ class AutoHarnessService:
     @staticmethod
     def _build_model_from_env() -> Optional[Model]:
         """Build Model from environment variables as fallback."""
+        model_request_authority(None)  # No catalog binding exists for ambient env fallback.
         api_key = os.getenv("API_KEY", "").strip()
         base_url = os.getenv("API_BASE", os.getenv("BASE_URL", "")).strip()
         model_name = os.getenv("MODEL_NAME", os.getenv("MODEL", "")).strip()
@@ -970,14 +972,14 @@ class AutoHarnessService:
             )
             return None
 
-        return Model(
+        return Model(**runtime_model_kwargs(
             model_client_config=ModelClientConfig(
                 api_key=api_key,
                 base_url=base_url,
                 model_name=model_name,
             ),
-            model_config=ModelRequestConfig(model=model_name, temperature=0.95),
-        )
+            model_config=ModelRequestConfig(model=model_name, temperature=0.95)
+        ))
 
     @staticmethod
     def is_activate_only_request(request: Any, query: str) -> bool:

@@ -1,4 +1,5 @@
-﻿import {
+﻿import { organizationRequestRestriction } from '../../features/organizationRelease';
+import {
   useState,
   useRef,
   useCallback,
@@ -294,6 +295,7 @@ function isDefaultProject(project: ProjectInfo): boolean {
 }
 
 interface InputAreaProps {
+  organizationAuth?: boolean;
   onSubmit: (content: string, mediaItems?: MediaItem[]) => void;
   onEnsureSession: (initialTitle?: string) => Promise<string | null>;
   onNewSession: () => void;
@@ -665,6 +667,7 @@ function buildSubmitContent(text: string, attachments: AttachmentDraft[]): strin
 
 export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function InputArea(
   {
+    organizationAuth = false,
     onSubmit,
     onEnsureSession,
     onNewSession,
@@ -960,7 +963,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const isWorkContextLocked = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
   const showWorkContextRow = activeSessionId === NEW_CONVERSATION_ID;
   /** Goal 入口是否适用于当前上下文（agent 模式 + 已接入 onSetGoal，如欢迎页新会话就不适用） */
-  const canUseGoalMenu = isAgentMode && Boolean(onSetGoal);
+  const canUseGoalMenu = !organizationAuth && isAgentMode && Boolean(onSetGoal);
   // 只跟 armed 挂钩：这个 tag 是"下一条消息将用于设置目标"的过渡态指示，发送后 armed 变 false
   // 就该跟着消失，不能靠"目标是否存在"续命——目标存在与否、当前状态、编辑/暂停/删除，已经由
   // 输入框上方常驻的 GoalBar 完整覆盖，工具栏这里再挂一份重复的常驻入口只会显得"选择没解除"。
@@ -1898,6 +1901,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   const runGoalSlashAction = useCallback(
     async (sessionId: string, action: GoalSlashAction, objective?: string): Promise<GoalSlashSnapshot> => {
+      if (organizationAuth && action !== 'get') throw new Error(t('organizationRelease.goalUnavailable'));
       if (action === 'get' && sessionId === NEW_CONVERSATION_ID) return null;
 
       if (action === 'set') {
@@ -1929,7 +1933,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       const goal = useGoalStore.getState().getRuntime(sessionId)?.goal;
       return goal ? { objective: goal.objective, status: goal.status } : null;
     },
-    [onClearGoal, onPauseGoal, onRefreshGoal, onResumeGoal, onSetGoal, onSubmit],
+    [organizationAuth, t, onClearGoal, onPauseGoal, onRefreshGoal, onResumeGoal, onSetGoal, onSubmit],
   );
 
   const executeSlashCommand = useCallback(
@@ -1970,6 +1974,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   const handleSubmit = useCallback(() => {
     if (composerDisabled) return;
+    const restriction = organizationRequestRestriction(organizationAuth, 'chat.send', {}, mode);
+    if (restriction || (organizationAuth && goalArmed)) {
+      pushAttachmentAlert(t(restriction ?? 'organizationRelease.goalUnavailable'));
+      return;
+    }
 
     // 用富文本（含 chip 标记）作为发送内容，气泡可交织渲染技能
     const richContent = extractRichContent();
@@ -2098,6 +2107,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     readyMediaItems,
     hasUploadingAttachments,
     hasAttachmentErrors,
+    organizationAuth,
     composerDisabled,
     isInterruptible,
     onSubmit,
@@ -2934,10 +2944,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   const handleModeSwitch = useCallback(
     async (targetMode: AgentMode) => {
+      const restriction = organizationRequestRestriction(organizationAuth, 'session.create', { mode: targetMode });
+      if (restriction) { pushAttachmentAlert(t(restriction)); return; }
       if (isProcessing || hasHistory || mode === targetMode) return;
       onSwitchMode(targetMode);
     },
-    [isProcessing, hasHistory, mode, onSwitchMode],
+    [organizationAuth, pushAttachmentAlert, t, isProcessing, hasHistory, mode, onSwitchMode],
   );
 
   const handleModeSelect = useCallback(
@@ -4001,6 +4013,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                           <button
                             type="button"
                             key={m.value}
+                            disabled={Boolean(organizationRequestRestriction(organizationAuth, 'session.create', { mode: m.value }))}
+                            title={organizationAuth && m.value === 'team' ? t('organizationRelease.teamUnavailable') : undefined}
                             onClick={() => void handleModeSelect(m.value)}
                             onMouseEnter={(e) => {
                               const desc = m.descriptionI18nKey ? t(m.descriptionI18nKey) : null;

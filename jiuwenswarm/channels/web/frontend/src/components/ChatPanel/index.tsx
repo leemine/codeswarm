@@ -95,6 +95,7 @@ export interface ChatHistoryPagerProps {
 }
 
 interface ChatPanelProps {
+  organizationAuth?: boolean;
   onSendMessage: (content: string, mediaItems?: MediaItem[]) => void;
   onEnsureSession: (initialTitle?: string) => Promise<string | null>;
   onNewSession: () => void;
@@ -134,6 +135,7 @@ interface ChatPanelProps {
     source?: string,
   ) => Promise<boolean>;
   onExportShare?: () => void | Promise<void>;
+  shareActionLabel?: string;
   isExportingShare?: boolean;
   canExportShare?: boolean;
   sessionTitle?: string;
@@ -972,6 +974,7 @@ export const ChatPanel = React.memo(function ChatPanel({
   isProcessing,
   onUserAnswer,
   onExportShare,
+  shareActionLabel,
   isExportingShare = false,
   canExportShare = false,
   sessionTitle,
@@ -979,6 +982,7 @@ export const ChatPanel = React.memo(function ChatPanel({
   sessionProject = null,
   historyPager = null,
   isHistoryRestoring = false,
+  organizationAuth = false,
   teamAreaExpanded = false,
   autoFocusKey = null,
   onNavigateToSkills,
@@ -1066,7 +1070,7 @@ export const ChatPanel = React.memo(function ChatPanel({
     : 'chat-content chat-content--welcome';
   const suggestions = [t('chat.welcomeSuggestions.journey'), t('chat.welcomeSuggestions.skills')];
   const shouldShowChatHeader = hasConversation;
-  const shareExportTitle = getShareExportTitle(t, isExportingShare, canExportShare);
+  const shareExportTitle = shareActionLabel ?? getShareExportTitle(t, isExportingShare, canExportShare);
   const shouldShowShareExport = Boolean(onExportShare);
   const shouldShowHumanShare = mode === 'team' && teamHumanShareCommands.length > 0;
   const [humanShareOpen, setHumanShareOpen] = React.useState(false);
@@ -1968,6 +1972,7 @@ export const ChatPanel = React.memo(function ChatPanel({
             />
           )}
           <InputArea
+            organizationAuth={organizationAuth}
             ref={inputAreaRef}
             onSubmit={handleSendMessage}
             onEnsureSession={onEnsureSession}

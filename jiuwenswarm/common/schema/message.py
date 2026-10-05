@@ -55,6 +55,14 @@ class ReqMethod(Enum):
     CHANNEL_GET = "channel.get"
 
     SESSION_LIST = "session.list"
+    SESSION_SHARE_CONTINUATION_OPTIONS = "session.share.continuation.options"
+    SESSION_SHARE_CONTINUE = "session.share.continue"
+    SESSION_SHARE_HISTORY_GET = "session.share.history.get"
+    SESSION_SHARE_AUDIT_LIST = "session.share.audit.list"
+    SESSION_SHARE_LIST = "session.share.list"
+    SESSION_SHARE_CREATE = "session.share.create"
+    SESSION_SHARE_UPDATE = "session.share.update"
+    SESSION_SHARE_REVOKE = "session.share.revoke"
     SESSION_GET_METADATA = "session.get_metadata"
     SESSION_PLAN_STATUS = "session.plan_status"
     SURFACE_CAPABILITIES_GET = "surface.capabilities.get"
@@ -109,6 +117,8 @@ class ReqMethod(Enum):
     PROJECT_EXTENSIONS_GET = "project.extensions.get"
     PROJECT_EXTENSIONS_UPDATE = "project.extensions.update"
     PROJECT_ACL_UPDATE = "project.acl.update"
+    PROJECT_CONTENT_GET = "project.content.get"
+    PROJECT_CONTENT_UPDATE = "project.content.update"
     PROJECT_INFO = "project.info"
     PROJECT_PINNED_SESSIONS = "project.pinned_sessions"
     PROJECT_GET_SESSIONS = "project.get_sessions"
@@ -160,6 +170,7 @@ class ReqMethod(Enum):
     # Smart Approval sealed assets: validate and read one bounded chunk in the
     # routed AgentServer. Gateway must never authorize these from token paths.
     FILE_DOWNLOAD_VERIFIED_CHUNK = "file.download_verified_chunk"
+    FILE_DOWNLOAD_WORKSPACE_CHUNK = "file.download_workspace_chunk"
 
     # IM 平台附件落盘（Phase 3：Gateway 下载字节后经 base64 交给 AgentServer
     # 落盘至其注入目录的 <平台>_files/downloads/，Gateway 不直写用户目录）

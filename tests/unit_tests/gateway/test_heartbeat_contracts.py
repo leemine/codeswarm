@@ -206,6 +206,7 @@ async def test_gateway_proxy_roundtrips_over_real_agentserver_websocket() -> Non
             return None
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None  # Explicit legacy composition for this wire fixture.
     server._heartbeat_runtime = Runtime()
     server._agent_manager = Manager()
     server._scheduler_service = None

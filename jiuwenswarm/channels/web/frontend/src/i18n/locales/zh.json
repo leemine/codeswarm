@@ -1,4 +1,8 @@
 {
+  "organizationRelease": {
+    "goalUnavailable": "本次 Single 交付暂不开放组织项目的 Goal 执行；仍可查看已有目标状态。",
+    "teamUnavailable": "本次 Single 交付暂不开放组织项目的 Team 执行；已有历史保持不变。"
+  },
   "common": {
     "noData": "暂无数据",
     "confirm": "确认",
@@ -155,6 +159,7 @@
         "forbidden": "该资源不支持此操作",
         "notFound": "资源不存在或已发生变化，请刷新后重试",
         "sessionGone": "该会话已不存在，无法恢复",
+        "deleteUnconfirmed": "无法确认删除完成，会话状态未知。请刷新列表或重试。",
         "requestFailed": "操作失败，请稍后重试",
         "sessionRestoreFailed": "对话恢复失败，请刷新后重试"
       }
@@ -693,6 +698,10 @@
     }
   },
   "artifacts": {
+    "ownerDownloadNotice": "仅可下载当前私有会话已签发的 Workspace 产物。临时文件及分享、轨迹、Git 导出暂不可用。",
+    "ownerDownloadUnavailable": "该产物暂无可用的已授权 Workspace 下载。",
+    "ownerDownloadFailed": "下载不可用。请检查当前会话及权限后重试。",
+    "ownerPreviewUnavailable": "组织模式的预览暂不可用。请返回产物列表下载已授权的 Workspace 产物。",
     "title": "所有产物",
     "tab": "产物",
     "count": "{{count}} 个产物",
@@ -829,6 +838,7 @@
     "taskFullDuplexStarting": "正在启动全双工对话",
     "taskFullDuplexStop": "停止全双工对话和屏幕共享",
     "modelSelector": {
+      "unavailable": "模型不可用：{{model}}",
       "tooltip": "切换对话使用的模型",
       "configured": "已配置模型",
       "free": "限时免费模型",
@@ -1367,6 +1377,7 @@
       "codex": "Codex",
       "claudeHint": "SDK 未安装时将自动安装；CLI 可使用内置版本、系统 PATH 或指定路径。",
       "codexHint": "SDK 未安装时将自动安装；CLI 可使用内置版本、系统 PATH 或指定路径。",
+      "codexGovernedUnavailable": "安全禁用：组织受管项目要求每次原生工具调用都经过当前授权。固定 Codex CLI 0.144.4 尚有工具不经过此边界，暂不可用于此模式；更换模型、安装路径或关闭普通审批均不能解除限制。",
       "useBuiltin": "使用内置 CLI",
       "detect": "检测",
       "detectHint": "未填写路径时从系统 PATH 查找；填写路径后检测指定的 CLI 可执行文件并校验版本",
@@ -3221,6 +3232,92 @@
       "entryCount": "共 {{count}} 条演进经验"
     }
   },
+  "sessionSharing": {
+    "audit": {
+      "refresh": "刷新审计记录",
+      "title": "最近分享审计",
+      "coverage": "这里只记录已确认的分享变更和继续执行发布，不代表完整活动审计。",
+      "error": "审计记录暂不可用，请刷新以重新核验当前访问权限。",
+      "count": "显示最近 {{count}} 条记录",
+      "empty": "本会话暂无已记录事件；更早的活动可能未记录审计。",
+      "actors": "{{actor}} → {{target}}",
+      "revision": "分享 {{share}} · 修订 {{revision}}",
+      "more": "还有更早记录；此处仅展示最近记录。",
+      "latestHundred": "显示最近 100 条",
+      "action": {
+        "create": "创建分享",
+        "update": "更新分享",
+        "revoke": "撤销分享",
+        "continue": "发布继续执行",
+        "cancel": "停止会话",
+        "delete": "删除会话"
+      },
+      "lifecycleCoverage": "仅包含已确认的分享变更、接续发布及已记录的所有者退出情况，不是完整活动审计。",
+      "owner": "所有者：{{actor}}",
+      "phase": {
+        "exit_requested": "已请求退出",
+        "cleanup_retry": "重试清理",
+        "exit_unconfirmed": "退出尚未确认",
+        "exit_confirmed": "退出已确认"
+      }
+    },
+    "exitUnconfirmed": "权限变更已生效，但执行退出尚未确认。请刷新当前状态并检查相关执行；不要重复提交此变更。",
+    "auditDegraded": "撤权已生效，但审计存储异常，本次变更未记录到审计历史。请联系管理员检查审计存储，不要重复撤权。",
+    "refreshError": "权限变更已提交，但当前列表刷新失败。请刷新列表，不要重复提交变更。",
+    "continuation": {
+      "savedRequest": "原请求：{{project}} · {{profile}} · {{model}} · {{title}}",
+      "title": "在私有会话中继续",
+      "scope": "以获准共享的文本作为上下文，在你自己的项目中继续。资源权限会独立核验，不会自动发送消息。",
+      "open": "授权继续执行",
+      "project": "你的目标项目",
+      "selectProject": "选择项目",
+      "option": "已授权的执行配置与模型",
+      "selectOption": "选择可用组合",
+      "name": "新会话标题（可选）",
+      "empty": "此项目当前没有获准的 Native Single 组合。",
+      "create": "创建私有会话",
+      "retry": "重试同一请求",
+      "newInput": "开始新请求",
+      "unknown": "结果未知，会话可能已经创建。重试会沿用同一请求；开始新请求可能创建另一会话。",
+      "failed": "无法核验权限或完成切换，未打开会话。请刷新选项后开始新请求。"
+    },
+    "viewerTitle": "共享历史 · 只读",
+    "viewerLimits": "固定的主会话历史快照，最新消息在前。仅显示文本，不加载媒体、工具输出或链接；不会切换你的活动会话。",
+    "viewerRefresh": "刷新历史",
+    "viewerUnavailable": "历史不可用或无法核验权限，已清空缓存内容。可刷新重新核验权限。",
+    "viewerEmpty": "此共享快照内没有消息。",
+    "viewerOlder": "加载更早消息",
+    "viewerRole": {
+      "user": "用户",
+      "assistant": "助手"
+    },
+    "title": "分享授权",
+    "scope": "分享已有历史的固定快照，不包含后续消息。各项权限独立，讨论不会启动智能体。",
+    "target": "接收者主体 ID",
+    "actions": "权限",
+    "expiry": "到期时间",
+    "refresh": "刷新授权",
+    "loading": "正在核验当前授权…",
+    "error": "无法核验或修改授权，请刷新后重试。",
+    "create": "授予访问权限",
+    "update": "保存权限",
+    "edit": "编辑",
+    "revoke": "撤销",
+    "managed": "本会话已授予的访问权限",
+    "received": "分享给我",
+    "receivedEmpty": "当前没有可用的共享会话。已到期或已撤销的授权不会出现在此处。",
+    "open": "打开获准历史",
+    "unavailable": "已到期、已撤销或不可用",
+    "noExpiry": "无到期时间",
+    "action": {
+      "view": "查看",
+      "discuss": "讨论",
+      "execute": "执行",
+      "approve": "审批",
+      "download": "下载",
+      "manage": "管理分享"
+    }
+  },
   "share": {
     "export": "导出长图",
     "exporting": "正在导出长图...",
@@ -3413,6 +3510,10 @@
     "review": "审核"
   },
   "multiSession": {
+    "deleteAuditPending": "会话已删除，删除审计仍待补写。",
+    "deleteAuditPendingDialog": "会话已删除，删除审计仍待补写。重试只补写审计；关闭此对话框后将失去此重试入口。",
+    "retryDeletionAudit": "重试保存审计",
+    "deletedAuditDescription": "{{title}} 已删除。",
     "title": "工作",
     "conversations": "任务",
     "newConversation": "新建任务",
@@ -3434,6 +3535,29 @@
       "read": "已完成已读"
     },
     "project": {
+      "content": {
+        "menu": "项目资料",
+        "title": "项目资料 · {{name}}",
+        "nextTurn": "修改从下一轮对话生效，当前轮次继续使用已固定的版本。",
+        "forbidden": "你已无权查看或修改此项目资料。",
+        "loadFailed": "项目资料加载失败，请重新加载。",
+        "saveFailed": "资料保存失败，请检查内容大小和连接。",
+        "conflict": "其他人已保存新版本。你的草稿已保留；再次保存前请重新加载最新版本。",
+        "saved": "已保存，下一轮对话将使用此版本。",
+        "version": "资料版本",
+        "emptyVersion": "尚未保存资料",
+        "versionNumber": "版本 {{version}}",
+        "readOnly": "当前版本仅供查看。编辑需要最新版本的写入权限。",
+        "instructions": "项目 Instructions",
+        "sources": "Sources 参考资料",
+        "sourceTrust": "Sources 是参考资料，不作为指令。链接或路径只记录来源，不会自动抓取内容。",
+        "sourceVersion": "来源版本 {{version}}",
+        "sourceTitle": "标题",
+        "sourceOrigin": "来源位置或引用",
+        "sourceBody": "参考文本",
+        "addSource": "添加来源",
+        "reload": "重新加载最新版本"
+      },
       "projects": "项目",
       "newConversation": "新建对话",
       "pinned": "置顶",
@@ -3824,6 +3948,10 @@
     }
   },
   "auth": {
+    "organizationLogoutFailed": "退出失败，凭据仍有效，请重试",
+    "organizationSubtitle": "使用管理员发放的组织访问凭据登录",
+    "organizationToken": "组织访问凭据",
+    "organizationHint": "凭据到期或撤销后连接失效。退出会撤销本凭据，再次登录需管理员发放新凭据。",
     "title": "登录 JiuwenSwarm",
     "subtitle": "输入你的账号与密码以继续",
     "username": "账号",

@@ -99,6 +99,11 @@ class CreateRuntime:
         self.prepared.append(prepared)
         return prepared
 
+    def validate_session_provision_for_delivery(self, prepared: Any) -> None:
+        assert prepared in self.prepared
+        assert prepared.state is SessionProvisionState.PREPARED
+        self.trace.append("create.validate_delivery")
+
     async def commit_session_provision(
         self,
         prepared: Any,
@@ -252,6 +257,7 @@ async def test_success_preserves_claim_metadata_team_send_kvc_order() -> None:
         "create.claim",
         "create.metadata",
         "create.team",
+        "create.validate_delivery",
         "response.send",
         "create.kvc",
     ]

@@ -1,4 +1,8 @@
 {
+  "organizationRelease": {
+    "goalUnavailable": "Goal execution is not available for organization projects in this Single release. Existing Goal status can still be viewed.",
+    "teamUnavailable": "Team execution is not available for organization projects in this Single release. Existing history is unchanged."
+  },
   "common": {
     "noData": "No data",
     "confirm": "Confirm",
@@ -155,6 +159,7 @@
         "forbidden": "This operation is not supported for this resource",
         "notFound": "The resource no longer exists or has changed. Refresh and try again.",
         "sessionGone": "This conversation no longer exists and cannot be restored.",
+        "deleteUnconfirmed": "Deletion could not be confirmed. The Session state is unknown; refresh the list or retry.",
         "requestFailed": "The operation failed. Please try again later.",
         "sessionRestoreFailed": "Failed to restore the conversation. Refresh and try again."
       }
@@ -702,6 +707,10 @@
     }
   },
   "artifacts": {
+    "ownerDownloadNotice": "Only issued Workspace artifacts for this private session can be downloaded. Temporary files and share, trace or Git exports are unavailable.",
+    "ownerDownloadUnavailable": "No authorized Workspace download is available for this artifact.",
+    "ownerDownloadFailed": "Download unavailable. Check the current session and permissions, then try again.",
+    "ownerPreviewUnavailable": "Preview is not available in organization mode yet. Return to the artifact list to download an authorized Workspace artifact.",
     "title": "Artifacts",
     "tab": "Artifacts",
     "count": "{{count}} item(s)",
@@ -838,6 +847,7 @@
     "taskFullDuplexStarting": "Starting Full-duplex conversation",
     "taskFullDuplexStop": "Stop Full-duplex conversation and screen sharing",
     "modelSelector": {
+      "unavailable": "Model unavailable: {{model}}",
       "tooltip": "Switch the model used for chat",
       "configured": "Configured Models",
       "free": "Limited-time Free Models",
@@ -1376,6 +1386,7 @@
       "codex": "Codex",
       "claudeHint": "The SDK is installed automatically when needed; use the built-in CLI, a CLI from PATH, or a specified path.",
       "codexHint": "The SDK is installed automatically when needed; use the built-in CLI, a CLI from PATH, or a specified path.",
+      "codexGovernedUnavailable": "Unavailable for safety: governed organization projects require current authorization for every native tool call. Codex CLI 0.144.4 has tools outside this boundary, so it is unavailable in this mode. Changing the model, installation path or ordinary approval setting does not remove this restriction.",
       "useBuiltin": "Use built-in CLI",
       "detect": "Detect",
       "detectHint": "Leave the path empty to search the system PATH, or enter a CLI executable path to validate it and check its version",
@@ -3235,6 +3246,92 @@
       "entryCount": "{{count}} entries total"
     }
   },
+  "sessionSharing": {
+    "audit": {
+      "refresh": "Refresh audit",
+      "title": "Recent sharing audit",
+      "coverage": "Only confirmed sharing changes and continuation publications are recorded here. This is not a complete activity audit.",
+      "error": "Audit records are unavailable. Refresh to check current access.",
+      "count": "Showing {{count}} recent records",
+      "empty": "No recorded events for this session. Earlier activity may not have been audited.",
+      "actors": "{{actor}} → {{target}}",
+      "revision": "Share {{share}} · revision {{revision}}",
+      "more": "Older records exist. Only the most recent records are shown here.",
+      "latestHundred": "Show latest 100",
+      "action": {
+        "create": "Share created",
+        "update": "Share updated",
+        "revoke": "Share revoked",
+        "continue": "Continuation published",
+        "cancel": "Stop session",
+        "delete": "Delete session"
+      },
+      "lifecycleCoverage": "Only confirmed sharing changes, continuation publications, and recorded owner exit observations are included. This is not a full activity log.",
+      "owner": "Owner: {{actor}}",
+      "phase": {
+        "exit_requested": "Exit requested",
+        "cleanup_retry": "Cleanup retry",
+        "exit_unconfirmed": "Exit not confirmed",
+        "exit_confirmed": "Exit confirmed"
+      }
+    },
+    "exitUnconfirmed": "The permission change is committed, but execution exit is not confirmed. Refresh the current state and check the affected execution; do not repeat this change.",
+    "auditDegraded": "Revocation is committed, but audit storage is unavailable and this change was not recorded in audit history. Ask an administrator to check audit storage; do not repeat revocation.",
+    "refreshError": "The permission change is committed, but refreshing the list failed. Refresh the list; do not repeat the change.",
+    "continuation": {
+      "savedRequest": "Saved request: {{project}} · {{profile}} · {{model}} · {{title}}",
+      "title": "Continue in a private conversation",
+      "scope": "Use the approved shared text as context in your own project. Your resource permissions are checked separately. No message is sent automatically.",
+      "open": "Continue with authorization",
+      "project": "Your target project",
+      "selectProject": "Select a project",
+      "option": "Authorized execution and model",
+      "selectOption": "Select an available combination",
+      "name": "New conversation title (optional)",
+      "empty": "No authorized Native Single combination is currently available for this project.",
+      "create": "Create private conversation",
+      "retry": "Retry the same request",
+      "newInput": "Start a new request",
+      "unknown": "The result is unknown; the conversation may already exist. Retry uses the same request. Starting a new request may create another conversation.",
+      "failed": "Access or navigation could not be verified. No conversation was opened. Refresh your choices to make a new request."
+    },
+    "viewerTitle": "Shared history · Read only",
+    "viewerLimits": "Fixed main-conversation snapshot, newest first. Text only; media, tool output and links are not loaded. This viewer does not change your active session.",
+    "viewerRefresh": "Refresh history",
+    "viewerUnavailable": "History is unavailable or access could not be verified. Cached content has been cleared. Refresh to check access again.",
+    "viewerEmpty": "No messages in this shared snapshot.",
+    "viewerOlder": "Load older messages",
+    "viewerRole": {
+      "user": "User",
+      "assistant": "Assistant"
+    },
+    "title": "Share access",
+    "scope": "Share a fixed snapshot of existing history. Later messages are excluded. Each permission is independent; discussion does not start an agent.",
+    "target": "Recipient actor ID",
+    "actions": "Permissions",
+    "expiry": "Expires at",
+    "refresh": "Refresh access",
+    "loading": "Checking current access…",
+    "error": "Access could not be verified or changed. Refresh and try again.",
+    "create": "Grant access",
+    "update": "Save permissions",
+    "edit": "Edit",
+    "revoke": "Revoke",
+    "managed": "Access granted for this session",
+    "received": "Shared with me",
+    "receivedEmpty": "No shared sessions are currently available. Expired or revoked access is not listed.",
+    "open": "Open shared history",
+    "unavailable": "Expired, revoked or unavailable",
+    "noExpiry": "No expiry",
+    "action": {
+      "view": "View",
+      "discuss": "Discuss",
+      "execute": "Execute",
+      "approve": "Approve",
+      "download": "Download",
+      "manage": "Manage sharing"
+    }
+  },
   "share": {
     "export": "Export PNG",
     "exporting": "Exporting PNG...",
@@ -3427,6 +3524,10 @@
     "review": "Review"
   },
   "multiSession": {
+    "deleteAuditPending": "Session deleted. Its deletion audit is still pending.",
+    "deleteAuditPendingDialog": "Session deleted. Its deletion audit is still pending. Retry saves the audit only; closing this dialog loses this retry entry.",
+    "retryDeletionAudit": "Retry saving audit",
+    "deletedAuditDescription": "{{title}} has been deleted.",
     "title": "Work",
     "conversations": "Tasks",
     "newConversation": "New task",
@@ -3448,6 +3549,29 @@
       "read": "Completed read"
     },
     "project": {
+      "content": {
+        "menu": "Project content",
+        "title": "Content · {{name}}",
+        "nextTurn": "Changes apply to the next turn. The current turn keeps its saved version.",
+        "forbidden": "You no longer have permission to view or update this project content.",
+        "loadFailed": "Could not load project content. Try reloading.",
+        "saveFailed": "Could not save project content. Check the content size and connection.",
+        "conflict": "Another update was saved. Your draft is preserved; reload the latest version before saving again.",
+        "saved": "Saved. The next turn will use this version.",
+        "version": "Content version",
+        "emptyVersion": "No saved content",
+        "versionNumber": "Version {{version}}",
+        "readOnly": "This version is read-only. Editing requires write access to the latest version.",
+        "instructions": "Project instructions",
+        "sources": "Sources",
+        "sourceTrust": "Sources are reference data, not instructions. Links and paths are recorded as provenance; they are not fetched automatically.",
+        "sourceVersion": "Source version {{version}}",
+        "sourceTitle": "Title",
+        "sourceOrigin": "Source location or citation",
+        "sourceBody": "Reference text",
+        "addSource": "Add source",
+        "reload": "Reload latest"
+      },
       "projects": "Projects",
       "newConversation": "New conversation",
       "pinned": "Pinned",
@@ -3838,6 +3962,10 @@
     }
   },
   "auth": {
+    "organizationLogoutFailed": "Sign-out failed; credential remains active. Retry",
+    "organizationSubtitle": "Sign in with an organization access credential supplied by your administrator",
+    "organizationToken": "Organization access credential",
+    "organizationHint": "Access ends when the credential expires or is revoked. Signing out revokes this credential; ask your administrator for a new one.",
     "title": "Sign in to JiuwenSwarm",
     "subtitle": "Enter your account and password to continue",
     "username": "Account",

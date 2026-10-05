@@ -481,6 +481,14 @@ class TrajectoryHttpService:
         session_id: str,
         settings: TrajectoryStoreSettings,
     ) -> Response | None:
+        # These complete-store projections have no scoped Session owner/share
+        # resolver yet. A valid credential does not authorize their contents.
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is not None:
+            return _error_response(
+                "Organization Session authority is required for trajectory access",
+                "ORGANIZATION_AUTHORITY_REQUIRED", 403,
+            )
         if not settings.enabled:
             return _error_response(
                 "trajectory UI is disabled",
@@ -566,6 +574,14 @@ def attach_trajectory_routes(
             and not path.startswith(f"{TRAJECTORY_API_PREFIX}/")
         ):
             return await call_next(request)
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is not None:
+            # Gate the whole surface, including aliases/unknown endpoints and
+            # alternate HTTP methods before request validation or disk reads.
+            return _error_response(
+                "Organization Session authority is required for trajectory access",
+                "ORGANIZATION_AUTHORITY_REQUIRED", 403,
+            )
         try:
             response = await call_next(request)
         except Exception:

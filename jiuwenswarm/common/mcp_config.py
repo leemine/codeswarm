@@ -34,6 +34,25 @@ _PREWARM_STALL_TIMEOUT_S = 120.0
 
 _PLACEHOLDER_RE = re.compile(r"\$\{(\w+)\}")
 
+_ORGANIZATION_MCP_DENIED = "organization-scoped MCP authorization required"
+
+
+def require_legacy_mcp_access() -> None:
+    """Reject installation-wide MCP consumers in organization mode.
+
+    A valid login or a configured placeholder resolver is not credential/use
+    authorization. A future scoped consumer must supply its own host authority;
+    this legacy path deliberately has no caller-controlled bypass.
+    """
+    from jiuwenswarm.governance.organization_auth import configured_authenticator
+
+    try:
+        organization = configured_authenticator()
+    except Exception:
+        raise PermissionError(_ORGANIZATION_MCP_DENIED) from None
+    if organization is not None:
+        raise PermissionError(_ORGANIZATION_MCP_DENIED)
+
 
 def _resolve_string(value: str, resolver) -> str:
     """Substitute ${VAR} in a string via the resolver; missing stays literal."""
@@ -52,6 +71,7 @@ def build_mcp_credential_resolver(name: str) -> Callable[[str], str | None] | No
     for ``name`` (placeholders stay literal, matching
     :func:`build_mcp_server_config`'s default ``credential_resolver=None``).
     """
+    require_legacy_mcp_access()
     name = str(name or "").strip()
     if not name:
         return None
@@ -64,6 +84,7 @@ def build_mcp_credential_resolver(name: str) -> Callable[[str], str | None] | No
         return None
 
     def resolver(key: str) -> str | None:
+        require_legacy_mcp_access()
         if key in stored:
             return stored[key]
         return os.environ.get(key)
@@ -123,6 +144,7 @@ def build_mcp_server_config(
             spawned stdio process / HTTP request gets real credentials.
             When None (default), placeholders stay literal (backward compat).
     """
+    require_legacy_mcp_access()
     name = str(entry.get("name", "")).strip()
     if not name:
         return None
@@ -208,6 +230,7 @@ def build_enabled_mcp_server_configs(
     HTTP MCPs stored with placeholder tokens get real credentials, matching
     the single-agent path.
     """
+    require_legacy_mcp_access()
     configs: list[McpServerConfig] = []
     for entry in extract_enabled_mcp_server_entries(config_base):
         resolver = (
@@ -239,6 +262,10 @@ async def preflight_mcp_server_reachable(
     config-time ``_pre_check_mcp_http_auth`` and cold-start
     ``_register_mcp_server`` so both gates stay identical.
     """
+    try:
+        require_legacy_mcp_access()
+    except PermissionError:
+        return False, _ORGANIZATION_MCP_DENIED
     transport = (getattr(cfg, "client_type", "") or "").strip().lower()
     if transport not in _HTTP_MCP_TRANSPORTS:
         return True, ""
@@ -462,6 +489,10 @@ async def probe_mcp_live_connection(name: str) -> tuple[bool, str]:
     """
     import shutil
 
+    try:
+        require_legacy_mcp_access()
+    except PermissionError:
+        return False, _ORGANIZATION_MCP_DENIED
     n = str(name or "").strip()
     if not n:
         return False, "mcp name is required"
@@ -514,6 +545,9 @@ async def probe_mcp_live_connection(name: str) -> tuple[bool, str]:
     except Exception as exc:  # noqa: BLE001
         return False, f"Runner unavailable: {exc}"
     try:
+        # Preflight failures are legacy-soft above, but cannot bypass a changed
+        # organization boundary when the final consumer is reached.
+        require_legacy_mcp_access()
         result = await Runner.resource_mgr.add_mcp_server(cfg, tag="mcp.probe")
     except Exception as exc:  # noqa: BLE001
         return False, str(exc) or repr(exc)
@@ -561,6 +595,10 @@ async def prewarm_connected_mcps() -> None:
     stall timeout.  A semaphore caps concurrency so N simultaneous spawns
     don't overwhelm the host during startup.
     """
+    try:
+        require_legacy_mcp_access()
+    except PermissionError:
+        return
     try:
         from jiuwenswarm.server.runtime.mcp.state_store import (
             list_truly_connected_mcps,
@@ -638,6 +676,7 @@ def _safe_id_part(value: str, *, default: str) -> str:
 
 
 __all__ = [
+    "require_legacy_mcp_access",
     "build_enabled_mcp_server_configs",
     "build_mcp_credential_resolver",
     "build_mcp_server_config",

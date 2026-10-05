@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from contextlib import AsyncExitStack
+import inspect
 import logging
 import os
 import shutil
@@ -316,6 +317,8 @@ class PreparedSessionProvision(Generic[_ResultT]):
     __slots__ = (
         "_abort_hook",
         "_commit_attempt_is_terminal",
+        "_abort_on_commit_error",
+        "_committed_probe",
         "_commit_context",
         "_commit_hook",
         "_commit_timing",
@@ -336,6 +339,8 @@ class PreparedSessionProvision(Generic[_ResultT]):
         ) = None,
         abort_hook: Callable[[], Awaitable[None]] | None = None,
         commit_attempt_is_terminal: bool = False,
+        abort_on_commit_error: Callable[[], bool] | None = None,
+        committed_probe: Callable[[], bool] | None = None,
     ) -> None:
         self._owner_token = owner_token
         self._result = result
@@ -344,6 +349,8 @@ class PreparedSessionProvision(Generic[_ResultT]):
         self._commit_hook = commit_hook
         self._abort_hook = abort_hook
         self._commit_attempt_is_terminal = commit_attempt_is_terminal
+        self._abort_on_commit_error = abort_on_commit_error
+        self._committed_probe = committed_probe
         self._state = SessionProvisionState.PREPARED
         self._finalize_lock = asyncio.Lock()
 
@@ -403,7 +410,24 @@ class PreparedSessionProvision(Generic[_ResultT]):
             if self._commit_hook is not None:
                 try:
                     await self._commit_hook(self._commit_context or context)
-                except BaseException:
+                except BaseException as primary:
+                    if self._abort_on_commit_error is not None and self._abort_on_commit_error():
+                        # This operation declares its business commit incomplete.
+                        # Preserve the existing abort receipt when cleanup fails;
+                        # a later owner retry must not repeat publication.
+                        self._state = SessionProvisionState.ABORTING
+                        try:
+                            if self._abort_hook is not None:
+                                await self._abort_hook()
+                        except BaseException as cleanup:
+                            primary.add_note('commit compensation incomplete: ' + type(cleanup).__name__)
+                        else:
+                            self._state = SessionProvisionState.ABORTED
+                            self._commit_context = None
+                            self._commit_hook = None
+                            self._abort_hook = None
+                            self._abort_on_commit_error = None
+                        raise
                     if self._commit_attempt_is_terminal:
                         self._state = SessionProvisionState.COMMITTED
                         self._commit_context = None
@@ -415,6 +439,27 @@ class PreparedSessionProvision(Generic[_ResultT]):
             self._commit_hook = None
             self._abort_hook = None
             return self._result
+
+    async def reconcile_commit_for_owner(self, owner_token: object) -> bool:
+        """Settle a declared ambiguous durable commit using its original receipt."""
+        self._assert_owner(owner_token)
+        if self._committed_probe is None:
+            return self._state is SessionProvisionState.COMMITTED
+        if self._finalize_lock.locked():
+            return False  # Preserve fail-fast shutdown while an owner is active.
+        async with self._finalize_lock:
+            if self._state is SessionProvisionState.COMMITTED:
+                return True
+            if (self._state not in {SessionProvisionState.COMMITTING, SessionProvisionState.ABORTING}
+                    or self._committed_probe is None or self._committed_probe() is not True):
+                return False
+            self._state = SessionProvisionState.COMMITTED
+            self._commit_context = None
+            self._commit_hook = None
+            self._abort_hook = None
+            self._abort_on_commit_error = None
+            self._committed_probe = None
+            return True
 
     async def abort_for_owner(self, owner_token: object) -> None:
         """Abort through the capability held by the owning Provisioner."""
@@ -523,6 +568,100 @@ class SessionDeleteLifecycle(Protocol):
         ...
 
 
+class SessionOwnerLifecycle(Protocol):
+    """Host-owned synchronous authority check before persistent publication.
+
+    The host obtains identity from its trusted task scope, never ``user_id``.
+    New reservations must atomically register owner/source and return a sync,
+    CAS-scoped rollback receipt. Existing Sessions are verified, never claimed,
+    and return None. Failure must raise before public metadata/history writes.
+    This is ordered publication, not a cross-file atomic transaction: rollback
+    leaves any already-created files incomplete and inaccessible to nonowners.
+    """
+
+    def before_publish(
+        self, session_id: str, project_id: str, created: bool,
+    ) -> Callable[[], None] | None:
+        ...
+
+
+def _check_owner_publication(
+    lifecycle: SessionOwnerLifecycle | None,
+    session_id: str,
+    project_id: str,
+    *,
+    created: bool,
+) -> Callable[[], None] | None:
+    if lifecycle is None:
+        return None
+    receipt = lifecycle.before_publish(session_id, project_id, created)
+    if inspect.isawaitable(receipt):
+        if inspect.iscoroutine(receipt):
+            receipt.close()
+        raise TypeError("Session owner before_publish must be synchronous")
+    if not created:
+        if receipt is not None:
+            raise TypeError("Existing Session owner verification must return None")
+        return None
+    if (
+        not callable(receipt)
+        or inspect.iscoroutinefunction(receipt)
+        or inspect.iscoroutinefunction(getattr(receipt, "__call__", None))
+    ):
+        raise TypeError("New Session owner requires a synchronous rollback receipt")
+    return receipt
+
+
+class _OwnerPublication:
+    """One reservation; compensation never deletes Session files."""
+
+    def __init__(self, lifecycle: SessionOwnerLifecycle | None) -> None:
+        self.lifecycle = lifecycle
+        self.session_id = ""
+        self.project_id = ""
+        self.receipt: Callable[[], None] | None = None
+
+    def prepare(self, session_id: str, project_id: str, *, created: bool) -> None:
+        self.session_id = session_id
+        self.project_id = project_id
+        self.receipt = _check_owner_publication(
+            self.lifecycle, session_id, project_id, created=created,
+        )
+
+    def verify(self) -> None:
+        _check_owner_publication(
+            self.lifecycle, self.session_id, self.project_id, created=False,
+        )
+
+    def rollback(self) -> None:
+        if self.receipt is None:
+            return
+        result = self.receipt()
+        if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
+            raise TypeError("Session owner rollback receipt must be synchronous")
+        if result is not None:
+            raise TypeError("Session owner rollback receipt must return None")
+        self.receipt = None
+        logger.warning(
+            "Session owner reservation aborted: session_id=%s; any published "
+            "files remain incomplete and require host recovery", self.session_id,
+        )
+
+    def compensate(self, primary_error: BaseException) -> None:
+        try:
+            self.rollback()
+        except BaseException as cleanup_error:
+            logger.warning(
+                "Session owner compensation incomplete while preserving %s: "
+                "session_id=%s error=%s",
+                type(primary_error).__name__, self.session_id, cleanup_error,
+                exc_info=(type(cleanup_error), cleanup_error,
+                          cleanup_error.__traceback__),
+            )
+
+
 class RuntimeSessionProvisioner:
     """Coordinate transport-neutral Session lifecycle work for one Runtime."""
 
@@ -538,6 +677,7 @@ class RuntimeSessionProvisioner:
         self._agent_manager = agent_manager
         self._plan_controller = plan_controller
         self._delete_lifecycle = delete_lifecycle
+        self._owner_lifecycle: SessionOwnerLifecycle | None = None
         self._participant_registry = (
             participant_registry or RuntimeParticipantRegistry()
         )
@@ -554,6 +694,10 @@ class RuntimeSessionProvisioner:
     ) -> None:
         """Replace the optional lifecycle participant owned by the host."""
         self._delete_lifecycle = lifecycle
+
+    def set_owner_lifecycle(self, lifecycle: SessionOwnerLifecycle | None) -> None:
+        """Set the trusted host hook; each preparation captures one participant."""
+        self._owner_lifecycle = lifecycle
 
     async def prepare_session_create(
         self,
@@ -579,6 +723,7 @@ class RuntimeSessionProvisioner:
         external_lock: asyncio.Lock | None = None
         external_lock_acquired = False
         claimed_session_id: str | None = None
+        owner_publication = _OwnerPublication(self._owner_lifecycle)
         try:
             from jiuwenswarm.server.runtime.session.session_history import (
                 is_valid_session_id,
@@ -798,6 +943,11 @@ class RuntimeSessionProvisioner:
                 }
                 and self._is_prewarm_model_eligible(provision_input.model_name)
             )
+            from jiuwenswarm.governance.continuation_publication import current_scope
+            continuation = current_scope()
+            if continuation is not None:
+                continuation._require()
+                prewarm_eligible = False
 
             if explicit_tui_session:
                 session_id = requested_session_id
@@ -828,6 +978,9 @@ class RuntimeSessionProvisioner:
             metadata_exists = (
                 get_agent_sessions_dir() / session_id / "metadata.json"
             ).is_file()
+            owner_publication.prepare(
+                session_id, project_id, created=not metadata_exists,
+            )
             if metadata_exists and not explicit_tui_session:
                 stored = get_session_metadata(session_id)
                 if (
@@ -879,6 +1032,7 @@ class RuntimeSessionProvisioner:
                     result,
                     claimed_session_id=claimed_session_id,
                     external_lock=external_lock,
+                    owner_publication=owner_publication,
                 )
 
             session_created = not metadata_exists
@@ -934,6 +1088,7 @@ class RuntimeSessionProvisioner:
                 previous_session_id=previous_session_id,
                 params={**params, "mode": canonical_mode},
             )
+            owner_publication.verify()
             result = SessionCreateResult(
                 channel_id=channel_id,
                 session_id=session_id,
@@ -954,8 +1109,10 @@ class RuntimeSessionProvisioner:
                 switch_context=switch_context,
                 dispatch_signals=dispatch_signals,
                 previous_session_id=previous_session_id,
+                owner_publication=owner_publication,
             )
         except BaseException as primary_error:
+            owner_publication.compensate(primary_error)
             try:
                 if claimed_session_id is not None:
                     await self._agent_manager.release_session_prewarm_claim(
@@ -988,25 +1145,76 @@ class RuntimeSessionProvisioner:
         switch_context: SessionLifecycleTarget | None = None,
         dispatch_signals: SessionLifecycleTarget | None = None,
         previous_session_id: str = "",
+        owner_publication: _OwnerPublication | None = None,
     ) -> PreparedSessionProvision[SessionCreateResult]:
         finalized = False
+        claim_released = False
+        from jiuwenswarm.governance.continuation_publication import current_scope
+        continuation = current_scope()
+        if continuation is not None:
+            continuation._require()
 
         async def release_resources() -> None:
-            nonlocal finalized
+            nonlocal finalized, claim_released
             if finalized:
                 return
-            if claimed_session_id is not None:
-                await self._agent_manager.release_session_prewarm_claim(
-                    claimed_session_id
+            primary_error: BaseException | None = None
+            try:
+                if owner_publication is not None:
+                    owner_publication.rollback()
+            except BaseException as error:
+                primary_error = error
+                logger.warning(
+                    "Session owner abort incomplete: session_id=%s error=%s",
+                    result.session_id, error, exc_info=True,
                 )
-            if external_lock is not None and external_lock.locked():
-                external_lock.release()
+            try:
+                if claimed_session_id is not None and not claim_released:
+                    await self._agent_manager.release_session_prewarm_claim(
+                        claimed_session_id
+                    )
+                    claim_released = True
+            except BaseException as error:
+                if primary_error is None:
+                    primary_error = error
+                else:
+                    logger.warning(
+                        "Session claim cleanup failed during owner abort: "
+                        "session_id=%s error=%s", result.session_id, error,
+                        exc_info=True,
+                    )
+            finally:
+                if external_lock is not None and external_lock.locked():
+                    external_lock.release()
+            if primary_error is not None:
+                raise primary_error
             finalized = True
+
+        business_committed = False
 
         async def commit_create(
             context: SessionProvisionCommitContext,
         ) -> None:
+            nonlocal business_committed
             try:
+                if continuation is not None:
+                    continuation._require()
+                    check = getattr(continuation, '_before_runtime_commit', None)
+                    if not callable(check):
+                        raise SessionProvisionError('continuation target admission missing')
+                    check()
+                    try:
+                        continuation.commit()
+                    except BaseException:
+                        # A storage wrapper may report failure after atomic save.
+                        # Only exact original receipt facts can settle that write.
+                        try:
+                            from jiuwenswarm.server.runtime.session.continuation_publication import confirms_committed
+                            business_committed = confirms_committed(continuation)
+                        except Exception:
+                            pass  # Keep the original error and retryable receipt.
+                        raise
+                    business_committed = True
                 self._completed_session_deletes.pop(result.session_id, None)
                 if switch_context is not None:
                     task = asyncio.create_task(
@@ -1024,12 +1232,19 @@ class RuntimeSessionProvisioner:
                 if external_lock is not None and external_lock.locked():
                     external_lock.release()
 
+        def committed_probe():
+            from jiuwenswarm.server.runtime.session.continuation_publication import confirms_committed
+            return confirms_committed(continuation)
+
         return self._stage_session_provision(
             result,
-            commit_timing=SessionProvisionCommitTiming.AFTER_RESULT_DELIVERY,
+            commit_timing=(SessionProvisionCommitTiming.BEFORE_RESULT_DELIVERY
+                           if continuation is not None else SessionProvisionCommitTiming.AFTER_RESULT_DELIVERY),
             commit_hook=commit_create,
             abort_hook=release_resources,
             commit_attempt_is_terminal=True,
+            abort_on_commit_error=(lambda: not business_committed) if continuation is not None else None,
+            committed_probe=committed_probe if continuation is not None else None,
         )
 
     @staticmethod
@@ -1301,6 +1516,7 @@ class RuntimeSessionProvisioner:
         The returned lease commits before result delivery and has no deferred
         transport-side work.
         """
+        owner_publication = _OwnerPublication(self._owner_lifecycle)
         source_session_id = str(provision_input.source_session_id or "").strip()
         target_session_id = str(provision_input.target_session_id or "").strip()
         channel_id = provision_input.channel_id or "default"
@@ -1337,6 +1553,18 @@ class RuntimeSessionProvisioner:
             cache_bust=True,
             enable_writeback=False,
         )
+        source_project_id = (
+            str(source_metadata.get("project_id") or "")
+            if isinstance(source_metadata, dict) else ""
+        )
+
+        def verify_source() -> None:
+            _check_owner_publication(
+                owner_publication.lifecycle, source_session_id,
+                source_project_id, created=False,
+            )
+
+        verify_source()
         profile_id = (
             source_metadata.get("execution_profile_id")
             if isinstance(source_metadata, dict)
@@ -1399,6 +1627,15 @@ class RuntimeSessionProvisioner:
                         "cutoff_timestamp": cutoff_timestamp,
                     }
                 )
+            if owner_publication.lifecycle is not None:
+                from jiuwenswarm.common.utils import get_agent_sessions_dir
+
+                target_exists = (get_agent_sessions_dir() / target_session_id).exists()
+                # No sidecar/lifecycle lock spans fork's queued-history drain.
+                verify_source()
+                owner_publication.prepare(
+                    target_session_id, source_project_id, created=not target_exists,
+                )
             fork_result = fork_session(
                 **fork_kwargs,
             )
@@ -1407,6 +1644,8 @@ class RuntimeSessionProvisioner:
             deep_agent = None
             if agent is not None:
                 deep_agent = await agent.ensure_instance()
+                verify_source()
+                owner_publication.verify()
                 if has_message_cutoff:
                     await copy_session_context(
                         deep_agent,
@@ -1438,6 +1677,8 @@ class RuntimeSessionProvisioner:
             from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
             if not has_message_cutoff and not side_conversation:
+                verify_source()
+                owner_publication.verify()
                 await copy_session_state(
                     source_session_id=source_session_id,
                     target_session_id=target_session_id,
@@ -1448,24 +1689,51 @@ class RuntimeSessionProvisioner:
                     ),
                     deep_agent=deep_agent,
                 )
-        except ValueError as error:
-            raise SessionProvisionError(
-                str(error),
-                code=_session_fork_error_code(error),
-            ) from error
+            verify_source()
+            owner_publication.verify()
+            result = SessionForkResult(
+                channel_id=channel_id,
+                source_session_id=str(
+                    fork_result.get("source_session_id") or source_session_id
+                ),
+                session_id=str(fork_result.get("session_id") or target_session_id),
+                title=str(fork_result.get("title") or ""),
+                ephemeral=bool(fork_result.get("ephemeral")),
+            )
+        except BaseException as error:
+            owner_publication.compensate(error)
+            if isinstance(error, ValueError):
+                raise SessionProvisionError(
+                    str(error),
+                    code=_session_fork_error_code(error),
+                ) from error
+            raise
 
-        result = SessionForkResult(
-            channel_id=channel_id,
-            source_session_id=str(
-                fork_result.get("source_session_id") or source_session_id
-            ),
-            session_id=str(fork_result.get("session_id") or target_session_id),
-            title=str(fork_result.get("title") or ""),
-            ephemeral=bool(fork_result.get("ephemeral")),
-        )
+        commit_error: BaseException | None = None
+
+        async def abort_fork() -> None:
+            owner_publication.rollback()
+
+        async def commit_fork(_context: SessionProvisionCommitContext) -> None:
+            nonlocal commit_error
+            if commit_error is not None:
+                owner_publication.compensate(commit_error)
+                raise commit_error
+            try:
+                verify_source()
+                owner_publication.verify()
+            except BaseException as error:
+                commit_error = error
+                # The existing lease cannot abort after COMMITTING. Keep its
+                # failed state but revoke this reservation before propagating.
+                owner_publication.compensate(error)
+                raise
+
         return self._stage_session_provision(
             result,
             commit_timing=SessionProvisionCommitTiming.BEFORE_RESULT_DELIVERY,
+            commit_hook=commit_fork,
+            abort_hook=abort_fork,
         )
 
     def _stage_session_provision(
@@ -1478,6 +1746,8 @@ class RuntimeSessionProvisioner:
         ) = None,
         abort_hook: Callable[[], Awaitable[None]] | None = None,
         commit_attempt_is_terminal: bool = False,
+        abort_on_commit_error: Callable[[], bool] | None = None,
+        committed_probe: Callable[[], bool] | None = None,
     ) -> PreparedSessionProvision[_ResultT]:
         """Build an owned lease after an operation-specific prepare succeeds.
 
@@ -1494,7 +1764,12 @@ class RuntimeSessionProvisioner:
             commit_hook=commit_hook,
             abort_hook=abort_hook,
             commit_attempt_is_terminal=commit_attempt_is_terminal,
+            abort_on_commit_error=abort_on_commit_error,
+            committed_probe=committed_probe,
         )
+
+    async def reconcile_committed_provision(self, prepared):
+        return await prepared.reconcile_commit_for_owner(self._provision_owner_token)
 
     async def commit_session_provision(
         self,
@@ -1529,6 +1804,8 @@ class RuntimeSessionProvisioner:
         session_id: str,
         quiesce_session: Callable[..., Awaitable[None]],
         dispose_session: Callable[..., Awaitable[None]],
+        _cleanup_guard: Callable[[], None] | None = None,
+        _cleanup_descriptor: dict | None = None,
     ) -> SessionDeleteResult:
         target = str(session_id or "").strip()
         if not target:
@@ -1538,11 +1815,15 @@ class RuntimeSessionProvisioner:
                 message="session_id is required",
             )
         async with session_delete_lock(target):
+            if _cleanup_guard is not None:
+                _cleanup_guard()
             return await self._delete_session_locked(
                 channel_id=channel_id,
                 session_id=target,
                 quiesce_session=quiesce_session,
                 dispose_session=dispose_session,
+                _cleanup_guard=_cleanup_guard,
+                _cleanup_descriptor=_cleanup_descriptor,
             )
 
     async def _delete_session_locked(
@@ -1552,6 +1833,8 @@ class RuntimeSessionProvisioner:
         session_id: str,
         quiesce_session: Callable[..., Awaitable[None]],
         dispose_session: Callable[..., Awaitable[None]],
+        _cleanup_guard: Callable[[], None] | None = None,
+        _cleanup_descriptor: dict | None = None,
     ) -> SessionDeleteResult:
         """Delete one Session while preserving the established transaction."""
         target = str(session_id or "").strip()
@@ -1610,10 +1893,14 @@ class RuntimeSessionProvisioner:
         # taking a snapshot also prevents a concurrent host reconfiguration
         # from pairing one lifecycle's begin with another one's abort/commit.
         delete_lifecycle = self._delete_lifecycle
+        if _cleanup_guard is not None:
+            _cleanup_guard()
         checkpoint_error = await self._ensure_delete_dependencies(
             target,
             delete_lifecycle=delete_lifecycle,
         )
+        if _cleanup_guard is not None:
+            _cleanup_guard()
         if checkpoint_error is not None:
             return checkpoint_error
 
@@ -1622,9 +1909,8 @@ class RuntimeSessionProvisioner:
             get_session_metadata,
         )
 
-        metadata = get_session_metadata(target) or delete_operation.get(
-            "delete_metadata", {}
-        )
+        metadata = (dict(_cleanup_descriptor) if _cleanup_guard is not None
+                    else get_session_metadata(target) or delete_operation.get("delete_metadata", {}))
         if recovering_delete and not delete_operation.get("delete_metadata"):
             lifecycle_update("session", target, delete_metadata=metadata)
         is_team_session = is_team_mode(metadata.get("mode"))
@@ -1658,6 +1944,8 @@ class RuntimeSessionProvisioner:
         participants = self._participant_registry.snapshot_delete()
         entered_participants = []
         for participant in participants:
+            if _cleanup_guard is not None:
+                _cleanup_guard()
             entered_participants.append(participant)
             try:
                 await participant.before_delete(delete_target)
@@ -1676,6 +1964,8 @@ class RuntimeSessionProvisioner:
                     target,
                     exc,
                 )
+            if _cleanup_guard is not None:
+                _cleanup_guard()
 
         trajectory_prepared = False
         lifecycle_prepared = False
@@ -1688,11 +1978,17 @@ class RuntimeSessionProvisioner:
             # Team and single-agent sessions both own a trajectory database.
             # Draining the ingress joins that session's writer threads, so it
             # must not run on the event loop.
+            if _cleanup_guard is not None:
+                _cleanup_guard()
             await asyncio.to_thread(begin_trajectory_session_delete, target)
             trajectory_prepared = True
+            if _cleanup_guard is not None:
+                _cleanup_guard()
             if delete_lifecycle is not None:
                 await delete_lifecycle.begin_session_delete(target)
                 lifecycle_prepared = True
+                if _cleanup_guard is not None:
+                    _cleanup_guard()
 
             if not session_dir.exists() and recovering_delete:
                 deleted = True
@@ -1707,7 +2003,10 @@ class RuntimeSessionProvisioner:
                 await self._release_participants(
                     tuple(entered_participants),
                     delete_target,
+                    _cleanup_guard=_cleanup_guard,
                 )
+                if _cleanup_guard is not None:
+                    _cleanup_guard()
                 destructive_started = True
                 await team_controller.dispose_after_resource_release(
                     delete_target,
@@ -1722,7 +2021,10 @@ class RuntimeSessionProvisioner:
                 await self._release_participants(
                     tuple(entered_participants),
                     delete_target,
+                    _cleanup_guard=_cleanup_guard,
                 )
+                if _cleanup_guard is not None:
+                    _cleanup_guard()
                 destructive_started = True
                 await dispose_session(
                     channel_id=result.channel_id or "",
@@ -1730,10 +2032,18 @@ class RuntimeSessionProvisioner:
                 )
                 from openjiuwen.core.runner import Runner
 
+                if _cleanup_guard is not None:
+                    _cleanup_guard()
                 await Runner.release(result.session_id)
+                if _cleanup_guard is not None:
+                    _cleanup_guard()
                 deleted = True
             if deleted and session_dir.exists():
+                if _cleanup_guard is not None:
+                    _cleanup_guard()
                 shutil.rmtree(session_dir)
+                if _cleanup_guard is not None:
+                    _cleanup_guard()
             if deleted and recovering_delete:
                 lifecycle_update("session", target, phase="cleanup")
         except BaseException as exc:
@@ -1797,7 +2107,10 @@ class RuntimeSessionProvisioner:
                 trajectory_prepared=trajectory_prepared,
                 lifecycle_prepared=lifecycle_prepared,
                 delete_lifecycle=delete_lifecycle,
+                _cleanup_guard=_cleanup_guard,
             )
+            if _cleanup_guard is not None:
+                _cleanup_guard()
             committed_result = SessionDeleteResult(
                 ok=True,
                 session_id=result.session_id,
@@ -1807,6 +2120,9 @@ class RuntimeSessionProvisioner:
                 deleted=True,
             )
             self.commit_session_delete(committed_result)
+            if _cleanup_guard is not None:
+                await self._notify_delete_committed(
+                    tuple(entered_participants), delete_target, _cleanup_guard=_cleanup_guard)
             if team_controller is not None:
                 team_controller.delete_committed(delete_target)
         except asyncio.CancelledError:
@@ -1837,10 +2153,11 @@ class RuntimeSessionProvisioner:
                 is_team=result.is_team,
                 team_name=result.team_name,
             )
-        await self._notify_delete_committed(
-            tuple(entered_participants),
-            delete_target,
-        )
+        if _cleanup_guard is None:
+            await self._notify_delete_committed(
+                tuple(entered_participants),
+                delete_target,
+            )
         self._completed_session_deletes[target] = committed_result
         return committed_result
 
@@ -2341,11 +2658,16 @@ class RuntimeSessionProvisioner:
     async def _release_participants(
         participants: tuple[object, ...],
         target: SessionLifecycleTarget,
+        *, _cleanup_guard: Callable[[], None] | None = None,
     ) -> None:
         for participant in participants:
+            if _cleanup_guard is not None:
+                _cleanup_guard()
             try:
                 await participant.release_resources(target)
             except Exception as exc:
+                if _cleanup_guard is not None:
+                    raise
                 logger.warning(
                     "Runtime delete participant release failed: "
                     "participant=%s session_id=%s error=%s",
@@ -2353,6 +2675,8 @@ class RuntimeSessionProvisioner:
                     target.descriptor.session_id,
                     exc,
                 )
+            if _cleanup_guard is not None:
+                _cleanup_guard()
 
     @staticmethod
     async def _notify_delete_failed(
@@ -2380,11 +2704,16 @@ class RuntimeSessionProvisioner:
     async def _notify_delete_committed(
         participants: tuple[object, ...],
         target: SessionLifecycleTarget,
+        *, _cleanup_guard: Callable[[], None] | None = None,
     ) -> None:
         for participant in participants:
+            if _cleanup_guard is not None:
+                _cleanup_guard()
             try:
                 await participant.delete_committed(target)
             except Exception as exc:
+                if _cleanup_guard is not None:
+                    raise
                 logger.warning(
                     "Runtime delete participant commit notification failed: "
                     "participant=%s session_id=%s error=%s",
@@ -2392,6 +2721,8 @@ class RuntimeSessionProvisioner:
                     target.descriptor.session_id,
                     exc,
                 )
+            if _cleanup_guard is not None:
+                _cleanup_guard()
 
     async def _commit_delete_observers(
         self,
@@ -2400,7 +2731,10 @@ class RuntimeSessionProvisioner:
         trajectory_prepared: bool,
         lifecycle_prepared: bool,
         delete_lifecycle: SessionDeleteLifecycle | None,
+        _cleanup_guard: Callable[[], None] | None = None,
     ) -> None:
+        if _cleanup_guard is not None:
+            _cleanup_guard()
         if trajectory_prepared:
             try:
                 from jiuwenswarm.observability.session_delete import (
@@ -2420,6 +2754,8 @@ class RuntimeSessionProvisioner:
                     exc,
                 )
                 raise
+        if _cleanup_guard is not None:
+            _cleanup_guard()
         if lifecycle_prepared and delete_lifecycle is not None:
             try:
                 await delete_lifecycle.commit_session_delete(
@@ -2445,6 +2781,7 @@ __all__ = [
     "SessionDescriptor",
     "SessionForkInput",
     "SessionForkResult",
+    "SessionOwnerLifecycle",
     "SessionProvisionCommitContext",
     "SessionProvisionCommitTiming",
     "SessionProvisionError",

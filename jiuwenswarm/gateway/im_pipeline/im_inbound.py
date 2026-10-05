@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 
+from jiuwenswarm.governance.model_consumer import runtime_model_kwargs
 from jiuwenswarm.common.config import _parse_custom_headers
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.gateway.routing.interaction_context import PendingInteraction
@@ -422,10 +423,11 @@ class IMConversationProcessor:
                 timeout=180.0,
                 custom_headers=custom_headers,
             )
-            self._llm = Model(
+            self._llm = Model(**runtime_model_kwargs(
                 model_config=model_cfg,
                 model_client_config=model_client_cfg,
-            )
+                binding_config={**mcc, "model_name": self._model_name}
+            ))
         except Exception as exc:
             logger.warning(
                 "[IMConversationProcessor] 初始化 LLM 失败，将回退原始消息: %s",

@@ -1515,6 +1515,10 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
     无论走哪个分支，最后都会追加 ``models.agentos`` 备份模型条目（若有）。
     agentos 与 defaults 并列、同等可选可切换，但 ``is_default=False`` 不抢启动默认。
     """
+    from jiuwenswarm.governance.organization_auth import configured_authenticator
+    if configured_authenticator() is not None:
+        from jiuwenswarm.governance.model_credentials import configured_model_metadata
+        return configured_model_metadata()
     if config is None:
         config = get_config()
     models = config.get("models", {})
@@ -1572,6 +1576,9 @@ def get_available_models(
     AgentServer 靠 Gateway 随请求带下来的凭据现造（见 common/auth/passthrough.py）。
     """
     configured = get_default_models(config)
+    from jiuwenswarm.governance.organization_auth import configured_authenticator
+    if configured_authenticator() is not None:
+        return configured
     if not session_id:
         return configured
     # 登录送的模型始终叠加进列表（不再受 enable_free_models / Opencode Zen 开关约束；

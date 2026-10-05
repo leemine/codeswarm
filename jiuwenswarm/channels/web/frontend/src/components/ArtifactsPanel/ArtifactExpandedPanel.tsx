@@ -1,7 +1,8 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useContext, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSessionArtifacts } from '.';
 import { ArtifactList } from '.';
+import { ArtifactOwnerContext } from './ArtifactOwnerContext';
 import { FilePreview } from './FilePreview';
 import BackIcon from '../../assets/work-mode/back.svg?react';
 import ArrowLeftIcon from '../../assets/work-mode/arrow-left.svg?react';
@@ -15,6 +16,7 @@ export function ArtifactExpandedPanel({
   onSelectArtifact: (artifactId: string) => void;
 }) {
   const { t } = useTranslation();
+  const { organizationAuth } = useContext(ArtifactOwnerContext);
   const artifacts = useSessionArtifacts();
   const selectedArtifact = artifacts.find(a => a.id === selectedArtifactId) ?? null;
   const selectedIndex = selectedArtifact ? artifacts.findIndex(a => a.id === selectedArtifact.id) : -1;
@@ -76,7 +78,9 @@ export function ArtifactExpandedPanel({
           </button>
         </div>
         <div className="min-h-0 flex-1 overflow-hidden bg-transparent p-3" data-testid="artifact-preview-surface">
-          <FilePreview artifact={selectedArtifact} onPresentationStructureInvalidChange={handlePresentationStructureInvalidChange} />
+          {organizationAuth ? (
+            <p className="text-sm text-text-muted" data-testid="artifact-owner-preview-notice">{t('artifacts.ownerPreviewUnavailable')}</p>
+          ) : <FilePreview artifact={selectedArtifact} onPresentationStructureInvalidChange={handlePresentationStructureInvalidChange} />}
         </div>
       </div>
     );

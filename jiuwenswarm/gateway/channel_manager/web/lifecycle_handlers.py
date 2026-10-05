@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.gateway.routing.e2a_proxy import fetch_agent_unary
@@ -82,8 +83,46 @@ def register_lifecycle_handlers(channel, resolve_client, resolve_cron):
 
     channel.ensure_lifecycle_watch = ensure_watch
 
+    async def delete_cleanup(ws, req_id, params, session_id):
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.governance.organization_auth import connection_principal
+        from jiuwenswarm.gateway.routing.agent_request_timeout import send_agent_request_with_timeout
+
+        permit = getattr(ws, "_jiuwen_session_permits", {}).get(req_id)
+        success = False
+        try:
+            identity = connection_principal(ws).identity()
+            if permit is None or not permit.allows_cleanup("session.delete", params, identity, session_id):
+                raise PermissionError("original deletion request required")
+            client = resolve_client()
+            if client is None or getattr(client, "server_ready", True) is False:
+                raise ConnectionError("deletion transport unavailable")
+            envelope = e2a_from_agent_fields(
+                request_id=req_id, channel_id=channel.channel_id, session_id=session_id,
+                req_method=ReqMethod.SESSION_DELETE, params=dict(params), is_stream=False,
+                timestamp=time.time(), user_id=channel._connection_user_id(ws),
+            )
+            response = await send_agent_request_with_timeout(client, envelope, label="session.delete.cleanup")
+            result = response.payload
+            # Ordinary permit revalidation correctly fails after owner retirement.
+            # The host verifies the original receipt against completed deletion facts.
+            success = (connection_principal(ws).identity() == permit.identity
+                       and response.request_id == req_id and response.channel_id == channel.channel_id
+                       and response.ok is True and isinstance(result, dict)
+                       and result.get("session_id") == session_id
+                       and result.get("deleted") is True and result.get("exit_confirmed") is True
+                       and permit.host.confirm_deletion_for_permit(permit) is True)
+        except Exception:
+            # Never forward raw backend errors or a possibly sensitive payload.
+            success = False
+        channel.send_deletion_result(ws, req_id, permit, success=success)
+
     def handler(method):
         async def handle(ws, req_id, params, session_id, user_id=None):
+            from jiuwenswarm.governance.organization_auth import configured_authenticator
+            if method == "session.delete" and configured_authenticator() is not None:
+                await delete_cleanup(ws, req_id, params, session_id)
+                return
             ensure_watch(user_id)
             if not isinstance(params, dict):
                 await channel.send_response(

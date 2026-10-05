@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from jiuwenswarm.governance.model_consumer import runtime_model_kwargs
 from jiuwenswarm.common.config import get_config, get_default_models
 from jiuwenswarm.common.kv_cache_affinity_config import (
     has_kv_cache_affinity_capability,
@@ -67,7 +68,7 @@ def create_default_kv_cache_model():
 
     model_name = str(client.pop("model_name", "") or "").strip()
     client.setdefault("client_provider", "OpenAI")
-    model = Model(
+    model = Model(**runtime_model_kwargs(
         model_client_config=ModelClientConfig(**client),
         model_config=ModelRequestConfig(
             **build_reasoning_model_request_kwargs(
@@ -75,8 +76,8 @@ def create_default_kv_cache_model():
                 model_config_obj=request,
                 model_name=model_name,
             )
-        ),
-    )
+        )
+    ))
     supports = getattr(model, "supports_kv_cache_affinity", None)
     return model if callable(supports) and supports() else None
 

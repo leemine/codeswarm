@@ -448,14 +448,18 @@ def flush_history_writes() -> None:
     _WRITE_QUEUE.join()
 
 
-def _write_records_to_path(path: Path, records: list[dict[str, Any]]) -> None:
+def _write_records_to_path(path: Path, records: list[dict[str, Any]], *, authorization_check=None) -> None:
     from jiuwenswarm.server.runtime.session import lifecycle as lc
     sid = _managed_history_session_id(path)
     if sid is None:
-        return _write_records_unfenced(path, records)
+        if authorization_check is not None:
+            authorization_check()
+        return _write_records_unfenced(path, records, **({"authorization_check": authorization_check} if authorization_check is not None else {}))
     with lc.resource_lock("session", sid):
         lc.write_guard(sid)
-        return _write_records_unfenced(path, records)
+        if authorization_check is not None:
+            authorization_check()
+        return _write_records_unfenced(path, records, **({"authorization_check": authorization_check} if authorization_check is not None else {}))
 
 
 def _managed_history_session_id(path: Path) -> str | None:
@@ -469,7 +473,9 @@ def _managed_history_session_id(path: Path) -> str | None:
     return None
 
 
-def _write_records_unfenced(path: Path, records: list[dict[str, Any]]) -> None:
+def _write_records_unfenced(path: Path, records: list[dict[str, Any]], *, authorization_check=None) -> None:
+    if authorization_check is not None:
+        authorization_check()
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.suffix.lower() == ".jsonl":
         payload = "\n".join(json.dumps(record, ensure_ascii=False) for record in records)
@@ -489,6 +495,8 @@ def _write_records_unfenced(path: Path, records: list[dict[str, Any]]) -> None:
             fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())
+        if authorization_check is not None:
+            authorization_check()
         os.replace(temporary_path, path)
 
 
@@ -1175,6 +1183,7 @@ def append_history_record(
     subagent_id: str | None = None,
     delivery_id: str | None = None,
     _persistence_receipt: Future[bool] | None = None,
+    authorization_check=None,
 ) -> bool | None:
     """向指定 session 的当前激活历史文件异步追加一条记录."""
     sid = (session_id or "default").strip() or "default"
@@ -1239,7 +1248,16 @@ def append_history_record(
         and extra.get("message_origin") == SESSION_MESSAGE_ORIGIN
     )
 
-    if _persistence_receipt is None:
+    if authorization_check is not None:
+        if _persistence_receipt is not None or subagent_id or role_norm != 'assistant':
+            raise ValueError('governed rewind append requires the synchronous root assistant path')
+        _WRITE_QUEUE.join()
+        with _FILE_LOCK:
+            authorization_check()
+            path = get_read_history_path(sid)
+            records = load_history_records(sid) if path.exists() else []
+            _write_records_to_path(path, [*records, item], authorization_check=authorization_check)
+    elif _persistence_receipt is None:
         _enqueue_history_item(sid, item, subagent_id=subagent_id)
     else:
         _enqueue_history_item(
@@ -1267,6 +1285,8 @@ def append_history_record(
                 ),
                 channel_metadata=channel_metadata,
                 mode=None if subagent_id else mode,
+                **({"sync_write": True, "cache_bust": True, "authorization_check": authorization_check}
+                   if authorization_check is not None else {}),
                 last_user_message_at=(
                     float(timestamp)
                     if role_norm == "user" and not is_cross_session_user
@@ -1280,6 +1300,10 @@ def append_history_record(
                     source_request_id=rid,
                     route_metadata=channel_metadata,
                 )
+        except PermissionError as exc:
+            if authorization_check is not None:
+                raise
+            logger.warning("更新会话元数据失败: %s", exc)
         except Exception as exc:
             logger.warning("更新会话元数据失败: %s", exc)
 
@@ -1400,7 +1424,7 @@ def append_compact_history_records(
     )
 
 
-def truncate_history_records(*, session_id: str, cut_index: int) -> dict[str, Any]:
+def truncate_history_records(*, session_id: str, cut_index: int, authorization_check=None) -> dict[str, Any]:
     """截断会话历史到指定位置（线程安全）。
 
     先等待异步写入队列刷盘，再持锁截断当前激活的历史文件。
@@ -1411,6 +1435,8 @@ def truncate_history_records(*, session_id: str, cut_index: int) -> dict[str, An
 
     fpath = get_read_history_path(sid)
     with _FILE_LOCK:
+        if authorization_check is not None:
+            authorization_check()
         if not fpath.exists():
             return {"remaining_records": 0, "removed_records": 0}
         history = load_history_records(sid)
@@ -1422,7 +1448,7 @@ def truncate_history_records(*, session_id: str, cut_index: int) -> dict[str, An
         if cut_index > total:
             cut_index = total
         truncated = history[:cut_index]
-        _write_records_to_path(fpath, truncated)
+        _write_records_to_path(fpath, truncated, **({"authorization_check": authorization_check} if authorization_check else {}))
         return {
             "remaining_records": len(truncated),
             "removed_records": total - len(truncated),

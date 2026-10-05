@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any
 
 from jiuwenswarm.common.config import get_config
@@ -84,6 +85,37 @@ class HeartbeatRuntimeUnavailableError(RuntimeError):
     """Heartbeat ownership exists, but its local runtime is not ready yet."""
 
 
+@dataclass(eq=False)
+class _DeletePreparation:
+    """Original in-memory fence owner; lifecycle remains the durable authority."""
+
+    operation_id: str | None
+    scheduler: object
+    admission: object
+    execution: object
+    ready: bool = False
+
+
+def _delete_operation_id(session_id: str) -> str | None:
+    # This is the original host lifecycle file, never a request-supplied token.
+    from jiuwenswarm.server.runtime.session import lifecycle
+
+    state = lifecycle.state("session", session_id)
+    operation = state.get("operation") or {}
+    token = operation.get("operation_id")
+    if (
+        operation.get("kind") == "delete"
+        and operation.get("resource_id") == session_id
+        and operation.get("resource_type") == "session"
+        and operation.get("status") in {"running", "failed"}
+        and state.get("deleted") is not True
+        and isinstance(token, str)
+        and token
+    ):
+        return token
+    return None
+
+
 class HeartbeatRailRuntime:
     """The sole Store/Controller/Scheduler/Execution owner in AgentServer."""
 
@@ -127,7 +159,7 @@ class HeartbeatRailRuntime:
         self._available = False
         self._start_lock = asyncio.Lock()
         self._pinned_agents: dict[str, Any] = {}
-        self._deleting_sessions: set[str] = set()
+        self._deleting_sessions: dict[str, _DeletePreparation] = {}
 
     @property
     def is_available(self) -> bool:
@@ -198,50 +230,115 @@ class HeartbeatRailRuntime:
         if await self.store.count_active_jobs_for_session(session_id) == 0:
             self.release_agent(session_id)
 
+    def _prepared_delete_is_current(
+        self, session_id: str, preparation: _DeletePreparation
+    ) -> bool:
+        if (
+            self._deleting_sessions.get(session_id) is not preparation
+            or self.scheduler is not preparation.scheduler
+            or self.admission is not preparation.admission
+            or self.execution is not preparation.execution
+        ):
+            return False
+        state = self.admission._states.get(session_id)
+        return (
+            session_id in self.scheduler._suspended_sessions
+            and state is not None
+            and state.heartbeat_blocked
+            and not self.admission.is_heartbeat_active(session_id)
+            and session_id not in self.execution.active_session_ids()
+            and session_id not in self._pinned_agents
+        )
+
     async def begin_session_delete(self, session_id: str) -> None:
-        """Quiesce one Session without committing job deletion policies yet."""
+        """Prepare once; reuse only an actually quiesced original operation."""
         session_id = str(session_id or "").strip()
         if not session_id:
             raise ValueError("session_id is required")
-        if session_id in self._deleting_sessions:
+        operation_id = _delete_operation_id(session_id)
+        previous = self._deleting_sessions.get(session_id)
+        if previous is not None:
+            if (
+                operation_id is not None
+                and previous.operation_id == operation_id
+                and previous.ready
+                and self._prepared_delete_is_current(session_id, previous)
+            ):
+                return
             raise RuntimeError("heartbeat session deletion is already in progress")
-        self._deleting_sessions.add(session_id)
+        preparation = _DeletePreparation(
+            operation_id, self.scheduler, self.admission, self.execution
+        )
+        self._deleting_sessions[session_id] = preparation
         self.scheduler.suspend_session(session_id)
         try:
             active_run_id = await self.admission.block_heartbeats(session_id)
+            if self._deleting_sessions.get(session_id) is not preparation:
+                raise RuntimeError("heartbeat deletion preparation owner changed")
             if active_run_id:
                 cancelled = await self.execution.cancel(active_run_id)
                 if not cancelled and self.execution.has_active_run(active_run_id):
                     raise RuntimeError(
                         "failed to cancel active heartbeat before session deletion"
                     )
+            if (
+                self._deleting_sessions.get(session_id) is not preparation
+                or _delete_operation_id(session_id) != operation_id
+            ):
+                raise RuntimeError(
+                    "heartbeat deletion operation changed during preparation"
+                )
             self.release_agent(session_id)
+            if not self._prepared_delete_is_current(session_id, preparation):
+                raise RuntimeError("heartbeat deletion preparation is not quiesced")
+            preparation.ready = True
         except BaseException:
-            await self.abort_session_delete(session_id)
+            # A late prepare must not clear a replacement owner's fence.
+            if self._deleting_sessions.get(session_id) is preparation:
+                await self.abort_session_delete(session_id)
             raise
 
     async def abort_session_delete(
         self, session_id: str, *, channel_id: str = ""
     ) -> None:
-        """Roll back a prepared product deletion and allow future dispatch."""
+        """Roll back only this original preparation; never reuse it as ready."""
         session_id = str(session_id or "").strip()
-        self._deleting_sessions.discard(session_id)
-        self.scheduler.resume_session(session_id)
-        await self.admission.unblock_heartbeats(session_id)
-        if session_id and await self.store.count_active_jobs_for_session(session_id):
-            self._retain_existing_agent(channel_id, session_id)
+        preparation = self._deleting_sessions.get(session_id)
+        if preparation is not None:
+            preparation.ready = False
+        try:
+            self.scheduler.resume_session(session_id)
+            await self.admission.unblock_heartbeats(session_id)
+            if self._deleting_sessions.get(session_id) is not preparation:
+                return
+            if session_id and await self.store.count_active_jobs_for_session(
+                session_id
+            ):
+                if self._deleting_sessions.get(session_id) is preparation:
+                    self._retain_existing_agent(channel_id, session_id)
+        finally:
+            if self._deleting_sessions.get(session_id) is preparation:
+                self._deleting_sessions.pop(session_id, None)
 
     async def commit_session_delete(self, session_id: str) -> None:
-        """Apply configured job policies after the product Session is gone."""
+        """Apply job policies and clear only the original prepared handle."""
         session_id = str(session_id or "").strip()
+        preparation = self._deleting_sessions.get(session_id)
+        if preparation is not None:
+            preparation.ready = False
         try:
             await self.scheduler.on_session_deleted(session_id)
         finally:
-            self.release_agent(session_id)
-            self._deleting_sessions.discard(session_id)
-            self.scheduler.resume_session(session_id)
-            await self.admission.clear_interaction_pending(session_id)
-            await self.admission.unblock_heartbeats(session_id)
+            if self._deleting_sessions.get(session_id) is preparation:
+                self.release_agent(session_id)
+                self.scheduler.resume_session(session_id)
+                try:
+                    await self.admission.clear_interaction_pending(session_id)
+                    if self._deleting_sessions.get(session_id) is preparation:
+                        await self.admission.unblock_heartbeats(session_id)
+                finally:
+                    if self._deleting_sessions.get(session_id) is preparation:
+                        self._deleting_sessions.pop(session_id, None)
 
     async def _sync_session_agent(
         self,
