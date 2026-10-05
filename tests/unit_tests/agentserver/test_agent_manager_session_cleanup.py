@@ -325,6 +325,9 @@ async def test_release_subagent_runtime_uses_existing_agent_adapter() -> None:
         def __init__(self) -> None:
             self._adapter = Adapter()
 
+        def has_session_runtime(self, session_id):
+            return session_id == "delete-session"
+
     manager = AgentManager()
     manager.agents["web"] = {"agent::": Agent()}
 

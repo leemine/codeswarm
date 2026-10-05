@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Archive, CircleAlert, Folder, Loader2, RotateCcw, Search, Trash2 } from 'lucide-react';
 import { Button, Input, toast } from '../../../../components/ui';
@@ -7,6 +7,7 @@ import { useSettingsServices } from '../../services/SettingsServicesProvider';
 import { useWorkspaceStore } from '../../../../stores';
 import {
   archivedTaskClient,
+  DeletionAuditPendingError,
   findBatchSessionResult,
   getArchiveErrorCode,
   type ArchivedSession,
@@ -45,8 +46,17 @@ function ArchivedTasksSettingsPanel({ isConnected }: { isConnected: boolean }) {
   const [searchInput, setSearchInput] = useState('');
   const [keyword, setKeyword] = useState('');
   const [pendingActions, setPendingActions] = useState<Record<string, 'restore' | 'delete'>>({});
+  const [deleteAuditPendingSid, setDeleteAuditPendingSid] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
-  const [deleteBusy, setDeleteBusy] = useState(false);
+  const deleteTargetRef = useRef(deleteTarget);
+  deleteTargetRef.current = deleteTarget;
+  const deleteInFlight = useRef(new Set<string>());
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+  const deleteBusy = deleteTarget !== null && pendingActions[`session:${deleteTarget.session.session_id}`] === 'delete';
   const [deleteError, setDeleteError] = useState<string | null>(null);
   // 项目分组级操作：删除该项目下全部已归档会话（项目无归档态，操作只针对会话集合）。
   const [deleteArchivedTarget, setDeleteArchivedTarget] = useState<{ projectId: string; projectName: string } | null>(null);
@@ -110,30 +120,44 @@ function ArchivedTasksSettingsPanel({ isConnected }: { isConnected: boolean }) {
   };
 
   const handleConfirmDelete = async () => {
-    if (!deleteTarget) return;
-    const session = deleteTarget.session;
-    setDeleteBusy(true);
+    const target = deleteTarget;
+    if (!target || deleteInFlight.current.has(target.session.session_id)) return;
+    const session = target.session;
+    deleteInFlight.current.add(session.session_id);
     setDeleteError(null);
     const actionKey = `session:${session.session_id}`;
+    const isCurrentTarget = () => mountedRef.current && deleteTargetRef.current === target;
     setPendingActions((prev) => ({ ...prev, [actionKey]: 'delete' }));
     try {
       await archivedTaskClient.deleteSession(session.session_id);
-      removeLocalSession(session.session_id);
-      showToast('success', t('settingsPanel.archivedTasks.sessionDeleted'));
-      setDeleteTarget(null);
-    } catch (error) {
-      if (getArchiveErrorCode(error) === 'NOT_FOUND') {
-        removeLocalSession(session.session_id);
+      if (mountedRef.current) removeLocalSession(session.session_id);
+      if (isCurrentTarget()) {
         showToast('success', t('settingsPanel.archivedTasks.sessionDeleted'));
         setDeleteTarget(null);
-      } else {
-        setDeleteError(t(actionErrorKey(error)));
+        setDeleteAuditPendingSid(null);
+      }
+    } catch (error) {
+      if (error instanceof DeletionAuditPendingError && error.sessionId === session.session_id) {
+        if (mountedRef.current) removeLocalSession(session.session_id);
+        if (isCurrentTarget()) {
+          setDeleteAuditPendingSid(session.session_id);
+          setDeleteError(t('multiSession.deleteAuditPendingDialog'));
+        }
+        return;
+      }
+      if (isCurrentTarget()) {
+        const code = getArchiveErrorCode(error);
+        setDeleteError(t(code === 'NOT_FOUND' || code === 'DELETE_UNCONFIRMED'
+          ? 'settingsPanel.archivedTasks.errors.deleteUnconfirmed'
+          : actionErrorKey(error)));
       }
     } finally {
-      clearPendingAction(actionKey);
-      setDeleteBusy(false);
-      refreshLists();
-      void useWorkspaceStore.getState().refreshWorkspaceData();
+      deleteInFlight.current.delete(session.session_id);
+      if (mountedRef.current) {
+        clearPendingAction(actionKey);
+        refreshLists();
+        void useWorkspaceStore.getState().refreshWorkspaceData();
+      }
     }
   };
 
@@ -261,7 +285,12 @@ function ArchivedTasksSettingsPanel({ isConnected }: { isConnected: boolean }) {
     </li>
   );
 
-  const deleteDialogMessage = deleteTarget ? (
+  const deleteAuditPending = deleteTarget?.session.session_id === deleteAuditPendingSid;
+  const deleteDialogMessage = deleteAuditPending ? (
+    <p className="archived-tasks__dialog-line" data-testid="archived-tasks-deleted-audit-description">
+      {t('multiSession.deletedAuditDescription', { title: getArchivedSessionTitle(deleteTarget!.session, t('multiSession.untitled')) })}
+    </p>
+  ) : deleteTarget ? (
     <>
       <p className="archived-tasks__dialog-line">
         {t('settingsPanel.archivedTasks.deleteSessionRecord', {
@@ -381,13 +410,14 @@ function ArchivedTasksSettingsPanel({ isConnected }: { isConnected: boolean }) {
         message={deleteDialogMessage}
         confirming={deleteBusy}
         error={deleteError ?? undefined}
-        confirmLabel={t('settingsPanel.archivedTasks.deletePermanently')}
+        confirmLabel={t(deleteAuditPending ? 'multiSession.retryDeletionAudit' : 'settingsPanel.archivedTasks.deletePermanently')}
         confirmVariant="danger"
         onConfirm={() => { void handleConfirmDelete(); }}
         onCancel={() => {
           if (deleteBusy) return;
           setDeleteError(null);
           setDeleteTarget(null);
+          setDeleteAuditPendingSid(null);
         }}
       />
 

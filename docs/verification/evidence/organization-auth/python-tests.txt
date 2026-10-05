@@ -1,0 +1,226 @@
+
+----------------------------- live log collection ------------------------------
+2026-10-03 23:45:12 [INFO] setup plugin alembic.autogenerate.schemas
+2026-10-03 23:45:12 [INFO] setup plugin alembic.autogenerate.tables
+2026-10-03 23:45:12 [INFO] setup plugin alembic.autogenerate.types
+2026-10-03 23:45:12 [INFO] setup plugin alembic.autogenerate.constraints
+2026-10-03 23:45:12 [INFO] setup plugin alembic.autogenerate.defaults
+2026-10-03 23:45:12 [INFO] setup plugin alembic.autogenerate.comments
+2026-10-03 23:45:14 [INFO] loading built-in prompt resource /tmp/r1-12-quality/locked-venv/lib/python3.13/site-packages/openjiuwen/symphony/retrieval/common/prompts/retrieval_disclosure.yaml
+collected 66 items
+
+tests/unit_tests/governance/test_organization_auth.py::test_identity_ignores_routing_and_rechecks_current_revocation PASSED [  1%]
+tests/unit_tests/governance/test_organization_auth.py::test_assertion_rejects_tampering[body] PASSED [  3%]
+tests/unit_tests/governance/test_organization_auth.py::test_assertion_rejects_tampering[signature] PASSED [  4%]
+tests/unit_tests/governance/test_organization_auth.py::test_assertion_rejects_tampering[audience] PASSED [  6%]
+tests/unit_tests/governance/test_organization_auth.py::test_assertion_rejects_tampering[expired] PASSED [  7%]
+tests/unit_tests/governance/test_organization_auth.py::test_assertion_rejects_tampering[missing] PASSED [  9%]
+tests/unit_tests/governance/test_organization_auth.py::test_assertion_replay_restart_and_revocation PASSED [ 10%]
+tests/unit_tests/governance/test_organization_auth.py::test_service_assertion_does_not_become_local_human PASSED [ 12%]
+tests/unit_tests/governance/test_organization_auth.py::test_expired_and_unavailable_authority_fail_closed PASSED [ 13%]
+tests/unit_tests/governance/test_organization_auth.py::test_queue_preserves_two_independent_contexts_and_rechecks PASSED [ 15%]
+tests/unit_tests/governance/test_organization_auth.py::test_http_login_logout_and_direct_api
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:14 [INFO] HTTP Request: GET http://test/private "HTTP/1.1 401 Unauthorized"
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://test/api/v1/auth/organization/login "HTTP/1.1 403 Forbidden"
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://test/api/v1/auth/organization/login "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: GET http://test/private "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://test/api/v1/auth/organization/login "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: GET http://test/private "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://test/api/v1/auth/organization/logout "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: GET http://test/private "HTTP/1.1 401 Unauthorized"
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://test/api/v1/auth/organization/login "HTTP/1.1 401 Unauthorized"
+2026-10-03 23:45:14 [INFO] HTTP Request: GET http://test/private "HTTP/1.1 200 OK"
+PASSED                                                                   [ 16%]
+tests/unit_tests/governance/test_organization_auth.py::test_agentserver_rejects_unsigned_and_restores_context PASSED [ 18%]
+tests/unit_tests/governance/test_organization_auth.py::test_web_routing_uses_authenticated_actor_and_active_connection_revokes PASSED [ 19%]
+tests/unit_tests/governance/test_organization_auth.py::test_agentserver_upgrade_rejects_direct_and_replayed_handshake PASSED [ 21%]
+tests/unit_tests/governance/test_organization_auth.py::test_http_failed_revoke_does_not_claim_logged_out
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://test/api/v1/auth/organization/login "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://test/api/v1/auth/organization/logout "HTTP/1.1 503 Service Unavailable"
+2026-10-03 23:45:14 [INFO] HTTP Request: GET http://test/api/v1/auth/organization/status "HTTP/1.1 200 OK"
+PASSED                                                                   [ 22%]
+tests/unit_tests/governance/test_organization_auth.py::test_config_disabled_preserves_existing_mode PASSED [ 24%]
+tests/unit_tests/governance/test_organization_auth.py::test_http_stream_rechecks_revocation_before_next_chunk PASSED [ 25%]
+tests/unit_tests/governance/test_organization_auth.py::test_existing_connection_cannot_switch_actor_via_configuration PASSED [ 27%]
+tests/unit_tests/governance/test_organization_auth.py::test_legacy_static_file_routes_require_scoped_replacement PASSED [ 28%]
+tests/unit_tests/governance/test_organization_auth.py::test_browser_cookie_origin_and_status_do_not_expose_credentials
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:14 [INFO] HTTP Request: POST https://localhost/api/v1/auth/organization/login "HTTP/1.1 403 Forbidden"
+2026-10-03 23:45:14 [INFO] HTTP Request: POST https://localhost/api/v1/auth/organization/login "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: GET https://localhost/api/v1/auth/organization/status "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: POST https://localhost/api/v1/auth/organization/logout "HTTP/1.1 403 Forbidden"
+2026-10-03 23:45:14 [INFO] HTTP Request: GET https://localhost/api/v1/auth/organization/status "HTTP/1.1 200 OK"
+PASSED                                                                   [ 30%]
+tests/unit_tests/test_agentos_ws_handshake_auth.py::test_gateway_server_process_request_rejects_tui_not_acp PASSED [ 31%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_authorize_builds_account_kit_url
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 200 OK"
+PASSED                                                                   [ 33%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_authorize_fails_fast_without_exchange_service
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 503 Service Unavailable"
+PASSED                                                                   [ 34%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_routes_are_404_when_login_disabled
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 404 Not Found"
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://testserver/api/v1/auth/claim "HTTP/1.1 404 Not Found"
+2026-10-03 23:45:14 [INFO] HTTP Request: GET http://testserver/api/v1/auth/callback?state=s&code=c "HTTP/1.1 404 Not Found"
+PASSED                                                                   [ 36%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_full_login_flow
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://testserver/api/v1/auth/claim "HTTP/1.1 202 Accepted"
+2026-10-03 23:45:14 [INFO] HTTP Request: GET http://testserver/api/v1/auth/callback?state=qZVelGV2NwmYYSWjfpllfDiOlYF-D3Lr&code=auth-code-1 "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://testserver/api/v1/auth/claim "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://testserver/api/v1/auth/claim "HTTP/1.1 400 Bad Request"
+2026-10-03 23:45:14 [INFO] HTTP Request: GET http://testserver/api/v1/auth/status "HTTP/1.1 200 OK"
+PASSED                                                                   [ 37%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_status_without_session_is_logged_out
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: GET http://testserver/api/v1/auth/callback?state=FVcjxPaoC8KiU-f0M-Of_swT51_LRPcp&code=c "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: GET http://testserver/api/v1/auth/status "HTTP/1.1 200 OK"
+PASSED                                                                   [ 39%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_status_reports_the_campaign_state
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:14 [INFO] HTTP Request: GET http://testserver/api/v1/auth/status "HTTP/1.1 200 OK"
+PASSED                                                                   [ 40%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_status_reports_a_finished_campaign
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:14 [INFO] HTTP Request: GET http://testserver/api/v1/auth/status "HTTP/1.1 200 OK"
+PASSED                                                                   [ 42%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_wrong_claim_token_is_rejected_without_burning_the_login
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: GET http://testserver/api/v1/auth/callback?state=MVEkQv3GcTR0WwJNCnYBcGznumgfcE2k&code=c "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://testserver/api/v1/auth/claim "HTTP/1.1 400 Bad Request"
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://testserver/api/v1/auth/claim "HTTP/1.1 200 OK"
+PASSED                                                                   [ 43%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_user_denies_authorization
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: GET http://testserver/api/v1/auth/callback?state=87S-SrU95zySKkmoHRbgNWQ6RkcJiPBo&error=access_denied "HTTP/1.1 400 Bad Request"
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://testserver/api/v1/auth/claim "HTTP/1.1 400 Bad Request"
+PASSED                                                                   [ 45%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_huawei_error_description_reaches_the_claimer
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: GET http://testserver/api/v1/auth/callback?state=VOLTUVdWYrQacrBNLxdRz7LGkGt6mZfu&error=1201&error_description=some+reason "HTTP/1.1 400 Bad Request"
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://testserver/api/v1/auth/claim "HTTP/1.1 400 Bad Request"
+PASSED                                                                   [ 46%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_token_exchange_failure_reaches_the_claimer
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:14 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 200 OK"
+2026-10-03 23:45:14 [INFO] HTTP Request: GET http://testserver/api/v1/auth/callback?state=LoindTD4zu5TD4ClXAduPiFlrqhLkbk4&code=c "HTTP/1.1 400 Bad Request"
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/claim "HTTP/1.1 400 Bad Request"
+PASSED                                                                   [ 48%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_unknown_state_gets_a_neutral_page_and_no_exchange
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:15 [INFO] HTTP Request: GET http://testserver/api/v1/auth/callback?state=not-a-real-state&code=c "HTTP/1.1 400 Bad Request"
+PASSED                                                                   [ 50%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_replayed_callback_does_not_exchange_twice
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: GET http://testserver/api/v1/auth/callback?state=tBgoyljVrdlda1-M8DNesXVEErZMq7js&code=c "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: GET http://testserver/api/v1/auth/callback?state=tBgoyljVrdlda1-M8DNesXVEErZMq7js&code=c "HTTP/1.1 400 Bad Request"
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/claim "HTTP/1.1 200 OK"
+PASSED                                                                   [ 51%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_state_changing_routes_require_the_auth_header[post-/api/v1/auth/authorize-None]
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 403 Forbidden"
+PASSED                                                                   [ 53%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_state_changing_routes_require_the_auth_header[post-/api/v1/auth/claim-body1]
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/claim "HTTP/1.1 403 Forbidden"
+PASSED                                                                   [ 54%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_state_changing_routes_require_the_auth_header[post-/api/v1/auth/cancel-body2]
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/cancel "HTTP/1.1 403 Forbidden"
+PASSED                                                                   [ 56%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_state_changing_routes_require_the_auth_header[post-/api/v1/auth/logout-None]
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/logout "HTTP/1.1 403 Forbidden"
+PASSED                                                                   [ 57%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_cancelled_login_can_no_longer_be_claimed
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/cancel "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/claim "HTTP/1.1 202 Accepted"
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/cancel "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: GET http://testserver/api/v1/auth/callback?state=BVupHD3KGruQ_LGHrhGYoYRKAYroZMuK&code=c "HTTP/1.1 400 Bad Request"
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/claim "HTTP/1.1 400 Bad Request"
+PASSED                                                                   [ 59%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_non_ascii_claim_token_is_not_a_server_error
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/cancel "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/claim "HTTP/1.1 400 Bad Request"
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/claim "HTTP/1.1 202 Accepted"
+PASSED                                                                   [ 60%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_session_cookie_is_secure_over_https
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: GET http://testserver/api/v1/auth/callback?state=BewGxpz_b6yEHt-Qn8WiODU6T1B6FONF&code=c "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: POST https://testserver/api/v1/auth/claim "HTTP/1.1 200 OK"
+PASSED                                                                   [ 62%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_landing_page_escapes_error_text
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: GET http://testserver/api/v1/auth/callback?state=JcIK6qa3vTxQawmS9zMiK03c6wNSVkKn&error=%3Cimg+src%3Dx+onerror%3Dalert%281%29%3E "HTTP/1.1 400 Bad Request"
+PASSED                                                                   [ 63%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_logout_clears_session_and_cookie
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: GET http://testserver/api/v1/auth/callback?state=2Zt6SrQ3_iq9y5yp9AvZXzKAhS8H4J7o&code=c "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/claim "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/logout "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: GET http://testserver/api/v1/auth/status "HTTP/1.1 200 OK"
+PASSED                                                                   [ 65%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_logout_revokes_the_credential_held_by_agent_server
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: GET http://testserver/api/v1/auth/callback?state=BIB9mw0D3YUf55taTT4OlxWcGAOjCgQa&code=c "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/claim "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/logout "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/logout "HTTP/1.1 200 OK"
+PASSED                                                                   [ 66%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_models_endpoint_reports_empty_when_logged_out
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:15 [INFO] HTTP Request: GET http://testserver/api/v1/auth/models "HTTP/1.1 200 OK"
+PASSED                                                                   [ 68%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_quota_unavailable_without_apig
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:15 [INFO] HTTP Request: GET http://testserver/api/v1/auth/quota "HTTP/1.1 200 OK"
+PASSED                                                                   [ 69%]
+tests/unit_tests/gateway/test_web_http_auth_routes.py::test_quota_requires_the_callers_session
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:15 [INFO] HTTP Request: POST http://testserver/api/v1/auth/authorize "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: GET http://testserver/api/v1/auth/callback?state=3K5H-Z_Z7WMdiuED8HhlPJP0H12-J02q&code=c "HTTP/1.1 200 OK"
+2026-10-03 23:45:15 [INFO] HTTP Request: GET http://testserver/api/v1/auth/quota "HTTP/1.1 401 Unauthorized"
+PASSED                                                                   [ 71%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_handle_message_treats_no_close_frame_as_disconnect PASSED [ 72%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_handle_message_ignores_json_error_when_peer_is_closed PASSED [ 74%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_handle_message_reports_json_error_when_peer_is_open PASSED [ 75%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_handle_message_dispatches_registered_gateway_adapter PASSED [ 77%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_handle_message_resolves_gateway_cron_command_ack PASSED [ 78%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_send_push_returns_true_after_writing_to_gateway PASSED [ 80%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_disconnect_cancel_cleans_session_runtime_after_cancel PASSED [ 81%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_disconnect_cancel_response_waits_for_runtime_cleanup PASSED [ 83%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_disconnect_cancel_response_reports_runtime_cleanup_failure PASSED [ 84%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_session_mode_sync_lock_cache_does_not_retain_idle_sessions PASSED [ 86%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_scheduler_agent_pin_moves_with_persistent_owner PASSED [ 87%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_disconnect_cancel_does_not_create_agent_when_runtime_missing PASSED [ 89%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_disconnect_cancel_cleans_session_runtime_when_cancel_reply_send_fails PASSED [ 90%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_disconnect_cancel_cleans_session_runtime_when_stream_task_cleanup_fails PASSED [ 92%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_cancel_source_param_does_not_trigger_session_runtime_cleanup PASSED [ 93%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_cancel_source_metadata_does_not_trigger_supplement_runtime_cleanup PASSED [ 95%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_legacy_metadata_cancel_source_does_not_trigger_runtime_cleanup PASSED [ 96%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_manual_cancel_keeps_session_runtime PASSED [ 98%]
+tests/unit_tests/agentserver/test_agent_ws_connection_close.py::test_before_chat_hook_runs_before_auto_team_binding_and_only_once
+-------------------------------- live log call ---------------------------------
+2026-10-03 23:45:17 [INFO] [AgentServer] chat input received: request_id=hook-order session_id=session-1 channel_id=tui query=hello
+PASSED                                                                   [100%]
+
+======================== 66 passed, 1 warning in 7.97s =========================

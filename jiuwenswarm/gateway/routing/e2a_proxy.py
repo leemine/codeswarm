@@ -73,6 +73,22 @@ def is_legacy_shared_directory_client(agent_client: Any) -> bool:
     return isinstance(agent_client, WebSocketAgentServerClient)
 
 
+def organization_local_fallback_denial() -> dict[str, str] | None:
+    """A shared directory is never organization Session authorization.
+
+    Read the same host configuration as authentication, never request fields.
+    This is intentionally unavailable until a host owner boundary is wired.
+    """
+    from jiuwenswarm.governance.organization_auth import configured_authenticator
+
+    if configured_authenticator() is None:
+        return None
+    return {
+        "error": "Organization Session authority is required; local fallback is unavailable.",
+        "code": "ORGANIZATION_AUTHORITY_REQUIRED",
+    }
+
+
 async def _try_legacy_shared_directory_adapter(
     *,
     channel: Any,
@@ -129,6 +145,10 @@ async def _run_legacy_shared_directory_adapter(
     result form separate from the channel response lets ``fetch_agent_unary``
     use exactly the same compatibility path as RPC handlers.
     """
+    denied = organization_local_fallback_denial()
+    if denied is not None:
+        return False, denied
+
     from jiuwenswarm.common.schema.agent import AgentRequest
     from jiuwenswarm.server.runtime.gateway_adapter import (
         AdapterRegistry,

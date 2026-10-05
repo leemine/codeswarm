@@ -1085,6 +1085,11 @@ _MCP_KEY_SENSITIVE_SUBSTRINGS = frozenset({
 })
 
 
+def current_identity_for_request(_request: object):
+    from jiuwenswarm.governance.organization_auth import current_identity
+    return current_identity()
+
+
 class AgentWebSocketServer:
     """Gateway 与 AgentServer 之间的 WebSocket 服务端（单例）.
 
@@ -1115,11 +1120,16 @@ class AgentWebSocketServer:
         from jiuwenswarm.governance.host_identity import local_instance_identity
 
         local_identity = local_instance_identity(host, get_agent_root_dir())
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is not None:
+            trusted_identity_resolver = current_identity_for_request
         self._trusted_identity_resolver = (
             trusted_identity_resolver
             if trusted_identity_resolver is not None
             else lambda _request: local_identity
         )
+        from jiuwenswarm.governance.session_boundary import organization_sharing_host
+        self._organization_session_host = organization_sharing_host()
         self._server: Any = None
         # 当前 Gateway 连接，用于 send_push 主动推送
         self._current_ws: Any = None
@@ -1149,13 +1159,15 @@ class AgentWebSocketServer:
         self._adapter_registry = AdapterRegistry()
         for adapter in (
             SessionAdapter(),
-            WorkspaceFileAdapter(),
+            WorkspaceFileAdapter(sharing_host=self._organization_session_host,
+                identity_resolver=self._resolve_trusted_identity),
             MemoryAdapter(),
             ProjectAdapter(identity_resolver=self._resolve_trusted_identity),
             HarmonyOSAdapter(),
             ConfigAdapter(),
         ):
             self._adapter_registry.register(adapter)
+        self._install_sharing_adapters()
         # AgentServer-side tokenizer cache/download service. The Gateway only
         # persists model profiles and notifies this process to refresh them.
         self._tokenizer_service = TokenizerService()
@@ -1747,6 +1759,17 @@ class AgentWebSocketServer:
     async def _process_request(self, *args: Any) -> Any:
         """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
         path, request_headers = extract_handshake_request(args)
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        auth = configured_authenticator()
+        if auth is not None:
+            try:
+                proof = json.loads(get_header_value(request_headers, "X-Jiuwen-Gateway-Assertion") or "{}")
+                auth.verify(proof)
+                if proof.get("upgrade") != "agentserver":
+                    raise PermissionError("wrong assertion target")
+            except (OSError, ValueError, KeyError, TypeError, PermissionError):
+                from jiuwenswarm.gateway.channel_manager.base import BaseWebChannel
+                return BaseWebChannel.unauthorized_handshake_response(args)
         origin = get_header_value(request_headers, "Origin")
         enable_origin_check = is_origin_check_enabled()
         if not enable_origin_check:
@@ -1957,13 +1980,15 @@ class AgentWebSocketServer:
                 self._adapter_registry = AdapterRegistry()
                 for adapter in (
                     SessionAdapter(),
-                    WorkspaceFileAdapter(),
+                    WorkspaceFileAdapter(sharing_host=self._organization_session_host,
+                identity_resolver=self._resolve_trusted_identity),
                     MemoryAdapter(),
                     ProjectAdapter(identity_resolver=self._resolve_trusted_identity),
                     HarmonyOSAdapter(),
                     ConfigAdapter(),
                 ):
                     self._adapter_registry.register(adapter)
+                self._install_sharing_adapters()
 
         browser_close_error: BaseException | None = None
         if runtime_close_completed or closing_runtime.closed:
@@ -2058,6 +2083,7 @@ class AgentWebSocketServer:
             resource_lease=lease,
             team_execution_controller=get_team_manager(None),
             trusted_identity_resolver=self._resolve_trusted_identity,
+            organization_session_host=self._organization_session_host,
         )
 
     def _resolve_trusted_identity(self, request: object):
@@ -2084,17 +2110,20 @@ class AgentWebSocketServer:
 
         # 发送 connection.ack 事件，通知 Gateway 服务端已就绪
         try:
-            ack_frame = {
-                "type": "event",
-                "event": "connection.ack",
-                "payload": {
-                    "status": "ready",
-                    "heartbeat_job_owner": "agentserver",
-                    "heartbeat_job_protocol": self._heartbeat_runtime.protocol_version,
-                    "heartbeat_job_ready": self._heartbeat_runtime.is_available,
-                },
-            }
-            await send_wire_payload(ws, ack_frame)
+            if getattr(self, "_organization_session_host", None) is not None:
+                from jiuwenswarm.server.ws_send import send_service_ready
+                await send_service_ready(
+                    ws, heartbeat_protocol=self._heartbeat_runtime.protocol_version,
+                    heartbeat_ready=self._heartbeat_runtime.is_available,
+                )
+            else:
+                await send_wire_payload(ws, {
+                    "type": "event", "event": "connection.ack", "payload": {
+                        "status": "ready", "heartbeat_job_owner": "agentserver",
+                        "heartbeat_job_protocol": self._heartbeat_runtime.protocol_version,
+                        "heartbeat_job_ready": self._heartbeat_runtime.is_available,
+                    },
+                })
             if session_message_service is not None:
                 await session_message_service.set_available(True)
             logger.info("[AgentWebSocketServer] 已发送 connection.ack: %s", remote)
@@ -2167,6 +2196,26 @@ class AgentWebSocketServer:
             if owns_current_connection:
                 self._session_stream_tasks.clear()
 
+    def _install_sharing_adapters(self):
+        host = getattr(self, "_organization_session_host", None)
+        if host is None:
+            return
+        from jiuwenswarm.server.runtime.gateway_adapter.session_sharing_adapter import SessionSharingAdapter
+        from jiuwenswarm.server.runtime.gateway_adapter.shared_history_adapter import SharedHistoryAdapter
+        from jiuwenswarm.server.runtime.gateway_adapter.continuation_adapter import ContinuationAdapter
+        self._adapter_registry.register(SessionSharingAdapter(
+            host.store, identity_resolver=self._resolve_trusted_identity,
+            target_resolver=host.target_resolver, compile_history=host.compile_history,
+            audit_owner_revision=host.owner_revision,
+            after_mutation=lambda: self._execution_runtime()._session_coordinator.revalidate_session_authorities(),
+        ))
+        self._adapter_registry.register(ContinuationAdapter(
+            runtime_resolver=self._execution_runtime, identity_resolver=self._resolve_trusted_identity,
+        ))
+        self._adapter_registry.register(SharedHistoryAdapter(
+            host.store, identity_resolver=self._resolve_trusted_identity,
+        ))
+
     async def _dispatch_gateway_adapter_request(
         self,
         ws: Any,
@@ -2188,6 +2237,16 @@ class AgentWebSocketServer:
         if adapter is None:
             return False
         try:
+            host = getattr(self, "_organization_session_host", None)
+            if host is not None and request.req_method.value in {
+                "session.share.list", "session.share.create", "session.share.update", "session.share.revoke",
+            }:
+                params = request.params if isinstance(request.params, dict) else {}
+                sid = params.get("session_id")
+                identity = self._resolve_trusted_identity(request)
+                if sid and host.owner_current(sid, identity, "manage"):
+                    from jiuwenswarm.server.runtime.session.history_io import run_history_io
+                    await run_history_io(host.prepare_source, sid, identity)
             response = await adapter.handle(request)
         except Exception as exc:  # noqa: BLE001
             logger.exception(
@@ -2204,8 +2263,15 @@ class AgentWebSocketServer:
             )
         if getattr(response, "agent_ref", None) is None:
             response.agent_ref = request.agent_ref
-        wire = encode_agent_response_for_wire(response, response_id=request.request_id)
         async with send_lock:
+            guard = getattr(response, "_delivery_guard", None)
+            if callable(guard):
+                try:
+                    guard()
+                except Exception:
+                    response = AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
+                        ok=False, payload={"code": "FORBIDDEN", "error": "Session authorization changed."})
+            wire = encode_agent_response_for_wire(response, response_id=request.request_id)
             await send_wire_payload(ws, wire)
         return True
 
@@ -2259,6 +2325,28 @@ class AgentWebSocketServer:
         return True
 
     async def _handle_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
+        from jiuwenswarm.governance.organization_auth import (
+            ASSERTION, authenticated_scope, configured_authenticator,
+        )
+        auth = configured_authenticator()
+        if auth is None:
+            return await self._handle_authenticated_message(ws, raw, send_lock)
+        try:
+            data = json.loads(raw)
+            principal = auth.verify(data)
+            data.pop(ASSERTION, None)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, PermissionError):
+            await ws.close(code=1008, reason="authentication required")
+            return
+        with authenticated_scope(principal):
+            return await self._handle_authenticated_message(ws, json.dumps(data), send_lock)
+
+    async def _handle_authenticated_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
+        from jiuwenswarm.governance.session_boundary import delivery_scope
+        with delivery_scope():
+            await self._handle_authenticated_message_impl(ws, raw, send_lock)
+
+    async def _handle_authenticated_message_impl(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
         try:
             data = json.loads(raw)
@@ -2319,6 +2407,41 @@ class AgentWebSocketServer:
 
         _strip_untrusted_session_message_context(request)
 
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        permit = None
+        rewind_authority = None
+        if configured_authenticator() is not None:
+            from jiuwenswarm.governance.session_boundary import admit_session_request, set_delivery_permit
+            try:
+                host = getattr(self, "_organization_session_host", None)
+                if host is None:
+                    raise PermissionError("Session authority unavailable")
+                permit = admit_session_request(
+                    request.req_method.value if request.req_method else "",
+                    request.params or {}, identity_resolver=lambda: self._resolve_trusted_identity(request),
+                    host=host, envelope_session=(
+                        request.session_id
+                        if request.req_method == ReqMethod.FILE_DOWNLOAD_WORKSPACE_CHUNK
+                        or (request.params or {}).get("session_id")
+                        else None
+                    ),
+                )
+                set_delivery_permit(permit)
+                from jiuwenswarm.server.runtime.session.rewind_authority import REWIND_METHODS, capture_rewind_authority
+                if permit.method in REWIND_METHODS:
+                    rewind_authority = capture_rewind_authority(self, request, permit)
+                if request.req_method == ReqMethod.SESSION_DELETE:
+                    self._execution_runtime().prepare_session_deletion(request, permit)
+                elif permit.cleanup is not None:
+                    self._execution_runtime().prepare_session_cleanup(request)
+            except Exception:
+                response = AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
+                    ok=False, payload={"code": "FORBIDDEN", "error": "Session authorization denied."})
+                async with send_lock:
+                    await send_wire_payload(ws, encode_agent_response_for_wire(response, response_id=request.request_id))
+                return
+
+
         logger.info(
             "[AgentWebSocketServer] 收到请求: request_id=%s channel_id=%s is_stream=%s",
             request.request_id,
@@ -2345,7 +2468,10 @@ class AgentWebSocketServer:
             )
 
             try:
-                authorize_resource_request(request, self._resolve_trusted_identity(request))
+                if permit is None:
+                    authorize_resource_request(request, self._resolve_trusted_identity(request))
+                else:
+                    authorize_resource_request(request, self._resolve_trusted_identity(request), session_permit=permit)
             except ProjectAccessDenied as exc:
                 response = AgentResponse(
                     request_id=request.request_id,
@@ -2430,6 +2556,8 @@ class AgentWebSocketServer:
             # automatic team binding or any other request-side effect. Runtime
             # execution below is told not to trigger this hook a second time.
             await self._trigger_before_chat_request_hook(request)
+            if rewind_authority is not None:
+                rewind_authority.check_initial_context()
 
             if request.req_method == ReqMethod.HEARTBEAT_JOB:
                 await self._handle_heartbeat_job(ws, request, send_lock)
@@ -2457,16 +2585,16 @@ class AgentWebSocketServer:
                 await self._handle_session_input_intent(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.SESSION_REWIND:
-                await self._handle_session_rewind_full(ws, request, send_lock)
+                await self._handle_session_rewind_full(ws, request, send_lock, **({"authorization_check": rewind_authority} if rewind_authority is not None else {}))
                 return
             if request.req_method == ReqMethod.SESSION_REWIND_AND_RESTORE:
-                await self._handle_session_rewind_full(ws, request, send_lock, restore_files=True)
+                await self._handle_session_rewind_full(ws, request, send_lock, restore_files=True, **({"authorization_check": rewind_authority} if rewind_authority is not None else {}))
                 return
             if request.req_method == ReqMethod.SESSION_REWIND_COMPACT:
-                await self._handle_session_rewind_full(ws, request, send_lock, compact=True)
+                await self._handle_session_rewind_full(ws, request, send_lock, compact=True, **({"authorization_check": rewind_authority} if rewind_authority is not None else {}))
                 return
             if request.req_method == ReqMethod.SESSION_REWIND_CONTEXT:
-                await self._handle_session_rewind_context(ws, request, send_lock)
+                await self._handle_session_rewind_context(ws, request, send_lock, **({"authorization_check": rewind_authority} if rewind_authority is not None else {}))
                 return
             if request.req_method == ReqMethod.TEAM_TEMPLATES_LIST:
                 await self._handle_team_templates_list(ws, request, send_lock)
@@ -2717,6 +2845,12 @@ class AgentWebSocketServer:
                 await self._handle_agents_tools_list(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.CHAT_CANCEL:
+                if permit is not None and permit.cleanup is not None:
+                    # Runtime stops only the captured generation and confirms
+                    # Provider resource exit. Never cancel every transport
+                    # stream by Session ID before this authority is consumed.
+                    await self._handle_cancel(ws, request, send_lock, allow_create=False)
+                    return
                 # 中断请求：根据 intent 决定是否取消流式任务
                 sid = request.session_id or "default"
                 intent = request.params.get("intent", "cancel") if isinstance(request.params, dict) else "cancel"
@@ -3434,7 +3568,36 @@ class AgentWebSocketServer:
     async def _handle_stream(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
-        await self._handle_stream_impl(ws, request, send_lock)
+        try:
+            await self._handle_stream_impl(ws, request, send_lock)
+        except asyncio.CancelledError:
+            # Runtime cancellation still has to close this request's Gateway
+            # queue. This is a transport failure, never an execution-success
+            # or cleanup receipt. The normal sink rechecks delivery authority
+            # and substitutes a content-free denial after revocation.
+            wire = encode_agent_response_for_wire(
+                AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"code": "CANCELLED", "error": "Request stream cancelled."},
+                ),
+                response_id=request.request_id,
+            )
+            try:
+                # A failed bounded keepalive stop can still own this lock.
+                # Never make cancellation wait indefinitely for a failure frame.
+                async with asyncio.timeout(_STREAM_KEEPALIVE_STOP_TIMEOUT_SECONDS):
+                    async with send_lock:
+                        await send_wire_payload(ws, wire)
+            except TimeoutError:
+                logger.warning(
+                    "[AgentWebSocketServer] cancelled stream terminal delivery timed out: request_id=%s",
+                    request.request_id,
+                )
+            except WebSocketConnectionClosed:
+                pass
+            raise
 
     async def _handle_heartbeat_job(
         self,
@@ -4781,24 +4944,19 @@ class AgentWebSocketServer:
                     profile_id = metadata.get("execution_profile_id")
                     manifest = None
                     if isinstance(profile_id, str) and profile_id.strip():
-                        probe = AgentRequest(
-                            request_id=f"{request.request_id}:surface-capabilities",
-                            channel_id=request.channel_id,
-                            session_id=session_id,
-                            req_method=ReqMethod.SURFACE_CAPABILITIES_GET,
-                            params={"mode": mode, "work_mode": metadata.get("work_mode", "work")},
-                            user_id=str(getattr(request, "user_id", "") or ""),
-                        )
-                        from jiuwenswarm.runtime.request import prepare_chat_turn
-
-                        _, _, agent = await prepare_chat_turn(
-                            self._agent_manager,
-                            probe,
-                            request.channel_id,
-                            sync_metadata=False,
-                        )
+                        lookup = getattr(self._agent_manager, "get_agent_for_session_nowait", None)
+                        agent = lookup(request.channel_id, session_id) if callable(lookup) else None
                         adapter = getattr(agent, "_adapter", None)
                         manifest = getattr(adapter, "ui_capability_manifest", None)
+                        if manifest is None:
+                            from jiuwenswarm.common.config import get_config
+                            from jiuwenswarm.runtime.harness.cold_surface_manifest import cold_surface_manifest
+                            from jiuwenswarm.runtime.harness.external_browser_admission import browser_runtime_enabled
+
+                            manifest = cold_surface_manifest(
+                                metadata, config=get_config(), channel_id=request.channel_id,
+                                session_id=session_id, browser_available=browser_runtime_enabled(os.environ),
+                            )
 
                     if manifest is None:
                         from openjiuwen.harness_protocol import RuntimeSurface
@@ -5600,14 +5758,21 @@ class AgentWebSocketServer:
                 results = []
                 for sid in ids:
                     try:
-                        results.append(await service.session(sid, method.split(".")[1], request.channel_id or ""))
+                        options = {}
+                        deletion = getattr(request, '_deletion_authority', None)
+                        if deletion is not None:
+                            options['_deletion_authority'] = deletion
+                        results.append(await service.session(sid, method.split(".")[1],
+                                                             request.channel_id or "", **options))
                     except lc.LifecycleError as exc:
                         results.append(dict(session_id=sid, ok=False, code=exc.code, error=str(exc), **exc.details))
                 if method == "session.delete" and "session_ids" not in params:
                     ok = results[0]["ok"]
                     # project_id 超出 §5.10.5 单条字段表，但 Gateway 需要
                     # 它发出符合 §5.10.11 契约的 session.deleted 事件。
-                    payload = {"session_id": ids[0], "project_id": results[0].get("project_id", "")} if ok else {
+                    payload = ({"session_id": ids[0], "deleted": True, "exit_confirmed": True}
+                               if ok and getattr(request, '_deletion_authority', None) is not None
+                               else {"session_id": ids[0], "project_id": results[0].get("project_id", "")}) if ok else {
                         key: value for key, value in results[0].items()
                         if key not in {"session_id", "ok"}
                     }
@@ -5632,6 +5797,11 @@ class AgentWebSocketServer:
             metadata=request.metadata,
         )
         async with send_lock:
+            deletion = getattr(request, '_deletion_authority', None)
+            if deletion is not None and resp.ok:
+                from jiuwenswarm.server.ws_send import send_deletion_result
+                await send_deletion_result(ws, authority=deletion, request=request)
+                return True
             await send_wire_payload(ws, encode_agent_response_for_wire(resp, response_id=request.request_id))
         return True
 
@@ -5639,6 +5809,7 @@ class AgentWebSocketServer:
         self,
         channel_id: str,
         session_id: str | None = None,
+        authorization_check=None,
     ) -> tuple[Any, Any] | None:
         """Return (deep_agent, react_agent) for rewind context rebuild.
 
@@ -5648,6 +5819,16 @@ class AgentWebSocketServer:
         user turn will read — updating them leaves the model still seeing
         rewound turns.
         """
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        from jiuwenswarm.server.runtime.session.rewind_authority import RewindAuthority
+        if authorization_check is not None:
+            if (type(authorization_check) is not RewindAuthority
+                    or authorization_check.session_id != session_id
+                    or authorization_check.channel_id != channel_id):
+                raise PermissionError('original rewind authority required')
+            return authorization_check.resolve()
+        if configured_authenticator() is not None:
+            raise PermissionError('organization rewind requires original authority')
         sid = str(session_id or "").strip()
         agent = (
             self._agent_manager.get_agent_for_session_nowait(
@@ -5727,13 +5908,21 @@ class AgentWebSocketServer:
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock,
         restore_files: bool = False,
         compact: bool = False,
+        authorization_check=None,
     ) -> None:
         """Full rewind: truncate history.json + context_engine + update checkpointer."""
         from jiuwenswarm.agents.harness.common.session_ops_service import (
             rewind_session,
-            rewind_session_context,
+            rewind_session_context, _check_rewind_authority, _rewind_options,
         )
 
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        from jiuwenswarm.server.runtime.session.rewind_authority import RewindAuthority
+        if configured_authenticator() is not None and type(authorization_check) is not RewindAuthority:
+            raise PermissionError('original rewind authority required')
+        _check_rewind_authority(authorization_check)
+        if authorization_check is not None:
+            authorization_check.check_initial_context()
         params = request.params if isinstance(request.params, dict) else {}
         target_sid = str(params.get("session_id") or request.session_id or "").strip()
         turn_index = params.get("turn_index")
@@ -5766,7 +5955,8 @@ class AgentWebSocketServer:
             restore_result: dict[str, Any] = {}
             if restore_files:
                 from jiuwenswarm.agents.harness.common.session_ops_service import restore_session_files
-                restore_result = restore_session_files(session_id=target_sid, turn_index=turn_index)
+                restore_result = restore_session_files(session_id=target_sid, turn_index=turn_index, **_rewind_options(authorization_check),
+                    **({"project_dir": dict(authorization_check._binding)["project_dir"]} if authorization_check is not None else {}))
 
             # Step 2: Truncate history.json (local file operation)
             # "up_to" direction: keep messages from turn_index onward, summarize the prefix.
@@ -5778,10 +5968,10 @@ class AgentWebSocketServer:
                     session_id=target_sid,
                     turn_index=turn_index,
                     direction="up_to",
-                    llm_summary=compact_summary,
+                    llm_summary=compact_summary, **_rewind_options(authorization_check),
                 )
             else:
-                rewind_result = rewind_session(session_id=target_sid, turn_index=turn_index)
+                rewind_result = rewind_session(session_id=target_sid, turn_index=turn_index, **_rewind_options(authorization_check))
 
             # Step 3: Truncate context_engine in-place + persist to checkpointer.
             # rewind_session_context reads the already-truncated history.json and
@@ -5789,9 +5979,10 @@ class AgentWebSocketServer:
             # correct result for both "from" and "up_to" directions.
             context_ok = False
             pair = await self._resolve_rewind_agent(
-                request.channel_id or "default",
-                session_id=target_sid,
+                (authorization_check.channel_id if authorization_check is not None else request.channel_id or "default"),
+                session_id=target_sid, **({"authorization_check": authorization_check} if authorization_check is not None else {}),
             )
+            _check_rewind_authority(authorization_check)
             if pair is None:
                 logger.warning(
                     "[AgentWS] session.rewind: no agent for context rebuild "
@@ -5803,11 +5994,16 @@ class AgentWebSocketServer:
             else:
                 deep_agent, _react_agent = pair
                 try:
+                    if authorization_check is not None:
+                        authorization_check.check_initial_context()
                     context_ok = await rewind_session_context(
                         deep_agent=deep_agent,
                         session_id=target_sid,
-                        turn_index=turn_index,
+                        turn_index=turn_index, **_rewind_options(authorization_check),
                     )
+                    _check_rewind_authority(authorization_check)
+                except PermissionError:
+                    raise
                 except Exception as exc:
                     logger.warning(
                         "[AgentWS] session.rewind context truncation failed: %s", exc,
@@ -5840,10 +6036,10 @@ class AgentWebSocketServer:
                     else f"Summarized {summarized_count} messages up to this point."
                 )
 
-                await run_history_io(append_history_record,
+                await run_history_io(append_history_record, **_rewind_options(authorization_check),
                     session_id=target_sid,
                     request_id=request_id,
-                    channel_id=request.channel_id or "tui",
+                    channel_id=(authorization_check.channel_id if authorization_check is not None else request.channel_id or "tui"),
                     role="assistant",
                     event_type="context.compact_boundary",
                     content="Conversation compacted",
@@ -5857,11 +6053,12 @@ class AgentWebSocketServer:
                         },
                     },
                 )
+                _check_rewind_authority(authorization_check)
 
-                await run_history_io(append_history_record,
+                await run_history_io(append_history_record, **_rewind_options(authorization_check),
                     session_id=target_sid,
                     request_id=request_id,
-                    channel_id=request.channel_id or "tui",
+                    channel_id=(authorization_check.channel_id if authorization_check is not None else request.channel_id or "tui"),
                     role="assistant",
                     event_type="context.rewind_summary",
                     content=short_text,
@@ -5876,12 +6073,13 @@ class AgentWebSocketServer:
                         "is_compact_summary": True,
                     },
                 )
+                _check_rewind_authority(authorization_check)
 
                 if isinstance(compact_summary, str) and compact_summary.strip():
-                    await run_history_io(append_history_record,
+                    await run_history_io(append_history_record, **_rewind_options(authorization_check),
                         session_id=target_sid,
                         request_id=request_id,
-                        channel_id=request.channel_id or "tui",
+                        channel_id=(authorization_check.channel_id if authorization_check is not None else request.channel_id or "tui"),
                         role="assistant",
                         event_type="context.compact_summary",
                         content=compact_summary.strip(),
@@ -5897,9 +6095,11 @@ class AgentWebSocketServer:
                             "transcript_only": True,
                         },
                     )
+                    _check_rewind_authority(authorization_check)
 
                 payload["summarized_messages"] = summarized_count
 
+            _check_rewind_authority(authorization_check)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -5915,6 +6115,8 @@ class AgentWebSocketServer:
                 payload={"error": str(exc), "code": "BAD_REQUEST"},
                 metadata=request.metadata,
             )
+        except PermissionError:
+            raise
         except Exception as exc:
             logger.exception("[AgentWS] session.rewind failed: %s", exc)
             resp = AgentResponse(
@@ -5927,17 +6129,25 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
+            _check_rewind_authority(authorization_check)
             await send_wire_payload(ws, wire)
 
     async def _handle_session_rewind_context(
-        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock, *, authorization_check=None,
     ) -> None:
         """Truncate history.json + in-memory context_engine for a session."""
         from jiuwenswarm.agents.harness.common.session_ops_service import (
             rewind_session,
-            rewind_session_context,
+            rewind_session_context, _check_rewind_authority, _rewind_options,
         )
 
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        from jiuwenswarm.server.runtime.session.rewind_authority import RewindAuthority
+        if configured_authenticator() is not None and type(authorization_check) is not RewindAuthority:
+            raise PermissionError('original rewind authority required')
+        _check_rewind_authority(authorization_check)
+        if authorization_check is not None:
+            authorization_check.check_initial_context()
         params = request.params if isinstance(request.params, dict) else {}
         target_sid = str(params.get("session_id") or request.session_id or "").strip()
         turn_index = params.get("turn_index")
@@ -5963,9 +6173,10 @@ class AgentWebSocketServer:
             return
 
         pair = await self._resolve_rewind_agent(
-            request.channel_id or "default",
-            session_id=target_sid,
+            (authorization_check.channel_id if authorization_check is not None else request.channel_id or "default"),
+            session_id=target_sid, **({"authorization_check": authorization_check} if authorization_check is not None else {}),
         )
+        _check_rewind_authority(authorization_check)
         if pair is None:
             wire = AgentWebSocketServer._send_error_response(
                 ws, request, send_lock, "no agent instance available",
@@ -5979,12 +6190,15 @@ class AgentWebSocketServer:
             # Truncate history.json first so rewind_session_context reads the
             # correct truncated state (the new implementation rebuilds context
             # from history.json on disk).
-            rewind_result = rewind_session(session_id=target_sid, turn_index=turn_index)
+            rewind_result = rewind_session(session_id=target_sid, turn_index=turn_index, **_rewind_options(authorization_check))
+            if authorization_check is not None:
+                authorization_check.check_initial_context()
             context_ok = await rewind_session_context(
                 deep_agent=deep_agent,
                 session_id=target_sid,
-                turn_index=turn_index,
+                turn_index=turn_index, **_rewind_options(authorization_check),
             )
+            _check_rewind_authority(authorization_check)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -6000,6 +6214,8 @@ class AgentWebSocketServer:
                 payload={"error": str(exc), "code": "BAD_REQUEST"},
                 metadata=request.metadata,
             )
+        except PermissionError:
+            raise
         except Exception as exc:
             logger.exception("[AgentWS] session.rewind_context failed: %s", exc)
             resp = AgentResponse(
@@ -6012,6 +6228,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
+            _check_rewind_authority(authorization_check)
             await send_wire_payload(ws, wire)
 
     async def _handle_permissions_config(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
@@ -7757,6 +7974,12 @@ class AgentWebSocketServer:
 
         Returns ``(ok, message)``.
         """
+        from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+
+        try:
+            require_legacy_mcp_access()
+        except PermissionError as exc:
+            return False, str(exc)
         import logging as _logging
         from openjiuwen.core.foundation.tool import McpServerConfig
         from openjiuwen.core.runner.resources_manager.tool_manager import ToolMgr
@@ -11329,6 +11552,7 @@ class AgentWebSocketServer:
                 response_id=request.request_id,
             )
             async with send_lock:
+                runtime.validate_session_provision_for_delivery(prepared)
                 await send_wire_payload(ws, wire)
             response_delivered = True
 

@@ -253,7 +253,7 @@ def strict_network_available() -> tuple[bool, str | None]:
     except TestCtlError as exc:
         return False, str(exc)
     probe = subprocess.run(
-        prefix + ["--unshare-net", "--ro-bind", "/", "/", "--bind", "/tmp", "/tmp", "--proc", "/proc", "--dev", "/dev", "--", "/bin/true"],
+        prefix + ["--unshare-net", "--unshare-pid", "--die-with-parent", "--ro-bind", "/", "/", "--bind", "/tmp", "/tmp", "--proc", "/proc", "--dev", "/dev", "--", "/bin/true"],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -279,7 +279,7 @@ def isolated_command(suite: dict, workdir: Path, command: list[str], junit_dir: 
         return command
     if suite.get("services") or "local_service" in suite.get("capabilities", []):
         raise TestCtlError(f"strict network namespace cannot host local service: {suite['id']}")
-    wrapper = bwrap_prefix() + ["--unshare-net", "--ro-bind", "/", "/", "--bind", "/tmp", "/tmp"]
+    wrapper = bwrap_prefix() + ["--unshare-net", "--unshare-pid", "--die-with-parent", "--ro-bind", "/", "/", "--bind", "/tmp", "/tmp"]
     if junit_dir is not None:
         wrapper.extend(["--bind", str(junit_dir), str(junit_dir)])
     if suite.get("runner") in {"vitest", "node-test", "web-scripts"} or suite.get("writable_workdir"):
@@ -288,37 +288,104 @@ def isolated_command(suite: dict, workdir: Path, command: list[str], junit_dir: 
     return wrapper + command
 
 
-def run_process(command: list[str], cwd: Path, env: dict[str, str], timeout_seconds: int) -> dict:
+def run_process(
+    command: list[str], cwd: Path, env: dict[str, str], timeout_seconds: int,
+    *, log_path: Path | None = None,
+) -> dict:
+    """Capture through the shard deadline, then bound both pipe drain and reap.
+
+    A child may exit while descendants retain stdout (including a setsid child).
+    Killing the original process group does not guarantee EOF. Never perform an
+    unbounded second communicate, nor count the exited parent as suite success.
+    """
     started = time.monotonic()
-    process = subprocess.Popen(
-        command,
-        cwd=cwd,
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        start_new_session=os.name == "posix",
-    )
+    deadline = started + timeout_seconds
+    cleanup_seconds = 2.0
+    output = b""
+    timed_out = False
+    cleanup_errors = []
+    log = log_path.open("wb") if log_path is not None else None
+    process = None
+
+    def capture(data):
+        nonlocal output
+        if data is None:
+            return
+        # communicate's retry payload is cumulative, not a fresh chunk.
+        if log is not None:
+            log.write(data[len(output):])
+            log.flush()
+        output = data
+
+    def kill_owned_group():
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            cleanup_errors.append(f"kill_failed:{exc.errno}")
+
     try:
-        output, _ = process.communicate(timeout=timeout_seconds)
+        process = subprocess.Popen(
+            command, cwd=cwd, env=env, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, bufsize=0,
+            start_new_session=os.name == "posix",
+        )
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                data, _ = process.communicate(timeout=min(0.25, remaining))
+                capture(data)
+                break
+            except subprocess.TimeoutExpired as exc:
+                capture(exc.output)
+        if timed_out:
+            kill_owned_group()
+            cleanup_deadline = time.monotonic() + cleanup_seconds
+            try:
+                data, _ = process.communicate(timeout=cleanup_seconds)
+                capture(data)
+            except subprocess.TimeoutExpired as exc:
+                capture(exc.output)
+                cleanup_errors.append("output_pipe_still_open")
+                # FileIO (bufsize=0) closure does not wait for a buffered reader.
+                process.stdout.close()
+                try:
+                    process.wait(timeout=max(0.01, cleanup_deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    cleanup_errors.append("owned_process_not_reaped")
+            diagnostic = (
+                f"\n[testctl] shard timeout after {timeout_seconds}s; "
+                f"cleanup_incomplete={bool(cleanup_errors)}"
+                f"; details={','.join(cleanup_errors) or 'owned group terminated'}\n"
+            ).encode()
+            capture(output + diagnostic)
         return {
             "returncode": process.returncode,
-            "output": output,
-            "timed_out": False,
+            "output": output.decode("utf-8", errors="replace"),
+            "timed_out": timed_out,
+            "cleanup_incomplete": bool(cleanup_errors),
+            "cleanup_errors": cleanup_errors,
             "duration_seconds": round(time.monotonic() - started, 6),
         }
-    except subprocess.TimeoutExpired:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGKILL)
-        else:
-            process.kill()
-        output, _ = process.communicate()
-        return {
-            "returncode": process.returncode,
-            "output": output,
-            "timed_out": True,
-            "duration_seconds": round(time.monotonic() - started, 6),
-        }
+    finally:
+        if process is not None:
+            if process.returncode is None:
+                kill_owned_group()
+                try:
+                    process.wait(timeout=cleanup_seconds)
+                except subprocess.TimeoutExpired:
+                    pass  # Already reported above; never block the orchestrator forever.
+            if process.stdout is not None:
+                process.stdout.close()
+        if log is not None:
+            log.close()
 
 
 def start_services(suite: dict, cwd: Path, env: dict[str, str], sandbox: Path) -> tuple[list[subprocess.Popen], dict[str, str], str | None]:
@@ -469,6 +536,8 @@ def discover_suite(suite: dict, run_id: str) -> dict:
         "items": items,
         "count": len(items),
         "output_tail": result["output"][-4000:],
+        "cleanup_incomplete": result["cleanup_incomplete"],
+        "cleanup_errors": result["cleanup_errors"],
         "sandbox": str(root),
     }
 
@@ -552,10 +621,9 @@ def execute_suite(suite: dict, run_id: str, run_dir: Path) -> dict:
                 "log": str(log.relative_to(run_dir)),
             }
         suite_env.update(service_env)
-        result = run_process(isolated_command(suite, workdir, command, junit.parent), workdir, suite_env, int(suite.get("shard_timeout_seconds", 900)))
+        result = run_process(isolated_command(suite, workdir, command, junit.parent), workdir, suite_env, int(suite.get("shard_timeout_seconds", 900)), log_path=log)
     finally:
         stop_services(processes)
-    log.write_text(result["output"], encoding="utf-8")
     counts = empty_counts()
     cases: list[dict] = []
     parse_error = None
@@ -597,6 +665,8 @@ def execute_suite(suite: dict, run_id: str, run_dir: Path) -> dict:
         "log": str(log.relative_to(run_dir)),
         "sandbox": str(sandbox_root),
         "junit_parse_error": parse_error,
+        "cleanup_incomplete": result["cleanup_incomplete"],
+        "cleanup_errors": result["cleanup_errors"],
         "cases": cases,
     }
 
@@ -734,6 +804,8 @@ def command_bootstrap(manifest: dict, execute: bool) -> int:
                     "returncode": result["returncode"],
                     "duration_seconds": result["duration_seconds"],
                     "output_tail": result["output"][-4000:],
+                    "cleanup_incomplete": result["cleanup_incomplete"],
+                    "cleanup_errors": result["cleanup_errors"],
                 }
             )
         actions.append(action)

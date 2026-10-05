@@ -52,6 +52,8 @@ class GitDiffWebSocketHandler:
         断连清理由 ``WebChannel._connection_handler`` 的 ``finally`` 块负责
         (``unregister_ws`` + ``cleanup_ws``)。
         """
+        if await self._reject_unscoped_organization_connection(ws):
+            return
         try:
             async for raw in ws:
                 await self._handle_message(ws, raw)
@@ -60,6 +62,8 @@ class GitDiffWebSocketHandler:
 
     async def _handle_message(self, ws: Any, raw: str) -> None:
         """解析并分发单条消息。"""
+        if await self._reject_unscoped_organization_connection(ws):
+            return
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
@@ -108,6 +112,17 @@ class GitDiffWebSocketHandler:
                 error=f"unknown method: {method}", code="BAD_REQUEST",
             )
             return
+
+    @staticmethod
+    async def _reject_unscoped_organization_connection(ws: Any) -> bool:
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is None:
+            return False
+        # Close only /ws/git. The ordinary authenticated Web connection and
+        # its Session RPCs remain available. Host owner/watch authorization
+        # must be wired before this complete-workspace projection is enabled.
+        await ws.close(code=1008, reason="Organization Session authority required for Git watches")
+        return True
 
     async def _send_git_error_response(
         self, ws: Any, req_id: str, exc: Exception,

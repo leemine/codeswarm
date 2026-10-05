@@ -114,7 +114,7 @@ function patchSessionLists(
       .map((session) => {
         if (session.session_id !== sessionId) return session;
         changed = true;
-        return { ...session, ...patch };
+        return session.cleanup_only === true ? cleanupSession(session) : { ...session, ...patch };
       })
       .filter((session) => !(options.removeFromProjectLists && session.session_id === sessionId));
     next[projectId] = patched;
@@ -160,7 +160,28 @@ function getLocalSessionsById(): Map<string, Session> {
   return sessions;
 }
 
+// Cleanup inventory is intentionally content-free. Never restore private fields from local caches.
+function cleanupSession(session: Session): Session {
+  return {
+    session_id: session.session_id,
+    project_id: session.project_id,
+    channel_id: session.channel_id,
+    mode: session.mode,
+    work_mode: session.work_mode,
+    cleanup_only: true,
+    title: '',
+    project_dir: '',
+    status: 'interrupted',
+    message_count: 0,
+    created_at: '',
+    updated_at: '',
+    last_message_at: 0,
+    pinned: false,
+  };
+}
+
 function mergeLocalTitle(serverSession: Session, localSession: Session | undefined): Session {
+  if (serverSession.cleanup_only === true) return cleanupSession(serverSession);
   if (getSessionTitle(serverSession) || !localSession) return serverSession;
   const localTitle = getSessionTitle(localSession);
   if (!localTitle) return serverSession;
@@ -189,6 +210,7 @@ function findWorkspaceSession(state: WorkspaceState, sessionId: string): Session
 }
 
 function mergeSessionProjectContext(session: Session, previousSession: Session | undefined): Session {
+  if (session.cleanup_only === true) return cleanupSession(session);
   if (!previousSession) return session;
   return {
     ...session,
@@ -207,7 +229,7 @@ function mergeVisibleSessionTitles(serverSessions: Session[], visibleSessions: S
 }
 
 function shouldKeepPendingLocalSession(session: Session): boolean {
-  if (session.pinned) return false;
+  if (session.cleanup_only === true || session.pinned) return false;
   if (!getSessionTitle(session)) return false;
   const runtime = useChatStore.getState().getRuntime(session.session_id);
   return session.is_processing === true
@@ -330,6 +352,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           ...state.projectSessions,
           [projectId]: sessions,
         },
+        // A newly restricted row must also remove its old pinned presentation.
+        pinnedSessions: state.pinnedSessions.filter((item) => !sessions.some(
+          (session) => session.cleanup_only === true && session.session_id === item.session_id,
+        )),
         projectSessionTotals: {
           ...state.projectSessionTotals,
           [projectId]: total,
@@ -491,6 +517,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   upsertSession: (session, options = {}) => {
     const state = get();
+    const previous = findWorkspaceSession(state, session.session_id);
+    if (previous?.cleanup_only === true) session = cleanupSession(previous);
+    else if (session.cleanup_only === true) session = cleanupSession(session);
     const isCronSession = Boolean(session.cron_id?.trim());
     set((current) => {
       // cron 会话由 cronStore 在对应定时任务节点展示。WebSocket / metadata
@@ -580,7 +609,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set((state) => ({
       projectSessions: patchSessionLists(state.projectSessions, sessionId, patch),
       pinnedSessions: state.pinnedSessions.map((session) => (
-        session.session_id === sessionId ? { ...session, ...patch } : session
+        session.session_id === sessionId
+          ? session.cleanup_only === true ? cleanupSession(session) : { ...session, ...patch }
+          : session
       )),
     }));
     await get().loadPinnedSessions();
@@ -597,7 +628,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set((state) => ({
       projectSessions: patchSessionLists(state.projectSessions, sessionId, patch),
       pinnedSessions: state.pinnedSessions.map((session) => (
-        session.session_id === sessionId ? { ...session, ...patch } : session
+        session.session_id === sessionId
+          ? session.cleanup_only === true ? cleanupSession(session) : { ...session, ...patch }
+          : session
       )),
     }));
   },

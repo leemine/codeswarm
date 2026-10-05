@@ -3,6 +3,11 @@ from __future__ import annotations
 import importlib.util
 import http.client
 import json
+import os
+import signal
+import sys
+import threading
+import time
 from pathlib import Path
 import socket
 import tempfile
@@ -112,6 +117,123 @@ class TestProtocol(unittest.TestCase):
             self.assertIsNotNone(processes[0].poll())
             with self.assertRaises(OSError):
                 socket.create_connection(("127.0.0.1", port), timeout=0.5)
+
+
+class TestProcessDeadline(unittest.TestCase):
+    def test_output_is_flushed_while_running_and_not_duplicated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log, release = root / "live.log", root / "release"
+            code = (
+                "import pathlib,time; print('first 中文',flush=True); "
+                f"p=pathlib.Path({str(release)!r}); "
+                "exec('while not p.exists(): time.sleep(.01)'); print('last',flush=True)"
+            )
+            result = []
+            worker = threading.Thread(target=lambda: result.append(testctl.run_process(
+                [sys.executable, "-c", code], root, os.environ.copy(), 5, log_path=log,
+            )))
+            worker.start()
+            try:
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    if log.exists() and b"first" in log.read_bytes():
+                        break
+                    time.sleep(.02)
+                self.assertTrue(worker.is_alive())
+                self.assertEqual(log.read_text(), "first 中文\n")
+            finally:
+                release.touch()
+                worker.join(timeout=8)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(result[0]["output"], "first 中文\nlast\n")
+            self.assertEqual(log.read_text(), result[0]["output"])
+            self.assertFalse(result[0]["timed_out"])
+            self.assertFalse(result[0]["cleanup_incomplete"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group regression")
+    def test_escaped_descendant_pipe_cannot_block_timeout_drain(self):
+        for parent_wait in (True, False):
+            with self.subTest(parent_wait=parent_wait):
+                self._check_escaped_pipe(parent_wait)
+
+    def _check_escaped_pipe(self, parent_wait):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pidfile, log = root / "owned-child.pid", root / "timeout.log"
+            # Safety cap makes even the old unbounded implementation terminate.
+            child = (
+                "import os,time; from pathlib import Path; "
+                f"Path({str(pidfile)!r}).write_text(str(os.getpid())); "
+                "print('escaped child output',flush=True); time.sleep(8)"
+            )
+            parent = (
+                "import subprocess,sys,time; "
+                f"subprocess.Popen([sys.executable,'-c',{child!r}],start_new_session=True); time.sleep({10 if parent_wait else 0})"
+            )
+            try:
+                result = testctl.run_process([sys.executable, "-c", parent], root, os.environ.copy(), .3,
+                                             log_path=log)
+                self.assertTrue(result["timed_out"])
+                self.assertLess(result["duration_seconds"], 6)
+                self.assertEqual(result["cleanup_errors"], ["output_pipe_still_open"])
+                self.assertTrue(result["cleanup_incomplete"])
+                self.assertIn("escaped child output", log.read_text())
+                self.assertIn("[testctl] shard timeout", log.read_text())
+                self.assertIsNotNone(result["returncode"])
+            finally:
+                if pidfile.exists():
+                    try:
+                        os.kill(int(pidfile.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    @unittest.skipUnless(os.name == "posix", "POSIX signal error accounting")
+    def test_signal_permission_error_is_reported_without_unbounded_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            testctl.os, "killpg", side_effect=PermissionError(1, "synthetic signal denial")
+        ):
+            result = testctl.run_process(
+                [sys.executable, "-c", "import time; time.sleep(.3)"],
+                Path(directory), os.environ.copy(), .1,
+            )
+        self.assertTrue(result["timed_out"])
+        self.assertTrue(result["cleanup_incomplete"])
+        self.assertEqual(result["cleanup_errors"], ["kill_failed:1"])
+        self.assertIsNotNone(result["returncode"])
+
+    def test_timeout_stays_failed_even_with_passed_junit_and_persists_live_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            code = (
+                "import pathlib,sys,time; "
+                "pathlib.Path(sys.argv[1]).write_text('<testsuite><testcase name=\"passed-before-hang\"/></testsuite>'); "
+                "print('last visible test',flush=True); time.sleep(10)"
+            )
+            suite = {"id": "owned.fixture", "required": True, "runner": "pytest", "workdir": ".",
+                     "command": [sys.executable, "-c", code, "{junit}"], "shard_timeout_seconds": 1}
+            with patch.object(testctl, "REPO_ROOT", root), patch.dict(os.environ, {"TESTCTL_NETWORK_MODE": "audit"}):
+                result = testctl.execute_suite(suite, "synthetic", root)
+            try:
+                self.assertEqual(result["status"], "timeout")
+                self.assertEqual(result["counts"]["passed"], 1)
+                self.assertEqual(result["counts"]["timeout"], 1)
+                self.assertIn("last visible test", (root / result["log"]).read_text())
+                summary = testctl.aggregate("synthetic", "test", [result], None, 1)
+                self.assertNotEqual(summary["status"], "passed")
+            finally:
+                testctl.shutil.rmtree(result["sandbox"])
+
+    def test_strict_command_keeps_network_boundary_and_contains_owned_pid_tree(self):
+        with patch.dict(os.environ, {"TESTCTL_NETWORK_MODE": "strict"}), patch.object(
+            testctl, "bwrap_prefix", return_value=["bwrap"]
+        ):
+            command = testctl.isolated_command({"id": "test"}, Path("/work"), ["python", "fixture.py"])
+        self.assertIn("--unshare-net", command)
+        self.assertIn("--unshare-pid", command)
+        self.assertIn("--die-with-parent", command)
+        self.assertNotIn("--share-net", command)
+        self.assertEqual(command[-2:], ["python", "fixture.py"])
 
 
 if __name__ == "__main__":

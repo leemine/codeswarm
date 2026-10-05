@@ -13,6 +13,8 @@ from dataclasses import dataclass
 
 from openjiuwen.harness_providers.jsonsafe import to_json_safe
 
+from jiuwenswarm.governance.model_consumer import runtime_model_kwargs
+
 logger = logging.getLogger(__name__)
 
 
@@ -251,7 +253,7 @@ class HookExecutor:
             api_base=api_base,
             client_provider=client_provider,
         )
-        model = Model(model_client_config=mcc)
+        model = Model(**runtime_model_kwargs(model_client_config=mcc, binding_config=client_cfg))
 
         response = await model.invoke(
             messages=[{"role": "user", "content": prompt}],

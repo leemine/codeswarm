@@ -30,6 +30,7 @@ from openjiuwen.extensions.observability.demand import (
     get_trajectory_span_processor,
 )
 
+from jiuwenswarm.governance.model_consumer import runtime_model_kwargs
 from jiuwenswarm.agents.harness.common.rails.ask_user_rail import StructuredAskUserRail
 from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
@@ -513,7 +514,11 @@ def build_evolution_llm(
         )
     )
     client_config = ModelClientConfig(**model_client_config)
-    return Model(model_client_config=client_config, model_config=request_config), model_name
+    return Model(**runtime_model_kwargs(
+        model_client_config=client_config,
+        model_config=request_config,
+        binding_config={**model_client_config, "model_name": model_name},
+    )), model_name
 
 
 def build_skill_evolution_rail(

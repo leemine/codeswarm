@@ -29,6 +29,9 @@ from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
 from jiuwenswarm.agents.harness.common.rails.multimodal_image_rail import (
     MultimodalImageRail,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions.resource_authority_rail import (
+    NativeResourceAuthorityRail,
+)
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import (
     ResponsePromptRail,
 )
@@ -39,6 +42,7 @@ from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
 # No-parameter swarm-owned rail type names; namespaced under "swarm.".
 RESPONSE_PROMPT = "swarm.response_prompt"
 STREAM_EVENT = "swarm.stream_event"
+RESOURCE_AUTHORITY = "swarm.resource_authority"
 AVATAR_PROMPT = "swarm.avatar_prompt"
 MULTIMODAL_IMAGE = "swarm.multimodal_image"
 
@@ -70,6 +74,12 @@ def _build_response_prompt_rail(
 
 harness_element(
     kind=ElementKind.RAIL,
+    name=RESOURCE_AUTHORITY,
+    description="Checks current mandatory resource authority immediately before Native tools.",
+    builder=NativeResourceAuthorityRail,
+)
+harness_element(
+    kind=ElementKind.RAIL,
     name=STREAM_EVENT,
     description="Emits JiuSwarm streaming events across the member's lifecycle.",
     builder=JiuSwarmStreamEventRail,
@@ -91,6 +101,7 @@ harness_element(
 __all__ = [
     "RESPONSE_PROMPT",
     "STREAM_EVENT",
+    "RESOURCE_AUTHORITY",
     "AVATAR_PROMPT",
     "MULTIMODAL_IMAGE",
 ]

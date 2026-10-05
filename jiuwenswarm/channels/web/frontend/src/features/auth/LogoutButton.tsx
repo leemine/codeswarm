@@ -1,3 +1,4 @@
+import { notifyOrganizationCredentialChange } from '../../services/organizationCredentialEvents';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -10,9 +11,10 @@ import { useTranslation } from 'react-i18next';
  *
  * 视觉参考 Apple 官网:浅色描边胶囊按钮, 右上角悬浮, 不抢主界面布局。
  */
-export function LogoutButton() {
+export function LogoutButton({ organization = false }: { organization?: boolean }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
 
   async function handleLogout() {
     if (busy) return;
@@ -21,15 +23,27 @@ export function LogoutButton() {
       // 后端 _proxy_auth_http 从 jw_token cookie 取 token 注入 Authorization,
       // control-panel 收到后可吊销; 并在响应里发过期 Set-Cookie 清 HttpOnly cookie。
       // best-effort: control-panel logout 可能 500 (NotNullViolation), 不阻塞清 cookie。
-      await fetch('/auth-api/v1/auth/logout', {
+      const response = await fetch(organization ? '/api/v1/auth/organization/logout' : '/auth-api/v1/auth/logout', {
         method: 'POST',
         credentials: 'same-origin',
-      }).catch(() => {});
-    } finally {
-      // HttpOnly cookie 由后端 Set-Cookie 清除; 这里 reload 即可让浏览器带上(已清空的)请求,
-      // AppWithAuth 重探 /auth-api/v1/auth/permissions → 401 → 回登录页。
-      window.location.href = window.location.origin + '/';
+        headers: { 'X-Jiuwen-Auth': '1' },
+      });
+      if (organization && !response.ok) {
+        setFailed(true);
+        setBusy(false);
+        return;
+      }
+    } catch {
+      if (organization) {
+        setFailed(true);
+        setBusy(false);
+        return;
+      }
     }
+    if (organization) notifyOrganizationCredentialChange();
+    // HttpOnly cookie 由后端 Set-Cookie 清除; 这里 reload 即可让浏览器带上(已清空的)请求,
+      // AppWithAuth 重探 /auth-api/v1/auth/permissions → 401 → 回登录页。
+    window.location.href = window.location.origin + '/';
   }
 
   return (
@@ -37,7 +51,7 @@ export function LogoutButton() {
       type="button"
       onClick={handleLogout}
       disabled={busy}
-      aria-label={t('auth.logout')}
+      aria-label={t(failed ? 'auth.organizationLogoutFailed' : 'auth.logout')}
       data-testid="auth-logout-button"
       className="fixed top-3 right-3 z-[9999] flex items-center gap-1.5 px-3.5 h-8 rounded-full border border-black/10 bg-white/70 hover:bg-white text-[#1d1d1f] text-[13px] font-medium backdrop-blur-md shadow-sm transition-colors duration-200 disabled:opacity-50"
       style={{
@@ -61,7 +75,7 @@ export function LogoutButton() {
         <polyline points="16 17 21 12 16 7" />
         <line x1="21" y1="12" x2="9" y2="12" />
       </svg>
-      {t('auth.logout')}
+      {t(failed ? 'auth.organizationLogoutFailed' : 'auth.logout')}
     </button>
   );
 }

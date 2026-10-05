@@ -293,3 +293,30 @@ test('saveBlob does not fall back to whole-file data URLs in desktop mode', asyn
   }
   assert.equal(errors.length, 1);
 });
+
+test('guarded file picker discards a result after the current operation changes', async () => {
+  let current = true;
+  const restore = installDesktopGlobals({ showSaveFilePicker: async () => {
+    current = false;
+    return { createWritable() { throw new Error('stale picker must not write'); } };
+  } });
+  try {
+    const result = await saveBlobWithResult(new Blob(['fixture']), 'file.txt', { preferBrowserFilePicker: true, isCurrent: () => current });
+    assert.equal(result.outcome, 'cancelled');
+  } finally { restore(); }
+});
+
+test('guarded file picker aborts temporary data before close after write changes scope', async () => {
+  let current = true;
+  const actions = [];
+  const restore = installDesktopGlobals({ showSaveFilePicker: async () => ({ createWritable: async () => ({
+    write: async () => { actions.push('write'); current = false; },
+    close: async () => actions.push('close'),
+    abort: async () => actions.push('abort'),
+  }) }) });
+  try {
+    const result = await saveBlobWithResult(new Blob(['fixture']), 'file.txt', { preferBrowserFilePicker: true, isCurrent: () => current });
+    assert.equal(result.outcome, 'cancelled');
+    assert.deepEqual(actions, ['write', 'abort']);
+  } finally { restore(); }
+});

@@ -20,6 +20,8 @@ from jiuwenswarm.server.runtime.session.project_access import (
     ProjectAccessStore, ProjectAccessDenied, ProjectRevisionConflict,
 )
 
+from jiuwenswarm.server.runtime.session.project_content import ProjectContentStore
+
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.work_mode import (
@@ -1428,6 +1430,8 @@ class ProjectAdapter(GatewayAdapter):
 
     methods: frozenset[str] = frozenset(
         {
+            "project.content.get",
+            "project.content.update",
             "project.extensions.get",
             "project.extensions.update",
             "project.acl.update",
@@ -1470,11 +1474,15 @@ class ProjectAdapter(GatewayAdapter):
             method = getattr(request.req_method, 'value', request.req_method)
             project_id = str(params.get('project_id') or '').strip()
             store = ProjectAccessStore()
-            if method in {'project.extensions.get', 'project.extensions.update', 'project.acl.update'}:
+            if method in {'project.content.get', 'project.content.update', 'project.extensions.get', 'project.extensions.update', 'project.acl.update'}:
                 if not project_id or is_default_project_id(project_id):
                     return build_error_response(request, "registered project_id required", code="BAD_REQUEST")
                 try:
-                    if method == 'project.extensions.get':
+                    if method == 'project.content.get':
+                        payload = await asyncio.to_thread(_call_project_scoped, project_id, 'read', ProjectContentStore(store).get, project_id, identity, revision=params.get('revision'))
+                    elif method == 'project.content.update':
+                        payload = await asyncio.to_thread(_call_project_scoped, project_id, 'write', ProjectContentStore(store).update, project_id, identity, instructions=params.get('instructions'), sources=params.get('sources'), expected_revision=params.get('expected_revision'))
+                    elif method == 'project.extensions.get':
                         payload = await asyncio.to_thread(_call_project_scoped, project_id, 'read', store.get, project_id, actor)
                     elif method == 'project.extensions.update':
                         payload = await asyncio.to_thread(_call_project_scoped, project_id, 'write', store.update, project_id, actor, goal=params.get('goal'), extensions=params.get('extensions'))

@@ -11,6 +11,8 @@ import { ModelProviderIcon } from '../ModelProviderIcon';
 
 interface ModelPickerProps {
   value: string | null;
+  /** Host-resolved label for an exact selection outside the default menu. */
+  displayLabel?: string;
   /** Both conversation and scheduled-task callers receive the canonical model_name. */
   onChange: (modelName: string) => void;
   disabled?: boolean;
@@ -26,6 +28,7 @@ const MENU_MAX_HEIGHT = 300;
 /** A shared model catalog and menu, with selection owned by the caller. */
 export default function ModelPicker({
   value,
+  displayLabel,
   onChange,
   disabled = false,
   onAddModel,
@@ -138,7 +141,7 @@ export default function ModelPicker({
             </span>
           )}
           <span className={clsx('chat-mode-select__label', !value && 'text-text-muted')}>
-            {selected ? selected.alias || selected.model_name : value || t('chat.modelSelector.placeholder')}
+            {displayLabel ?? (selected ? selected.alias || selected.model_name : value || t('chat.modelSelector.placeholder'))}
           </span>
         </span>
         {!disabled && (

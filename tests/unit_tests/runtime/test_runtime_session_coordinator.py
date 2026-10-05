@@ -1489,3 +1489,82 @@ async def test_heartbeat_followup_replaces_only_the_answered_control():
     assert root.awaits_control('second')
     assert root.waiting_control_ids == {'second'}
     await coordinator.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_session", [False, True])
+async def test_queued_stream_cancel_closes_consumer_before_producer_starts(close_session):
+    coordinator = RuntimeSessionCoordinator()
+    await _register(coordinator)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    ran = False
+
+    async def occupied():
+        started.set()
+        await release.wait()
+
+    async def queued():
+        nonlocal ran
+        ran = True
+        yield "must-not-run"
+
+    first = asyncio.create_task(coordinator.run_unary(
+        "session-a", "occupied", SessionWorkKind.CHAT_UNARY, occupied,
+    ))
+    await started.wait()
+    stream = coordinator.run_stream("session-a", "queued-stream", SessionWorkKind.CHAT_STREAM, queued)
+    consumer = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    try:
+        if close_session:
+            await coordinator.close_session("session-a")
+        else:
+            result = await coordinator.cancel_execution("session-a", request_id="queued-stream")
+            assert result.matched == result.cancelled == 1
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(consumer, timeout=0.5)
+        assert not ran
+        if not close_session:
+            assert not first.done()
+    finally:
+        release.set()
+        await asyncio.gather(first, consumer, return_exceptions=True)
+        await stream.aclose()
+        await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_stream_reports_producer_close_error_after_draining_buffer():
+    coordinator = RuntimeSessionCoordinator(stream_buffer_size=1)
+    await _register(coordinator)
+
+    class Source:
+        def __init__(self):
+            self.index = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            self.index += 1
+            if self.index > 3:
+                raise StopAsyncIteration
+            return self.index
+
+        async def aclose(self):
+            raise RuntimeError("original source close failed")
+
+    values = []
+    try:
+        async with asyncio.timeout(1):
+            with pytest.raises(RuntimeError, match="original source close failed"):
+                async for item in coordinator.run_stream(
+                    "session-a", "close-error", SessionWorkKind.CHAT_STREAM, Source,
+                ):
+                    values.append(item)
+                    await asyncio.sleep(0)
+        assert values == [1, 2, 3]
+    finally:
+        await coordinator.close()

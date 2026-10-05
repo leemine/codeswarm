@@ -385,19 +385,22 @@ class _InboundGatewayServer:
                 pass
 
     async def handle_message(self, msg) -> bool:
-        await self._queue.put(msg)
+        from contextvars import copy_context
+        await self._queue.put((msg, copy_context()))
         return True
 
     async def _serve_loop(self) -> None:
         while self._running:
             try:
-                msg = await self._queue.get()
+                msg, context = await self._queue.get()
             except asyncio.CancelledError:
                 break
             try:
-                handled = self._inbound_handler(msg)
+                from jiuwenswarm.governance.organization_auth import current_identity
+                context.run(current_identity)  # Queue waits must not retain expired admission.
+                handled = context.run(self._inbound_handler, msg)
                 if asyncio.iscoroutine(handled):
-                    await handled
+                    await asyncio.create_task(handled, context=context)
             except Exception:  # noqa: BLE001
                 logger.exception("[App] Gateway inbound handling failed: id=%s", getattr(msg, "id", None))
 
@@ -850,6 +853,8 @@ class GatewayServer(BaseWebChannel):
         if not self._ws_is_open(ws):
             return False
         try:
+            from jiuwenswarm.governance.organization_auth import connection_principal
+            connection_principal(ws)
             await ws.send(json.dumps(frame, ensure_ascii=False))
             return True
         except ConnectionClosed:
@@ -1024,6 +1029,8 @@ class GatewayServer(BaseWebChannel):
             if code:
                 frame["code"] = code
         try:
+            from jiuwenswarm.governance.organization_auth import connection_principal
+            connection_principal(ws)
             await ws.send(json.dumps(frame, ensure_ascii=False))
         except Exception:
             logger.debug("send_response failed (client disconnected?)", exc_info=True)
@@ -1037,6 +1044,8 @@ class GatewayServer(BaseWebChannel):
         """向指定客户端发送 event 帧（供本地 handler 使用）。"""
         frame: dict[str, Any] = {"type": "event", "event": event, "payload": payload}
         try:
+            from jiuwenswarm.governance.organization_auth import connection_principal
+            connection_principal(ws)
             await ws.send(json.dumps(frame, ensure_ascii=False))
         except Exception:
             logger.debug("send_event failed (client disconnected?)", exc_info=True)
@@ -1255,9 +1264,14 @@ class GatewayServer(BaseWebChannel):
             await ws.close(code=1008, reason=f"unsupported path: {request_path}")
             return
 
+        from jiuwenswarm.governance.organization_auth import connection_principal
+        try:
+            principal = connection_principal(ws)
+        except (OSError, ValueError, KeyError, TypeError, PermissionError):
+            await ws.close(code=1008, reason="authentication required")
+            return
         self._clients.add(ws)
-
-        ws_user_id = self._extract_ws_user_id(ws)
+        ws_user_id = principal.identity().actor_id if principal else self._extract_ws_user_id(ws)
         setattr(ws, "_gateway_user_id", ws_user_id)
         setattr(ws, "_gateway_agent_type", "jiuwenswarm")
         uid_marker = "" if ws_user_id else " uid_empty=yes"
@@ -1412,7 +1426,16 @@ class GatewayServer(BaseWebChannel):
                     )
 
     async def _handle_raw_message(self, ws: Any, raw: str, request_path: str, route: RouteConfig) -> None:
+        from jiuwenswarm.governance.organization_auth import authenticated_scope, connection_principal
+        try:
+            principal = connection_principal(ws)
+        except (OSError, ValueError, KeyError, TypeError, PermissionError):
+            await ws.close(code=1008, reason="authentication required")
+            return
+        with authenticated_scope(principal):
+            return await self._handle_authenticated_raw_message(ws, raw, request_path, route)
 
+    async def _handle_authenticated_raw_message(self, ws: Any, raw: str, request_path: str, route: RouteConfig) -> None:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:

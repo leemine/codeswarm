@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('..', import.meta.url));
 await build({
   absWorkingDir: root,
-  entryPoints: ['src/components/ChatPanel/InputArea.tsx', 'src/stores/index.ts', 'src/i18n/index.ts'],
+  entryPoints: ['src/components/ChatPanel/InputArea.tsx', 'src/stores/index.ts', 'src/i18n/index.ts', 'src/hooks/useWebSocket.ts', 'src/services/webClient.ts'],
   outbase: 'src',
   outdir: 'node_modules/.cache/input-area-permission-merge',
   bundle: true,
@@ -37,7 +37,7 @@ await build({
     },
   ],
 });
-const result = spawnSync(process.execPath, ['--test', 'tests/inputAreaPermissionMerge.test.mjs'], {
+const result = spawnSync(process.execPath, ['--test', 'tests/inputAreaPermissionMerge.test.mjs', 'tests/organizationSingleRelease.test.mjs'], {
   cwd: root,
   stdio: 'inherit',
 });

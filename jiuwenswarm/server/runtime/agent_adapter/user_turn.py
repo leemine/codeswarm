@@ -19,7 +19,7 @@ import json
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from jiuwenswarm.agents.harness.common.rails.permissions.root_context import (
@@ -30,6 +30,9 @@ from jiuwenswarm.agents.harness.common.rails.permissions.root_context import (
 from jiuwenswarm.common.session_message import SESSION_MESSAGE_INTERNAL_KEY
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from jiuwenswarm.governance.project_content import ProjectContentSnapshot
 
 # ``inputs`` key carrying the UserTurn across the team dispatch boundary.
 # Private to the adapter layer: DeepAgent's ``_normalize_inputs`` reads only
@@ -77,6 +80,7 @@ class UserTurn:
     skills: list[str] | None = None
     metadata: dict[str, Any] | None = None
     origin_kind: str = HOST_USER_ORIGIN_INTERNAL
+    project_content: ProjectContentSnapshot | None = None
 
     def with_text(self, text: Any) -> "UserTurn":
         """Return a copy carrying rewritten user text, keeping all context."""
@@ -86,8 +90,9 @@ class UserTurn:
         """Render this turn into the prompt an agent receives.
 
         Returns:
-            The JSON envelope for ordinary text, the A2UI prompt for a client
-            event, or the value unchanged when it is not renderable text (an
+            The JSON envelope for ordinary text and project-backed A2UI events,
+            the original A2UI prompt when no project snapshot is attached, or
+            the value unchanged when it is not renderable text (an
             ``InteractiveInput`` resume carries its own structure).
         """
         from jiuwenswarm.server.runtime.a2ui.integration import build_user_prompt_if_a2ui_event
@@ -97,7 +102,7 @@ class UserTurn:
             channel=self.channel,
             language=self.language,
         )
-        if a2ui_prompt is not None:
+        if a2ui_prompt is not None and self.project_content is None:
             return a2ui_prompt
 
         if not isinstance(self.text, (str, dict)):
@@ -105,10 +110,13 @@ class UserTurn:
             # own payload and must reach the agent untouched.
             return self.text
 
-        content = self.text
+        # Preserve the specialized A2UI instructions while carrying the same
+        # frozen project context as every other renderable Turn. References
+        # remain structured, untrusted data in the outer user envelope.
+        content = a2ui_prompt if a2ui_prompt is not None else self.text
         origin_kind = self.origin_kind
         prompt_channel = self._prompt_channel()
-        if isinstance(content, str) and prompt_channel != "agent_session":
+        if a2ui_prompt is None and isinstance(content, str) and prompt_channel != "agent_session":
             # /statusline <prompt> is a prompt-type command (mirrors Claude Code);
             # it never goes through /skills. The rewritten content instructs
             # the parent to invoke the dedicated built-in subagent.
@@ -170,6 +178,13 @@ class UserTurn:
         envelope.update(self._sender_fields())
         envelope.update(self._skill_scene_fields())
         envelope.update(self._prefer_mcp_field())
+        if self.project_content is not None:
+            snapshot = self.project_content
+            envelope["project_content_snapshot"] = snapshot.provenance
+            envelope["project_instructions"] = snapshot.instructions
+            # Reference bytes stay a data object inside the user envelope.
+            # They never become a system/developer instruction or cold prompt.
+            envelope["project_reference_data"] = json.loads(snapshot.reference_json)
         return envelope
 
     def _prompt_channel(self) -> str:

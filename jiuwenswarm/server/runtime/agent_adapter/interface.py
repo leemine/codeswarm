@@ -547,7 +547,7 @@ def _with_heartbeat_history_metadata(
     return result
 
 
-def _history_user_extra(params: Any) -> dict[str, Any] | None:
+def _history_user_extra(params: Any, *, project_content=None) -> dict[str, Any] | None:
     """Extract media/files/skills from ``params`` for the history extra.
 
     Image attachments and uploaded files are scoped to the *current turn* only
@@ -558,6 +558,8 @@ def _history_user_extra(params: Any) -> dict[str, Any] | None:
         return None
 
     extra = _with_cross_session_history_metadata(None, params) or {}
+    if project_content is not None:
+        extra["project_content_snapshot"] = project_content.provenance
     raw_media_items = params.get("media_items")
     if isinstance(raw_media_items, list):
         media_items: list[dict[str, Any]] = []
@@ -1750,6 +1752,7 @@ class JiuWenSwarm:
             skills=skills,
             metadata=metadata,
             origin_kind=origin_kind,
+            project_content=getattr(request, "_project_content_snapshot", None),
         )
 
         if isinstance(query, InteractiveInput):
@@ -2988,6 +2991,83 @@ class JiuWenSwarm:
         """Process a request through the facade-owned Session scheduler."""
         return await self._process_message(request, schedule_session=True)
 
+    def _cached_native_goal_runtime(self, request):
+        root = getattr(self, '_adapter', None)
+        slots = getattr(root, '_session_adapters', {})
+        child = (root if getattr(root, '_is_session_scoped_adapter', False) is True
+                 else slots.get(request.session_id) if isinstance(slots, dict) else None)
+        return getattr(child, '_native_execution', None)
+
+    def _capture_native_goal_request(self, request):
+        """Capture one Runtime-injected control without allocating any executor."""
+        if not hasattr(request, '_native_goal_control'):
+            route = getattr(request, '_execution_route', None)
+            if (isinstance(route, AdmittedExecutionRoute) and route.provider_id != 'native'
+                    and getattr(request, '_bound_execution', None) is route.bound):
+                # Runtime already admitted this immutable External route. Its
+                # original adapter still validates selection before mutation;
+                # a shared resource bundle is not Native control provenance.
+                return None
+            params = request.params if isinstance(request.params, dict) else {}
+            if str(params.get('action', 'get') or 'get').strip().lower() != 'get':
+                from jiuwenswarm.governance.organization_auth import configured_authenticator
+                from jiuwenswarm.governance.tool_context import submitted_native_lifecycle_factory
+                native = self._cached_native_goal_runtime(request)
+                if (getattr(native, '_require_execution_origin', False)
+                        or submitted_native_lifecycle_factory() is not None
+                        or configured_authenticator() is not None):
+                    raise PermissionError('Managed Native Goal mutation requires original control admission')
+            return None
+        from jiuwenswarm.runtime.harness.native_goal_control import NativeGoalControl
+
+        cap = request._native_goal_control
+        if type(cap) is not NativeGoalControl:
+            raise PermissionError('Native Goal control capability is invalid')
+        root = self._adapter
+        sid, rid = request.session_id, request.request_id
+        if sid != cap.binding.host_session_id or rid != cap.request_id:
+            raise PermissionError('Native Goal control request differs from its owner')
+        scoped = getattr(root, '_is_session_scoped_adapter', False) is True
+        slots = None if scoped else getattr(root, '_session_adapters', None)
+        child = root if scoped else (slots.get(sid) if isinstance(slots, dict) else None)
+        native = getattr(child, '_native_execution', None)
+        raw = json.dumps(request.params, sort_keys=True, allow_nan=False)
+
+        def facts():
+            return (self._adapter is root and child is not None and native is cap.native
+                    and getattr(child, '_native_execution', None) is native
+                    and getattr(child, '_parent_session_id', None) == sid
+                    and getattr(child, '_instance', None) is cap.agent
+                    and (scoped or (getattr(root, '_session_adapters', None) is slots and slots.get(sid) is child))
+                    and request.session_id == sid and request.request_id == rid
+                    and getattr(request, '_native_goal_control', None) is cap
+                    and json.dumps(request.params, sort_keys=True, allow_nan=False) == raw)
+
+        def check(*, result=False):
+            if not facts():
+                raise PermissionError('Native Goal control route changed')
+            (cap.check_result if result else cap.check_current)()
+            if not facts():
+                raise PermissionError('Native Goal control route changed')
+
+        check()
+        return cap, child, sid, check
+
+    @staticmethod
+    async def _record_native_goal_control_history(request, child, result, check):
+        if (result.get('action') != 'set'
+                or result.get('result_type') in {'goal_error', 'goal_confirm_required'}):
+            return
+        check(result=True)
+        record = getattr(child, '_record_goal_set_history_if_needed', None)
+        if not callable(record):
+            raise RuntimeError('Original Native Goal history writer unavailable')
+        saved = record(request, action='set', result_type=result.get('result_type'),
+                       goal_payload=result.get('goal'))
+        if inspect.isawaitable(saved):
+            await saved
+        check(result=True)
+
     async def execute_message(self, request: AgentRequest) -> AgentResponse:
         """Execute one request when scheduling is owned by AgentRuntime."""
         return await self._process_message(request, schedule_session=False)
@@ -3043,25 +3123,36 @@ class JiuWenSwarm:
         # Non-stream goal command (GET, PAUSE, CLEAR)
         if request.req_method == ReqMethod.COMMAND_GOAL:
             try:
-                adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
-                self._select_execution_before_mcp(adapter, request)
+                captured = self._capture_native_goal_request(request)
                 params = request.params if isinstance(request.params, dict) else {}
                 action = params.get("action", "get")
-                session_id = self._session_manager.get_session_id(request.session_id)
+                if captured is None:
+                    adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+                    self._select_execution_before_mcp(adapter, request)
+                    session_id = self._session_manager.get_session_id(request.session_id)
+                else:
+                    cap, adapter, session_id, check = captured
                 logger.info(
                     "[Goal] COMMAND_GOAL received: request_id=%s action=%s "
                     "resolved_session_id=%s",
                     request.request_id, action, session_id,
                 )
                 # Pass protocol fields straight to the Goal capability adapter.
-                goal_result = await adapter.handle_goal_command_structured(params, session_id)
+                if captured is None:
+                    goal_result = await adapter.handle_goal_command_structured(params, session_id)
+                else:
+                    from . import goal_control
+                    goal_result = await goal_control.dispatch_goal_control(
+                        cap, **goal_control.structured_goal_control_kwargs(params))
+                    check(result=True)
+                    await self._record_native_goal_control_history(request, adapter, goal_result, check)
                 if goal_result is not None:
                     result_type = goal_result.get("result_type")
                     ok = result_type not in {"goal_error", "goal_confirm_required"}
                     # Only set writes user history (objective as the user turn).
                     # pause / resume / clear / get stay control-only.
                     # 忙碌时与流式路径同一 helper：推迟到上一轮收尾再落盘。
-                    if ok and str(action or "").strip().lower() == "set":
+                    if captured is None and ok and str(action or "").strip().lower() == "set":
                         goal_obj = goal_result.get("goal")
                         record_fn = getattr(adapter, "_record_goal_set_history_if_needed", None)
                         if callable(record_fn):
@@ -3114,6 +3205,8 @@ class JiuWenSwarm:
                     }
                     if not ok and human_text:
                         payload["error"] = human_text
+                    if captured is not None:
+                        check(result=True)
                     return AgentResponse(
                         request_id=request.request_id,
                         channel_id=request.channel_id,
@@ -3186,7 +3279,9 @@ class JiuWenSwarm:
                 role="user",
                 content=_history_user_content(request.params, query),
                 timestamp=time.time(),
-                extra=_history_user_extra(request.params),
+                extra=_history_user_extra(
+                    request.params, project_content=getattr(request, "_project_content_snapshot", None),
+                ),
                 channel_metadata=request.metadata,
                 mode=request.params.get("mode", "unknown"),
             )
@@ -3376,12 +3471,15 @@ class JiuWenSwarm:
         params = request.params if isinstance(request.params, dict) else {}
         restore_chat_send_equipment_params(session_id, params)
         inputs, _memory_mode, _user_turn = self._build_inputs(request)
-        await self.reconcile_session_mcp(
-            request.session_id,
-            compute_chat_send_mcp_needed(params),
-            model_name=params.get("model_name"),
-            history_before_request_id=request.request_id,
-        )
+        from jiuwenswarm.runtime.continuation_control import continuation_control
+        retained = continuation_control(request, facade=self)
+        if retained is None:
+            await self.reconcile_session_mcp(
+                request.session_id,
+                compute_chat_send_mcp_needed(params),
+                model_name=params.get("model_name"),
+                history_before_request_id=request.request_id,
+            )
         async with aclosing(adapter.process_message_stream_impl(request, inputs)) as stream:
             async for chunk in stream:
                 yield chunk
@@ -3444,12 +3542,26 @@ class JiuWenSwarm:
         if request.req_method == ReqMethod.COMMAND_GOAL:
             params = request.params if isinstance(request.params, dict) else {}
             action = str(params.get("action", "get") or "get").strip().lower()
-            if action not in {"set", "resume"}:
+            native = self._cached_native_goal_runtime(request)
+            managed_control = (getattr(native, '_require_execution_origin', False)
+                               and (action == 'resume'
+                                    or getattr(native._native, 'active_turn', None) is not None))
+            if (hasattr(request, '_native_goal_control') or action not in {"set", "resume"}
+                    or managed_control):
                 try:
-                    adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
-                    self._select_execution_before_mcp(adapter, request)
-                    session_id = self._session_manager.get_session_id(request.session_id)
-                    goal_result = await adapter.handle_goal_command_structured(params, session_id)
+                    captured = self._capture_native_goal_request(request)
+                    if captured is None:
+                        adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+                        self._select_execution_before_mcp(adapter, request)
+                        session_id = self._session_manager.get_session_id(request.session_id)
+                        goal_result = await adapter.handle_goal_command_structured(params, session_id)
+                    else:
+                        from . import goal_control
+                        cap, adapter, session_id, check = captured
+                        goal_result = await goal_control.dispatch_goal_control(
+                            cap, **goal_control.structured_goal_control_kwargs(params))
+                        check(result=True)
+                        await self._record_native_goal_control_history(request, adapter, goal_result, check)
                     if goal_result is None:
                         yield AgentResponseChunk(
                             request_id=request.request_id,
@@ -3459,6 +3571,15 @@ class JiuWenSwarm:
                         )
                         return
                     result_type = goal_result.get("result_type")
+                    if captured is not None:
+                        check(result=True)
+                    if result_type == 'goal_confirm_required':
+                        yield AgentResponseChunk(request_id=request.request_id, channel_id=request.channel_id,
+                            payload={'event_type': 'goal.confirm_required',
+                                     'existing_goal': goal_result.get('existing_goal'),
+                                     'requested_objective': goal_result.get('requested_objective')},
+                            is_complete=True)
+                        return
                     if result_type == "goal_error":
                         yield AgentResponseChunk(
                             request_id=request.request_id,
@@ -3577,7 +3698,9 @@ class JiuWenSwarm:
                 role="user",
                 content=_history_user_content(params_for_history, query),
                 timestamp=time.time(),
-                extra=_history_user_extra(params_for_history),
+                extra=_history_user_extra(
+                    params_for_history, project_content=getattr(request, "_project_content_snapshot", None),
+                ),
                 channel_metadata=request.metadata,
                 mode=params_for_history.get("mode", "unknown"),
             )
@@ -4931,6 +5054,31 @@ class JiuWenSwarm:
 
     # ---------- 资源清理 ----------
 
+    async def stop_existing_session_runtime(self, session_id: str) -> bool:
+        """Stop only already-owned processors and the exact existing adapter."""
+        adapter, manager = self._adapter, self._session_manager
+
+        def check():
+            if self._adapter is not adapter or self._session_manager is not manager:
+                raise RuntimeError('Session facade owner changed during stop')
+
+        processor_cleaned = await manager.close_session(session_id)
+        check()
+        adapter_cleaned = False
+        if adapter is not None:
+            has_runtime = getattr(adapter, 'has_session_runtime', None)
+            if not callable(has_runtime):
+                raise RuntimeError('existing adapter ownership is unavailable')
+            if has_runtime(session_id):
+                stop = getattr(adapter, 'stop_existing_session_adapter', None)
+                if not callable(stop):
+                    raise RuntimeError('existing adapter has no strict stop port')
+                adapter_cleaned = bool(await stop(session_id))
+                check()
+        if self.has_session_runtime(session_id):
+            raise RuntimeError('Session runtime exit is not confirmed')
+        return processor_cleaned or adapter_cleaned
+
     async def cleanup_session_runtime(self, session_id: str) -> bool:
         """Release in-memory runtime owned by one session while keeping persisted history."""
         processor_cleaned = await self._session_manager.close_session(session_id)
@@ -4956,6 +5104,18 @@ class JiuWenSwarm:
         if session_id is None:
             return bool(has_runtime())
         return bool(has_runtime(session_id))
+
+    def owns_native_model_session(self, execution, native_session) -> bool:
+        check = getattr(self._adapter, "owns_native_model_session", None)
+        return callable(check) and check(execution, native_session) is True
+
+    def owns_native_tool_session(self, execution, agent, session) -> bool:
+        check = getattr(self._adapter, "owns_native_tool_session", None)
+        return callable(check) and check(execution, agent, session) is True
+
+    def owns_external_tool_session(self, execution, provider_session_id) -> bool:
+        check = getattr(self._adapter, "owns_external_tool_session", None)
+        return callable(check) and check(execution, provider_session_id) is True
 
     def owns_external_execution(self, session_id: str | None = None) -> bool:
         """Return whether this facade is the isolated root for one External binding."""

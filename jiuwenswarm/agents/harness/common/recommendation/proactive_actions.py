@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from jiuwenswarm.governance.model_consumer import runtime_model_kwargs
+
 if TYPE_CHECKING:
     # 仅类型注解用，避免与 proactive_adapter（函数级 import 本模块）形成运行时循环。
     from jiuwenswarm.server.runtime.proactive_adapter import ProactiveTriggerRequest
@@ -254,7 +256,7 @@ def _get_model(temperature: float = 0.0) -> Any:
     # base_model_client._build_request_params 的 model_dump 透传到底层
     # chat.completions.create(extra_body=...)。
     try:
-        return Model(
+        return Model(**runtime_model_kwargs(
             model_client_config=ModelClientConfig(**mcc_fields),
             model_config=ModelRequestConfig(
                 model=model_name,
@@ -264,7 +266,8 @@ def _get_model(temperature: float = 0.0) -> Any:
                     "chat_template_kwargs": {"enable_thinking": False},
                 },
             ),
-        )
+            binding_config=mcc
+        ))
     except Exception:
         return None
 

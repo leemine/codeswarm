@@ -335,6 +335,9 @@ class CredentialStore:
         return self._root / f"{str(name or '').strip()}.json"
 
     def _load(self, name: str) -> dict[str, str]:
+        from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+
+        require_legacy_mcp_access()
         p = self._path(name)
         if not p.is_file():
             return {}
@@ -442,6 +445,9 @@ def resolve_placeholders(entry: dict[str, Any], store: CredentialStore, name: st
     ``entry["name"]``. Missing tokens leave the placeholder literal so callers
     can detect un-provisioned MCPs.
     """
+    from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+
+    require_legacy_mcp_access()
     n = name or str(entry.get("name", "")).strip()
     tokens = store.get_all(n) if n else {}
     return _resolve_node(entry, tokens)  # type: ignore[return-value]

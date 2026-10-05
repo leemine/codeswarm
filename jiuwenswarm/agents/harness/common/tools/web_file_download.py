@@ -122,6 +122,7 @@ class WebFileDownloadManager:
         *,
         file_name: str,
         session_id: str = "",
+        artifact_issuer=None, original_path=None, asset_owner=None,
     ) -> str:
         """Generate a token bound to one durable verified asset registration."""
 
@@ -135,7 +136,20 @@ class WebFileDownloadManager:
             "name": Path(file_name).name,
             "sid": session_id,
         }
-        return self._sign_payload(payload)
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        from jiuwenswarm.governance.workspace_download import (
+            ARTIFACT_NAMESPACE, MAX_DOWNLOAD_TOKEN_BYTES, WorkspaceArtifactIssuer, WorkspaceDownloadDenied,
+        )
+        if configured_authenticator() is not None or artifact_issuer is not None:
+            if (type(artifact_issuer) is not WorkspaceArtifactIssuer or asset_owner is None
+                    or type(original_path) is not str or Path(file_name).name != Path(original_path).name):
+                raise WorkspaceDownloadDenied("sealed artifact execution source required")
+            payload[ARTIFACT_NAMESPACE] = artifact_issuer.issue_sealed(
+                asset, original_path, session_id, owner=asset_owner)
+        token = self._sign_payload(payload)
+        if len(token.encode()) > MAX_DOWNLOAD_TOKEN_BYTES:
+            raise WorkspaceDownloadDenied("artifact selector exceeds supported size")
+        return token
 
     def generate_token(
         self,
@@ -145,7 +159,27 @@ class WebFileDownloadManager:
         *,
         agent_http_base: str | None = None,
         agent_http_base_key: str = "",
+        artifact_issuer=None,
     ) -> str:
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        from jiuwenswarm.governance.workspace_download import (
+            ARTIFACT_NAMESPACE, MAX_DOWNLOAD_TOKEN_BYTES,
+            WorkspaceArtifactIssuer, WorkspaceDownloadDenied,
+        )
+        if configured_authenticator() is not None or artifact_issuer is not None:
+            # No ambient-principal/default-owner fallback. The original tool
+            # consumer must explicitly provide its captured execution issuer.
+            if type(artifact_issuer) is not WorkspaceArtifactIssuer:
+                raise WorkspaceDownloadDenied('artifact execution source required')
+            ttl = _DEFAULT_EXPIRES_SECONDS if expires_in is None else expires_in
+            if type(ttl) is not int or not 0 < ttl <= _DEFAULT_EXPIRES_SECONDS:
+                raise WorkspaceDownloadDenied('invalid artifact lifetime')
+            payload = {'path': file_path, 'sid': session_id, 'exp': int(time.time()) + ttl,
+                       ARTIFACT_NAMESPACE: artifact_issuer.issue(file_path, session_id)}
+            token = self._sign_payload(payload)
+            if len(token.encode()) > MAX_DOWNLOAD_TOKEN_BYTES:
+                raise WorkspaceDownloadDenied('artifact selector exceeds supported size')
+            return token
         payload: dict[str, Any] = {
             "path": file_path,
             "sid": session_id,
@@ -255,6 +289,7 @@ def generate_file_download_token(
     file_path: str,
     session_id: str = "",
     expires_in: int | None = None,
+    *, artifact_issuer=None,
 ) -> str:
     """签发文件下载令牌。
 
@@ -270,6 +305,7 @@ def generate_file_download_token(
             or os.getenv(_LEGACY_HTTP_BASE_ENV_KEY)
         ),
         agent_http_base_key="download_http_base",
+        artifact_issuer=artifact_issuer,
     )
 
 
@@ -375,13 +411,21 @@ def build_file_download_info(
     session_id: str = "",
     expires_in: int | None = None,
     user_id: str = "",
+    *, artifact_issuer=None,
 ) -> dict[str, Any]:
     """构建可投递的文件下载信息。
 
     默认签发不过期令牌（``expires_in=None``），与 ``send_file_to_user`` 产物语义一致。
     """
-    token = generate_file_download_token(file_path, session_id, expires_in)
-    download_url = WebFileDownloadManager.get_instance().generate_download_url(token, user_id)
+    token = (generate_file_download_token(file_path, session_id, expires_in)
+             if artifact_issuer is None else generate_file_download_token(
+                 file_path, session_id, expires_in, artifact_issuer=artifact_issuer))
+    if artifact_issuer is not None:
+        # The governed owner route accepts the original Session selector, not
+        # legacy routing identity. Token generation already validates the issuer.
+        download_url = f"/file-api/download?{urlencode({'token': token, 'session_id': session_id})}"
+    else:
+        download_url = WebFileDownloadManager.get_instance().generate_download_url(token, user_id)
 
     file_size = 0
     mime_type = "application/octet-stream"
@@ -410,6 +454,7 @@ def build_verified_asset_download_info(
     file_name: str,
     session_id: str = "",
     user_id: str = "",
+    *, artifact_issuer=None, original_path=None, asset_owner=None,
 ) -> dict[str, Any]:
     """Build download metadata whose token is backed by a staged asset."""
 
@@ -418,6 +463,7 @@ def build_verified_asset_download_info(
         asset,
         file_name=file_name,
         session_id=session_id,
+        artifact_issuer=artifact_issuer, original_path=original_path, asset_owner=asset_owner,
     )
     mime_type = "application/octet-stream"
 
@@ -431,6 +477,7 @@ def build_verified_asset_download_info(
         "name": Path(file_name).name,
         "size": asset.size_bytes,
         "mime_type": mime_type,
-        "download_url": manager.generate_download_url(token, user_id),
+        "download_url": (f"/file-api/download?{urlencode({'token': token, 'session_id': session_id})}"
+                         if artifact_issuer is not None else manager.generate_download_url(token, user_id)),
         "download_token": token,
     }

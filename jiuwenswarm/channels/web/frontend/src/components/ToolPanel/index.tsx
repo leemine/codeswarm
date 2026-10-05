@@ -6,9 +6,10 @@
 
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Info } from 'lucide-react';
 import { useSessionArtifacts, useSessionArtifactsCount } from '../ArtifactsPanel';
+import { ArtifactOwnerContext } from '../ArtifactsPanel/ArtifactOwnerContext';
 import { useTaskPlanningMetrics } from '../teamArea';
 import { ExpandedPanel } from '../teamArea/ExpandedPanel';
 import { loadTeamHistoryPanelState } from '../../features/teamHistoryPanelRestore';
@@ -151,6 +152,7 @@ export function ToolPanel({
   onCloseFloating,
 }: ToolPanelProps) {
   const { t } = useTranslation();
+  const { organizationAuth } = useContext(ArtifactOwnerContext);
   const isConnected = useSessionStore((state) => state.isConnected);
   const activeSessionId = useChatStore(s => s.activeSessionId);
   const mode = useSessionStore(s => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
@@ -785,7 +787,7 @@ export function ToolPanel({
             renderStatusIcon={task => <FileIcon fileName={task.title ?? ''} size={16} className="shrink-0" />}
             onTaskClick={taskId => {
               const artifact = sessionArtifacts.find(item => item.id === taskId);
-              if (artifact && openFileInDesktopBrowser({ name: artifact.name, download_url: artifact.downloadUrl })) return;
+              if (!organizationAuth && artifact && openFileInDesktopBrowser({ name: artifact.name, download_url: artifact.downloadUrl })) return;
               expandTo('artifacts');
               if (isTeam) {
                 setTeamAreaSelectedArtifactId(taskId);

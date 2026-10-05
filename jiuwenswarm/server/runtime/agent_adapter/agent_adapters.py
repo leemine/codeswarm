@@ -148,7 +148,13 @@ def create_adapter(
         RuntimeError: If SDK is unknown.
     """
     if execution_route is not None and execution_route.provider_id != "native":
+        from jiuwenswarm.governance.tool_context import (
+            current_tool_authorizer, submitted_external_model_authorizer,
+        )
         if execution_route.surface is not None and execution_route.surface.identity.topology == "team":
+            if execution_route.provider_id == 'opencode' and current_tool_authorizer('opencode') is not None:
+                from jiuwenswarm.governance.resources import ResourceAccessDenied
+                raise ResourceAccessDenied('protected OpenCode Team model gateway is not bound')
             from jiuwenswarm.server.runtime.agent_adapter.team_engine_adapter import ExternalTeamAgentAdapter
 
             return ExternalTeamAgentAdapter(execution_route)
@@ -156,6 +162,21 @@ def create_adapter(
             EngineAgentAdapter,
         )
 
+        if execution_route.provider_id == 'opencode' and current_tool_authorizer('opencode') is not None:
+            from jiuwenswarm.governance.resources import ResourceAccessDenied
+            factory = submitted_external_model_authorizer()
+            if not callable(factory):
+                raise ResourceAccessDenied('protected OpenCode model authority required')
+            binding = factory(execution_route)
+
+            def capture_model_authority():
+                original = submitted_external_model_authorizer()
+                if not callable(original):
+                    raise ResourceAccessDenied('submitting model authority unavailable')
+                return original(execution_route, binding)
+
+            return EngineAgentAdapter(execution_route, model_gateway_binding=binding,
+                                      model_authority_factory=capture_model_authority)
         return EngineAgentAdapter(execution_route)
 
     sdk_name = sdk or resolve_sdk_choice()

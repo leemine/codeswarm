@@ -520,7 +520,7 @@ class MessageHandler(ABC):
             msg.metadata["member_name"] = mname
 
         self._remember_user_query_context(msg)
-        self._user_messages.put_nowait(msg)
+        self.publish_user_messages_nowait(msg)
         logger.info(
             "[MessageHandler] _user_messages 入队: id=%s channel_id=%s session_id=%s",
             msg.id, msg.channel_id, msg.session_id,
@@ -539,6 +539,12 @@ class MessageHandler(ABC):
         - params.mode is a team variant (team / code.team / team.plan), or
         - session already has subscribers (already a team session; web mode may be "agent")
         """
+        from jiuwenswarm.governance.organization_auth import configured_authenticator, current_identity
+        if configured_authenticator() is not None:
+            from jiuwenswarm.governance.session_boundary import organization_sharing_host, OWNER_METHODS
+            method = getattr(getattr(msg, "req_method", None), "value", "")
+            if method not in OWNER_METHODS or not organization_sharing_host().owner_current(msg.session_id, current_identity()):
+                return
         if not msg.session_id:
             return
         req_method = str(getattr(getattr(msg, "req_method", None), "value", "") or "")
@@ -1821,6 +1827,15 @@ class MessageHandler(ABC):
         if parsed.action is ParsedControlAction.NONE:
             return False
 
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is not None:
+            # IM channel state, slash-command resources and Team seats do not
+            # yet have trusted organization ownership mappings. Authentication
+            # alone cannot authorize their local mutations or background work.
+            raise PermissionError(
+                "Organization mode does not support controlled-channel slash commands"
+            )
+
         logger.info(
             "[MessageHandler] _handle_channel_control channel=%s text=%s action=%s",
             channel_type,
@@ -2453,6 +2468,13 @@ class MessageHandler(ABC):
                 logger.warning("[MessageHandler] /rewind E2A failed, fallback local: %s", e2a_exc)
 
             # --- Fallback: 仅单用户共享目录 client 回退到本地截断 history.json ---
+            from jiuwenswarm.gateway.routing.e2a_proxy import organization_local_fallback_denial
+            denied = organization_local_fallback_denial()
+            if denied is not None:
+                await self.send_channel_notice(
+                    user_infos, channel_id, reply_session_id, denied,
+                )
+                return
             if not is_legacy_shared_directory_client(self.agent_client):
                 await self.send_channel_notice(
                     user_infos, channel_id, reply_session_id,
@@ -2529,9 +2551,19 @@ class MessageHandler(ABC):
 
     # ---------- user_messages ----------
 
+    @staticmethod
+    def _capture_message_principal(msg: "Message") -> "Message":
+        from jiuwenswarm.governance.organization_auth import current_principal
+        # Dynamic host-only attribute: absent from dataclass fields, wire codecs,
+        # params and metadata. Each queue item owns its captured principal even
+        # when a producer submits the same mutable Message more than once.
+        queued = replace(msg)
+        queued._queued_organization_principal = current_principal()
+        return queued
+
     async def publish_user_messages(self, msg: "Message") -> None:
         """将消息放入 user_messages 队列（异步）."""
-        await self._user_messages.put(msg)
+        await self._user_messages.put(self._capture_message_principal(msg))
 
     async def _publish_runtime_wake(self, msg: "Message") -> None:
         """Accept Runtime wakeups only while the forwarding host is live."""
@@ -2541,7 +2573,7 @@ class MessageHandler(ABC):
 
     def publish_user_messages_nowait(self, msg: "Message") -> None:
         """将消息放入 user_messages 队列（同步）."""
-        self._user_messages.put_nowait(msg)
+        self._user_messages.put_nowait(self._capture_message_principal(msg))
 
     async def consume_user_messages(self, timeout: float | None = None) -> "Message | None":
         """消费一条 user_messages；timeout 为 None 则阻塞，否则超时返回 None."""
@@ -3944,7 +3976,7 @@ class MessageHandler(ABC):
             msg.session_id,
             (msg.params or {}).get("request_id") if isinstance(msg.params, dict) else None,
         ):
-            self._user_messages.put_nowait(
+            self.publish_user_messages_nowait(
                 replace(msg, req_method=ReqMethod.CHAT_SEND, is_stream=True)
             )
             return
@@ -4010,7 +4042,7 @@ class MessageHandler(ABC):
                 queued_attachments if isinstance(queued_attachments, list) else None,
                 self._get_session_last_user_query(msg.session_id),
             )
-            self._user_messages.put_nowait(queued_msg)
+            self.publish_user_messages_nowait(queued_msg)
             logger.info(
                 "[MessageHandler] evolution approval answered (resolved), "
                 "queued supplement dispatched: id=%s session_id=%s",
@@ -4070,7 +4102,7 @@ class MessageHandler(ABC):
             auto_save_enabled=auto_save_enabled,
         )
         if decision.user_message is not None:
-            self._user_messages.put_nowait(decision.user_message)
+            self.publish_user_messages_nowait(decision.user_message)
         return decision.should_publish_chunk
 
     def _clear_session_evolution_states(self, session_id: str | None) -> None:
@@ -4257,10 +4289,19 @@ class MessageHandler(ABC):
 
         while self._running:
             msg = None
+            principal_scope = None
             try:
                 msg = await self.consume_user_messages(timeout=None)
                 if msg is None:
                     continue
+                from jiuwenswarm.governance.organization_auth import authenticated_scope, configured_authenticator
+                principal = getattr(msg, "_queued_organization_principal", None)
+                if configured_authenticator() is not None:
+                    if principal is None:
+                        raise PermissionError("authenticated queue principal required")
+                    principal.identity()  # Re-read revocation after waiting.
+                principal_scope = authenticated_scope(principal)
+                principal_scope.__enter__()
                 
          
                 # 先处理受控通道的 Channel 控制指令（如 /new_session、/mode、/skills list）
@@ -4298,6 +4339,18 @@ class MessageHandler(ABC):
                 if self._is_unsupported_non_stream_team_send(msg):
                     await self._reject_non_stream_team_send(msg)
                     continue
+
+                if configured_authenticator() is not None:
+                    from jiuwenswarm.governance.session_boundary import admit_session_request, organization_sharing_host
+                    # Channel state may have resolved a different Session since
+                    # browser admission. Check the final target before hooks or
+                    # subscriptions and again in AgentServer after delivery.
+                    admit_session_request(
+                        getattr(msg.req_method, "value", ""),
+                        msg.params if isinstance(msg.params, dict) else {},
+                        identity_resolver=principal.identity,
+                        host=organization_sharing_host(), envelope_session=msg.session_id,
+                    )
 
                 # V2: _apply_channel_state has resolved msg.session_id to the real team
                 # session_id and injected params.mode; register GodView now so it lands
@@ -4511,7 +4564,7 @@ class MessageHandler(ABC):
                             bot_id=msg.bot_id,
                             metadata=sup_meta,
                         )
-                        self._user_messages.put_nowait(new_msg)
+                        self.publish_user_messages_nowait(new_msg)
                         logger.info(
                             "[MessageHandler] supplement: 旧任务已取消，新任务已入队: id=%s session_id=%s",
                             new_msg.id, msg.session_id,
@@ -4780,6 +4833,10 @@ class MessageHandler(ABC):
                             "[MessageHandler] failed to publish forward-loop error: id=%s",
                             getattr(msg, "id", None),
                         )
+
+            finally:
+                if principal_scope is not None:
+                    principal_scope.__exit__(None, None, None)
 
     async def process_stream(
         self,

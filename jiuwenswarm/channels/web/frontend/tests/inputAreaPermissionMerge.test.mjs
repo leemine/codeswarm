@@ -48,7 +48,7 @@ after(() => {
 
 const { InputArea } =
   await import('../node_modules/.cache/input-area-permission-merge/components/ChatPanel/InputArea.js');
-const { useChatStore, useSessionStore, useWorkspaceStore } =
+const { useChatStore, useSessionStore, useWorkspaceStore, useGoalStore } =
   await import('../node_modules/.cache/input-area-permission-merge/stores/index.js');
 const { default: i18n } = await import('../node_modules/.cache/input-area-permission-merge/i18n/index.js');
 
@@ -60,7 +60,7 @@ function byId(id, variant) {
 }
 const click = async (element) => act(async () => element.click());
 
-async function mount({ mode = 'agent', profile = 'default', language = 'en' } = {}, run) {
+async function mount({ mode = 'agent', profile = 'default', language = 'en', organizationAuth = false } = {}, run) {
   const sessionId = 'input-permission-merge';
   useSessionStore.getState().ensureRuntime(sessionId);
   useSessionStore.getState().setMode(sessionId, mode);
@@ -71,6 +71,7 @@ async function mount({ mode = 'agent', profile = 'default', language = 'en' } = 
   const saved = [];
   const switched = [];
   const props = {
+    organizationAuth,
     onSubmit() {},
     onInterrupt() {},
     onCancel() {},
@@ -86,6 +87,7 @@ async function mount({ mode = 'agent', profile = 'default', language = 'en' } = 
       saved.push(update);
     },
   };
+  document.getElementById('root').className = 'chat-panel-shell';
   const root = createRoot(document.getElementById('root'));
   const render = async () =>
     act(async () => root.render(createElement(I18nextProvider, { i18n }, createElement(InputArea, props))));
@@ -96,6 +98,7 @@ async function mount({ mode = 'agent', profile = 'default', language = 'en' } = 
     await act(async () => root.unmount());
     useChatStore.getState().setActiveSessionId(null);
     useChatStore.getState().removeRuntime(sessionId);
+    useGoalStore.getState().removeRuntime(sessionId);
     useSessionStore.getState().removeRuntime(sessionId);
     useWorkspaceStore.setState(previousWorkspace, true);
   }
@@ -182,3 +185,69 @@ for (const action of ['cancel', 'confirm']) {
     });
   });
 }
+
+
+test('organization keeps Team visible but disabled without changing the selected mode', async () => {
+  await mount({ organizationAuth: true }, async ({ switched, sessionId }) => {
+    await click(byId('chat-panel-mode-select-trigger'));
+    const option = byId('chat-panel-mode-select-option', 'team');
+    assert.equal(option.disabled, true);
+    assert.equal(option.title, i18n.t('organizationRelease.teamUnavailable'));
+    await click(option);
+    assert.deepEqual(switched, []);
+    assert.equal(useSessionStore.getState().getRuntime(sessionId).mode, 'agent');
+  });
+});
+
+async function submitText(value) {
+  const input = byId('chat-panel-input');
+  await act(async () => {
+    input.innerHTML = value;
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  });
+  await act(async () => input.dispatchEvent(new dom.window.KeyboardEvent('keydown', {
+    key: 'Enter', code: 'Enter', bubbles: true,
+  })));
+}
+
+test('organization hides Goal entry and blocks stale armed draft rather than sending ordinary chat', async () => {
+  await mount({ organizationAuth: true }, async ({ props, render, sessionId }) => {
+    const calls = [];
+    props.onSetGoal = (...args) => calls.push(['goal', ...args]);
+    props.onSubmit = (...args) => calls.push(['chat', ...args]);
+    await render();
+    await click(byId('chat-panel-input-attach-trigger'));
+    assert.equal(document.querySelector('[data-testid="chat-panel-input-attach-menu-goal"]'), null);
+    await act(async () => useGoalStore.getState().setArmed(sessionId, true));
+    await submitText('preserved goal objective');
+    assert.deepEqual(calls, []);
+    assert.equal(useGoalStore.getState().getRuntime(sessionId).armed, true);
+    assert.ok(document.body.textContent.includes(i18n.t('organizationRelease.goalUnavailable')));
+  });
+});
+
+test('organization slash Goal mutation is rejected but get still uses its original handler', async () => {
+  await mount({ organizationAuth: true }, async ({ props, render }) => {
+    const calls = [];
+    props.onSetGoal = () => calls.push('set');
+    props.onRefreshGoal = () => calls.push('get');
+    await render();
+    await submitText('/goal set hidden mutation');
+    assert.deepEqual(calls, []);
+    await submitText('/goal');
+    assert.deepEqual(calls, ['get']);
+  });
+});
+
+test('nonorganization Goal attachment and armed send keep existing behavior', async () => {
+  await mount({}, async ({ props, render, sessionId }) => {
+    const calls = [];
+    props.onSetGoal = (...args) => calls.push(args);
+    await render();
+    await click(byId('chat-panel-input-attach-trigger'));
+    assert.ok(byId('chat-panel-input-attach-menu-goal'));
+    await act(async () => useGoalStore.getState().setArmed(sessionId, true));
+    await submitText('ordinary legacy goal');
+    assert.deepEqual(calls, [[sessionId, 'ordinary legacy goal']]);
+  });
+});

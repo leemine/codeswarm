@@ -21,6 +21,15 @@ def to_session_info(meta: dict[str, Any]) -> dict[str, Any]:
     与 Web fallback ``_to_session_info`` 输出完全一致，确保迁移后
     单机模式 ``session.list`` 的外部接口行为不变。
     """
+    if meta.get("cleanup_only") is True:
+        # Never enrich an unreadable cleanup target with normal metadata.
+        return {
+            "session_id": meta["session_id"], "project_id": meta["project_id"],
+            "mode": meta["mode"], "work_mode": meta["work_mode"],
+            "cleanup_only": True, "title": "", "project_dir": "",
+            "message_count": 0, "created_at": 0, "last_message_at": 0,
+            "pinned": False,
+        }
     lum = meta.get("last_user_message_at")
     return {
         "session_id": str(meta.get("session_id", "")),

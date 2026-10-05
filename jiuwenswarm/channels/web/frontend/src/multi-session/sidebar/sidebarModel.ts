@@ -1,6 +1,7 @@
 export type SessionIndicator = 'waiting' | 'processing' | 'unread' | 'error' | 'time';
 
 export type SidebarMenuAction =
+  | 'content'
   | 'archive-sessions'
   | 'pin'
   | 'rename'
@@ -115,15 +116,18 @@ export function getProjectMenuItems(
   return [
     { action: 'pin', label: translate(isPinned ? PIN_LABEL_PAIRS.project[1] : PIN_LABEL_PAIRS.project[0]), pinned: isPinned },
     { action: 'rename', label: translate('multiSession.project.rename') },
+    { action: 'content', label: translate('multiSession.project.content.menu') },
     { action: 'delete', label: translate('multiSession.delete'), danger: true },
     ...batchItems,
   ];
 }
 
-export function getProjectSessionMenuItems(isPinned: boolean, translate: Translate): SidebarMenuItem[] {
-  return buildSidebarMenuItems(isPinned, PIN_LABEL_PAIRS.projectSession, translate, {
+export function getProjectSessionMenuItems(isPinned: boolean, translate: Translate, options: { deletable?: boolean } = {}): SidebarMenuItem[] {
+  const items = buildSidebarMenuItems(isPinned, PIN_LABEL_PAIRS.projectSession, translate, {
     archiveLabel: translate('multiSession.project.archiveConversation'),
   });
+  if (options.deletable) items.push({ action: 'delete', label: translate('multiSession.delete'), danger: true });
+  return items;
 }
 
 export function getConversationMenuItems(
