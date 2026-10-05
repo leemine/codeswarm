@@ -5,6 +5,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 from openjiuwen.harness.engine import HarnessEngine
+from openjiuwen.harness_protocol import (
+    CheckpointReason, HarnessContext, HarnessInput, HarnessProtocolError,
+)
+from openjiuwen.harness_providers.opencode import (
+    OpenCodeHarness, OpenCodeHarnessConfig, OpenCodeModelConfig,
+)
+from openjiuwen.harness_providers.opencode.errors import OpenCodeError
+from jiuwenswarm.runtime.harness.recovery_store import SessionExecutionRecovery
+from tests.unit_tests.runtime.harness.test_execution_recovery import recovery_env  # noqa: F401
+
 
 from jiuwenswarm.runtime.harness import execution_session as session_module
 from jiuwenswarm.runtime.harness.execution_session import ExecutionExitState, ExecutionSession, ExecutionExitUnconfirmedError
@@ -298,3 +308,193 @@ async def test_cleanup_only_consumes_original_confirmed_execution_receipt(tmp_pa
     assert ('original' in manager.agents.get('web', {})) is (proof != 'confirmed')
     if proof != 'confirmed':
         assert x.facade._adapter is x.adapter and x.adapter._session is None
+
+
+# The native process/HTTP transport is controlled here; core's OpenCode state
+# machine, IO event consumer, checkpoint publication and encrypted archive are real.
+
+
+class _AbortNativeTransport:
+    def __init__(self, history, mode):
+        self.history, self.mode = history, mode
+        self.queue = asyncio.Queue()
+        self.prompted, self.aborting = asyncio.Event(), asyncio.Event()
+        self.closed = False
+        self.requests = []
+        self.on_abort = None
+
+    async def request(self, method, path, body=None):
+        self.requests.append((method, path))
+        if method == 'POST' and path == '/session':
+            return {'id': 'ses_original'}
+        if method == 'GET' and path == '/session/ses_original':
+            return {'id': 'ses_original'}
+        if path == '/session/status':
+            return {}
+        if path in {'/permission', '/question'}:
+            return []
+        if method == 'GET' and path.endswith('/message'):
+            return self.history
+        if path.endswith('/prompt_async'):
+            self.user_id = body['messageID']
+            self.prompted.set()
+            return None
+        if path.endswith('/abort'):
+            self.aborting.set()
+            if self.on_abort is not None:
+                await self.on_abort()
+            if self.mode == 'error':
+                raise OpenCodeError('fixture_abort_error')
+            if self.mode == 'timeout':
+                await asyncio.Event().wait()
+            if self.mode == 'no_idle':
+                return True
+            message = {'id': 'msg_original', 'role': 'assistant',
+                       'parentID': self.user_id, 'sessionID': 'ses_original',
+                       'time': {'completed': 1},
+                       'error': {'name': 'MessageAbortedError', 'data': {'message': 'Aborted'}}}
+            self.history.append({'info': message, 'parts': []})
+            await self.queue.put({'type': 'message.updated', 'properties': {'sessionID': 'ses_original', 'info': message}})
+            await self.queue.put({'type': 'session.idle', 'properties': {'sessionID': 'ses_original'}})
+            return True
+        raise AssertionError((method, path))
+
+    async def next_event(self):
+        value = await self.queue.get()
+        if value is None:
+            raise OpenCodeError('event_stream_closed')
+        return value
+
+    async def close(self):
+        self.closed = True
+        await self.queue.put(None)
+
+
+class _AbortNativeHarness(OpenCodeHarness):
+    def __init__(self, history, mode='idle'):
+        super().__init__(OpenCodeHarnessConfig(model=OpenCodeModelConfig(
+            'fixture', 'http://127.0.0.1:1/v1', 'synthetic-key'), turn_timeout_s=30))
+        self.fixture_transport = _AbortNativeTransport(history, mode)
+
+    async def _open_session(self, ctx):
+        self._transport = self.fixture_transport
+        sid, resumed = await self._activate_session(ctx)
+        self._session_id = sid
+        await self._publish_session_checkpoint(reason=CheckpointReason.SESSION_ACTIVATED,
+                                              resumable=True, state='idle', resumed=resumed)
+        return sid
+
+    async def _verify(self):
+        pass
+
+
+def _native_abort_tree(tmp_path, history, mode='idle'):
+    route = _route(tmp_path, provider_id='opencode')
+    harness = _AbortNativeHarness(history, mode)
+    recovery = SessionExecutionRecovery(session_id='session-1', execution_profile_id='opencode-profile',
+                                        binding=route.bound.binding, runtime_paths=route.runtime_paths)
+    session = ExecutionSession(HarnessEngine(route.bound.binding, harness), route.runtime_paths,
+                               recovery=recovery)
+    adapter = EngineAgentAdapter(route)
+    adapter._session = session
+    context = HarnessContext('opencode', 'external:opencode:session-1', 'session-1', '', cwd=str(route.runtime_paths.cwd))
+    return SimpleNamespace(session=session, adapter=adapter, harness=harness, recovery=recovery,
+                           context=context, native=harness.fixture_transport)
+
+
+@pytest.mark.asyncio
+async def test_real_opencode_abort_idle_checkpoint_then_strict_stop_cold_resume(tmp_path, recovery_env):
+    history = []
+    x = _native_abort_tree(tmp_path, history)
+    await x.session.start(x.context)
+    await x.session.send(HarnessInput('ordinary slow request'))
+    await x.native.prompted.wait()
+    assert (await x.harness.export_checkpoint()).data['state'] == 'turn_active'
+    assert await x.adapter.stop_existing_session_adapter('session-1')
+    assert x.native.closed and x.session.exit_state is ExecutionExitState.EXIT_CONFIRMED
+    assert ('POST', '/session/ses_original/abort') in x.native.requests
+    resumed = _native_abort_tree(tmp_path, history)
+    try:
+        await resumed.session.start(resumed.context)
+        checkpoint = await resumed.harness.export_checkpoint()
+        assert checkpoint.data['resumed'] is True
+        assert checkpoint.data['session_id'] == 'ses_original'
+        assert ('POST', '/session') not in resumed.native.requests
+        assert resumed.native.history is history and history[0]['info']['id'] == 'msg_original'
+    finally:
+        await resumed.session.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['timeout', 'error', 'no_idle'])
+async def test_abort_failure_still_strict_stops_but_never_certifies_resume(tmp_path, recovery_env, monkeypatch, mode):
+    monkeypatch.setattr(session_module, 'RESOURCE_STOP_TIMEOUT_S', .1)
+    history = []
+    x = _native_abort_tree(tmp_path, history, mode)
+    await x.session.start(x.context)
+    await x.session.send(HarnessInput('slow'))
+    await x.native.prompted.wait()
+    assert await x.adapter.stop_existing_session_adapter('session-1')
+    assert x.native.closed and x.session.exit_state is ExecutionExitState.EXIT_CONFIRMED
+    resumed = _native_abort_tree(tmp_path, history)
+    with pytest.raises(HarnessProtocolError, match='confirmed idle'):
+        await resumed.session.start(resumed.context)
+
+
+@pytest.mark.asyncio
+async def test_abort_cancellation_cleans_original_and_propagates_unknown(tmp_path, recovery_env):
+    x = _native_abort_tree(tmp_path, [], 'timeout')
+    await x.session.start(x.context)
+    await x.session.send(HarnessInput('slow'))
+    await x.native.prompted.wait()
+    task = asyncio.create_task(x.adapter.stop_existing_session_adapter('session-1'))
+    await x.native.aborting.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert x.native.closed
+    assert x.adapter._session is x.session
+    assert x.session.exit_state is ExecutionExitState.EXIT_UNCONFIRMED
+    assert await x.adapter.stop_existing_session_adapter('session-1')
+    assert x.native.requests.count(('POST', '/session/ses_original/abort')) == 1
+
+
+@pytest.mark.asyncio
+async def test_abort_owner_drift_does_not_stop_replacement(tmp_path, recovery_env):
+    x = _native_abort_tree(tmp_path, [])
+    await x.session.start(x.context)
+    await x.session.send(HarnessInput('slow'))
+    await x.native.prompted.wait()
+    original_io = x.session.io
+    replacement = SimpleNamespace(stop=AsyncMock())
+    async def replace_io():
+        x.session.io = replacement
+    x.native.on_abort = replace_io
+    with pytest.raises(RuntimeError, match='resources changed'):
+        await x.adapter.stop_existing_session_adapter('session-1')
+    replacement.stop.assert_not_awaited()
+    assert not x.native.closed
+    assert x.adapter._session is x.session
+    x.session.io = original_io
+    await x.session.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_idle_does_not_override_failed_durable_checkpoint(tmp_path, recovery_env):
+    history = []
+    x = _native_abort_tree(tmp_path, history)
+    await x.session.start(x.context)
+    await x.session.send(HarnessInput('slow'))
+    await x.native.prompted.wait()
+    original_save = x.recovery._save_sync
+    def fail_terminal(checkpoint, reason, expected_revision):
+        if reason is CheckpointReason.TURN_COMPLETED:
+            raise OSError('synthetic archive unavailable')
+        return original_save(checkpoint, reason, expected_revision)
+    x.recovery._save_sync = fail_terminal
+    assert await x.adapter.stop_existing_session_adapter('session-1')
+    assert x.native.closed and x.session.exit_state is ExecutionExitState.EXIT_CONFIRMED
+    assert (await x.harness.export_checkpoint()).data['state'] == 'idle'
+    resumed = _native_abort_tree(tmp_path, history)
+    with pytest.raises(HarnessProtocolError, match='confirmed idle'):
+        await resumed.session.start(resumed.context)

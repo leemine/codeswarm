@@ -82,3 +82,30 @@ existing bound. A second case covers cancellation of the failure send itself.
 The two existing Web deletion scripts (`test:single-session-delete` and
 `test:session-delete`) are also included in the same stable Web governance
 suite's discovery and execution lists, without changing its 180-second budget.
+
+## OpenCode abort before strict resource exit
+
+For a retained OpenCode owner, strict `ExecutionSession.stop` now gives the
+original public IO abort/state path a bounded opportunity to reach whole-queue
+`IDLE` while its sole IO pump and output router remain alive. This uses the
+original Session lifecycle lock and ownership checks. The grace is at most five
+seconds (half the existing provider stop allowance); elapsed grace is subtracted
+from the existing ten-second provider stop allowance. Other Providers and the
+legacy unguarded stop path retain their original behavior.
+
+Native idle is not checkpoint durability or resource-exit proof. The existing
+core checkpoint sink and strict cold-resume validation remain authoritative; no
+archive is edited to claim idle and no failed resume is silently replaced with a
+new Session. Abort error, timeout, or missing idle still proceeds to strict
+resource cleanup. Cancellation attempts cleanup of the original objects before
+propagating and retains an unconfirmed owner for retry. Ownership drift rejects
+cleanup of replacement resources.
+
+`test_external_strict_stop.py` exercises the installed core OpenCode harness,
+its original IO/router, and a real encrypted temporary recovery archive. A
+controlled native transport supplies abort/idle and history; it is not a real
+OpenCode CLI/process acceptance test. Cases cover same-native-session cold
+resume, abort timeout/error/missing idle, failed checkpoint persistence,
+cancellation propagation, and exact-owner replacement. Actual CLI cancellation
+and subsequent ordinary continuation require separate evidence on the final
+integrated source pair.

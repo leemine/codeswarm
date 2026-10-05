@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from enum import Enum
 from pathlib import Path
@@ -15,6 +16,7 @@ from openjiuwen.harness_protocol import (
     HarnessCapability,
     HarnessContext,
     HarnessInput,
+    HarnessState,
     HostCapability,
     SendReceipt,
     ToolGateway,
@@ -35,6 +37,7 @@ from jiuwenswarm.runtime.harness.tool_transport import (
 )
 
 RESOURCE_STOP_TIMEOUT_S = 10.0
+logger = logging.getLogger(__name__)
 
 
 class ExecutionExitState(str, Enum):
@@ -264,15 +267,45 @@ class ExecutionSession:
                         raise RuntimeError("External closed Session exit is unconfirmed")
                     return
                 self._exit_state = ExecutionExitState.STOP_REQUESTED
+                # Keep the sole event pump/router alive while the original
+                # OpenCode abort is reconciled. An abort ACK is not native idle
+                # and native idle is not proof that the checkpoint sink saved.
+                provider_budget = RESOURCE_STOP_TIMEOUT_S
+                cancelled = None
+                if ownership_check is not None and binding.provider_id == "opencode" and self._started:
+                    began = asyncio.get_running_loop().time()
+                    try:
+                        async with asyncio.timeout(min(5.0, provider_budget / 2)):
+                            check()
+                            if io.state is HarnessState.RUNNING:
+                                await io.abort(immediate=False)
+                                check()
+                                while io.state is not HarnessState.IDLE:
+                                    await asyncio.sleep(0.01)
+                                    check()
+                    except asyncio.CancelledError as exc:
+                        # The original strict cleanup still owns these resources.
+                        # Preserve cancellation after attempting that cleanup.
+                        cancelled = exc
+                    except Exception:
+                        logger.warning("OpenCode abort did not confirm native idle before stop")
+                    # In particular, never convert an ownership drift into a
+                    # best-effort abort failure and clean a replacement owner.
+                    check()
+                    provider_budget = max(0.0, provider_budget - (asyncio.get_running_loop().time() - began))
                 if ownership_check is None:
                     router, recovery = self._output_router, self._recovery
                     await self._stop_owned_resources(router=router)
                 else:
-                    await self._stop_owned_resources(router=router, ownership_check=check)
+                    await self._stop_owned_resources(
+                        router=router, ownership_check=check, provider_timeout=provider_budget,
+                    )
                 check()
                 if recovery is not None:
                     await recovery.clear_pending_interactions()
                     check()
+                if cancelled is not None:
+                    raise cancelled
             except BaseException:
                 self._exit_state = ExecutionExitState.EXIT_UNCONFIRMED
                 raise
@@ -287,6 +320,7 @@ class ExecutionSession:
         *,
         router: TurnOutputRouter | None,
         ownership_check: Callable[[], None] | None = None,
+        provider_timeout: float | None = None,
     ) -> None:
         failures: list[tuple[str, Exception]] = []
         # Capture before the first await. A replacement never becomes this stop's resource.
@@ -299,7 +333,11 @@ class ExecutionSession:
         async def stop_one(name: str, operation: Callable[[], Awaitable[None]]) -> None:
             check()
             try:
-                await asyncio.wait_for(operation(), timeout=RESOURCE_STOP_TIMEOUT_S)
+                await asyncio.wait_for(
+                    operation(),
+                    timeout=(provider_timeout if name == "provider" and provider_timeout is not None
+                             else RESOURCE_STOP_TIMEOUT_S),
+                )
             except Exception as exc:
                 failures.append((name, exc))
             check()
