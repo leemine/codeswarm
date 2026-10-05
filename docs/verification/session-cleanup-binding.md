@@ -75,3 +75,17 @@ stop it. Existing cancellation, partial HTTPX close, failed server exit and
 strict facade retry cases remain required. The tests are discovered by the
 existing `tests/unit_tests/runtime/harness` stable suite; no budget or exception
 list changes are needed.
+
+### Queued stream cancellation
+
+A scheduled Single stream can be revoked before its producer starts. Its original
+scheduled task is now observed together with its sole bounded event queue, so
+cancelling queued work closes that exact consumer even when the producer's
+`finally` never runs. Buffered events retain ordering; producer close errors are
+propagated, and a missing terminal result is an error rather than successful
+execution. No replacement scheduler, Session state or cleanup receipt is added.
+
+Regression reproduced both queued request cancellation and whole Session close
+as timeouts on the prior candidate. Both pass after the fix, along with a bounded
+buffer/producer-close-error case and all 43 coordinator tests. Actual Provider
+revocation and the final combined candidate still require their separate checks.

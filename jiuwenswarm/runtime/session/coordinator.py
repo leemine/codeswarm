@@ -1117,7 +1117,24 @@ class RuntimeSessionCoordinator:
         completed_normally = False
         try:
             while True:
-                item = await queue.get()
+                # Queued work may be cancelled before produce() ever starts,
+                # so its finally block cannot supply a terminal marker. Observe
+                # the original scheduled task as well as the sole data queue.
+                # Drain buffered items first; scheduling completion alone is
+                # never evidence that an execution succeeded.
+                receive = asyncio.create_task(queue.get())
+                try:
+                    await asyncio.wait(
+                        (receive, scheduled), return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if not receive.done() and queue.empty():
+                        await scheduled
+                        raise RuntimeError("session stream ended without a terminal result")
+                    item = await receive
+                finally:
+                    if not receive.done():
+                        receive.cancel()
+                        await asyncio.gather(receive, return_exceptions=True)
                 if item.error is not None:
                     raise item.error
                 if item.done:
