@@ -335,6 +335,8 @@ class _AbortNativeTransport:
             return []
         if method == 'GET' and path.endswith('/message'):
             return self.history
+        if method == 'GET' and path == '/session/ses_original/message/msg_original':
+            return next(message for message in self.history if message['info']['id'] == 'msg_original')
         if path.endswith('/prompt_async'):
             self.user_id = body['messageID']
             self.prompted.set()
@@ -354,6 +356,11 @@ class _AbortNativeTransport:
                        'time': {'completed': 1},
                        'error': {'name': 'MessageAbortedError', 'data': {'message': 'Aborted'}}}
             self.history.append({'info': message, 'parts': []})
+            # Fixed CLI 1.18.18 emits an abort error and an early idle before
+            # publishing the completed assistant, then confirms idle again.
+            await self.queue.put({'type': 'session.error', 'properties': {
+                'sessionID': 'ses_original', 'error': message['error']}})
+            await self.queue.put({'type': 'session.idle', 'properties': {'sessionID': 'ses_original'}})
             await self.queue.put({'type': 'message.updated', 'properties': {'sessionID': 'ses_original', 'info': message}})
             await self.queue.put({'type': 'session.idle', 'properties': {'sessionID': 'ses_original'}})
             return True
@@ -413,6 +420,7 @@ async def test_real_opencode_abort_idle_checkpoint_then_strict_stop_cold_resume(
     assert await x.adapter.stop_existing_session_adapter('session-1')
     assert x.native.closed and x.session.exit_state is ExecutionExitState.EXIT_CONFIRMED
     assert ('POST', '/session/ses_original/abort') in x.native.requests
+    assert ('GET', '/session/ses_original/message/msg_original') in x.native.requests
     resumed = _native_abort_tree(tmp_path, history)
     try:
         await resumed.session.start(resumed.context)
