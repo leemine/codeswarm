@@ -834,3 +834,71 @@ async def test_stream_control_event_does_not_consume_chunk_sequence() -> None:
     assert json.loads(ws.sent[1])["sequence"] == 1
     assert terminal.is_complete is True
     assert terminal.payload == {"is_complete": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revoked", [False, True])
+async def test_cancelled_original_stream_closes_only_its_gateway_queue(monkeypatch, revoked):
+    from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+    from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
+    from jiuwenswarm.governance import session_boundary
+
+    started = asyncio.Event()
+    closed = asyncio.Event()
+    manager = object()
+    runtime = AgentRuntime(agent_manager=manager, initializer=AsyncMock(), plan_controller=AsyncMock())
+
+    async def stream(request, **kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+            yield
+        finally:
+            closed.set()
+
+    runtime.stream = stream
+    server = agent_ws_server.AgentWebSocketServer.__new__(agent_ws_server.AgentWebSocketServer)
+    server._agent_manager = manager
+    server._runtime = runtime
+    server._session_stream_tasks = {}
+    request = AgentRequest(
+        request_id="original-stream", channel_id="web", session_id="private-session",
+        req_method=ReqMethod.CHAT_SEND, params={"mode": "agent"}, is_stream=True,
+        metadata={"private": "must-not-leak"},
+    )
+    client = WebSocketAgentServerClient()
+    client._ensure_connected_for_request = AsyncMock()
+    client._send_wire_payload = AsyncMock()
+    other_queue = asyncio.Queue()
+    client._message_queues["new-stream"] = other_queue
+    wires = []
+
+    class Loopback:
+        async def send(self, value):
+            wire = json.loads(value)
+            wires.append(wire)
+            await client._message_queues[wire["request_id"]].put(wire)
+
+    async def receive():
+        envelope = e2a_from_agent_fields(
+            request_id=request.request_id, channel_id="web", session_id=request.session_id,
+            params={"content": "test"}, is_stream=True,
+        )
+        return [chunk async for chunk in client.send_request_stream(envelope)]
+
+    receiver = asyncio.create_task(receive())
+    producer = asyncio.create_task(server._handle_stream(Loopback(), request, asyncio.Lock()))
+    await asyncio.wait_for(started.wait(), 1)
+    monkeypatch.setattr(session_boundary, "delivery_authorized", lambda: not revoked)
+    producer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await producer
+    chunks = await asyncio.wait_for(receiver, 2)
+    assert closed.is_set()
+    assert len(chunks) == 1
+    assert chunks[0].is_complete is True
+    assert chunks[0].payload["code"] == ("FORBIDDEN" if revoked else "CANCELLED")
+    assert "original-stream" not in client._message_queues
+    assert client._message_queues["new-stream"] is other_queue and other_queue.empty()
+    assert "must-not-leak" not in json.dumps(wires)
+    assert "exit_confirmed" not in json.dumps(wires)

@@ -3568,7 +3568,28 @@ class AgentWebSocketServer:
     async def _handle_stream(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
-        await self._handle_stream_impl(ws, request, send_lock)
+        try:
+            await self._handle_stream_impl(ws, request, send_lock)
+        except asyncio.CancelledError:
+            # Runtime cancellation still has to close this request's Gateway
+            # queue. This is a transport failure, never an execution-success
+            # or cleanup receipt. The normal sink rechecks delivery authority
+            # and substitutes a content-free denial after revocation.
+            wire = encode_agent_response_for_wire(
+                AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"code": "CANCELLED", "error": "Request stream cancelled."},
+                ),
+                response_id=request.request_id,
+            )
+            try:
+                async with send_lock:
+                    await send_wire_payload(ws, wire)
+            except WebSocketConnectionClosed:
+                pass
+            raise
 
     async def _handle_heartbeat_job(
         self,

@@ -43,3 +43,23 @@ installed noneditable core f6c56838 and an isolated swarm source overlay
 (`/tmp/r2b-host-composition.log`). The previous 3deb583a strict stable result
 (4641 passed) is retained for that SHA only; the corrected candidate still needs
 its own stable and actual browser verification.
+
+## Single cleanup entry after source revocation
+
+An original owner whose private continuation has lost its source authorization
+receives a minimal `cleanup_only` inventory entry, rebuilt from the original
+cleanup-owner proof. It contains no title, preview, model, workspace path or
+history, cannot be opened or pinned, and offers only the existing Delete action.
+History, switch, execute and artifact authorization remain denied. Credential
+revocation, retired bindings, Team, archived and ephemeral sessions do not gain
+this inventory entry. The original exact deletion/exit receipt is still required.
+
+Cancellation now closes the original AgentServer request stream through the
+existing E2A error response and delivery authorization sink. The Gateway removes
+only that request's queue; this frame neither confirms execution success nor
+resource cleanup. A revoked delivery emits the existing generic FORBIDDEN body.
+
+Affected verification: organization inventory, cleanup authority/binding,
+owned deletion and Gateway adapter: 153 passed; stream sending/keepalive and
+actual Gateway client queue decoding: 64 passed. Real UI/Provider acceptance
+must be rerun against the combined frozen candidate before release.

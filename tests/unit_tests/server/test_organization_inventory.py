@@ -415,9 +415,89 @@ async def test_new_inventory_request_cannot_join_pre_revocation_scan(
                 for row in sent["payload"]["projects"]
                 if row["project_id"] == inventory.project_id
             )
-            assert shared["session_count"] == 0, (
-                "new authorization permit exposed pre-revocation owner inventory"
-            )
+            # The newly authorized scan may retain the owner's cleanup target,
+            # but must replace the old readable row with the minimal DTO.
+            assert shared["session_count"] == 1
+            assert "private title" not in json.dumps(sent)
+            rows = session_boundary.filter_current_inventory(pending.result())
+            cleanup = next(row for row in rows if row["session_id"] == "alice-one")
+            assert cleanup["cleanup_only"] is True and cleanup["title"] == ""
+            assert cleanup["project_dir"] == "" and cleanup["message_count"] == 0
         finally:
             release.set()
             await old_task
+
+
+@pytest.mark.asyncio
+async def test_revoked_source_retains_only_original_owner_cleanup_inventory(inventory):
+    from jiuwenswarm.governance.session_sharing import SessionSharingDenied
+
+    inventory.host.invalidate_source(
+        "alice-one", expected_epoch=inventory.host.source_epoch("alice-one")
+    )
+    with organization_auth.authenticated_scope(inventory.principals["alice"]):
+        assert not inventory.host.owner_current("alice-one", organization_auth.current_identity())
+        result = await dispatch("project.get_sessions", {"project_id": inventory.project_id}, inventory)
+        assert result.ok and result.payload["total"] == 1
+        row = result.payload["sessions"][0]
+        assert row == {
+            "session_id": "alice-one", "project_id": inventory.project_id,
+            "mode": "agent", "work_mode": "work", "cleanup_only": True,
+            "title": "", "project_dir": "", "message_count": 0,
+            "created_at": 0, "last_message_at": 0, "pinned": False,
+        }
+        for method in ("history.get", "session.switch", "session.get_metadata", "chat.send"):
+            with pytest.raises(SessionSharingDenied):
+                session_boundary.admit_session_request(
+                    method, {"session_id": "alice-one"},
+                    identity_resolver=organization_auth.current_identity, host=inventory.host,
+                )
+        permit = session_boundary.admit_session_request(
+            "session.delete", {"session_id": "alice-one"},
+            identity_resolver=organization_auth.current_identity, host=inventory.host,
+        )
+        assert permit.revalidate()
+    with organization_auth.authenticated_scope(inventory.principals["bob"]):
+        result = await dispatch("project.get_sessions", {"project_id": inventory.project_id}, inventory)
+        assert [row["session_id"] for row in result.payload["sessions"]] == ["bob-one"]
+
+
+def test_stale_full_inventory_is_rebuilt_as_minimal_cleanup_after_revoke(inventory):
+    with organization_auth.authenticated_scope(inventory.principals["alice"]):
+        rows = session_metadata.collect_all_sessions_metadata()
+        old = next(row for row in rows if row["session_id"] == "alice-one")
+        assert old["title"] == "alice-one private title"
+        inventory.host.invalidate_source(
+            "alice-one", expected_epoch=inventory.host.source_epoch("alice-one")
+        )
+        filtered = session_boundary.filter_current_inventory([old])
+        assert len(filtered) == 1 and filtered[0]["cleanup_only"] is True
+        assert "private title" not in json.dumps(filtered)
+        assert "project_dir" in filtered[0] and filtered[0]["project_dir"] == ""
+        inventory.auth.revoke(inventory.principals["alice"])
+        with pytest.raises(PermissionError):
+            session_boundary.filter_current_inventory(filtered)
+
+
+@pytest.mark.parametrize("change", ["team", "ephemeral", "deleted", "unknown"])
+def test_cleanup_inventory_never_invents_unsupported_or_foreign_ownership(inventory, change):
+    inventory.host.invalidate_source(
+        "alice-one", expected_epoch=inventory.host.source_epoch("alice-one")
+    )
+    metadata = inventory.sessions / "alice-one" / "metadata.json"
+    value = json.loads(metadata.read_text())
+    if change == "team":
+        value["mode"] = "team.work.normal"
+    elif change == "ephemeral":
+        value["ephemeral"] = True
+    elif change == "deleted":
+        metadata.unlink()
+    else:
+        metadata = inventory.sessions / "legacy-unknown" / "metadata.json"
+    if change in {"team", "ephemeral"}:
+        metadata.write_text(json.dumps(value))
+    sid = "legacy-unknown" if change == "unknown" else "alice-one"
+    with organization_auth.authenticated_scope(inventory.principals["alice"]):
+        assert session_boundary.cleanup_inventory_entry(
+            inventory.host, organization_auth.current_identity(), sid
+        ) is None

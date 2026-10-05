@@ -364,9 +364,49 @@ def current_inventory_identity():
     return resolver() if callable(resolver) else current_identity()
 
 
+def cleanup_inventory_entry(host, identity, session_id):
+    """Identify an original owner's unreadable Single solely for cleanup UI.
+
+    Rebuild from the existing cleanup proof, never from cached list metadata.
+    This DTO grants no read/execute authority and exposes no title or content.
+    """
+    from jiuwenswarm.server.runtime.session import lifecycle
+    try:
+        _session(session_id)
+        if session_id.startswith(('cron_', 'heartbeat_')):
+            return None
+        stamp = host.cleanup_owner_stamp(session_id, identity)
+        binding = dict(host.cleanup_owner_binding(session_id, identity, expected_stamp=stamp))
+        if binding['mode'] not in {'agent', 'agent.work', 'agent.work.normal', 'agent.code', 'agent.code.normal'}:
+            return None
+        if lifecycle.session_paths(session_id)[1].exists():
+            return None
+        if lifecycle.raw_metadata(session_id).get('ephemeral') is True:
+            return None
+        return {
+            'session_id': session_id, 'project_id': binding['project_id'],
+            'channel_id': binding['channel_id'], 'mode': binding['mode'],
+            'work_mode': binding.get('work_mode') or 'work',
+            'cleanup_only': True, 'title': '', 'project_dir': '',
+            'message_count': 0, 'created_at': 0, 'last_message_at': 0,
+            'pinned': False,
+        }
+    except Exception:
+        return None
+
+
 def filter_current_inventory(rows):
     host = organization_sharing_host()
     if host is None:
         return rows
     identity = current_inventory_identity()
-    return [row for row in rows if host.owner_current(row.get('session_id'), identity)]
+    result = []
+    for row in rows:
+        sid = row.get('session_id')
+        if row.get('cleanup_only') is not True and host.owner_current(sid, identity):
+            result.append(row)
+        else:
+            cleanup = cleanup_inventory_entry(host, identity, sid)
+            if cleanup is not None:
+                result.append(cleanup)
+    return result

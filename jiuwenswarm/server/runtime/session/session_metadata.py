@@ -1919,6 +1919,10 @@ def get_all_sessions_metadata(
         if session_id.startswith(_EPHEMERAL_PROBE_SESSION_PREFIXES):
             continue
         if organization_host is not None and not organization_host.owner_current(session_id, organization_identity):
+            from jiuwenswarm.governance.session_boundary import cleanup_inventory_entry
+            cleanup = cleanup_inventory_entry(organization_host, organization_identity, session_id)
+            if cleanup is not None:
+                sessions.append(cleanup)
             continue
         state = lc.state("session", session_id)
         archived = lc.session_paths(session_id)[1].exists()
@@ -2061,6 +2065,10 @@ def _collect_all_sessions_metadata(
             continue
         sid = session_dir.name
         if organization_host is not None and not organization_host.owner_current(sid, organization_identity):
+            from jiuwenswarm.governance.session_boundary import cleanup_inventory_entry
+            cleanup = cleanup_inventory_entry(organization_host, organization_identity, sid)
+            if cleanup is not None:
+                result.append(cleanup)
             continue
         if sid.startswith(_EPHEMERAL_PROBE_SESSION_PREFIXES):
             continue
