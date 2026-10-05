@@ -63,3 +63,22 @@ Affected verification: organization inventory, cleanup authority/binding,
 owned deletion and Gateway adapter: 153 passed; stream sending/keepalive and
 actual Gateway client queue decoding: 64 passed. Real UI/Provider acceptance
 must be rerun against the combined frozen candidate before release.
+
+### Cancelled stream failure-frame budget
+
+The cancelled producer's content-free failure frame closes only its original
+request queue; it is not a cleanup or execution-success receipt. Its shared
+send-lock acquisition and WebSocket send now use the existing keepalive stop
+budget. When an unresponsive keepalive retains that lock after its bounded stop
+fails, the producer logs a fixed timeout and still propagates its original
+cancellation instead of waiting indefinitely. It does not force-release the
+other task's lock, cancel another request or report confirmed exit. A blocked
+connection may therefore receive no terminal frame; the existing disconnect and
+cleanup retry paths remain authoritative.
+
+The actual stream/keepalive regression holds the original send lock in a socket
+fixture that delays cancellation, and proves the producer leaves within the
+existing bound. A second case covers cancellation of the failure send itself.
+The two existing Web deletion scripts (`test:single-session-delete` and
+`test:session-delete`) are also included in the same stable Web governance
+suite's discovery and execution lists, without changing its 180-second budget.

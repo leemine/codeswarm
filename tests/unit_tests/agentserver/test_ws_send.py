@@ -902,3 +902,66 @@ async def test_cancelled_original_stream_closes_only_its_gateway_queue(monkeypat
     assert client._message_queues["new-stream"] is other_queue and other_queue.empty()
     assert "must-not-leak" not in json.dumps(wires)
     assert "exit_confirmed" not in json.dumps(wires)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stream_cannot_rewait_unreleased_keepalive_lock(monkeypatch):
+    monkeypatch.setattr(agent_ws_server, '_STREAM_KEEPALIVE_INTERVAL_SECONDS', .01)
+    monkeypatch.setattr(agent_ws_server, '_STREAM_KEEPALIVE_STOP_TIMEOUT_SECONDS', .04)
+    started, sending, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    manager = object()
+    runtime = AgentRuntime(agent_manager=manager, initializer=AsyncMock(), plan_controller=AsyncMock())
+    async def stream(request, **kwargs):
+        started.set()
+        await asyncio.Event().wait()
+        yield
+    runtime.stream = stream
+    server = agent_ws_server.AgentWebSocketServer.__new__(agent_ws_server.AgentWebSocketServer)
+    server._agent_manager = manager
+    server._runtime = runtime
+    server._session_stream_tasks = {}
+    class Socket:
+        async def send(self, value):
+            sending.set()
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    continue
+    request = AgentRequest(request_id='original', channel_id='web', session_id='private',
+                           req_method=ReqMethod.CHAT_SEND, params={'mode': 'agent'}, is_stream=True)
+    producer = asyncio.create_task(server._handle_stream(Socket(), request, asyncio.Lock()))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        await asyncio.wait_for(sending.wait(), 1)
+        producer.cancel()
+        done, _ = await asyncio.wait({producer}, timeout=.3)
+        assert producer in done, 'cancel wrapper re-waits the unreleased keepalive send lock after bounded stop failed'
+    finally:
+        release.set()
+        await asyncio.gather(producer, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stream_terminal_send_timeout_preserves_cancellation(monkeypatch):
+    monkeypatch.setattr(agent_ws_server, '_STREAM_KEEPALIVE_STOP_TIMEOUT_SECONDS', .04)
+    server = agent_ws_server.AgentWebSocketServer.__new__(agent_ws_server.AgentWebSocketServer)
+    async def cancelled(*args):
+        raise asyncio.CancelledError()
+    server._handle_stream_impl = cancelled
+    entered, interrupted = asyncio.Event(), asyncio.Event()
+    class Socket:
+        async def send(self, value):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                interrupted.set()
+    request = AgentRequest(request_id='cancelled-only', channel_id='web',
+                           session_id='private', req_method=ReqMethod.CHAT_SEND,
+                           params={'mode': 'agent'}, is_stream=True)
+    lock = asyncio.Lock()
+    task = asyncio.create_task(server._handle_stream(Socket(), request, lock))
+    done, _ = await asyncio.wait({task}, timeout=.3)
+    assert task in done and task.cancelled()
+    assert entered.is_set() and interrupted.is_set() and not lock.locked()

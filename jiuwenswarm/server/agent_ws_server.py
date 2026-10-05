@@ -3585,8 +3585,16 @@ class AgentWebSocketServer:
                 response_id=request.request_id,
             )
             try:
-                async with send_lock:
-                    await send_wire_payload(ws, wire)
+                # A failed bounded keepalive stop can still own this lock.
+                # Never make cancellation wait indefinitely for a failure frame.
+                async with asyncio.timeout(_STREAM_KEEPALIVE_STOP_TIMEOUT_SECONDS):
+                    async with send_lock:
+                        await send_wire_payload(ws, wire)
+            except TimeoutError:
+                logger.warning(
+                    "[AgentWebSocketServer] cancelled stream terminal delivery timed out: request_id=%s",
+                    request.request_id,
+                )
             except WebSocketConnectionClosed:
                 pass
             raise
