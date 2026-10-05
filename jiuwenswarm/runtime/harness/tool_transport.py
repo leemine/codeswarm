@@ -196,6 +196,13 @@ class ManagedProductToolTransport:
         listener = self._socket
         if server is not None:
             server.should_exit = True
+        # Uvicorn drains active HTTP handlers before its serve task exits.
+        # Close this transport's upstream model client first: waiting for the
+        # server before closing the client deadlocks on a slow model stream.
+        # Keep all original ownership references if close fails or is cancelled.
+        if self._model_consumer is not None:
+            async with asyncio.timeout(_STOP_TIMEOUT_S):
+                await self._model_consumer.close()
         if task is not None:
             try:
                 async with asyncio.timeout(_STOP_TIMEOUT_S):
@@ -227,7 +234,6 @@ class ManagedProductToolTransport:
             raise RuntimeError("product MCP transport exit could not be confirmed")
         if self._model_consumer is not None:
             async with asyncio.timeout(_STOP_TIMEOUT_S):
-                await self._model_consumer.close()
                 pending = self._pending_model_handlers()
                 if pending:
                     _, pending = await asyncio.wait(pending, timeout=_STOP_TIMEOUT_S)

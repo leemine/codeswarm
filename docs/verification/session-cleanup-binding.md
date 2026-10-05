@@ -48,3 +48,30 @@ These tests use temporary metadata/sidecars and synthetic execution, not a real
 Provider. Candidate CI and the integrated permanent-delete/real UI story remain
 separate acceptance gates. No protocol, Provisioner, SessionArchive, Runtime
 service, lifecycle lock, or persistent schema was changed by this slice.
+
+## OpenCode model HTTP shutdown ordering
+
+The product tool transport also owns OpenCode's authenticated model HTTP
+consumer. On stop it first closes admission and requests server shutdown, then
+closes its original consumer before waiting for Uvicorn to drain request
+handlers. Previously it waited for the server first, while the server was
+waiting for the still-open upstream model response. An ordinary slow response
+or SSE stream could exhaust the outer Session stop deadline before the consumer
+close was reached.
+
+The existing deadlines, server task and request-task registry remain unchanged.
+A consumer close failure/cancellation retains the original transport references
+for retry; server termination alone does not confirm exit. The consumer must
+confirm its HTTP transport close, and the original request handlers must finish,
+before the listener/port references are released. No other transport is closed.
+
+`test_governed_transport_cleanup.py` covers both a response waiting for upstream
+headers and a response already streaming its first SSE chunk. These regressions
+use real loopback TCP, Uvicorn, HTTPX, the production model consumer and temporary
+Project resource store. Native source capture and the upstream model are
+controlled fixtures, not an OpenCode CLI or external model acceptance test.
+They keep a second transport live and confirm that stopping the first does not
+stop it. Existing cancellation, partial HTTPX close, failed server exit and
+strict facade retry cases remain required. The tests are discovered by the
+existing `tests/unit_tests/runtime/harness` stable suite; no budget or exception
+list changes are needed.
