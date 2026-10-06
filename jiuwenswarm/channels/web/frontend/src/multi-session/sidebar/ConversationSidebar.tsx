@@ -1856,6 +1856,7 @@ export function ConversationSidebar({
         <ProjectContentDialog
           key={contentProject.project_id}
           project={contentProject}
+          resourcesEnabled={Boolean(onOpenSharedSessions)}
           onClose={() => setContentProject(null)}
         />
       )}

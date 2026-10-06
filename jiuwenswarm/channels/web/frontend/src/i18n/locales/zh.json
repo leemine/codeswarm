@@ -3536,8 +3536,47 @@
       "read": "已完成已读"
     },
     "project": {
+      "resources": {
+        "contentTab": "资料",
+        "tab": "资源授权",
+        "description": "只能委派管理员已登记的资源。项目权限不等于资源权限。",
+        "empty": "管理员尚未配置您可委派的资源。",
+        "invalidated": "连接或凭据已变化，请刷新后重新核验权限。",
+        "loadFailed": "无法加载资源授权，请刷新重试。",
+        "mutationFailed": "无法确认变更结果，请先刷新核对当前授权，再决定是否重试。",
+        "saved": "资源授权已变更。",
+        "exitUnconfirmed": "资源授权已变更，但执行退出尚未确认。已刷新当前授权，未重复执行变更。",
+        "exitUnconfirmedRefreshFailed": "资源授权已变更，但执行退出尚未确认，且当前授权刷新失败。请刷新核对，不要直接重复变更。",
+        "conflict": "资源授权已被其他操作修改。已刷新当前授权，请核对后再提交。",
+        "invalidInput": "请选择接收主体和操作，并设置不超出自身授权期限的未来时间。",
+        "noExpiry": "无到期时间",
+        "none": "无",
+        "authority": "您的操作：{{actions}} · 到期：{{expires}}",
+        "active": "有效",
+        "unavailable": "不可用",
+        "grant": "授予权限",
+        "revoke": "撤销",
+        "resource": "资源",
+        "choose": "选择资源",
+        "target": "接收主体 Actor ID",
+        "expiry": "到期时间（可选，本地时间）",
+        "inherited": "留空则继承自身授权期限。范围继承，接收方不能再次委派此授权。",
+        "kinds": {
+          "workspace": "工作区",
+          "tool": "工具",
+          "credential": "凭据引用",
+          "process": "本机进程执行"
+        },
+        "actions": {
+          "read": "读取",
+          "write": "写入",
+          "invoke": "调用",
+          "use": "使用",
+          "execute": "执行"
+        }
+      },
       "content": {
-        "menu": "项目资料",
+        "menu": "项目资料与授权",
         "title": "项目资料 · {{name}}",
         "nextTurn": "修改从下一轮对话生效，当前轮次继续使用已固定的版本。",
         "forbidden": "你已无权查看或修改此项目资料。",

@@ -393,6 +393,30 @@ class BaseWsChannel(BaseWebChannel):
                             data.update(error="Cleanup failed or remains unconfirmed.", code="CLEANUP_UNCONFIRMED")
                     else:
                         data = {"type": "event", "event": "chat.interrupt_result", "payload": payload}
+                elif (isinstance(data, dict) and data.get("type") == "res" and data.get("ok") is False
+                      and data.get("code") == "EXIT_UNCONFIRMED" and permit is not None
+                      and permit.resource_mutation_request is not None):
+                    from jiuwenswarm.governance.resource_mutation_receipt import resource_mutation_error_payload
+                    request_id = data.get("id")
+                    payload = resource_mutation_error_payload(data.get("payload"), permit.resource_mutation_request)
+                    if (payload is None or principal.identity() != permit.identity
+                            or permit.method != permit.resource_mutation_request.method):
+                        raise PermissionError("original resource mutation receipt unavailable")
+                    data = {"type": "res", "id": request_id, "ok": False,
+                            "code": "EXIT_UNCONFIRMED", "payload": payload,
+                            "error": "Resource authorization changed; execution exit remains unconfirmed. Refresh; do not repeat the change."}
+                    receipt_frame = data
+                    receipt_json = json.dumps(data, sort_keys=True, separators=(",", ":"))
+
+                    def guard():
+                        try:
+                            return (connection_principal(ws) is principal
+                                    and principal.identity() == permit.identity
+                                    and getattr(ws, "_jiuwen_session_permits", {}).get(request_id) is permit
+                                    and json.dumps(receipt_frame, sort_keys=True, separators=(",", ":")) == receipt_json
+                                    and permit.revalidate())
+                        except Exception:
+                            return False
                 elif isinstance(data, dict) and data.get("type") == "res" and data.get("ok") is False:
                     # Failure messages from unscoped handlers never carry their
                     # original potentially sensitive payload into a browser.

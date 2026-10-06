@@ -3077,6 +3077,13 @@ def _sharing_mutation_error_payload(value, method, expected):
             'mutation': dict(mutation), 'audit': dict(audit)}
 
 
+def _resource_mutation_error_payload(value, method, expected):
+    from jiuwenswarm.governance.resource_mutation_receipt import (
+        capture_resource_mutation, resource_mutation_error_payload,
+    )
+    return resource_mutation_error_payload(value, capture_resource_mutation(method, expected))
+
+
 def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     """注册 Web 前端需要的 method 与 on_connect。
     on_config_saved: 可选，config.set 写回后调用的回调；
@@ -5036,6 +5043,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             sharing_mutation = method.value in {
                 'session.share.create', 'session.share.update', 'session.share.revoke',
             }
+            resource_mutation = method.value in {'project.resources.grant', 'project.resources.revoke'}
             if sharing_mutation:
                 input_params = params if isinstance(params, dict) else {}
                 expected = {key: input_params.get(key) for key in ('session_id', 'share_id', 'expected_revision')}
@@ -5058,6 +5066,30 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                         await channel.send_response(response_ws, response_id, **kwargs)
 
                 response_channel = SharingMutationResponses()
+            elif resource_mutation:
+                input_params = params if isinstance(params, dict) else {}
+                expected = {key: input_params.get(key) for key in (
+                    'project_id', 'resource_id', 'target_actor', 'expected_resource_revision',
+                )}
+
+                class ResourceMutationResponses:
+                    channel_id = channel.channel_id
+
+                    async def send_response(self, response_ws, response_id, **kwargs):
+                        if kwargs.get('ok') is not True:
+                            payload = _resource_mutation_error_payload(kwargs.get('payload'), method.value, expected)
+                            kwargs['payload'] = payload
+                            kwargs['error'] = ('Resource authorization changed; execution exit remains unconfirmed. '
+                                               'Refresh; do not repeat the change.' if payload else
+                                               'Resource change outcome unavailable; refresh before any further action.')
+                            if kwargs.get('code') not in {
+                                'EXIT_UNCONFIRMED', 'FORBIDDEN', 'CONFLICT', 'BAD_REQUEST',
+                                'SERVICE_UNAVAILABLE', 'AGENT_SERVER_TIMEOUT', 'MUTATION_OUTCOME_UNKNOWN',
+                            }:
+                                kwargs['code'] = 'FORBIDDEN'
+                        await channel.send_response(response_ws, response_id, **kwargs)
+
+                response_channel = ResourceMutationResponses()
             await proxy_unary_request(
                 channel=response_channel,
                 agent_client=_resolve(agent_client),
@@ -5068,7 +5100,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 user_id=user_id,
                 req_method=method,
                 label=method.value,
-                preserve_error_payload=sharing_mutation,
+                preserve_error_payload=sharing_mutation or resource_mutation,
             )
         return handler
 
@@ -7099,6 +7131,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         ProjectMethod.PROJECT_ACL_UPDATE,
         ProjectMethod.PROJECT_CONTENT_GET,
         ProjectMethod.PROJECT_CONTENT_UPDATE,
+        ProjectMethod.PROJECT_RESOURCES_LIST,
+        ProjectMethod.PROJECT_RESOURCES_GRANT,
+        ProjectMethod.PROJECT_RESOURCES_REVOKE,
         ProjectMethod.SESSION_SHARE_AUDIT_LIST,
         ProjectMethod.SESSION_SHARE_LIST,
         ProjectMethod.SESSION_SHARE_CREATE,
