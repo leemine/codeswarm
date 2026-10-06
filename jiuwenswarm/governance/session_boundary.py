@@ -38,6 +38,7 @@ GLOBAL_METHODS = frozenset({
     'config.get', 'models.list',
     'session.list', 'project.list', 'project.create', 'project.info',
     'project.content.get', 'project.content.update', 'project.get_sessions',
+    'project.resources.list', 'project.resources.grant', 'project.resources.revoke',
     'project.get_cron_sessions', 'project.pinned_sessions',
 })
 
@@ -45,6 +46,7 @@ GLOBAL_METHODS = frozenset({
 INVENTORY_METHODS = frozenset({
     'session.list', 'project.list', 'project.info', 'project.get_sessions',
     'project.get_cron_sessions', 'project.pinned_sessions', 'session.share.list',
+    'project.resources.list',
 })
 
 
@@ -149,6 +151,7 @@ class SessionRequestPermit:
     workspace_download: object | None = None
     goal_read_route: object | None = None
     goal_read_result: object | None = None
+    resource_mutation_request: object | None = None
 
     def allows_cleanup(self, method: str, params: dict, identity: TrustedIdentity,
                        envelope_session: str | None = None) -> bool:
@@ -297,6 +300,9 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
                                   share_actions, continuation_input, continuation_options, cleanup,
                                   json.dumps(params, sort_keys=True, separators=(',', ':')) if cleanup else None,
                                   deletion_receipt, workspace_download, goal_read_route)
+    if method in {'project.resources.grant', 'project.resources.revoke'}:
+        from .resource_mutation_receipt import capture_resource_mutation
+        permit = replace(permit, resource_mutation_request=capture_resource_mutation(method, params))
     if not permit.revalidate():
         raise SessionSharingDenied('Session authorization denied')
     return permit

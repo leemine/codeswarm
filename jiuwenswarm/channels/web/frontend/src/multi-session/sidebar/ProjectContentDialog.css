@@ -55,3 +55,25 @@
 .project-content-dialog .project-content-dialog__error {
   color: var(--color-feedback-danger);
 }
+
+.project-content-dialog__content:not([hidden]),
+.project-content-dialog__resources {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.project-content-dialog__grant {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+.project-content-dialog__resource-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+}

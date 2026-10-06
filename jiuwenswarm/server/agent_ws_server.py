@@ -2203,6 +2203,31 @@ class AgentWebSocketServer:
         from jiuwenswarm.server.runtime.gateway_adapter.session_sharing_adapter import SessionSharingAdapter
         from jiuwenswarm.server.runtime.gateway_adapter.shared_history_adapter import SharedHistoryAdapter
         from jiuwenswarm.server.runtime.gateway_adapter.continuation_adapter import ContinuationAdapter
+        from jiuwenswarm.server.runtime.gateway_adapter.project_resource_adapter import ProjectResourceAdapter
+        resource_runtime = self._runtime
+        resource_coordinator = resource_runtime._session_coordinator
+
+        def resolve_resource_identity(request):
+            if (self._runtime is not resource_runtime
+                    or self._agent_manager is not resource_runtime.agent_manager
+                    or resource_runtime._session_coordinator is not resource_coordinator):
+                raise PermissionError('Resource Runtime changed; refresh before retrying.')
+            return self._resolve_trusted_identity(request)
+
+        async def revalidate_resource_executions():
+            # Drain the original execution owner even if composition changed
+            # after the write. A newly allocated empty Runtime is not proof.
+            await resource_coordinator.revalidate_session_authorities()
+            if (self._runtime is not resource_runtime
+                    or self._agent_manager is not resource_runtime.agent_manager
+                    or resource_runtime._session_coordinator is not resource_coordinator):
+                raise PermissionError('Resource Runtime changed; exit remains unconfirmed.')
+
+        self._adapter_registry.register(ProjectResourceAdapter(
+            host._storage, identity_resolver=resolve_resource_identity,
+            target_resolver=host.target_resolver,
+            after_mutation=revalidate_resource_executions,
+        ))
         self._adapter_registry.register(SessionSharingAdapter(
             host.store, identity_resolver=self._resolve_trusted_identity,
             target_resolver=host.target_resolver, compile_history=host.compile_history,

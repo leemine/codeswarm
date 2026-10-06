@@ -1,3 +1,4 @@
+import { projectResourceClient } from './projectResourceClient';
 import { webRequest } from '../../services/webClient';
 import type { Session } from '../../types';
 import type { ProjectInfo, WorkMode } from './projectTypes';
@@ -28,6 +29,9 @@ export interface ProjectSessionBatchResult {
 }
 
 export const projectRegistryClient = {
+  listResources: projectResourceClient.list,
+  grantResource: projectResourceClient.grant,
+  revokeResource: projectResourceClient.revoke,
   getContent: (projectId: string, revision?: number) =>
     webRequest<ProjectContent>('project.content.get', {
       project_id: projectId,

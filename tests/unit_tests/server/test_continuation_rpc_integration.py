@@ -52,6 +52,10 @@ async def hops(transaction, monkeypatch):
     server._organization_session_host = tx.setup.host
     server._trusted_identity_resolver = lambda _: tx.setup.identities[0]
     server._execution_runtime = lambda: tx.runtime
+    # Production composes its Runtime before registering organization adapters.
+    # Retain this transaction's real owner; do not create an empty replacement.
+    server._runtime = tx.runtime
+    server._agent_manager = tx.runtime.agent_manager
     server._adapter_registry = AdapterRegistry()
     server._install_sharing_adapters()
     await tx.runtime.start()

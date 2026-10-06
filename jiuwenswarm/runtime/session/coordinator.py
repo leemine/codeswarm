@@ -332,10 +332,20 @@ class RuntimeSessionCoordinator:
         record.authority_error = None
 
     async def revalidate_session_authorities(self):
-        # Explicit sharing mutations wait for the original resources to exit.
+        # Explicit authorization mutations wait for the original resources to exit.
         # Cross-process changes and expiry are also observed by the same monitor.
+        failures = []
         for record in tuple(self._sessions.values()):
-            await self._revalidate_record_authorities(record)
+            try:
+                await self._revalidate_record_authorities(record)
+            except Exception as exc:
+                # One unconfirmed exit must not prevent fencing other affected
+                # Sessions; report uncertainty after attempting every original owner.
+                failures.append(exc)
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise ExceptionGroup('Session authority exits remain unconfirmed', failures)
 
     def external_execution_owner(self, session_id: str, request_id: str) -> SessionExecutionHandle:
         """Resolve authority from the original registry, never request metadata."""

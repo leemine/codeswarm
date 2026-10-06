@@ -3550,8 +3550,47 @@
       "read": "Completed read"
     },
     "project": {
+      "resources": {
+        "contentTab": "Content",
+        "tab": "Resource access",
+        "description": "Delegate only resources registered by your administrator. Project access does not grant resource access.",
+        "empty": "Your administrator has not configured any resources you can delegate.",
+        "invalidated": "Your connection or credentials changed. Reload to check access again.",
+        "loadFailed": "Resource access could not be loaded. Reload to try again.",
+        "mutationFailed": "The change could not be confirmed. Reload and check the current grants before trying again.",
+        "saved": "Resource access changed.",
+        "exitUnconfirmed": "Resource access changed, but execution exit is not confirmed. The current grants have been refreshed; the change was not repeated.",
+        "exitUnconfirmedRefreshFailed": "Resource access changed, but execution exit is not confirmed and the current grants could not be refreshed. Reload to check; do not repeat the change blindly.",
+        "conflict": "Resource access changed elsewhere. The current grants have been refreshed; review them before submitting again.",
+        "invalidInput": "Choose a recipient and actions, and use a future expiry within your own authorization.",
+        "noExpiry": "No expiry",
+        "none": "None",
+        "authority": "Your actions: {{actions}} · Expires: {{expires}}",
+        "active": "Active",
+        "unavailable": "Unavailable",
+        "grant": "Grant access",
+        "revoke": "Revoke",
+        "resource": "Resource",
+        "choose": "Choose a resource",
+        "target": "Recipient actor ID",
+        "expiry": "Expiry (optional, local time)",
+        "inherited": "Leave expiry empty to inherit your authorization limit. Scope is inherited; recipients cannot delegate this grant.",
+        "kinds": {
+          "workspace": "Workspace",
+          "tool": "Tool",
+          "credential": "Credential reference",
+          "process": "Local process execution"
+        },
+        "actions": {
+          "read": "Read",
+          "write": "Write",
+          "invoke": "Invoke",
+          "use": "Use",
+          "execute": "Execute"
+        }
+      },
       "content": {
-        "menu": "Project content",
+        "menu": "Project content and access",
         "title": "Content · {{name}}",
         "nextTurn": "Changes apply to the next turn. The current turn keeps its saved version.",
         "forbidden": "You no longer have permission to view or update this project content.",

@@ -145,7 +145,73 @@ def test_owner_permit_never_revives_after_acl_restore(setup):
     assert not permit.revalidate()
 
 
-@pytest.mark.parametrize('method', ['session.list', 'project.list', 'project.get_sessions', 'session.share.list'])
+@pytest.mark.asyncio
+async def test_resource_inventory_queued_before_acl_revocation_never_reaches_browser(setup, monkeypatch):
+    from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
+    from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannel, WebChannelConfig
+    host, access, project_id, _, _, _, _ = setup
+    principal = SimpleNamespace(identity=lambda: ALICE)
+    monkeypatch.setattr(organization_auth, 'configured_authenticator', lambda: object())
+    monkeypatch.setattr(organization_auth, 'connection_principal', lambda ws: principal)
+    monkeypatch.setattr(session_boundary, 'organization_sharing_host', lambda: host)
+    permit = admit_session_request('project.resources.list', {'project_id': project_id},
+                                  identity_resolver=lambda: ALICE, host=host)
+    ws = SimpleNamespace(_jiuwen_ws_id='resource-browser', closed=False, send=AsyncMock(),
+                         _jiuwen_session_permits={'resource-list': permit})
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    queue = asyncio.Queue()
+    channel._send_queues['resource-browser'] = queue
+    channel._enqueue_send(ws, {'type': 'res', 'id': 'resource-list', 'ok': True,
+                              'payload': {'resources': [{'resource_id': 'private-resource'}]}})
+    assert queue.qsize() == 1
+    access.replace_acl(project_id, 'admin', acl={}, expected_revision=2)
+    queue.put_nowait(None)
+    await channel._writer_loop(ws, 'resource-browser')
+    ws.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('credential_current', [True, False])
+async def test_original_resource_commit_receipt_survives_real_error_sink_only_for_original_identity(
+    setup, monkeypatch, credential_current,
+):
+    from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
+    from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannel, WebChannelConfig
+    host, _, project_id, _, _, _, _ = setup
+    current = [ALICE]
+    principal = SimpleNamespace(identity=lambda: current[0])
+    monkeypatch.setattr(organization_auth, 'configured_authenticator', lambda: object())
+    monkeypatch.setattr(organization_auth, 'connection_principal', lambda ws: principal)
+    params = {'project_id': project_id, 'resource_id': 'workspace', 'target_actor': 'bob',
+              'expected_acl_revision': 2, 'expected_resource_revision': 3}
+    permit = admit_session_request('project.resources.revoke', params,
+                                  identity_resolver=lambda: current[0], host=host)
+    ws = SimpleNamespace(_jiuwen_ws_id='resource-browser', closed=False, send=AsyncMock(),
+                         _jiuwen_session_permits={'resource-mutation': permit})
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    queue = asyncio.Queue()
+    channel._send_queues['resource-browser'] = queue
+    facts = {'committed': True, 'project_id': project_id, 'resource_id': 'workspace',
+             'target_actor': 'bob', 'resource_revision': 4}
+    channel._enqueue_send(ws, {'type': 'res', 'id': 'resource-mutation', 'ok': False,
+        'code': 'EXIT_UNCONFIRMED', 'error': 'private-diagnostics',
+        'payload': {'code': 'EXIT_UNCONFIRMED', 'exit_confirmed': False, 'mutation': facts,
+                    'private': 'private-diagnostics'}})
+    if not credential_current:
+        current[0] = BOB
+    queue.put_nowait(None)
+    await channel._writer_loop(ws, 'resource-browser')
+    if not credential_current:
+        ws.send.assert_not_awaited()
+    else:
+        sent = json.loads(ws.send.call_args.args[0])
+        assert sent['ok'] is False and sent['code'] == 'EXIT_UNCONFIRMED'
+        assert sent['payload'] == {'code': 'EXIT_UNCONFIRMED', 'exit_confirmed': False, 'mutation': facts}
+        assert 'private-diagnostics' not in json.dumps(sent)
+
+
+@pytest.mark.parametrize('method', ['session.list', 'project.list', 'project.get_sessions', 'session.share.list',
+                                   'project.resources.list'])
 def test_inventory_buffer_invalidated_by_authority_change(setup, method):
     host, access, project_id, _, _, _, _ = setup
     permit = admit_session_request(method, {}, identity_resolver=lambda: ALICE, host=host)
