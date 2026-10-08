@@ -294,3 +294,22 @@ test('tool calls without pending deltas preserve finalized text and do not creat
     await connection.dispose();
   }
 });
+
+test('fresh session restores authoritative questions and rejects a snapshot after a live answer', () => {
+  const sid = 'fresh-question-snapshot';
+  const store = useChatStore.getState();
+  store.removeRuntime(sid);
+  const observed = store.ensureRuntime(sid).pendingQuestions;
+  const question = { request_id: 'waiting-request', source: 'ask_user_interrupt', questions: [{ question: 'Ready?', options: [{ label: 'READY' }] }] };
+  // History can arrive before or after metadata during initial navigation.
+  store.replaceHistoryMessages(sid, []);
+  store.reconcilePendingQuestions(sid, observed, [question]);
+  assert.deepEqual(store.getRuntime(sid).pendingQuestions, [question]);
+  store.replaceHistoryMessages(sid, []);
+  assert.deepEqual(store.getRuntime(sid).pendingQuestions, [question]);
+  const beforeAnswer = store.getRuntime(sid).pendingQuestions;
+  store.consumePendingQuestion(sid, question);
+  store.reconcilePendingQuestions(sid, beforeAnswer, [question]);
+  assert.deepEqual(store.getRuntime(sid).pendingQuestions, []);
+  store.removeRuntime(sid);
+});

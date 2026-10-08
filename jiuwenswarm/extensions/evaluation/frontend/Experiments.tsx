@@ -23,6 +23,7 @@ export default function Experiments({
   const [name, setName] = useState('');
   const [timeout, setTimeout] = useState('300');
   const [repeats, setRepeats] = useState('1');
+  const [policy, setPolicy] = useState('shared-environment-v1');
   const [acknowledged, setAcknowledged] = useState(false);
   const [experiments, setExperiments] = useState<Experiment[]>([]);
   const [detail, setDetail] = useState<Experiment>();
@@ -85,6 +86,7 @@ export default function Experiments({
         repeats: Number(repeats),
         timeout_seconds: Number(timeout),
         shared_environment_acknowledged: acknowledged,
+        acceptance_policy: policy,
       },
     });
     key.current = crypto.randomUUID();
@@ -164,7 +166,22 @@ export default function Experiments({
             onChange={setTimeout}
           />
         </label>
+        <label>
+          {t('evaluation.policy')}
+          <Select
+            data-testid="evaluation-acceptance-policy"
+            value={policy}
+            options={(options?.acceptance_policies || ['shared-environment-v1']).map((value) => ({
+              value,
+              label: t(`evaluation.policies.${value}`),
+            }))}
+            onChange={setPolicy}
+          />
+        </label>
       </fieldset>
+      <p data-testid="evaluation-policy-hint">
+        {t(policy === 'independent-container-v1' ? 'evaluation.independentHint' : 'evaluation.shared')}
+      </p>
       <label className="evaluation-ack">
         <input
           type="checkbox"
@@ -212,7 +229,8 @@ export default function Experiments({
           <article data-testid="evaluation-run-detail">
             <h3 data-testid="evaluation-run-name">{detail.definition.name}</h3>
             <p data-testid="evaluation-frozen-hint">
-              {t('evaluation.frozen')} · {detail.definition.model} · {detail.definition.acceptance_policy}
+              {t('evaluation.frozen')} · {detail.definition.model} ·{' '}
+              {t(`evaluation.policies.${detail.definition.acceptance_policy}`)}
             </p>
             <div className="evaluation-actions">
               <Button
@@ -271,6 +289,7 @@ export default function Experiments({
                   setProfile(detail.definition.execution_profile_id);
                   setTimeout(String(detail.definition.timeout_seconds));
                   setRepeats(String(detail.definition.repeats));
+                  setPolicy(detail.definition.acceptance_policy);
                   key.current = crypto.randomUUID();
                 }}
               >
@@ -303,7 +322,11 @@ export default function Experiments({
                               ? 'recovery_required'
                               : attempt.body.runtime?.state || attempt.body.status || attempt.phase,
                         )}{' '}
-                        · {status(attempt.body.outcome || 'not_evaluated')}
+                        ·{' '}
+                        {attempt.body.outcome === 'passed' &&
+                        detail.definition.acceptance_policy === 'independent-container-v1'
+                          ? t('evaluation.independentPassed')
+                          : status(attempt.body.outcome || 'not_evaluated')}
                       </p>
                       {attempt.body.session_id && (
                         <a
@@ -325,6 +348,23 @@ export default function Experiments({
                           {t(attempt.body.exit_confirmed ? 'evaluation.yes' : 'evaluation.no')}
                         </p>
                         <p data-testid="evaluation-workspace">{attempt.body.workspace}</p>
+                        {attempt.body.verification_environment && (
+                          <div data-testid="evaluation-independent-evidence">
+                            <p data-testid="evaluation-verifier-image">
+                              {t('evaluation.verifierImage')}: {attempt.body.verification_environment.image_id}
+                            </p>
+                            <p data-testid="evaluation-authority-digest">
+                              {t('evaluation.authorityDigest')}: {attempt.body.authority_sha256}
+                            </p>
+                            <p data-testid="evaluation-assertion-count">
+                              {t('evaluation.assertions')}: {attempt.body.authoritative_assertions ?? '—'}
+                            </p>
+                            <p data-testid="evaluation-verifier-cleanup">
+                              {t('evaluation.verifierCleanup')}:{' '}
+                              {t(attempt.body.verifier_removed ? 'evaluation.yes' : 'evaluation.no')}
+                            </p>
+                          </div>
+                        )}
                         {attempt.body.test_output !== undefined && (
                           <pre data-testid="evaluation-test-output">
                             {attempt.body.test_output || t('evaluation.emptyOutput')}

@@ -1491,6 +1491,11 @@ class RuntimeSessionCoordinator:
             if not isinstance(payload, dict):
                 continue
             event_type = str(payload.get("event_type") or "")
+            # Keep terminal error observations on this existing receipt even
+            # when a resumed transport ends normally. Do not end its producer.
+            from jiuwenswarm.runtime.events import TERMINAL_ERROR_EVENT_TYPES
+            if not getattr(item, "ok", True) or event_type in TERMINAL_ERROR_EVENT_TYPES:
+                handle.error = event_type or "runtime.error"
             stage = str(payload.get("submission_status") or "")
             message_id = str(payload.get("provider_message_id") or "").strip()
             turn_id = str(payload.get("provider_turn_id") or "").strip()

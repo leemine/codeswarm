@@ -71,6 +71,7 @@ class EvaluationService:
                 value["execution_available"] = (
                     identity.authority == "local-single-user-installation"
                 )
+                value["acceptance_policies"] = ["shared-environment-v1", "independent-container-v1"]
                 return value
             if method == "evaluation.experiment.create":
                 return await self.trials.create(
@@ -169,7 +170,7 @@ class EvaluationService:
                 task = decode(TaskDraft, value)
                 try:
                     version = self.store._version(actor, "task", task.task_id, 1)
-                    if version["value"] != task.model_dump(mode="json"):
+                    if decode(TaskDraft, version["value"]) != task:
                         raise CatalogError("EXAMPLE_ID_CONFLICT")
                 except CatalogError as exc:
                     if exc.code != "NOT_FOUND":

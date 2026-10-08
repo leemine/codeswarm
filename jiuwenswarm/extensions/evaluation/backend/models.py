@@ -50,6 +50,7 @@ class DTO(BaseModel):
 class InputFile(DTO):
     path: str
     content: str = Field(max_length=262144)
+    executable: bool = False
 
     _path = field_validator("path")(relative_path)
 
@@ -58,6 +59,12 @@ class Acceptance(DTO):
     kind: Literal["manual", "python"] = "manual"
     script: str = Field(default="", max_length=65536)
     timeout_seconds: int = Field(default=30, ge=1, le=300)
+    dependency_lock: str | None = None
+
+    @field_validator("dependency_lock")
+    @classmethod
+    def lock_path(cls, value):
+        return relative_path(value) if value is not None else None
 
     @model_validator(mode="after")
     def executable(self):
@@ -100,6 +107,13 @@ class TaskDraft(DTO):
             raise ValueError("duplicate or too many deliverables")
         for path in self.deliverables:
             relative_path(path)
+        if self.acceptance.dependency_lock and self.acceptance.dependency_lock not in {
+            *paths,
+            *self.deliverables,
+        }:
+            raise ValueError(
+                "dependency lock must be in the baseline or declared deliveries"
+            )
         return self
 
 
@@ -131,7 +145,9 @@ class ExperimentDraft(DTO):
     repeats: int = Field(default=1, ge=1, le=5)
     concurrency: Literal[1] = 1
     timeout_seconds: int = Field(default=300, ge=10, le=1800)
-    acceptance_policy: Literal["shared-environment-v1"] = "shared-environment-v1"
+    acceptance_policy: Literal["shared-environment-v1", "independent-container-v1"] = (
+        "shared-environment-v1"
+    )
     shared_environment_acknowledged: Literal[True]
     dataset_id: Identifier | None = None
     dataset_revision: int | None = Field(default=None, ge=1)

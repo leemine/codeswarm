@@ -1612,6 +1612,34 @@ class AgentRuntime:
             return None
         return next((item for item in snapshot.executions if item.request_id == request_id), None)
 
+    def get_session_request_executions(
+        self, request: SessionGetInput, *, request_id: str,
+    ) -> tuple[SessionExecutionSnapshot, ...]:
+        """Read a request and its control descendants, without changing their states.
+
+        A completed root receipt can still own a resumed control stream. Consumers
+        waiting for the whole request must observe that lineage, not just its root.
+        Missing/evicted roots remain unknown; unrelated Session turns are excluded.
+        """
+        if self.get_session(request) is None:
+            return ()
+        snapshot = self._session_coordinator.snapshot_session(request.session_id)
+        if snapshot is None or snapshot.channel_id != request.channel_id:
+            return ()
+        root = next((item for item in snapshot.executions
+                     if item.request_id == request_id and item.generation == snapshot.generation), None)
+        if root is None:
+            return ()
+        selected = {root.execution_id: root}
+        while True:
+            children = [item for item in snapshot.executions
+                        if item.generation == root.generation
+                        and item.parent_execution_id in selected
+                        and item.execution_id not in selected]
+            if not children:
+                return tuple(selected.values())
+            selected.update((item.execution_id, item) for item in children)
+
     async def _reconcile_continuation_result(self, session_id):
         """Settle this Runtime's original receipt after a durable commit retry."""
         self._require_started()

@@ -131,3 +131,14 @@ export function normalizeQuestionPayload(questionPayload: Record<string, unknown
       : {}),
   };
 }
+
+
+/** Apply a Runtime snapshot only if no live event/answer changed this queue in flight. */
+export function reconcilePendingQuestionSnapshot(
+  current: AskUserQuestionPayload[],
+  observed: AskUserQuestionPayload[] | undefined,
+  snapshot: AskUserQuestionPayload[] | undefined,
+): AskUserQuestionPayload[] {
+  if (!snapshot || current !== observed) return current;
+  return snapshot.reduce((queue, question) => enqueuePendingQuestions(queue, question), [] as AskUserQuestionPayload[]);
+}

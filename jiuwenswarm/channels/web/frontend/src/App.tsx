@@ -1671,12 +1671,13 @@ function AppContent({
 
   const loadSessionMetadata = useCallback(async (targetSessionId: string): Promise<Session | null> => {
     try {
+      const observedQuestions = useChatStore.getState().ensureRuntime(targetSessionId).pendingQuestions;
       const session = await request<Session>('session.get_metadata', {
         session_id: targetSessionId,
       });
-      for (const question of session.pending_interactions ?? []) {
-        useChatStore.getState().enqueuePendingQuestion(targetSessionId, normalizeQuestionPayload(question));
-      }
+      useChatStore.getState().reconcilePendingQuestions(
+        targetSessionId, observedQuestions, session.pending_interactions?.map(normalizeQuestionPayload),
+      );
       const isSideConversation = Boolean(session.ephemeral && session.side_parent_session_id?.trim());
       if (isSideConversation) {
         useSessionStore.getState().removeSession(targetSessionId);

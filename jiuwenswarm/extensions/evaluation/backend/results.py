@@ -115,6 +115,12 @@ def implementation_source():
         for path in (
             "runtime/service.py",
             "runtime/plan.py",
+            "runtime/session/coordinator.py",
+            "runtime/session/interactions.py",
+            "server/agent_ws_server.py",
+            "server/app_agentserver.py",
+            "gateway/channel_manager/web/app_web_handlers.py",
+            "common/schema/message.py",
             "server/runtime/agent_adapter/interface.py",
         )
     ]

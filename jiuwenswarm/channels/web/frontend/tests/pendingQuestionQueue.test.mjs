@@ -171,3 +171,14 @@ test('Code reconnect and live question use one original control identity', () =>
   assert.deepEqual(consumePendingQuestion([first], reconnected), []);
   assert.equal(normalizeQuestionPayload({}).request_id, '');
 });
+
+test('authoritative reconnect clears resolved cards but cannot erase a newer live question', async () => {
+  const { reconcilePendingQuestionSnapshot } = await import('../node_modules/.cache/pending-question-queue/pendingQuestionQueue.mjs');
+  const observed = [{request_id:'old',source:'ask_user_interrupt',sessionGeneration:1,questions:[]}];
+  assert.deepEqual(reconcilePendingQuestionSnapshot(observed, observed, []), []);
+  const live = [...observed, {request_id:'new',source:'ask_user_interrupt',sessionGeneration:2,questions:[]}];
+  assert.equal(reconcilePendingQuestionSnapshot(live, observed, []), live);
+  assert.equal(reconcilePendingQuestionSnapshot(observed, observed, undefined), observed);
+  const question={request_id:'valid',source:'ask_user_interrupt',sessionGeneration:2,questions:[]};
+  assert.deepEqual(reconcilePendingQuestionSnapshot(observed,observed,[question,question]),[question]);
+});

@@ -1,6 +1,8 @@
 """Business contracts over a controlled execution port plus real verifier processes."""
 
 import asyncio
+import importlib.metadata
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +16,7 @@ from jiuwenswarm.extensions.evaluation.backend.adapters.verification import (
 )
 from jiuwenswarm.extensions.evaluation.backend.models import TaskDraft, decode
 from jiuwenswarm.extensions.evaluation.backend.trials import Trials
+from jiuwenswarm.extensions.evaluation.backend.results import implementation_source
 from jiuwenswarm.governance.contracts import TrustedIdentity
 from jiuwenswarm.runtime.session.model import SessionExecutionState
 
@@ -101,7 +104,13 @@ def setup(tmp_path, monkeypatch, script="assert True", port=None):
         "shared_environment_acknowledged": True,
     }
     exp = store.create_experiment(
-        ACTOR, definition, "key", versions={"configuration": {"model": "fixture"}}
+        ACTOR, definition, "key", versions={
+            "configuration": {"model": "fixture"},
+            "implementation": implementation_source(),
+            "core": importlib.metadata.version("openjiuwen"),
+            "swarm": importlib.metadata.version("workswarm"),
+            "core_source": json.loads(importlib.metadata.distribution("openjiuwen").read_text("direct_url.json") or "null"),
+        }
     )
     return trials, exp
 
@@ -238,6 +247,7 @@ async def test_runtime_control_adapter_uses_original_cancel_contract():
     from jiuwenswarm.common.schema.message import ReqMethod
 
     runtime = SimpleNamespace(
+        get_session_request_executions=lambda *args, **kwargs: (),
         cancel_request=AsyncMock(
             return_value=AgentResponse(
                 request_id="control",
@@ -291,6 +301,108 @@ async def test_timeout_requires_original_cancel_exit_before_settlement(tmp_path,
         assert trials.execution.finished
         assert result["body"]["outcome"] == "execution_timeout"
         assert result["body"]["exit_confirmed"] is True
+    finally:
+        await trials.close()
+        trials.store.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_targets_live_control_after_original_receipt_completed():
+    from unittest.mock import AsyncMock
+    from jiuwenswarm.common.schema.agent import AgentResponse
+    from jiuwenswarm.extensions.evaluation.backend.adapters.runtime_execution import RuntimeExecution
+
+    runtime = SimpleNamespace(
+        get_session_request_executions=lambda *args, **kwargs: (
+            SimpleNamespace(request_id="attempt", state=SessionExecutionState.SUCCEEDED),
+            SimpleNamespace(request_id="question-1", state=SessionExecutionState.WAITING_FOR_CONTROL),
+        ),
+        cancel_request=AsyncMock(return_value=AgentResponse(
+            request_id="cancel", channel_id="web", ok=True, payload={"success": True})),
+    )
+    await RuntimeExecution(runtime).cancel("session", "attempt")
+    assert runtime.cancel_request.await_count == 1
+    assert runtime.cancel_request.call_args.args[0].params["target_request_id"] == "question-1"
+
+
+@pytest.mark.asyncio
+async def test_changed_implementation_cannot_start_frozen_experiment(tmp_path, monkeypatch):
+    trials, exp = setup(tmp_path, monkeypatch)
+    frozen = exp["versions"]["implementation"]
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.evaluation.backend.trials.implementation_source",
+        lambda: {**frozen, "sha256": "changed-after-freeze"},
+    )
+    try:
+        with pytest.raises(CatalogError, match="IMPLEMENTATION_CHANGED"):
+            await trials.start(ACTOR, exp["id"])
+        assert trials.execution.calls == 0
+        assert trials.get(ACTOR, exp["id"])["trials"][0]["attempts"][0]["phase"] == "pending"
+    finally:
+        await trials.close()
+        trials.store.close()
+
+
+@pytest.mark.asyncio
+async def test_installed_location_does_not_change_source_identity(tmp_path, monkeypatch):
+    trials, exp = setup(tmp_path, monkeypatch)
+    frozen = exp["versions"]["implementation"]
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.evaluation.backend.trials.implementation_source",
+        lambda: {**frozen, "package_path": "/another/clean/install", "git_head": "rewritten-history"},
+    )
+    try:
+        await trials.start(ACTOR, exp["id"])
+        result = await finish(trials, exp)
+        assert result["body"]["outcome"] == "passed"
+    finally:
+        await trials.close()
+        trials.store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["core", "swarm", "core_source"])
+async def test_dependency_drift_rejected_before_submission(tmp_path, monkeypatch, field):
+    trials, exp = setup(tmp_path, monkeypatch)
+    current = trials._sources()
+    monkeypatch.setattr(trials, "_sources", lambda: {**current, field: "changed"})
+    try:
+        with pytest.raises(CatalogError, match="DEPENDENCY_CHANGED"):
+            await trials.start(ACTOR, exp["id"])
+        assert not trials.workers
+        assert trials.execution.calls == 0
+        # Read and cancellation remain available even for obsolete snapshots.
+        await trials.cancel(ACTOR, exp["id"])
+        assert trials.get(ACTOR, exp["id"])["trials"][0]["attempts"][0]["body"]["outcome"] == "cancelled"
+    finally:
+        await trials.close()
+        trials.store.close()
+
+
+@pytest.mark.asyncio
+async def test_source_drift_after_start_is_rechecked_before_session_creation(tmp_path, monkeypatch):
+    trials, exp = setup(tmp_path, monkeypatch)
+    configuration = trials.execution.configuration
+    calls = 0
+
+    async def changed(definition):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            monkeypatch.setattr(
+                "jiuwenswarm.extensions.evaluation.backend.trials.implementation_source",
+                lambda: {"sha256": "changed-between-trials"},
+            )
+        return await configuration(definition)
+
+    monkeypatch.setattr(trials.execution, "configuration", changed)
+    try:
+        await trials.start(ACTOR, exp["id"])
+        result = await finish(trials, exp)
+        assert result["body"]["error_code"] == "IMPLEMENTATION_CHANGED"
+        assert result["body"]["exit_confirmed"]
+        assert "session_id" not in result["body"]
+        assert trials.execution.calls == 0
     finally:
         await trials.close()
         trials.store.close()

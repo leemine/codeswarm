@@ -381,6 +381,11 @@ async def test_request_execution_read_requires_session_admission_and_never_creat
         request = AgentRequest(request_id='known', channel_id='process', session_id=session_id,
                                req_method=ReqMethod.CHAT_SEND, params={'mode': 'agent.code.normal', 'work_mode': 'code'})
         await runtime.invoke(request)
+        await runtime.invoke(AgentRequest(
+            request_id='unrelated', channel_id='process', session_id=session_id,
+            req_method=ReqMethod.CHAT_SEND,
+            params={'mode': 'agent.code.normal', 'work_mode': 'code'},
+        ))
         admitted = []
         def read(value):
             admitted.append(value.session_id)
@@ -394,10 +399,16 @@ async def test_request_execution_read_requires_session_admission_and_never_creat
         assert runtime.get_session_request_execution(SessionGetInput(channel_id='web', session_id=session_id), request_id='known') is None
         assert runtime._session_coordinator.snapshot_session(session_id) == before
         assert admitted == [session_id] * 3
+        assert runtime.get_session_request_executions(query, request_id='known') == (result,)
+        assert runtime.get_session_request_executions(query, request_id='missing') == ()
+        assert runtime.get_session_request_executions(SessionGetInput(channel_id='web', session_id=session_id), request_id='known') == ()
+        assert runtime._session_coordinator.snapshot_session(session_id) == before
         def denied(value):
             raise PermissionError('revoked')
         monkeypatch.setattr(runtime, 'get_session', denied)
         with pytest.raises(PermissionError, match='revoked'):
             runtime.get_session_request_execution(query, request_id='known')
+        with pytest.raises(PermissionError, match='revoked'):
+            runtime.get_session_request_executions(query, request_id='known')
     finally:
         await runtime.close()

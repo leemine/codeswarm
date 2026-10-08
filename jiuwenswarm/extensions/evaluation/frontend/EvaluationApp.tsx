@@ -77,7 +77,7 @@ export default function EvaluationApp() {
       <header className="evaluation-header" data-testid="evaluation-header">
         <div>
           <h1 data-testid="evaluation-title">{t('evaluation.title')}</h1>
-          <p data-testid="evaluation-shared-environment">{t('evaluation.shared')}</p>
+          <p data-testid="evaluation-shared-environment">{t('evaluation.overview')}</p>
         </div>
         <Button data-testid="evaluation-refresh" disabled={busy} onClick={() => void act(refresh)}>
           {t('evaluation.refresh')}
@@ -257,9 +257,26 @@ export default function EvaluationApp() {
                 onChange={(script) =>
                   change({
                     acceptance: {
+                      ...task.acceptance,
                       kind: script.trim() ? 'python' : 'manual',
                       script,
                       timeout_seconds: 30,
+                    },
+                  })
+                }
+              />
+            </label>
+            <label>
+              {t('evaluation.dependencyLock')}
+              <Input
+                data-testid="evaluation-dependency-lock"
+                value={task.acceptance?.dependency_lock || ''}
+                onChange={(value) =>
+                  change({
+                    acceptance: {
+                      ...task.acceptance,
+                      kind: task.acceptance?.kind || 'manual',
+                      dependency_lock: value || null,
                     },
                   })
                 }

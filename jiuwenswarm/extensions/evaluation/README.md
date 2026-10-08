@@ -1,4 +1,4 @@
-# Evaluation experiments (M1)
+# Evaluation experiments (M1 + independent acceptance)
 
 Application ID: `evaluation-experiments`; navigation: `app:evaluation-experiments`.
 The AgentServer owns one instance of the evaluation metadata store and use cases.
@@ -49,7 +49,7 @@ Costs and token coverage currently show **unknown**, never an invented zero.
 No new package dependency or core source override is required. Enable this bundled
 extension through the existing plugin loader and use the normal AgentServer /
 Gateway / Web launch path. JSONL and acceptance scripts are trusted local input;
-M1 is not an isolation boundary. Container-independent acceptance belongs to M2.
+M1 is not an isolation boundary. Independent acceptance is an explicit policy below.
 
 ## Verification (2026-10-08)
 
@@ -60,3 +60,53 @@ Run `tools/testctl.py run --profile pr-stable` with the repository's normal stri
 network test environment; the profile includes evaluation Python and Web contracts.
 The Web build must include this extension. Application frontend peers resolve from
 `src/applicationPlugins/ui.ts` to avoid altering unrelated test bundler resolution.
+
+
+## Independent acceptance (EVAL-05)
+
+Select **Independent container acceptance / 独立容器验收** before freezing an
+experiment. Native still uses the original shared-host Code workflow and controls.
+After Runtime confirms exit, the verifier reconstructs immutable initial materials
+and applies only declared deliverables. It never mounts the execution workspace.
+The authoritative Python script and offline dependencies are separate read-only
+mounts; verification uses a non-root, network-disabled container with a read-only
+root filesystem and private writable temporary directories.
+
+The administrator must preinstall the Docker image named by
+`JIUWENSWARM_EVALUATION_IMAGE` (default `python:3.12-slim`); its resolved image ID
+is frozen. No image pull is performed. Optional `JIUWENSWARM_EVALUATION_WHEELHOUSE`
+contains preapproved wheels whose hashes are frozen. `acceptance.dependency_lock`
+is a normalized path present in initial files or declared deliverables. Each lock
+line must be `package==version --hash=sha256:<digest>` and match a frozen wheel.
+Install is offline, binary-only and hash-required. A changed declared lock can
+select another frozen wheel; undeclared host installs do not enter verification.
+Files are limited to 1 MiB each, with 4 MiB/100 delivered files per capture; links,
+hard links, special files and mutation during reads are rejected. Initial files
+can set `executable: true`; controlled delivery preserves file modes and deletions.
+
+Authoritative scripts must execute at least one `assert`. Empty tests, early zero
+exit and missing reports are environment errors, not passes. UI evidence includes
+image ID, test hash, assertion count, output, delivery hashes/diffs and confirmed
+container cleanup. Cancellation checks a persisted random ownership label before
+removing a container; uncertain cleanup remains unknown. Old shared-environment
+experiments retain their policy and immutable digests.
+
+This is reproducibility isolation for trusted personal tasks, not a hostile-host
+or arbitrary malicious-Python security boundary. Organization execution, EVAL-06,
+Team evaluation and remote Workers remain outside this implementation. Management
+`EVALUATION_EXPERIMENT/eval05` evidence includes real Docker/pip negative fixtures
+and separately identified real Native/Code UI verification.
+
+Execution completion includes the original request's resumed control descendants.
+A root stream may finish while a later question or permission still owns work;
+the plugin reads the Runtime receipt lineage and waits for every active receipt.
+Cancellation targets the remaining live receipts through the original Runtime
+cancel channel. A missing lineage remains unknown; no history replay or closed
+stream is treated as successful completion.
+
+Frozen experiments also pin implementation content and the installed core source.
+Starting an old pending experiment after a code/dependency change is rejected with
+`IMPLEMENTATION_CHANGED` / `DEPENDENCY_CHANGED`; copy its configuration and freeze a
+new experiment. Old results remain readable, and cancellation remains available.
+Relocating an identical installation or reorganizing commits does not change code
+identity. Each submitted attempt records its actual execution source separately.

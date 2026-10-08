@@ -784,3 +784,71 @@ async def test_browser_answer_reaches_waiting_host_without_a_second_turn(harness
             await anext(stream)
     adapter.handle_user_answer.assert_awaited_once()
     adapter.process_message_stream_impl.assert_not_called()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('ending', ['succeeded', 'failed', 'cancelled', 'terminal_error'])
+async def test_evaluation_waits_for_all_resumed_control_descendants(harness, monkeypatch, ending):
+    """An EOF handing off to another permission is not a complete experiment."""
+    from jiuwenswarm.extensions.evaluation.backend.adapters.runtime_execution import RuntimeExecution
+    from jiuwenswarm.runtime.session_catalog import SessionGetInput
+    from dataclasses import replace
+
+    monkeypatch.setattr(harness.runtime, 'get_session', Mock(return_value=SimpleNamespace()))
+    await _seed_waiting(harness)
+    # The evaluation adapter uses web sessions; this fixture registers process_cli.
+    original = harness.runtime.get_session_request_execution
+    def read(request, **kwargs):
+        return original(replace(request, channel_id='process_cli'), **kwargs)
+    monkeypatch.setattr(harness.runtime, 'get_session_request_execution', read)
+    if hasattr(harness.runtime, 'get_session_request_executions'):
+        original_many = harness.runtime.get_session_request_executions
+        monkeypatch.setattr(harness.runtime, 'get_session_request_executions',
+                            lambda request, **kwargs: original_many(replace(request, channel_id='process_cli'), **kwargs))
+    port = RuntimeExecution(harness.runtime)
+    release = asyncio.Event()
+
+    async def delivered(request):
+        control = request.params['request_id']
+        if control in ('question_1', 'permission_2'):
+            yield _chunk(request, 'chat.ask_user_question',
+                         request_id='permission_2' if control == 'question_1' else 'permission_3',
+                         source='permission_interrupt')
+        else:
+            yield _chunk(request, 'runtime.accepted')
+            await release.wait()
+            if ending == 'failed':
+                raise ValueError('final continuation failed')
+            if ending == 'cancelled':
+                raise asyncio.CancelledError()
+            if ending == 'terminal_error':
+                yield _chunk(request, 'chat.error', error='provider failed after a tool')
+            else:
+                yield _chunk(request, 'chat.final', content='all tools finished')
+
+    harness.agent.deliver_control_input = delivered
+    for control in ('question_1', 'permission_2'):
+        await _collect(harness.client.stream_interaction_answer(_answer(control)))
+        assert port.snapshot(SESSION_ID, 'root-request').state is SessionExecutionState.WAITING_FOR_CONTROL
+    # Keep the established per-execution Runtime semantics unchanged.
+    assert original(SessionGetInput(channel_id='process_cli', session_id=SESSION_ID), request_id='root-request').state is SessionExecutionState.SUCCEEDED
+    final = harness.client.stream_interaction_answer(_answer('permission_3'))
+    async with aclosing(final):
+        await anext(final)
+        assert port.snapshot(SESSION_ID, 'root-request').state is SessionExecutionState.RUNNING
+        release.set()
+        if ending == 'failed':
+            with pytest.raises(ValueError):
+                await _collect(final)
+        elif ending == 'cancelled':
+            with pytest.raises(asyncio.CancelledError):
+                await _collect(final)
+        else:
+            await _collect(final)
+    if ending == 'succeeded':
+        assert port.snapshot(SESSION_ID, 'root-request').state is SessionExecutionState.SUCCEEDED
+    elif ending == 'terminal_error':
+        assert port.snapshot(SESSION_ID, 'root-request').state is SessionExecutionState.FAILED
+    else:
+        # Runtime retains the interrupted parent's control for retry; this must
+        # never turn the already-completed root into evaluation success.
+        assert port.snapshot(SESSION_ID, 'root-request').state is SessionExecutionState.WAITING_FOR_CONTROL

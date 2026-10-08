@@ -3,12 +3,13 @@ export interface Task {
   task_id: string;
   name: string;
   instruction: string;
-  files?: { path: string; content: string }[];
+  files?: { path: string; content: string; executable?: boolean }[];
   deliverables?: string[];
   acceptance?: {
     kind: 'manual' | 'python';
     script?: string;
     timeout_seconds?: number;
+    dependency_lock?: string | null;
   };
   environment?: 'shared-host-v1';
 }
@@ -44,6 +45,7 @@ export interface Options {
   models: { selection_key: string; display_name: string }[];
   profiles: { id: string; revision: string }[];
   execution_available: boolean;
+  acceptance_policies?: string[];
 }
 export interface Attempt {
   id: string;
@@ -55,6 +57,11 @@ export interface Attempt {
     exit_confirmed?: boolean;
     error_code?: string;
     workspace?: string;
+    acceptance_policy?: string;
+    authority_sha256?: string;
+    verifier_removed?: boolean;
+    authoritative_assertions?: number;
+    verification_environment?: { image_id: string; network: string };
     test_output?: string;
     runtime?: { state: string };
     files?: { path: string; status: string; sha256?: string; diff?: string }[];

@@ -87,3 +87,19 @@ test('refresh remount reads original attempt; evidence export reauthorizes and s
   assert.equal(calls.filter((call) => /experiment\.(create|start)/.test(call.method)).length, 0);
   await unmount();
 });
+
+test('independent acceptance shows authoritative evidence and preserves original Code link', async () => {
+  experiments = [{id:'independent',definition:{name:'Independent', model:'model', acceptance_policy:'independent-container-v1'},
+    statistics:{passed:1,planned_trials:1,all_settled:true},trials:[{id:'trial',task_id:'task',repeat_index:0,attempts:[{
+      id:'attempt',phase:'settled',body:{session_id:'code-original',outcome:'passed',exit_confirmed:true,
+        acceptance_policy:'independent-container-v1',authority_sha256:'fixed-authority',authoritative_assertions:2,
+        verification_environment:{image_id:'sha256:fixed-image',network:'none'},verifier_removed:true}}]}]}];
+  await mount();
+  assert.match(find('evaluation-attempt-status').textContent,/Independent acceptance passed/);
+  assert.equal(find('evaluation-session-link').getAttribute('href'),'/chat/code-original');
+  assert.match(find('evaluation-verifier-image').textContent,/sha256:fixed-image/);
+  assert.match(find('evaluation-authority-digest').textContent,/fixed-authority/);
+  assert.match(find('evaluation-verifier-cleanup').textContent,/Yes/);
+  assert.ok(find('evaluation-start').disabled);
+  await unmount();
+});

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import aclosing
+from dataclasses import replace
 from pathlib import Path
 
 from jiuwenswarm.common.config import get_config
@@ -155,29 +156,82 @@ class RuntimeExecution:
             async for event in events:
                 await project(event)
 
-    def snapshot(self, session_id, request_id):
-        return self.runtime.get_session_request_execution(
+    def _executions(self, session_id, request_id):
+        return self.runtime.get_session_request_executions(
             SessionGetInput(channel_id="web", session_id=session_id),
             request_id=request_id,
         )
 
+    def snapshot(self, session_id, request_id):
+        from jiuwenswarm.runtime.session.model import SessionExecutionState as State
+
+        executions = self._executions(session_id, request_id)
+        if not executions:
+            return None
+        root = executions[0]
+        live = [item for item in executions if not item.state.terminal]
+        waiting = tuple(sorted({control for item in live
+                                for control in (*item.waiting_control_ids, item.waiting_control_id)
+                                if control}))
+        if live:
+            state = (State.WAITING_FOR_CONTROL
+                     if any(item.state is State.WAITING_FOR_CONTROL for item in live)
+                     else State.RUNNING)
+        elif any(item.state is State.FAILED or item.error for item in executions):
+            state = State.FAILED
+        elif any(item.state is State.CANCELLED for item in executions):
+            state = State.CANCELLED
+        else:
+            state = State.SUCCEEDED
+        # A read projection over existing receipts, never a second execution owner.
+        return replace(root, state=state, waiting_control_ids=waiting,
+                       waiting_control_id=waiting[0] if waiting else None,
+                       finished_at=None if live else max(item.finished_at or 0 for item in executions))
+
     async def cancel(self, session_id, request_id):
-        response = await self.runtime.cancel_request(
-            AgentRequest(
-                request_id="cancel-" + request_id,
-                channel_id="web",
-                session_id=session_id,
-                req_method=ReqMethod.CHAT_CANCEL,
-                params={
-                    "target_request_id": request_id,
-                    "intent": "cancel",
-                    "mode": "agent.code.normal",
-                    "work_mode": "code",
-                },
+        executions = self._executions(session_id, request_id)
+        # A terminal root no longer matches Runtime's active cancellation selector.
+        # Target each live descendant through the original cancellation channel.
+        targets = [item.request_id for item in executions if not item.state.terminal]
+        for target in dict.fromkeys(targets or [request_id]):
+            if executions and not any(
+                item.request_id == target and not item.state.terminal
+                for item in self._executions(session_id, request_id)
+            ):
+                continue
+            response = await self.runtime.cancel_request(
+                AgentRequest(
+                    request_id="cancel-" + request_id,
+                    channel_id="web",
+                    session_id=session_id,
+                    req_method=ReqMethod.CHAT_CANCEL,
+                    params={
+                        "target_request_id": target,
+                        "intent": "cancel",
+                        "mode": "agent.code.normal",
+                        "work_mode": "code",
+                    },
+                )
             )
-        )
-        if not response.ok or (
-            isinstance(response.payload, dict)
-            and response.payload.get("success") is False
-        ):
-            raise CatalogError("EXIT_NOT_CONFIRMED")
+            if not response.ok or (
+                isinstance(response.payload, dict)
+                and response.payload.get("success") is False
+            ):
+                raise CatalogError("EXIT_NOT_CONFIRMED")
+
+        if self.send_push is not None:
+            receipt = self.snapshot(session_id, request_id)
+            if receipt is not None and receipt.state.terminal:
+                # Notify the original Web channel only after Runtime confirms exit.
+                # Its existing metadata reconciliation clears resolved controls.
+                await self.send_push({
+                    "request_id": request_id,
+                    "channel_id": "web",
+                    "session_id": session_id,
+                    "payload": {
+                        "event_type": "chat.processing_status",
+                        "session_id": session_id,
+                        "is_processing": False,
+                    },
+                    "is_complete": True,
+                })

@@ -4486,7 +4486,7 @@
   },
   "evaluation": {
     "title": "Evaluation experiments",
-    "shared": "M1 · Shared-environment acceptance. Execution and tests use the same workspace; results are not independent validation.",
+    "shared": "Development self-tests use the execution workspace; this is not independent acceptance.",
     "refresh": "Refresh",
     "library": "Task library",
     "newTask": "New task",
@@ -4521,7 +4521,7 @@
     "repeats": "Independent repeats (1–5)",
     "timeout": "Execution timeout (seconds)",
     "acknowledge": "I authorize the selected tasks, acceptance scripts and configured model calls on this personal shared host.",
-    "costHint": "M1 runs sequentially. Cost and usage coverage are unknown; timeout limits execution, not spending.",
+    "costHint": "Sequential execution. Cost and usage coverage are unknown; timeouts are execution limits, not a hard spending budget.",
     "localOnly": "This shared environment supports trusted local personal installations only; this identity cannot start runs.",
     "create": "Freeze and create experiment",
     "runs": "Experiments",
@@ -4565,7 +4565,21 @@
       "not_evaluated": "Not evaluated",
       "unknown": "Unknown",
       "recovery_required": "Outcome requires review in original session; never automatically resubmitted",
-      "exit_unconfirmed": "Exit unconfirmed"
-    }
+      "exit_unconfirmed": "Exit unconfirmed",
+      "artifact_error": "Delivery artifact error"
+    },
+    "overview": "Native keeps the original Code workflow. Each experiment selects workspace self-tests or independent container acceptance.",
+    "policy": "Acceptance policy",
+    "policies": {
+      "shared-environment-v1": "Development self-test (same workspace)",
+      "independent-container-v1": "Independent container acceptance"
+    },
+    "independentHint": "After execution exits, apply only declared deliveries to the frozen baseline. Authoritative tests run in a separate offline container without host-installed dependencies. Python scripts must execute assert statements; dependency locks require offline wheels and SHA256 hashes.",
+    "independentPassed": "Independent acceptance passed",
+    "verifierImage": "Pinned verifier image",
+    "authorityDigest": "Authoritative test digest",
+    "assertions": "Executed assertions",
+    "verifierCleanup": "Verifier container removed",
+    "dependencyLock": "Independent dependency lock path (optional)"
   }
 }

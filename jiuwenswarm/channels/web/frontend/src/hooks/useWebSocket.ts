@@ -4100,6 +4100,18 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useChatStore.getState().setThinking(sessionId, false);
           useChatStore.getState().stopStreaming(sessionId);
           useChatStore.getState().settleHistoricalToolExecutions(sessionId);
+          // Another Code tab can answer while this tab reconnects. A Runtime read
+          // reconciles old cards; processing=false alone never resolves a question.
+          const observedQuestions = useChatStore.getState().getRuntime(sessionId)?.pendingQuestions;
+          if (observedQuestions?.length) {
+            void webClient.request<{ pending_interactions?: Record<string, unknown>[] }>(
+              'session.get_metadata', { session_id: sessionId },
+            ).then((metadata) => {
+              useChatStore.getState().reconcilePendingQuestions(
+                sessionId, observedQuestions, metadata.pending_interactions?.map(normalizeQuestionPayload),
+              );
+            }).catch(() => undefined);
+          }
 
           // §8 步骤5：Heartbeat 自动轮结束时，把对应 assistant 消息的 streaming 关掉
           // （chat.delta 可能因丢帧未收到 final；这里兜底收尾），并静默刷新 Heartbeat

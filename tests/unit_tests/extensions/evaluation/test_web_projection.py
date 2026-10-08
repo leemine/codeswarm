@@ -67,3 +67,33 @@ def test_read_projection_rechecks_session_authority(monkeypatch):
         dict(event_type="chat.ask_user_question", request_id="live", timestamp=11, questions=[])])
     assert runtime.get_session_interaction_state(SessionGetInput(channel_id="web", session_id="s")) == {
         "is_processing": False, "pending_interactions": []}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmed", [True, False])
+async def test_plugin_cancel_notifies_code_only_after_descendant_exit(confirmed):
+    from jiuwenswarm.runtime.session.model import SessionExecutionHandle, SessionWorkKind
+
+    root = SessionExecutionHandle("root", "session", "attempt", 1, SessionWorkKind.CHAT_STREAM,
+                                  state=State.SUCCEEDED, finished_at=10)
+    child = SessionExecutionHandle("child", "session", "answer", 1, SessionWorkKind.CONTROL_INPUT,
+                                   parent_execution_id="root", state=State.WAITING_FOR_CONTROL)
+
+    async def cancel(request):
+        assert request.params["target_request_id"] == "answer"
+        if confirmed:
+            child.state, child.finished_at = State.CANCELLED, 20
+        return NS(ok=True, payload={"success": True})
+
+    push = AsyncMock()
+    port = RuntimeExecution(NS(cancel_request=cancel, get_session_request_executions=
+        lambda *args, **kwargs: (root.snapshot(), child.snapshot())), send_push=push)
+    await port.cancel("session", "attempt")
+    if confirmed:
+        push.assert_awaited_once_with({
+            "request_id": "attempt", "channel_id": "web", "session_id": "session",
+            "payload": {"event_type": "chat.processing_status", "session_id": "session", "is_processing": False},
+            "is_complete": True,
+        })
+    else:
+        push.assert_not_awaited()

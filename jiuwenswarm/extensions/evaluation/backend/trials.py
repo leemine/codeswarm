@@ -10,6 +10,7 @@ import time
 from .adapters.runtime_execution import RuntimeExecution
 from .adapters.store import CatalogError
 from .adapters.verification import SharedHostVerifier, workspace_file
+from .adapters.independent import IndependentVerifier, environment_snapshot, POLICY
 from .models import ExperimentDraft, TaskDraft, decode
 from .results import (
     delivery_evidence,
@@ -24,6 +25,7 @@ class Trials:
         self.store, self.root = store, root
         self.execution = RuntimeExecution(runtime, send_push=send_push)
         self.verifier = SharedHostVerifier()
+        self.independent = IndependentVerifier(root / "verification-staging")
         self.workers = {}
         self.observations = {}
         self.stopping = set()
@@ -36,21 +38,37 @@ class Trials:
         if identity.authority != "local-single-user-installation":
             raise CatalogError("SHARED_HOST_LOCAL_ONLY")
 
+    @staticmethod
+    def _sources():
+        distribution = importlib.metadata.distribution("openjiuwen")
+        return {
+            "implementation": implementation_source(),
+            "core": distribution.version,
+            "swarm": importlib.metadata.version("workswarm"),
+            "core_source": json.loads(distribution.read_text("direct_url.json") or "null"),
+        }
+
+    def _require_sources(self, frozen):
+        current = self._sources()
+        # Paths, Git history and dirty flags describe provenance, not code identity.
+        # A clean installation or commit reorganization can have identical bytes.
+        if current["implementation"]["sha256"] != frozen.get("implementation", {}).get("sha256"):
+            raise CatalogError("IMPLEMENTATION_CHANGED")
+        if any(current[key] != frozen.get(key) for key in ("core", "swarm", "core_source")):
+            raise CatalogError("DEPENDENCY_CHANGED")
+        return current
+
     async def create(self, identity, value, key):
         self.require_execution(identity)
         definition = decode(ExperimentDraft, value)
         configuration = await self.execution.configuration(definition)
         versions = {
             "plugin": "1.0.0",
-            "implementation": implementation_source(),
-            "core": importlib.metadata.version("openjiuwen"),
-            "swarm": importlib.metadata.version("workswarm"),
+            **self._sources(),
             "configuration": configuration,
         }
-        core_distribution = importlib.metadata.distribution("openjiuwen")
-        versions["core_source"] = json.loads(
-            core_distribution.read_text("direct_url.json") or "null"
-        )
+        if definition.acceptance_policy == POLICY:
+            versions["verification_environment"] = await environment_snapshot()
         return self.store.create_experiment(identity, value, key, versions=versions)
 
     def _attempt(self, identity, experiment_id, attempt_id):
@@ -91,6 +109,7 @@ class Trials:
             != experiment["versions"]["configuration"]
         ):
             raise CatalogError("CONFIGURATION_CHANGED")
+        self._require_sources(experiment["versions"])
         # Configuration lookup yields; another click may already own the submission.
         if self.closed:
             raise CatalogError("EVALUATION_CLOSED")
@@ -219,11 +238,12 @@ class Trials:
                     return
 
     async def _run_attempt(self, identity, experiment_id, definition, task, attempt_id):
-        expected = self.store.experiment(identity, experiment_id)["versions"][
-            "configuration"
-        ]
+        versions = self.store.experiment(identity, experiment_id)["versions"]
+        expected = versions["configuration"]
         if await self.execution.configuration(definition) != expected:
             raise CatalogError("CONFIGURATION_CHANGED")
+        sources = self._require_sources(versions)
+        self._patch(identity, experiment_id, attempt_id, execution_sources=sources)
         prepared = await self.execution.prepare(
             definition, title=task.name, request_id=attempt_id
         )
@@ -238,8 +258,10 @@ class Trials:
                 # Do not overwrite an existing Session's files after a lost receipt.
                 with path.open("x", encoding="utf-8") as target:
                     target.write(item.content)
+                path.chmod(0o755 if item.executable else 0o644)
             if await self.execution.configuration(definition) != expected:
                 raise CatalogError("CONFIGURATION_CHANGED")
+            self._require_sources(versions)
             await self.execution.commit(prepared)
         except BaseException:
             await self.execution.runtime.abort_session_provision(prepared)
@@ -361,8 +383,25 @@ class Trials:
             status="verifying",
             execution_outcome="succeeded",
         )
-        verification = await self.verifier.verify(attempt_id, workspace, task)
-        verification["files"] = delivery_evidence(workspace, task)
+        if definition.acceptance_policy == POLICY:
+            snapshot = self.store.experiment(identity, experiment_id)["versions"][
+                "verification_environment"
+            ]
+            verification = await self.independent.verify(
+                attempt_id,
+                workspace,
+                task,
+                snapshot,
+                remember=lambda ownership: self._patch(
+                    identity, experiment_id, attempt_id, verifier_ownership=ownership
+                ),
+            )
+            verification["files"] = verification.get("delivery_manifest", {}).get(
+                "files", []
+            )
+        else:
+            verification = await self.verifier.verify(attempt_id, workspace, task)
+            verification["files"] = delivery_evidence(workspace, task)
         if experiment_id in self.stopping:
             verification["outcome"] = "cancelled"
         self._patch(
@@ -392,14 +431,39 @@ class Trials:
                     exit_confirmed=True,
                     submitted=False,
                 )
+            elif (
+                experiment_id not in self.workers
+                and attempt["phase"] != "settled"
+                and attempt["body"].get("execution_finished_at")
+                and attempt["body"].get("verifier_ownership")
+            ):
+                await self.independent.cancel(
+                    attempt["id"], attempt["body"]["verifier_ownership"]
+                )
+                self._patch(
+                    identity,
+                    experiment_id,
+                    attempt["id"],
+                    "settled",
+                    outcome="cancelled",
+                    status="settled",
+                    exit_confirmed=True,
+                    verifier_removed=True,
+                )
             elif attempt["phase"] == "verifying":
                 await self.verifier.cancel(attempt["id"])
+                await self.independent.cancel(
+                    attempt["id"], attempt["body"].get("verifier_ownership")
+                )
             elif (
                 (attempt["phase"] == "unknown" or experiment_id not in self.workers)
                 and attempt["body"].get("session_id")
                 and attempt["phase"] != "settled"
             ):
                 await self.verifier.cancel(attempt["id"])
+                await self.independent.cancel(
+                    attempt["id"], attempt["body"].get("verifier_ownership")
+                )
                 snapshot = self.execution.snapshot(
                     attempt["body"]["session_id"], attempt["id"]
                 )
@@ -434,6 +498,10 @@ class Trials:
     async def close(self):
         self.closed = True
         self.stopping.update(self.workers)
+        for attempt_id in tuple(self.independent.environments):
+            await self.independent.cancel(attempt_id)
+        for attempt_id in tuple(self.verifier.processes):
+            await self.verifier.cancel(attempt_id)
         if self.workers:
             done, pending = await asyncio.wait(tuple(self.workers.values()), timeout=25)
             if pending:
@@ -446,5 +514,9 @@ class Trials:
             self.observations.values()
         ):
             await self.cancel(identity, experiment_id)
-        if self.observations or self.verifier.processes:
+        if (
+            self.observations
+            or self.verifier.processes
+            or self.independent.environments
+        ):
             raise CatalogError("EXIT_NOT_CONFIRMED")

@@ -4467,7 +4467,7 @@
   },
   "evaluation": {
     "title": "评测实验",
-    "shared": "M1 · 共享环境验收。执行与测试使用同一个工作区；结果不代表独立验收。",
+    "shared": "开发自测使用执行工作区，结果不代表独立验收。",
     "refresh": "刷新",
     "library": "任务库",
     "newTask": "新建任务",
@@ -4502,7 +4502,7 @@
     "repeats": "独立重复次数（1–5）",
     "timeout": "每次执行超时（秒）",
     "acknowledge": "我授权在当前个人共享主机上执行所选任务、验收脚本及已配置的模型调用。",
-    "costHint": "M1 顺序执行。费用与用量覆盖未知；超时是运行限制，不是硬费用预算。",
+    "costHint": "按顺序执行。费用与用量覆盖未知；超时是运行限制，不是硬费用预算。",
     "localOnly": "此共享环境仅支持受信的本地个人安装；当前身份不可启动。",
     "create": "冻结并创建实验",
     "runs": "实验记录",
@@ -4546,7 +4546,21 @@
       "not_evaluated": "尚未验收",
       "unknown": "无法确认",
       "recovery_required": "状态无法确认；请核对原会话，不会自动重提",
-      "exit_unconfirmed": "退出未确认"
-    }
+      "exit_unconfirmed": "退出未确认",
+      "artifact_error": "交付物错误"
+    },
+    "overview": "Native 保留原 Code 开发流程。每个实验明确选择开发自测或独立容器验收。",
+    "policy": "验收方式",
+    "policies": {
+      "shared-environment-v1": "开发自测（同工作区）",
+      "independent-container-v1": "独立容器验收"
+    },
+    "independentHint": "确认执行退出后，仅将声明的交付物应用到固定初始材料；权威测试在独立、断网的容器中运行，不继承宿主临时依赖。Python 验收脚本须实际执行 assert；依赖锁仅支持离线 wheel 与 SHA256。",
+    "independentPassed": "独立验收通过",
+    "verifierImage": "固定验收镜像",
+    "authorityDigest": "权威测试摘要",
+    "assertions": "实际执行断言数",
+    "verifierCleanup": "验收容器已清理",
+    "dependencyLock": "独立验收依赖锁路径（可选）"
   }
 }
