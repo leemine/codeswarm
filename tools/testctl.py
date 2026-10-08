@@ -274,12 +274,16 @@ def bwrap_prefix() -> list[str]:
     return [executable]
 
 
-def isolated_command(suite: dict, workdir: Path, command: list[str], junit_dir: Path | None = None) -> list[str]:
+def isolated_command(suite: dict, workdir: Path, command: list[str], junit_dir: Path | None = None, *, sandbox_root: Path | None = None) -> list[str]:
     if network_mode() != "strict":
         return command
     if suite.get("services") or "local_service" in suite.get("capabilities", []):
         raise TestCtlError(f"strict network namespace cannot host local service: {suite['id']}")
     wrapper = bwrap_prefix() + ["--unshare-net", "--unshare-pid", "--die-with-parent", "--ro-bind", "/", "/", "--bind", "/tmp", "/tmp"]
+    # make_sandbox owns this directory, including HOME and TMPDIR. It may live
+    # outside /tmp; keep it writable without exposing its parent directory.
+    if sandbox_root is not None:
+        wrapper.extend(["--bind", str(sandbox_root), str(sandbox_root)])
     if junit_dir is not None:
         wrapper.extend(["--bind", str(junit_dir), str(junit_dir)])
     if suite.get("runner") in {"vitest", "node-test", "web-scripts"} or suite.get("writable_workdir"):
@@ -518,7 +522,7 @@ def discover_suite(suite: dict, run_id: str) -> dict:
             "count": 0,
             "sandbox": str(root),
         }
-    result = run_process(isolated_command(suite, workdir, command), workdir, hermetic_env(sandbox_env), int(discover.get("timeout_seconds", 120)))
+    result = run_process(isolated_command(suite, workdir, command, sandbox_root=root), workdir, hermetic_env(sandbox_env), int(discover.get("timeout_seconds", 120)))
     parser = discover.get("parser")
     if parser == "pytest":
         items = parse_pytest_collect(result["output"])
@@ -621,7 +625,7 @@ def execute_suite(suite: dict, run_id: str, run_dir: Path) -> dict:
                 "log": str(log.relative_to(run_dir)),
             }
         suite_env.update(service_env)
-        result = run_process(isolated_command(suite, workdir, command, junit.parent), workdir, suite_env, int(suite.get("shard_timeout_seconds", 900)), log_path=log)
+        result = run_process(isolated_command(suite, workdir, command, junit.parent, sandbox_root=sandbox_root), workdir, suite_env, int(suite.get("shard_timeout_seconds", 900)), log_path=log)
     finally:
         stop_services(processes)
     counts = empty_counts()
