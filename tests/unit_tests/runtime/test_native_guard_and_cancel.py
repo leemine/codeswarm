@@ -40,7 +40,12 @@ async def test_organization_public_chat_rejects_unowned_default_before_resource_
     req = AgentRequest('without-managed-project', session_id='unowned-session', channel_id='web',
                        req_method=ReqMethod.CHAT_SEND, params={'project_id': pid, 'query': 'ordinary'})
     with authenticated_scope(f.bob):
-        assert runtime._resource_authorizers_for(req) is None
+        if project_kind == "unmanaged":
+            assert runtime._resource_authorizers_for(req) is None
+        else:
+            # Private resources require a registered owner before authority exists.
+            with pytest.raises(SessionSharingDenied, match="trusted Session owner unavailable"):
+                runtime._resource_authorizers_for(req)
         with pytest.raises(SessionSharingDenied):
             admit_session_request('chat.send', {'session_id': req.session_id},
                                   identity_resolver=current_identity, host=f.host)

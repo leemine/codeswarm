@@ -144,8 +144,16 @@ async def test_prepare_chat_preserves_frozen_user_through_real_metadata_sync_and
     frozen_creation = deepcopy(metadata["surface_creation"])
     session_metadata.init_session_metadata(**metadata)
     manager.wait_for_session_prewarm = AsyncMock()
-    allocated = object()
     routes = []
+    selected = []
+
+    def select_execution_for_request(request):
+        assert request._execution_route is routes[-1]
+        assert request._bound_execution is routes[-1].bound
+        assert request._bound_execution.binding.subject_id == "host-worker"
+        selected.append(request._execution_route)
+
+    allocated = SimpleNamespace(select_execution_for_request=select_execution_for_request)
 
     async def get_agent_for_request(request, *, admit_request, on_admitted, **_kwargs):
         routes.append(on_admitted(admit_request()))
@@ -171,6 +179,8 @@ async def test_prepare_chat_preserves_frozen_user_through_real_metadata_sync_and
         assert request.user_id == "forged-wire-user"
         request.user_id = "another-wire-user"
         await prepare_chat_turn(manager, request, "web", trusted_subject_id="host-worker")
+        assert selected == routes
+        assert len(selected) == 2
         assert routes[1].bound.binding is routes[0].bound.binding
         with pytest.raises(ExecutionRecoveryUnavailableError, match="Binding changed"):
             await prepare_chat_turn(manager, request, "web", trusted_subject_id="other-host-worker")
