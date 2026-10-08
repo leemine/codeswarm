@@ -237,11 +237,23 @@ class Trials:
                 ):
                     return
 
+    def _cancel_unsubmitted(self, identity, experiment_id, attempt_id):
+        if experiment_id not in self.stopping:
+            return False
+        self._patch(
+            identity, experiment_id, attempt_id, "settled",
+            outcome="cancelled", status="settled", exit_confirmed=True,
+            submitted=False, finished_at=time.time(),
+        )
+        return True
+
     async def _run_attempt(self, identity, experiment_id, definition, task, attempt_id):
         versions = self.store.experiment(identity, experiment_id)["versions"]
         expected = versions["configuration"]
         if await self.execution.configuration(definition) != expected:
             raise CatalogError("CONFIGURATION_CHANGED")
+        if self._cancel_unsubmitted(identity, experiment_id, attempt_id):
+            return
         sources = self._require_sources(versions)
         self._patch(identity, experiment_id, attempt_id, execution_sources=sources)
         prepared = await self.execution.prepare(
@@ -250,6 +262,8 @@ class Trials:
         session_id = prepared.result.session_id
         self._patch(identity, experiment_id, attempt_id, session_id=session_id)
         try:
+            if experiment_id in self.stopping:
+                raise CatalogError("SUBMISSION_CANCELLED")
             workspace = self.execution.workspace(session_id)
             self._patch(identity, experiment_id, attempt_id, workspace=str(workspace))
             for item in task.files:
@@ -261,11 +275,20 @@ class Trials:
                 path.chmod(0o755 if item.executable else 0o644)
             if await self.execution.configuration(definition) != expected:
                 raise CatalogError("CONFIGURATION_CHANGED")
+            if experiment_id in self.stopping:
+                raise CatalogError("SUBMISSION_CANCELLED")
             self._require_sources(versions)
             await self.execution.commit(prepared)
-        except BaseException:
+        except BaseException as exc:
             await self.execution.runtime.abort_session_provision(prepared)
+            if isinstance(exc, CatalogError) and exc.code == "SUBMISSION_CANCELLED":
+                self._cancel_unsubmitted(identity, experiment_id, attempt_id)
+                return
             raise
+        # A committed Session does not yet own an execution. A stop received
+        # during commit must not create an observer that submits new model work.
+        if self._cancel_unsubmitted(identity, experiment_id, attempt_id):
+            return
         self._patch(
             identity, experiment_id, attempt_id, "observing", status="submitted"
         )

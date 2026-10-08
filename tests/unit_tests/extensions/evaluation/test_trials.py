@@ -406,3 +406,44 @@ async def test_source_drift_after_start_is_rechecked_before_session_creation(tmp
     finally:
         await trials.close()
         trials.store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage,aborts", [("configuration", 0), ("prepare", 1), ("recheck", 1), ("commit", 0)])
+async def test_cancel_during_submission_never_starts_model(tmp_path, monkeypatch, stage, aborts):
+    from unittest.mock import AsyncMock
+
+    trials, exp = setup(tmp_path, monkeypatch)
+    trials.execution.runtime = SimpleNamespace(abort_session_provision=AsyncMock())
+    entered, released = asyncio.Event(), asyncio.Event()
+    method = "configuration" if stage in {"configuration", "recheck"} else stage
+    original = getattr(trials.execution, method)
+    calls = 0
+
+    async def blocked(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        target = 2 if stage == "configuration" else 3 if stage == "recheck" else 1
+        if calls == target:
+            entered.set()
+            await released.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(trials.execution, method, blocked)
+    try:
+        await trials.start(ACTOR, exp["id"])
+        await asyncio.wait_for(entered.wait(), 5)
+        await trials.cancel(ACTOR, exp["id"])
+        released.set()
+        result = await finish(trials, exp)
+        assert result["phase"] == "settled"
+        assert result["body"]["outcome"] == "cancelled"
+        assert result["body"]["exit_confirmed"]
+        assert result["body"]["submitted"] is False
+        assert trials.execution.calls == 0
+        assert trials.execution.runtime.abort_session_provision.await_count == aborts
+        assert not trials.observations
+    finally:
+        released.set()
+        await trials.close()
+        trials.store.close()
