@@ -113,3 +113,19 @@
   color: var(--color-text-secondary);
   font-size: 12px;
 }
+
+.session-sharing-permission-status {
+  margin-left: 8px;
+  color: var(--color-text-tertiary);
+}
+.session-sharing-permission-description {
+  display: block;
+  color: var(--color-text-secondary);
+  margin-top: 4px;
+}
+.session-sharing-content details label {
+  margin-top: 12px;
+}
+
+.session-sharing-content fieldset > details { width: 100%; }
+.session-sharing-content fieldset details label { align-items: flex-start; }

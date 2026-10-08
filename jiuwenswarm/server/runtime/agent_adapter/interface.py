@@ -1381,6 +1381,13 @@ class JiuWenSwarm:
                 bind_route(execution_route)
         return self._adapter
 
+    def select_execution_for_request(self, request: AgentRequest) -> None:
+        """Pin admitted execution before plan/permission setup creates a child."""
+        if getattr(request, "_bound_execution", None) is None:
+            return
+        adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+        self._select_execution_before_mcp(adapter, request)
+
     @staticmethod
     def _select_execution_before_mcp(adapter: AgentAdapter, request: AgentRequest) -> None:
         if getattr(request, "_bound_execution", None) is None:

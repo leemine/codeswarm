@@ -60,6 +60,7 @@ async def test_prepare_code_mode_chat_turn_resolves_mode_and_agent() -> None:
     manager.wait_for_session_prewarm = AsyncMock()
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     server._agent_manager = manager
     server._resolve_code_language = MagicMock(return_value="cn")
 
@@ -88,6 +89,7 @@ async def test_prepare_chat_normalizes_agent_request_for_code_workspace() -> Non
     manager.get_agent_for_request = AsyncMock(side_effect=dispatch)
     manager.wait_for_session_prewarm = AsyncMock()
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     server._agent_manager = manager
     request = _chat_request(
         "sess_code_workspace",
@@ -131,6 +133,7 @@ async def test_prepare_chat_without_mode_restores_locked_session_mode() -> None:
     manager.get_agent_for_request = AsyncMock(side_effect=dispatch)
     manager.wait_for_session_prewarm = AsyncMock()
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     server._agent_manager = manager
     request = AgentRequest(
         request_id="heartbeat-run-1",
@@ -193,6 +196,7 @@ async def test_prepare_heartbeat_chat_without_mode_restores_locked_team_session(
     manager.get_agent_for_request = AsyncMock(side_effect=dispatch)
     manager.wait_for_session_prewarm = AsyncMock()
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     server._agent_manager = manager
     request = AgentRequest(
         request_id="heartbeat-team-run",
@@ -249,6 +253,7 @@ async def test_prepare_chat_without_mode_restores_locked_work_session_on_tui() -
     manager.get_agent_for_request = AsyncMock(side_effect=dispatch)
     manager.wait_for_session_prewarm = AsyncMock()
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     server._agent_manager = manager
     request = AgentRequest(
         request_id="heartbeat-work-run",
@@ -304,6 +309,7 @@ async def test_prepare_chat_uses_locked_persist_session_metadata() -> None:
 
     manager.wait_for_session_prewarm = AsyncMock()
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     server._agent_manager = manager
     request = _chat_request(
         "sess_persist_locked",
@@ -339,6 +345,7 @@ async def test_prepare_rejects_auto_root_change_before_metadata_sync() -> None:
     manager.get_agent_for_request = AsyncMock(side_effect=reject)
     manager.wait_for_session_prewarm = AsyncMock()
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     server._agent_manager = manager
     request = _chat_request(
         "sess_auto_root",
@@ -373,6 +380,7 @@ async def test_prepare_team_chat_turn_propagates_locked_project_dir() -> None:
     manager.wait_for_session_prewarm = AsyncMock()
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     server._agent_manager = manager
     request = _chat_request("sess_team_project", mode="team")
     request.metadata = {"member_name": "reviewer", "project_dir": "/tmp/stale"}
@@ -425,6 +433,7 @@ async def test_ensure_code_mode_state_syncs_plan_to_normal() -> None:
     commit = AsyncMock()
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     request = _chat_request(session_id, "hello", mode="code.normal")
 
     with patch(
@@ -464,6 +473,7 @@ async def test_ensure_code_mode_state_skips_if_mode_already_matches() -> None:
     create_session = MagicMock(return_value=session)
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     request = _chat_request(session_id, "hello", mode="code.plan")
 
     with patch(
@@ -500,6 +510,7 @@ async def test_ensure_code_mode_state_allows_explicit_plan_reentry_after_exit() 
     create_session = MagicMock(return_value=session)
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     server._push_plan_mode_exited = AsyncMock()
     request = _chat_request(
         session_id,
@@ -556,6 +567,7 @@ async def test_disconnect_cleanup_then_stale_plan_reentry_blocked_by_slug() -> N
     create_session = MagicMock(return_value=session)
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     server._push_plan_mode_exited = AsyncMock()
     # No plan_entry_source => this is a stale re-entry, not an explicit /plan.
     request = _chat_request(session_id, "go", mode="code.plan")
@@ -596,6 +608,7 @@ async def test_plain_work_turn_skips_sync_without_touching_the_agent() -> None:
     agent = MagicMock()
     agent.ensure_instance = AsyncMock()
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     request = _chat_request(
         "sess_plain_work", mode="agent", extra_params={"work_mode": "work"}
     )
@@ -627,6 +640,7 @@ async def test_work_turn_with_previous_plan_mode_still_syncs() -> None:
     session.commit = AsyncMock()
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     server._push_plan_mode_exited = AsyncMock()
     request = _chat_request(
         session_id,
@@ -652,6 +666,7 @@ async def test_work_turn_with_previous_plan_mode_still_syncs() -> None:
 async def test_plan_mode_exited_push_uses_the_session_profile_mode() -> None:
     """work 会话不能收到写死的 ``code.normal``——TUI 会消费这个字段。"""
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     server.send_push = AsyncMock()
     request = _chat_request(
         "sess_work_exit", mode="agent", extra_params={"work_mode": "work"}
@@ -728,6 +743,7 @@ async def test_internal_heartbeat_pushes_visible_prompt_before_stream() -> None:
     agent = MagicMock()
     agent.process_message_stream.return_value = response_stream()
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     server._heartbeat_runtime = SimpleNamespace(retain_agent=MagicMock())
     _install_internal_heartbeat_runtime(server, agent)
     server.send_push = AsyncMock(return_value=True)
@@ -787,6 +803,7 @@ async def test_internal_heartbeat_cancel_closes_processing_status() -> None:
     agent = MagicMock()
     agent.process_message_stream.return_value = response_stream()
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     server._heartbeat_runtime = SimpleNamespace(retain_agent=MagicMock())
     _install_internal_heartbeat_runtime(server, agent)
     server.send_push = AsyncMock(return_value=True)
@@ -818,6 +835,7 @@ async def test_ensure_skips_for_team_sub_mode() -> None:
     """_ensure_code_mode_state returns False for team sub_mode."""
     agent = MagicMock()
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     request = _chat_request("sess_team", mode="code.team")
 
     restored = await server._ensure_code_mode_state(request, "code", "team", agent)
@@ -835,6 +853,7 @@ async def test_prepare_chat_turn_skips_approval_for_interrupt_resume() -> None:
     manager.wait_for_session_prewarm = AsyncMock()
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     server._agent_manager = manager
     server._resolve_code_language = MagicMock(return_value="cn")
 
@@ -862,6 +881,7 @@ async def test_ensure_skips_for_agent_mode() -> None:
     """_ensure_code_mode_state returns False for non-code modes."""
     agent = MagicMock()
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._organization_session_host = None
     request = _chat_request("sess_agent", mode="agent.fast")
 
     restored = await server._ensure_code_mode_state(request, "agent", "fast", agent)

@@ -913,7 +913,7 @@ async def test_execution_binds_after_admission_before_agent_construction(
             on_admitted(admitted_workspace)
             events.append("construct")
             assert request._bound_execution.binding.workspace == str(workspace)
-            return object()
+            return SimpleNamespace(select_execution_for_request=lambda req: events.append("select"))
 
     request = AgentRequest(
         request_id="r1", channel_id="web", session_id="s1",
@@ -921,7 +921,7 @@ async def test_execution_binds_after_admission_before_agent_construction(
         params={"query": "hello", "mode": "agent.work.normal", "project_dir": str(workspace)},
     )
     await prepare_chat_turn(cast(Any, Manager()), request, "web", sync_metadata=False)
-    assert events == ["wait", "admit", "construct"]
+    assert events == ["wait", "admit", "construct", "select"]
     assert request._bound_execution.spec.provider_id == "native"
 
 
@@ -3540,3 +3540,31 @@ async def test_agent_server_start_restores_remote_service_after_stop(
         # listener and background services before pytest closes its event loop.
         if server._server is not None:
             await server.stop()
+
+
+def test_native_facade_pins_route_before_child_and_keeps_legacy_guard(tmp_path):
+    from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+    from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
+    from jiuwenswarm.runtime.harness.config_source import ExecutionConfigSource
+    from openjiuwen.harness_protocol import AgentExecutionSpec
+    bindings = ExecutionBindingStore()
+    source = ExecutionConfigSource(explicit=AgentExecutionSpec('native','test'))
+    bound = bindings.bind(source, subject_id='alice', host_session_id='plan-first', workspace=str(tmp_path))
+    request = AgentRequest('plan-first-turn', channel_id='web', session_id='plan-first',
+        req_method=ReqMethod.CHAT_SEND, params={'mode':'code.normal','query':'Hi'})
+    request._bound_execution = bound
+    request._execution_source = source
+    request._execution_bindings = bindings
+    root = object.__new__(JiuWenSwarmDeepAdapter)
+    root._native_session_routes = {}
+    root._session_adapters = {}
+    facade = object.__new__(JiuWenSwarm)
+    facade._adapter = root
+    facade.select_execution_for_request(request)
+    assert root._native_session_routes['plan-first'][2] is bound
+    root._session_adapters['plan-first'] = SimpleNamespace(_native_execution=object())
+    facade.select_execution_for_request(request)
+    root._session_adapters['plan-first'] = SimpleNamespace(_native_execution=None)
+    with pytest.raises(RuntimeError, match='legacy interaction route'):
+        facade.select_execution_for_request(request)

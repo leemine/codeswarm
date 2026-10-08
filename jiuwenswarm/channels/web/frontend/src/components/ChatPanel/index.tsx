@@ -1898,6 +1898,7 @@ export const ChatPanel = React.memo(function ChatPanel({
                 <InterruptResultBubble />
                 <InteractionSlot onSubmit={onUserAnswer} />
                 <InputArea
+                  organizationAuth={organizationAuth}
                   ref={inputAreaRef}
                   onSubmit={handleSendMessage}
                   onEnsureSession={onEnsureSession}

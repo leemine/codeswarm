@@ -96,6 +96,8 @@ def _source(host, identity, sid):
             "project_id"
         ] or binding != _metadata_cleanup_binding(lifecycle.raw_metadata(sid)):
             _deny()
+        if source.get('kind') == 'private':
+            binding['project_dir'] = host.private_workspace(sid, identity)
         root = _path(binding["project_dir"])
         if str(root.resolve()) != str(root):
             _deny()
@@ -118,7 +120,7 @@ def _decision(host, source, path):
     root, project = binding["project_dir"], binding["project_id"]
     if not _path(path).is_relative_to(_path(root)) or path == root:
         _deny()
-    rows = host._storage.resource_grants(project, source.identity)["resources"]
+    rows = host.resource_authorizer(source.session_id).resource_grants(project, source.identity)["resources"]
     ids = {
         row["resource_id"]
         for row in rows
@@ -128,7 +130,7 @@ def _decision(host, source, path):
     }
     if len(ids) != 1:
         _deny()
-    decision = ResourceGuard(host._storage).check(
+    decision = ResourceGuard(host.resource_authorizer(source.session_id)).check(
         project, source.identity, ResourceRequest(next(iter(ids)), "read", path)
     )
     if decision.reference != root:
@@ -276,7 +278,7 @@ class WorkspaceArtifactIssuer:
                 != self._decisions[self._paths.index(path)]
                 or self._tool_origin is None
                 or type(self._tool_decision) is not ResourceDecision
-                or ResourceGuard(self._host._storage).check(
+                or ResourceGuard(self._host.resource_authorizer(self._source.session_id)).check(
                     dict(self._source.binding)["project_id"], self._source.identity,
                     self._tool_decision.request) != self._tool_decision):
             _deny()
@@ -601,7 +603,7 @@ class WorkspaceDownloadPermit:
             or _source(self._host, self._source.identity, self.session_id)
             != (self._source, self._revision)
             or _decision(self._host, self._source, self._path) != self._decision
-            or (self._tool_decision is not None and ResourceGuard(self._host._storage).check(
+            or (self._tool_decision is not None and ResourceGuard(self._host.resource_authorizer(self._source.session_id)).check(
                 dict(self._source.binding)["project_id"], self._source.identity,
                 self._tool_decision.request) != self._tool_decision)
         ):

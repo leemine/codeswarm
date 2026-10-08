@@ -501,11 +501,17 @@ class AgentRuntime:
         project_id = self._governance_project(request)
         identity = self._governance_identity(request)
         decision = self._submission_guard.check_access(project_id, identity, "execute")
-        if decision is None or decision.revision == 0:
+        from jiuwenswarm.common.work_mode import is_default_project_id
+        private = self._organization_session_host is not None and is_default_project_id(project_id)
+        if not private and (decision is None or decision.revision == 0):
             return None
         if identity is None:
             raise GovernanceError("resource execution requires trusted identity")
+        resources = self._resource_authorizer
         workspace = get_project_dir_by_id(project_id)
+        if private:
+            workspace = self._organization_session_host.private_workspace(request.session_id, identity)
+            resources = self._organization_session_host.resource_authorizer(request.session_id)
         if not workspace:
             return {}  # Bound but unavailable: every Provider remains denied.
         session_id = request.session_id or "default"
@@ -569,7 +575,7 @@ class AgentRuntime:
                 check = getattr(owner, "owns_external_tool_session", None)
                 return callable(check) and check(execution, provider_session_id) is True
             resolver = _CurrentNativeToolResources(
-                self._resource_authorizer, owns_session, owns_external_session,
+                resources, owns_session, owns_external_session,
             )
         from jiuwenswarm.governance.model_credentials import NativeModelCredentialAuthority
         from jiuwenswarm.governance.tool_context import ExecutionResourceAuthorities
@@ -590,14 +596,14 @@ class AgentRuntime:
             return crypto.decrypt(value)
         model_authority = NativeModelCredentialAuthority(
             ResourceExecutionContext(project_id, identity, session_id, str(Path(workspace).resolve()), "native"),
-            resource_authorizer=self._resource_authorizer,
+            resource_authorizer=resources,
             current_identity=current_identity, is_current_execution=is_current,
             owns_execution=owns_model_execution, credential_decoder=decode_model_credential,
             binding_checker=continuation.check_model if continuation is not None else None,
         )
         from jiuwenswarm.governance.mcp_credentials import NativeMcpCredentialAuthority
         mcp_authority = NativeMcpCredentialAuthority(
-            model_authority.execution, resource_authorizer=self._resource_authorizer,
+            model_authority.execution, resource_authorizer=resources,
             current_identity=current_identity, is_current_execution=is_current,
             owns_execution=owns_model_execution, credential_decoder=decode_model_credential,
         )
@@ -638,7 +644,7 @@ class AgentRuntime:
                            else params.get('model_name'))
         external_model_authority = OpenCodeModelCredentialAuthority(
             ResourceExecutionContext(project_id, identity, session_id, str(Path(workspace).resolve()), 'opencode'),
-            resource_authorizer=self._resource_authorizer, current_identity=current_identity,
+            resource_authorizer=resources, current_identity=current_identity,
             is_current_execution=is_current, capture_binding=capture_external_model_binding,
             model_selection=model_selection, credential_decoder=decode_model_credential,
             binding_checker=continuation.check_model if continuation is not None else None,
@@ -691,7 +697,7 @@ class AgentRuntime:
         return ExecutionResourceAuthorities({
             provider: BoundToolResourceAuthority(
                 ResourceExecutionContext(project_id, identity, session_id, str(Path(workspace).resolve()), provider),
-                authorizer=self._resource_authorizer, resolver=resolver,
+                authorizer=resources, resolver=resolver,
                 current_identity=current_identity, is_current_execution=is_current,
             ) for provider in ("native", "codex", "opencode")
         }, model_authorizer=model_authority, mcp_authorizer=mcp_authority,
@@ -765,6 +771,14 @@ class AgentRuntime:
                     )
                     if decision is not None and decision.revision > 0:
                         raise GovernanceError("directory overlaps a different protected project")
+        from jiuwenswarm.common.work_mode import is_default_project_id
+        if self._organization_session_host is not None and is_default_project_id(project_id):
+            if project_dir or declared_dirs:
+                if not session_id:
+                    raise GovernanceError("private Session directory is allocated by the host")
+                root = self._organization_session_host.private_workspace(session_id, self._governance_identity(value))
+                if any(not Path(path).resolve().is_relative_to(Path(root)) for path in [project_dir, *declared_dirs] if path):
+                    raise GovernanceError("directory outside private Session workspace")
         return project_id
 
     def _authorize_session_mutation(self, session_id: str, channel_id: str) -> None:
@@ -1831,8 +1845,8 @@ class AgentRuntime:
         project_id = self._governance_project(request)
         if identity is not None and project_id:
             decision = self._submission_guard.check_access(project_id, identity, "execute")
+            prepare_kwargs["trusted_subject_id"] = identity.subject_id
             if decision is not None and decision.revision > 0:
-                prepare_kwargs["trusted_subject_id"] = identity.subject_id
                 if (request.req_method in self._chat_turn_methods()
                         and not self._is_interrupt_resume_request(request)):
                     from jiuwenswarm.server.runtime.session.project_content import ProjectContentStore

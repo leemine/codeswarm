@@ -318,8 +318,11 @@ def _run_git(
         raise FileNotFoundError("git executable not found")
     cmd_str = "git " + " ".join(args)
     logger.debug("[ProjectGit] run: %s (cwd=%s)", cmd_str, cwd)
+    from jiuwenswarm.governance.project_git import git_command_context
+    governed_args, governed_env = git_command_context(cwd)
     return subprocess.run(
-        [git_exe, *args],
+        [git_exe, *governed_args, *args],
+        **({'env': governed_env} if governed_env is not None else {}),
         cwd=cwd,
         capture_output=True,
         text=True,

@@ -109,8 +109,8 @@ test('RPC client uses existing websocket and only whitelisted fields', async () 
   }
 });
 
-test('editor keeps actions independent and never expands the snapshot', async () => {
-  sessionSharingApi.list = async (id) => ({ shares: id ? [share] : [] });
+test('editor hides continuation, preserves old execute and never expands the snapshot', async () => {
+  sessionSharingApi.list = async (id) => ({ shares: id ? [{ ...share, actions: ['view', 'execute'] }] : [] });
   let submitted;
   sessionSharingApi.update = async (item, bounds) => {
     submitted = { item, bounds };
@@ -118,12 +118,15 @@ test('editor keeps actions independent and never expands the snapshot', async ()
   };
   await mount();
   try {
-    assert.equal(document.querySelectorAll('[data-testid="multi-session-sharing-action"]').length, 6);
+    assert.equal(document.querySelectorAll('[data-testid="multi-session-sharing-action"]').length, 5);
     await act(async () => find('multi-session-sharing-edit').click());
     assert.equal(find('multi-session-sharing-target').value, 'bob');
     assert.equal(find('multi-session-sharing-target').disabled, true);
     const execute = document.querySelector('[data-testid="multi-session-sharing-action"][data-variant="execute"]');
-    await act(async () => execute.click());
+    assert.equal(execute, null);
+    for (const action of ['discuss', 'approve', 'download']) {
+      assert.equal(document.querySelector(`input[data-variant="${action}"]`).disabled, true);
+    }
     assert.equal(
       document.querySelector('[data-variant="approve"] input')?.checked ??
         document.querySelector('input[data-variant="approve"]').checked,

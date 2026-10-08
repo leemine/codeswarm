@@ -35,7 +35,7 @@ SHARE_METHODS = frozenset({
     'session.share.continuation.options', 'session.share.continue',
 })
 GLOBAL_METHODS = frozenset({
-    'config.get', 'models.list',
+    'config.get', 'models.list', 'session.execution.options',
     'session.list', 'project.list', 'project.create', 'project.info',
     'project.content.get', 'project.content.update', 'project.get_sessions',
     'project.resources.list', 'project.resources.grant', 'project.resources.revoke',
@@ -152,6 +152,7 @@ class SessionRequestPermit:
     goal_read_route: object | None = None
     goal_read_result: object | None = None
     resource_mutation_request: object | None = None
+    project_git_request: object | None = None
 
     def allows_cleanup(self, method: str, params: dict, identity: TrustedIdentity,
                        envelope_session: str | None = None) -> bool:
@@ -173,6 +174,8 @@ class SessionRequestPermit:
         try:
             if self.identity_resolver() != self.identity:
                 return False
+            if self.project_git_request is not None:
+                self.project_git_request.check()
             if self.goal_read_route is not None:
                 self.goal_read_route.check()
             if self.goal_read_result is not None:
@@ -211,6 +214,7 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
     if not isinstance(identity, TrustedIdentity) or not isinstance(params, dict):
         raise SessionSharingDenied('authenticated request required')
     from .single_delivery import require_single_delivery
+    from .project_git import GIT_METHODS
     require_single_delivery(method, params, session_id=params.get('session_id') or envelope_session)
     if method == 'session.share.audit.list':
         from jiuwenswarm.server.runtime.session.sharing_audit import audit_query_params
@@ -218,6 +222,7 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
     owners = []
     workspace_download = None
     goal_read_route = None
+    project_git_request = None
     cleanup = None
     deletion_receipt = None
     share = None
@@ -293,6 +298,9 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
             decision = host.store.authorize(sid, identity, 'view', share_id=share_id, history=history)
             share = (sid, share_id, decision.revision, history)
         # Management is checked by the sharing adapter, never active subscription.
+    elif method in GIT_METHODS:
+        from .project_git import capture_git_request
+        project_git_request = capture_git_request(method, params, identity_resolver, host._storage)
     elif method not in GLOBAL_METHODS:
         raise SessionSharingDenied('organization method requires an explicit policy')
     permit = SessionRequestPermit(identity, identity_resolver, host, tuple(owners), share,
@@ -303,6 +311,8 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
     if method in {'project.resources.grant', 'project.resources.revoke'}:
         from .resource_mutation_receipt import capture_resource_mutation
         permit = replace(permit, resource_mutation_request=capture_resource_mutation(method, params))
+    if project_git_request is not None:
+        permit = replace(permit, project_git_request=project_git_request)
     if not permit.revalidate():
         raise SessionSharingDenied('Session authorization denied')
     return permit
@@ -416,3 +426,13 @@ def filter_current_inventory(rows):
             if cleanup is not None:
                 result.append(cleanup)
     return result
+
+
+def current_git_request(method, params):
+    """Return only the original AgentServer request's exact Git permit."""
+    permit = _delivery.get()
+    if (permit is None or permit.method != method or permit.project_git_request is None
+            or not permit.revalidate()
+            or permit.project_git_request.params_json != json.dumps(params, sort_keys=True)):
+        raise SessionSharingDenied('Original Git request permit required')
+    return permit.project_git_request

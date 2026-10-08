@@ -151,7 +151,17 @@ class SharingHostService:
             raise SessionSharingDenied('Session source was deleted')
         session_generation = _component(session_state.get('generation', 0))
         project_generation = _component(project_state.get('generation', 0))
-        actions, acl_revision = self._project(data, project_id, owner)
+        from jiuwenswarm.common.work_mode import is_default_project_id
+        if is_default_project_id(project_id):
+            record = self.store._section(data)['owners'][session_id]
+            source = record['source']
+            from jiuwenswarm.governance.private_session_resources import workspace_stamp
+            if (source.get('kind') != 'private' or metadata.get('project_dir')
+                    or workspace_stamp(source['workspace']) != source.get('workspace_stamp')):
+                raise SessionSharingDenied('private Session workspace binding changed')
+            actions, acl_revision = frozenset({'view', 'manage', 'execute'}), record['revision']
+        else:
+            actions, acl_revision = self._project(data, project_id, owner)
         return actions, acl_revision, session_generation, project_generation
 
     def _current(self, data, session_id):
@@ -175,6 +185,22 @@ class SharingHostService:
                                                facts[0], scope)
         except Exception:
             return None
+
+    def resource_authorizer(self, session_id):
+        """Bind private grants to an actual Session; project consumers stay unchanged."""
+        with self._storage._locked():
+            _, _, source, _ = self._current(self._storage._load(), session_id)
+            if source.get('kind') == 'private':
+                from jiuwenswarm.governance.private_session_resources import PrivateSessionResources
+                return PrivateSessionResources(self, session_id)
+            return self._storage
+
+    def private_workspace(self, session_id, identity):
+        with self._storage._locked():
+            _, owner, source, _ = self._current(self._storage._load(), session_id)
+            if owner != identity or source.get('kind') != 'private':
+                raise SessionSharingDenied('private Session owner required')
+            return source['workspace']
 
     def owner_current(self, session_id: str, identity: TrustedIdentity, action: str = 'view') -> bool:
         """Current owner ACL without requiring a history file to exist yet."""
@@ -310,7 +336,7 @@ class SharingHostService:
         return audit_pending_for_permit(self, permit)
 
     def register_owner_and_source(self, session_id: str, owner: TrustedIdentity, project_id: str, *,
-                                  expected_owner_revision: int = 0) -> int:
+                                  expected_owner_revision: int = 0, private: bool = False) -> int:
         """Host-only prepublish registration; one sidecar save and no history IO.
 
         Session metadata need not exist yet. The first prepared source cannot
@@ -332,7 +358,13 @@ class SharingHostService:
                 raise SessionSharingConflict('owner revision changed')
             if self._known_actor(owner) is not True:
                 raise SessionSharingDenied('trusted known owner required')
-            self._project(data, project_id, owner)
+            from jiuwenswarm.common.work_mode import is_default_project_id
+            if private is not True and is_default_project_id(project_id):
+                raise SessionSharingDenied('private Session registration requires Runtime authority')
+            if private and not is_default_project_id(project_id):
+                raise SessionSharingDenied('private Session cannot claim a Project')
+            if not private:
+                self._project(data, project_id, owner)
             lifecycle.guard(project_id=project_id)
             session_state, project_state = lifecycle.state('session', session_id), lifecycle.state('project', project_id)
             # Creation after deletion requires the lifecycle owner to finish its
@@ -345,6 +377,19 @@ class SharingHostService:
                 'retired': False, 'source': {'schema_version': 1, 'epoch': epoch, 'active': True,
                 'project_id': project_id, 'session_generation': _component(session_state.get('generation', 0)),
                 'project_generation': _component(project_state.get('generation', 0)), 'history': None}}
+            if private:
+                from jiuwenswarm.common.projectless_workspace import get_projectless_task_workspace
+                from jiuwenswarm.governance.private_session_resources import workspace_stamp
+                root = str(get_projectless_task_workspace(session_id).root_dir)
+                from . import project_store
+                from pathlib import Path
+                for project in project_store.list_projects(include_hidden=True, cache_bust=True):
+                    if project.project_dir and self._storage.is_protected(project.project_id):
+                        other = Path(project.project_dir).resolve()
+                        if Path(root).is_relative_to(other) or other.is_relative_to(Path(root)):
+                            raise SessionSharingDenied('private workspace overlaps a protected Project')
+                owners[session_id]['source'].update(kind='private', workspace=root,
+                                                   workspace_stamp=workspace_stamp(root))
             from .continuation_publication import prepare_registration
             publication = prepare_registration(self, session_id, owner, project_id, previous=previous, epoch=epoch, owners=owners)
             if publication is not None:
@@ -418,6 +463,10 @@ class SharingHostService:
             if type(expected_epoch) is not int or source['epoch'] != expected_epoch or source['active']:
                 raise SessionSharingConflict('source is not the expected invalidated epoch')
             facts = self._live_binding(data, session_id, owner, project_id)
+            from jiuwenswarm.common.work_mode import is_default_project_id
+            if not is_default_project_id(project_id):
+                for key in ('kind', 'workspace', 'workspace_stamp'):
+                    source.pop(key, None)
             source.update(project_id=project_id, active=True, history=None,
                           session_generation=facts[2], project_generation=facts[3])
             self._storage._save(data)

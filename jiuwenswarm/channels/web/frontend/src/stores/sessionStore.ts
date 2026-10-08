@@ -1,3 +1,4 @@
+import type { ExecutionChoice } from '../services/executionOptions';
 /**
  * 会话状态管理（多 session 版本）
  *
@@ -509,6 +510,8 @@ export interface TeamMemberExecutionEvent {
  * 原 B 类全局字段全部迁移到这里，按 session 隔离。
  */
 export interface SessionRuntime {
+  /** In-memory creation choice; an existing Session always reads its server Binding. */
+  executionChoice?: ExecutionChoice | null;
   mode: AgentMode;
   selectedModelName: string | null;
   projectDirectory: string | null;
@@ -627,6 +630,7 @@ interface SessionState {
   setMemoryUsage: (memoryUsage: Partial<MemoryUsage> | null) => void;
   setAvailableModels: (models: ModelEntry[], activeModel?: string) => void;
   setSelectedModelName: (sessionId: string, name: string) => void;
+  setExecutionChoice: (sessionId: string, choice: ExecutionChoice | null) => void;
 
   // B 类 actions（加 sessionId）
   setMode: (sessionId: string, mode: AgentMode) => void;
@@ -1948,6 +1952,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     });
   },
 
+  setExecutionChoice: (sessionId, choice) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return { runtimes: { ...state.runtimes, [sessionId]: { ...runtime, executionChoice: choice } } };
+    });
+  },
   setSelectedModelName: (sessionId, name) => {
     // 注意：这里只更新当次会话的内存态，不再写 MODEL_STORAGE_KEY——
     // 该 key 专门保存后端配置的默认模型（见 setAvailableModels），

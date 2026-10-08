@@ -1,4 +1,6 @@
-﻿import { organizationRequestRestriction } from '../../features/organizationRelease';
+﻿import { ExecutionPicker } from './ExecutionPicker';
+import { resolvePlanWireMode } from '../../features/planMode/wireMode';
+import { organizationRequestRestriction } from '../../features/organizationRelease';
 import {
   useState,
   useRef,
@@ -4084,6 +4086,15 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     permissionProfile={permissionProfile}
                     permissionRuntimeState={permissionRuntimeState}
                     onSavePermission={onSavePermission}
+                  />
+                )}
+
+                {isAgentMode && activeSessionId && (
+                  <ExecutionPicker
+                    sessionId={activeSessionId}
+                    mode={resolvePlanWireMode(mode, planActive, activeSession?.work_mode || selectedProject?.work_mode || workMode)}
+                    workMode={activeSession?.work_mode || selectedProject?.work_mode || workMode}
+                    disabled={composerDisabled || isProcessing}
                   />
                 )}
 

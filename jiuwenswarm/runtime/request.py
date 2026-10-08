@@ -541,6 +541,14 @@ async def prepare_chat_turn(
     if agent is None:
         raise ValueError("Failed to get agent")
 
+    # Plan setup can allocate the session child before the first message. The
+    # admitted provider must already be pinned when that allocation happens.
+    if getattr(request, "_bound_execution", None) is not None:
+        select = getattr(agent, "select_execution_for_request", None)
+        if not callable(select):
+            raise RuntimeError("selected execution provider has no agent route")
+        select(request)
+
     # Persist Session is a session-creation identity. Per-turn request values
     # are advisory only; expose the locked value through the legacy internal
     # adapter key without allowing a chat request to mutate it.

@@ -4073,3 +4073,20 @@ async def test_all_sharing_methods_forward_to_agentserver(monkeypatch, method):
     assert forwarded["params"] is params
     assert forwarded["agent_client"] is client
     assert forwarded["ws"] is ws
+
+
+@pytest.mark.asyncio
+async def test_execution_options_forward_without_transport_session(monkeypatch):
+    from unittest.mock import AsyncMock
+    proxy = AsyncMock()
+    monkeypatch.setattr('jiuwenswarm.gateway.routing.e2a_proxy.proxy_unary_request', proxy)
+    channel = FakeWebChannel()
+    client = object()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, agent_client=client))
+    params = {'mode': 'agent.code.normal', 'work_mode': 'code'}
+    await channel.methods['session.execution.options'](object(), 'options', params, 'private-active-session', user_id='routing-only')
+    forwarded = proxy.await_args.kwargs
+    assert forwarded['req_method'].value == 'session.execution.options'
+    assert forwarded['params'] is params
+    assert forwarded['session_id'] is None
+    assert forwarded['agent_client'] is client

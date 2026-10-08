@@ -107,6 +107,7 @@ class SessionAdapter(GatewayAdapter):
         {
             ReqMethod.SESSION_LIST.value,
             ReqMethod.SESSION_GET_METADATA.value,
+            ReqMethod.SESSION_EXECUTION_OPTIONS.value,
             ReqMethod.SESSION_PIN.value,
             ReqMethod.SESSION_COLOR_SET.value,
             ReqMethod.SESSION_PREVIEW.value,
@@ -131,6 +132,8 @@ class SessionAdapter(GatewayAdapter):
                 guard(str(params.get("session_id") or request.session_id or ""))
             except LifecycleError as exc:
                 return build_error_response(request, str(exc), code=exc.code)
+        if method == ReqMethod.SESSION_EXECUTION_OPTIONS:
+            return await self._handle_execution_options(request)
         if method == ReqMethod.SESSION_GET_METADATA:
             return await self._handle_get_metadata(request)
         if method == ReqMethod.SESSION_PIN:
@@ -148,6 +151,29 @@ class SessionAdapter(GatewayAdapter):
         if method == ReqMethod.SESSION_RENAME:
             return await self._handle_rename(request)
         return await self._handle_list(request)
+
+    async def _handle_execution_options(self, request: AgentRequest) -> AgentResponse:
+        from jiuwenswarm.common.config import get_config
+        from jiuwenswarm.governance.model_credentials import configured_model_metadata
+        from jiuwenswarm.governance.organization_auth import configured_authenticator, current_identity
+        from jiuwenswarm.runtime.harness.execution_options import execution_options, parse_execution_options
+
+        try:
+            parse_execution_options(request.params)
+            governed = configured_authenticator() is not None
+            if governed and current_identity() is None:
+                raise PermissionError("authenticated catalog required")
+        except PermissionError:
+            return build_error_response(request, "Execution options unavailable.", code="FORBIDDEN")
+        except (TypeError, ValueError):
+            return build_error_response(request, "Invalid execution options request.", code="BAD_REQUEST")
+        try:
+            payload = execution_options(get_config(), configured_model_metadata(), request.params, governed=governed)
+        except Exception:
+            # Config validators may contain provider secrets in their errors.
+            return build_error_response(request, "Execution configuration unavailable.", code="CONFIGURATION_UNAVAILABLE")
+        return AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
+                             ok=True, payload=payload, metadata=request.metadata)
 
     async def _handle_history_list_turns(self, request: AgentRequest) -> AgentResponse:
         """Return session turns without entering the chat request path."""
@@ -295,6 +321,13 @@ class SessionAdapter(GatewayAdapter):
             return build_error_response(
                 request, "session not found", code="NOT_FOUND"
             )
+        from jiuwenswarm.common.config import get_config
+        from jiuwenswarm.runtime.harness.execution_options import execution_display
+        try:
+            display_config = get_config()
+        except Exception:
+            display_config = {}
+        meta = {**meta, "execution_display": execution_display(meta, display_config)}
         return AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,

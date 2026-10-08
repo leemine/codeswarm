@@ -69,6 +69,7 @@ class ReqMethod(Enum):
     SESSION_PIN = "session.pin"
     SESSION_COLOR_SET = "session.color_set"
     SESSION_PREVIEW = "session.preview"
+    SESSION_EXECUTION_OPTIONS = "session.execution.options"
     SESSION_CREATE = "session.create"
     SESSION_SWITCH = "session.switch"
     SESSION_DELETE = "session.delete"

@@ -1,3 +1,4 @@
+import { prepareExecutionCreate } from './services/executionOptions';
 import { organizationRequestRestriction } from './features/organizationRelease';
 import { useSideConversationDeletion, useSessionDeletionReceipt } from './multi-session/state/useSideConversationDeletion';
 import { SharedHistoryDialog } from './multi-session/dialogs/SharedHistoryDialog';
@@ -429,6 +430,7 @@ function AppContent({
   useEffect(() => {
     return onOrganizationCredentialChange(() => {
       continuationAttempts.current.clear();
+      useSessionStore.getState().setExecutionChoice(NEW_CONVERSATION_ID, null);
       setSharedHistoryTarget(null);
       setSharingDialogSessionId(null);
       setSharingInboxOpen(false);
@@ -2662,6 +2664,9 @@ function AppContent({
       ? pendingNewRuntime.agentGroupSelectionIntent
       : null;
     resetNewConversationRuntime({ mode: nextMode, selectedModelName, projectDir });
+    if (shouldRestorePendingNewConversation && pendingNewRuntime?.executionChoice) {
+      useSessionStore.getState().setExecutionChoice(NEW_CONVERSATION_ID, pendingNewRuntime.executionChoice);
+    }
     if (pendingAgentSelection) {
       useSessionStore.getState().setAgentSelectionIntent(NEW_CONVERSATION_ID, pendingAgentSelection);
     }
@@ -2835,6 +2840,8 @@ function AppContent({
       if (workContext.project_id) createParams.project_id = workContext.project_id;
       if (workContext.project_dir) createParams.project_dir = workContext.project_dir;
 
+      await prepareExecutionCreate(request, createParams, pendingRuntime?.executionChoice);
+      runtimeSettings.selectedModelName = String(createParams.model_name || runtimeSettings.selectedModelName || '') || null;
       const created = await createConversationSession(request, createParams);
       const newSid = created.session_id;
       const createdSession = registerCreatedConversation(
@@ -2887,7 +2894,7 @@ function AppContent({
       useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
       useChatStore.getState().setThinking(NEW_CONVERSATION_ID, false);
       console.error('Failed to create application plugin conversation:', error);
-      window.alert(t('multiSession.errors.create'));
+      window.alert(t(error instanceof Error && ['executionPicker.selectionUnavailable', 'executionPicker.chooseModel'].includes(error.message) ? error.message : 'multiSession.errors.create'));
       return null;
     } finally {
       creatingSessionRef.current = false;
@@ -2986,6 +2993,8 @@ function AppContent({
         if (workContext.project_dir) {
           createParams.project_dir = workContext.project_dir;
         }
+        await prepareExecutionCreate(request, createParams, newRuntime?.executionChoice);
+        runtimeSettings.selectedModelName = String(createParams.model_name || runtimeSettings.selectedModelName || '') || null;
         const created = await createConversationSession(request, createParams);
         const newSid = created.session_id;
         const createdSession = registerCreatedConversation(
@@ -3085,7 +3094,7 @@ function AppContent({
         useChatStore.getState().setThinking(NEW_CONVERSATION_ID, false);
         useChatStore.getState().setInputValue(NEW_CONVERSATION_ID, content);
         console.error('Failed to create conversation:', error);
-        window.alert(t('multiSession.errors.create'));
+        window.alert(t(error instanceof Error && ['executionPicker.selectionUnavailable', 'executionPicker.chooseModel'].includes(error.message) ? error.message : 'multiSession.errors.create'));
       } finally {
         creatingSessionRef.current = false;
       }

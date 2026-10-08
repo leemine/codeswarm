@@ -63,7 +63,7 @@ class NativeArtifactAuthority:
         ctx = source_execution.agent_context
 
         def tool_decision():
-            rows = self._host._storage.resource_grants(
+            rows = self._host.resource_authorizer(self.execution.session_id).resource_grants(
                 self.execution.project_id, self.execution.identity
             )["resources"]
             ids = {
@@ -75,7 +75,7 @@ class NativeArtifactAuthority:
             }
             if len(ids) != 1:
                 raise ResourceAccessDenied("artifact tool resource unavailable")
-            decision = ResourceGuard(self._host._storage).check(
+            decision = ResourceGuard(self._host.resource_authorizer(self.execution.session_id)).check(
                 self.execution.project_id,
                 self.execution.identity,
                 ResourceRequest(next(iter(ids)), "invoke"),

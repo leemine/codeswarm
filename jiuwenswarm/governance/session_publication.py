@@ -25,13 +25,15 @@ class SessionOwnerPublication:
         if not isinstance(identity, TrustedIdentity):
             raise SessionSharingDenied('trusted Runtime publication identity required')
         decision = self.host._storage.authorize(project_id, identity.actor_id, 'execute')
-        if not decision.allowed or decision.revision < 1:
+        from jiuwenswarm.common.work_mode import is_default_project_id
+        if not decision.allowed or (not is_default_project_id(project_id) and decision.revision < 1):
             raise SessionSharingDenied('managed project execution authority required')
         if not created:
             if not self.host.owner_current(session_id, identity):
                 raise SessionSharingDenied('existing Session has no matching trusted owner')
             return None
-        epoch = self.host.register_owner_and_source(session_id, identity, project_id)
+        epoch = self.host.register_owner_and_source(session_id, identity, project_id,
+                                                   private=is_default_project_id(project_id))
         # register_owner_and_source used expected_owner_revision=0. A
         # successful CAS therefore already proves revision 1; do not perform
         # another fallible storage read before returning the owned receipt.

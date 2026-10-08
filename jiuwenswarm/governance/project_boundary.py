@@ -75,6 +75,10 @@ def authorize_resource_request(
     authorized scoped APIs remain available. Audience-filtered sharing is R2-B.
     """
     method = getattr(getattr(request, "req_method", None), "value", "")
+    # Catalog display contains no project/session/resource data. Creation still
+    # performs the original project and resource authorization.
+    if method == "session.execution.options":
+        return
     if not method.startswith(_RESOURCE_PREFIXES):
         return
     from .organization_auth import configured_authenticator
