@@ -4090,3 +4090,19 @@ async def test_execution_options_forward_without_transport_session(monkeypatch):
     assert forwarded['params'] is params
     assert forwarded['session_id'] is None
     assert forwarded['agent_client'] is client
+
+
+@pytest.mark.asyncio
+async def test_models_list_keeps_configured_positions_for_exact_session_selection(monkeypatch):
+    from jiuwenswarm.server.runtime import opencode_zen
+    configured = [{"model_client_config": {"model_name": name}, "is_default": True}
+                  for name in ["", "same", "same"]]
+    monkeypatch.setattr(app_web_handlers, "get_config", lambda: {"models": {"defaults": configured}})
+    monkeypatch.setattr(app_web_handlers, "get_available_models", lambda *_: configured + [
+        {"model_client_config": {"model_name": "login-only"}}])
+    monkeypatch.setattr(opencode_zen, "get_zen_free_model_entries", lambda: [])
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    await channel.methods["models.list"](object(), "models", {}, "session")
+    entries = channel.responses[-1]["payload"]["models"]
+    assert [entry.get("selection_key") for entry in entries] == [None, "same#1", "same#2", None]

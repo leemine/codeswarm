@@ -35,6 +35,7 @@ import {
   consumePendingQuestion as consumeQueuedQuestion,
   clearPermissionQuestions as clearQueuedPermissionQuestions,
   enqueuePendingQuestions,
+  reconcilePendingQuestionSnapshot,
 } from './pendingQuestionQueue';
 
 const TOOL_TIMEOUT_MS = 12_000_000;
@@ -298,6 +299,7 @@ interface ChatState {
   removeFromTaskQueue: (sessionId: string, id: string) => void;
   reorderTaskQueue: (sessionId: string, fromIndex: number, toIndex: number) => void;
   enqueuePendingQuestion: (sessionId: string, question: AskUserQuestionPayload) => void;
+  reconcilePendingQuestions: (sessionId: string, observed: AskUserQuestionPayload[] | undefined, snapshot: AskUserQuestionPayload[] | undefined) => void;
   consumePendingQuestion: (sessionId: string, question: AskUserQuestionPayload) => void;
   clearPendingQuestions: (sessionId: string) => void;
   setPendingGoalObjectiveBubble: (sessionId: string, content: string | null) => void;
@@ -430,7 +432,8 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
               toolResultDedupDropped: 0,
             },
             taskQueue: [],
-            pendingQuestions: [],
+            // History is presentation; only live controls/metadata own questions.
+            pendingQuestions: runtime.pendingQuestions,
             pendingGoalObjectiveBubble: null,
           },
         },
@@ -1568,6 +1571,16 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
           },
         },
       };
+    });
+  },
+
+  reconcilePendingQuestions: (sessionId, observed, snapshot) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const pendingQuestions = reconcilePendingQuestionSnapshot(runtime.pendingQuestions, observed, snapshot);
+      if (pendingQuestions === runtime.pendingQuestions) return state;
+      return { runtimes: { ...state.runtimes, [sessionId]: { ...runtime, pendingQuestions } } };
     });
   },
 

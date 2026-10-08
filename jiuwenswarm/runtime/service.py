@@ -1570,6 +1570,76 @@ class AgentRuntime:
         """Return the bounded status record for queued Session work."""
         return self._session_coordinator.get_execution(execution_id)
 
+    def get_session_interaction_state(self, request: SessionGetInput) -> dict[str, Any]:
+        """Project live control IDs onto original history after Session read admission.
+
+        History is presentation only: only current coordinator owners make a
+        question actionable. No replay creates a producer or a new control ID.
+        """
+        empty = {"is_processing": False, "pending_interactions": []}
+        if self.get_session(request) is None:
+            return empty
+        snapshot = self._session_coordinator.snapshot_session(request.session_id)
+        if snapshot is None or snapshot.channel_id != request.channel_id:
+            return empty
+        from jiuwenswarm.runtime.session.interactions import project_interaction_state
+        from jiuwenswarm.server.runtime.session.session_history import load_history_records
+
+        needs_questions = any(
+            not item.state.terminal and item.generation == snapshot.generation
+            and (item.waiting_control_id or item.waiting_control_ids)
+            for item in snapshot.executions
+        )
+        records = load_history_records(request.session_id) if needs_questions else ()
+        result = project_interaction_state(snapshot, records)
+        # Revalidate after reading history; do not disclose a revoked Session.
+        if self.get_session(request) is None:
+            return empty
+        return result
+
+    def get_session_request_execution(
+        self, request: SessionGetInput, *, request_id: str,
+    ) -> SessionExecutionSnapshot | None:
+        """Read an existing request's coordinator facts after normal Session read admission.
+
+        This never registers a consumer, resumes work, or infers a terminal from
+        a missing record. Historical callers must keep unknown outcomes unknown.
+        """
+        if self.get_session(request) is None:
+            return None
+        snapshot = self._session_coordinator.snapshot_session(request.session_id)
+        if snapshot is None or snapshot.channel_id != request.channel_id:
+            return None
+        return next((item for item in snapshot.executions if item.request_id == request_id), None)
+
+    def get_session_request_executions(
+        self, request: SessionGetInput, *, request_id: str,
+    ) -> tuple[SessionExecutionSnapshot, ...]:
+        """Read a request and its control descendants, without changing their states.
+
+        A completed root receipt can still own a resumed control stream. Consumers
+        waiting for the whole request must observe that lineage, not just its root.
+        Missing/evicted roots remain unknown; unrelated Session turns are excluded.
+        """
+        if self.get_session(request) is None:
+            return ()
+        snapshot = self._session_coordinator.snapshot_session(request.session_id)
+        if snapshot is None or snapshot.channel_id != request.channel_id:
+            return ()
+        root = next((item for item in snapshot.executions
+                     if item.request_id == request_id and item.generation == snapshot.generation), None)
+        if root is None:
+            return ()
+        selected = {root.execution_id: root}
+        while True:
+            children = [item for item in snapshot.executions
+                        if item.generation == root.generation
+                        and item.parent_execution_id in selected
+                        and item.execution_id not in selected]
+            if not children:
+                return tuple(selected.values())
+            selected.update((item.execution_id, item) for item in children)
+
     async def _reconcile_continuation_result(self, session_id):
         """Settle this Runtime's original receipt after a durable commit retry."""
         self._require_started()

@@ -777,6 +777,20 @@ _FORWARD_REQ_METHODS = frozenset({
     "skills.teamskillshub.init",
     "skills.teamskillshub.validate",
     "skills.teamskillshub.pack",
+    "evaluation.catalog",
+    "evaluation.task.save",
+    "evaluation.task.publish",
+    "evaluation.import.preview",
+    "evaluation.import.commit",
+    "evaluation.dataset.publish",
+    "evaluation.options",
+    "evaluation.experiment.create",
+    "evaluation.experiment.list",
+    "evaluation.experiment.get",
+    "evaluation.experiment.start",
+    "evaluation.experiment.cancel",
+    "evaluation.evidence",
+    "evaluation.examples",
     "assets.publish.describe",
     "assets.publish.prepare",
     "assets.publish.commit",
@@ -961,6 +975,20 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "skills.teamskillshub.init",
     "skills.teamskillshub.validate",
     "skills.teamskillshub.pack",
+    "evaluation.catalog",
+    "evaluation.task.save",
+    "evaluation.task.publish",
+    "evaluation.import.preview",
+    "evaluation.import.commit",
+    "evaluation.dataset.publish",
+    "evaluation.options",
+    "evaluation.experiment.create",
+    "evaluation.experiment.list",
+    "evaluation.experiment.get",
+    "evaluation.experiment.start",
+    "evaluation.experiment.cancel",
+    "evaluation.evidence",
+    "evaluation.examples",
     "assets.publish.describe",
     "assets.publish.prepare",
     "assets.publish.commit",
@@ -4075,6 +4103,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             models = await asyncio.to_thread(get_available_models, config, auth_session)
             result = []
             active_model = ""
+            configured_count = len(get_default_models(config))
             for idx, entry in enumerate(models):
                 mcc = entry.get("model_client_config", {})
                 mco = entry.get("model_config_obj", {})
@@ -4102,6 +4131,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     "plan": mcc.get("plan") or entry.get("plan") or "",
                     "endpoint_profile": mcc.get("endpoint_profile") or "",
                 }
+                if idx < configured_count and model_name:
+                    result_entry["selection_key"] = f"{model_name}#{idx}"
                 # An empty template entry is not a configured model yet; do
                 # not surface a synthetic context window until the user saves
                 # the model configuration.
@@ -4810,7 +4841,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         def _attach_runtime_status(ok: bool, payload: dict[str, Any]) -> None:
             if ok:
-                payload["is_processing"] = channel.is_session_busy(target_session_id)
+                # Runtime owns plugin/internal executions too. Older/offline
+                # responses may only contain stale disk is_processing metadata.
+                live = payload.pop("runtime_is_processing", None)
+                payload["is_processing"] = live if isinstance(live, bool) else channel.is_session_busy(target_session_id)
 
         await proxy_unary_request(
             channel=channel,

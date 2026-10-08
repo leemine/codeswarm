@@ -273,7 +273,17 @@ async def _run(host: str, port: int) -> None:
         host=host,
         port=port
     )
-    await server.start()
+    evaluation_plugin = extension_registry.get_capability("evaluation.application")
+    if evaluation_plugin is not None:
+        extension_registry.require_capabilities({"evaluation.application": ">=1,<2"})
+        server._evaluation_factory = evaluation_plugin.compose
+    try:
+        await server.start()
+    except BaseException:
+        if server._evaluation_service is not None:
+            await server._evaluation_service.close()
+            server._evaluation_service = None
+        raise
     logger.info(
         "[AgentServer] port listening: ws://%s:%s (elapsed %.2fs)",
         host,

@@ -1,0 +1,10 @@
+id: evaluation-experiments
+name: Evaluation experiments
+version: 1.0.0
+description: Versioned tasks and Native shared-environment evaluation experiments
+author: CodeSwarm
+min_jiuwenswarm_version: "0.2.5"
+package_type: application
+dependencies: {}
+permissions:
+  - agent_tools

@@ -32,6 +32,21 @@ class TestProtocol(unittest.TestCase):
             with patch.object(testctl.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
                 self.assertEqual(testctl.bwrap_prefix(), ["/usr/bin/sudo", "-n", "-E", "/usr/bin/bwrap"])
 
+    def test_strict_wrapper_writes_only_owned_external_sandbox(self) -> None:
+        owned = Path("/var/tmp/eval-tests/testctl-owned")
+        with patch.dict(os.environ, {"TESTCTL_NETWORK_MODE": "strict"}), patch.object(
+            testctl, "bwrap_prefix", return_value=["bwrap"]
+        ):
+            command = testctl.isolated_command(
+                {"id": "test"}, Path("/work"), ["python"], sandbox_root=owned,
+            )
+        binds = [command[index + 1:index + 3]
+                 for index, value in enumerate(command) if value == "--bind"]
+        self.assertIn([str(owned), str(owned)], binds)
+        self.assertNotIn([str(owned.parent), str(owned.parent)], binds)
+        self.assertIn("--unshare-net", command)
+        self.assertEqual(command[command.index("--ro-bind") + 1:command.index("--ro-bind") + 3], ["/", "/"])
+
     def test_manifest_rejects_unknown_schema(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "manifest.json"

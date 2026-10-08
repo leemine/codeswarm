@@ -79,6 +79,7 @@ import { readAgentTemplateName } from './features/agentIdentity';
 import { normalizeTeamLeaderIdentity } from './features/teamLeaderIdentity';
 import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages, useResponsiveLayout, useResponsivePanelResize } from './hooks';
 import { webRequest } from './services/webClient';
+import { normalizeQuestionPayload } from './stores/pendingQuestionQueue';
 import { DeletionAuditPendingError, archivedTaskClient, getArchiveErrorCode } from './features/workspace/archivedTaskClient';
 import type { WorkflowRun } from './components/teamArea/workflowTypes';
 import { useTeamPanelState } from './features/teamPanelState';
@@ -1670,9 +1671,13 @@ function AppContent({
 
   const loadSessionMetadata = useCallback(async (targetSessionId: string): Promise<Session | null> => {
     try {
+      const observedQuestions = useChatStore.getState().ensureRuntime(targetSessionId).pendingQuestions;
       const session = await request<Session>('session.get_metadata', {
         session_id: targetSessionId,
       });
+      useChatStore.getState().reconcilePendingQuestions(
+        targetSessionId, observedQuestions, session.pending_interactions?.map(normalizeQuestionPayload),
+      );
       const isSideConversation = Boolean(session.ephemeral && session.side_parent_session_id?.trim());
       if (isSideConversation) {
         useSessionStore.getState().removeSession(targetSessionId);

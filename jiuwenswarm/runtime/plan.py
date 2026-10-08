@@ -221,6 +221,11 @@ class PlanModeController:
 
         events: list[dict[str, Any]] = []
         async with self.lock_for(session_id):
+            if getattr(request, "_bound_execution", None) is not None:
+                prepare = getattr(agent, "prepare_session_execution", None)
+                if not callable(prepare):
+                    raise RuntimeError("admitted Native plan route unavailable")
+                prepare(request)
             deep_agent, session, live = await self.open_state_session(
                 agent,
                 request.session_id,

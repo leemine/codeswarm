@@ -365,3 +365,50 @@ async def test_process_client_routes_plan_to_its_executor() -> None:
     runtime._stream_started = stream_started  # type: ignore[method-assign]
     assert len([item async for item in client.stream(request)]) == 1
     await client.close()
+
+@pytest.mark.asyncio
+async def test_request_execution_read_requires_session_admission_and_never_creates_work(monkeypatch):
+    from jiuwenswarm.runtime.session_catalog import SessionGetInput
+    from types import SimpleNamespace
+
+    runtime = _runtime()
+    await runtime.start()
+    try:
+        session_id = await runtime.create_or_resume_session(channel_id='process', session_id='query-status')
+        async def invoke_started(request, **kwargs):
+            return ['done']
+        runtime._invoke_started = invoke_started
+        request = AgentRequest(request_id='known', channel_id='process', session_id=session_id,
+                               req_method=ReqMethod.CHAT_SEND, params={'mode': 'agent.code.normal', 'work_mode': 'code'})
+        await runtime.invoke(request)
+        await runtime.invoke(AgentRequest(
+            request_id='unrelated', channel_id='process', session_id=session_id,
+            req_method=ReqMethod.CHAT_SEND,
+            params={'mode': 'agent.code.normal', 'work_mode': 'code'},
+        ))
+        admitted = []
+        def read(value):
+            admitted.append(value.session_id)
+            return SimpleNamespace(session_id=value.session_id)
+        monkeypatch.setattr(runtime, 'get_session', read)
+        query = SessionGetInput(channel_id='process', session_id=session_id)
+        before = runtime._session_coordinator.snapshot_session(session_id)
+        result = runtime.get_session_request_execution(query, request_id='known')
+        assert result.state is SessionExecutionState.SUCCEEDED
+        assert runtime.get_session_request_execution(query, request_id='missing') is None
+        assert runtime.get_session_request_execution(SessionGetInput(channel_id='web', session_id=session_id), request_id='known') is None
+        assert runtime._session_coordinator.snapshot_session(session_id) == before
+        assert admitted == [session_id] * 3
+        assert runtime.get_session_request_executions(query, request_id='known') == (result,)
+        assert runtime.get_session_request_executions(query, request_id='missing') == ()
+        assert runtime.get_session_request_executions(SessionGetInput(channel_id='web', session_id=session_id), request_id='known') == ()
+        assert runtime._session_coordinator.snapshot_session(session_id) == before
+        def denied(value):
+            raise PermissionError('revoked')
+        monkeypatch.setattr(runtime, 'get_session', denied)
+        with pytest.raises(PermissionError, match='revoked'):
+            runtime.get_session_request_execution(query, request_id='known')
+        with pytest.raises(PermissionError, match='revoked'):
+            runtime.get_session_request_executions(query, request_id='known')
+    finally:
+        await runtime.close()
