@@ -10,6 +10,7 @@ export interface ExecutionOption {
 }
 export interface ExecutionOptions {
   options: ExecutionOption[];
+  unconfigured_providers?: { provider_id: string; reason: string }[];
   default_profile_id: string | null;
 }
 export type ExecutionChoice = Pick<
@@ -36,7 +37,18 @@ export function parseExecutionOptions(value: unknown): ExecutionOptions {
           (Array.isArray(row.model_selection_keys) && row.model_selection_keys.every((key) => typeof key === 'string'))
         ),
     ) ||
-    new Set(payload.options.map((row) => row.execution_profile_id)).size !== payload.options.length
+    new Set(payload.options.map((row) => row.execution_profile_id)).size !== payload.options.length ||
+    (payload.unconfigured_providers !== undefined &&
+      (!Array.isArray(payload.unconfigured_providers) ||
+        payload.unconfigured_providers.some(
+          (row) =>
+            !row ||
+            typeof row.provider_id !== 'string' ||
+            typeof row.reason !== 'string' ||
+            payload.options.some((option) => option.provider_id === row.provider_id),
+        ) ||
+        new Set(payload.unconfigured_providers.map((row) => row.provider_id)).size !==
+          payload.unconfigured_providers.length))
   ) {
     throw new Error('Invalid execution options response');
   }
@@ -83,7 +95,14 @@ export async function prepareExecutionCreate(
 
 export function executionProviderLabel(provider: string | null | undefined): string {
   return (
-    { native: 'Native', opencode: 'OpenCode', codex: 'Codex', claude: 'Claude Code', dsh: 'DSH' }[provider || ''] ||
+    {
+      native: 'Deepagent',
+      opencode: 'OpenCode',
+      codex: 'Codex',
+      claude: 'Claude Code',
+      claudecode: 'Claude Code',
+      dsh: 'DSH',
+    }[provider || ''] ||
     provider ||
     ''
   );

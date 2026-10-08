@@ -130,3 +130,33 @@ def test_personal_supported_providers_keep_original_creation_routes():
     result = execution_options(config, [], {'mode':'agent.code.normal','work_mode':'code'}, governed=False)
     assert all(row['available'] for row in result['options'])
     assert all(row['model_selection_keys'] is None for row in result['options'])
+
+
+@pytest.mark.parametrize('config', [{}, {'execution': {'default_profile_id': 'native', 'profiles': {
+    'native': {'provider_id': 'native', 'config_revision': 'r1'},
+}}}])
+def test_product_discovery_is_independent_of_configured_profiles(config):
+    before = json.dumps(config)
+    result = execution_options(config, [], {'mode': 'agent.code.normal', 'work_mode': 'code'}, governed=False)
+    missing = {row['provider_id']: row for row in result['unconfigured_providers']}
+    assert {row['provider_id'] for row in result['options']} | set(missing) == {
+        'native', 'opencode', 'codex', 'claudecode', 'dsh',
+    }
+    assert missing['opencode'] == {'provider_id': 'opencode', 'reason': 'configuration_required'}
+    assert missing['codex']['reason'] == 'configuration_required'
+    assert missing['claudecode']['reason'] == 'provider_unavailable'
+    # Discovery has no profile/fingerprint and does not mutate the actual catalog.
+    assert all(set(row) == {'provider_id', 'reason'} for row in missing.values())
+    assert len(result['options']) == 1 and result['options'][0]['available']
+    assert json.dumps(config) == before
+
+
+def test_discovery_preserves_scenario_restrictions_and_does_not_duplicate_profiles():
+    assert not {'native', 'opencode', 'codex'} & {
+        row['provider_id'] for row in options()['unconfigured_providers']
+    }
+    result = options({}, mode='agent.work.plan')
+    assert all(row['reason'] == 'mode_unavailable' for row in result['unconfigured_providers'])
+    result = options({})
+    missing = {row['provider_id']: row['reason'] for row in result['unconfigured_providers']}
+    assert missing['codex'] == 'provider_unavailable'  # still governed

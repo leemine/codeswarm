@@ -249,6 +249,24 @@ export function ExecutionPicker({
                 </button>
               ))
             )}
+            {!error &&
+              options?.unconfigured_providers?.map((provider) => (
+                <button
+                  type="button"
+                  className="chat-mode-select__option"
+                  role="menuitemradio"
+                  aria-checked={false}
+                  disabled
+                  data-testid="chat-panel-execution-option"
+                  data-variant={`provider-${provider.provider_id}`}
+                  key={`provider-${provider.provider_id}`}
+                >
+                  <span className="chat-execution-option__copy">
+                    <span>{executionProviderLabel(provider.provider_id)}</span>
+                    <small>{t(`executionPicker.reason.${provider.reason}`)}</small>
+                  </span>
+                </button>
+              ))}
           </div>,
           document.body,
         )}

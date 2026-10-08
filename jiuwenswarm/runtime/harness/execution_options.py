@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from openjiuwen.harness.engine.config import config_fingerprint
-from openjiuwen.harness_providers.construction import compile_execution
+from openjiuwen.harness_providers.construction import PROVIDER_NAMES, compile_execution
 
 from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
 from jiuwenswarm.runtime.harness.surface import canonical_surface_mode
@@ -93,7 +93,26 @@ def execution_options(config: Mapping, entries, params, *, governed: bool):
             "reason": reason,
             "model_selection_keys": model_keys,
         })
-    return {"options": options, "default_profile_id": catalog.default_profile_id if catalog else None}
+    # Product discovery must not depend on which profiles an installation has.
+    # These entries carry no selection token and cannot grant execution. Native
+    # V2 is the Team implementation adapter, not a separate product engine.
+    configured = {row["provider_id"] for row in options}
+    unconfigured = []
+    for provider in PROVIDER_NAMES:
+        if provider == "native_v2" or provider in configured:
+            continue
+        if mode.startswith("team.") or mode.endswith(".plan"):
+            reason = "mode_unavailable" if provider != "native" or governed and mode.startswith("team.") else "configuration_required"
+        elif provider in {"native", "opencode"} or provider == "codex" and not governed:
+            reason = "configuration_required"
+        else:
+            reason = "provider_unavailable"
+        unconfigured.append({"provider_id": provider, "reason": reason})
+    return {
+        "options": options,
+        "unconfigured_providers": unconfigured,
+        "default_profile_id": catalog.default_profile_id if catalog else None,
+    }
 
 
 def execution_display(metadata, config):

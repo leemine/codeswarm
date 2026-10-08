@@ -3256,6 +3256,7 @@
     "reason": {
       "mode_unavailable": "不支持当前模式",
       "model_unavailable": "没有匹配的模型配置",
+      "configuration_required": "尚未设置此引擎",
       "configuration_unavailable": "配置暂不可用",
       "provider_unavailable": "当前入口尚未开放"
     }
@@ -3315,7 +3316,7 @@
       "option": "已授权的执行配置与模型",
       "selectOption": "选择可用组合",
       "name": "新会话标题（可选）",
-      "empty": "此项目当前没有获准的 Native Single 组合。",
+      "empty": "此项目当前没有获准的 Deepagent Single 组合。",
       "create": "创建私有会话",
       "retry": "重试同一请求",
       "newInput": "开始新请求",
@@ -4496,9 +4497,9 @@
     "importSave": "导入为草稿",
     "line": "第 {{line}} 行",
     "selected": "已选择 {{count}} 个任务版本",
-    "configure": "配置 Native 实验",
+    "configure": "配置 Deepagent 实验",
     "model": "模型",
-    "profile": "Native 执行配置",
+    "profile": "Deepagent 执行配置",
     "repeats": "独立重复次数（1–5）",
     "timeout": "每次执行超时（秒）",
     "acknowledge": "我授权在当前个人共享主机上执行所选任务、验收脚本及已配置的模型调用。",
@@ -4549,7 +4550,7 @@
       "exit_unconfirmed": "退出未确认",
       "artifact_error": "交付物错误"
     },
-    "overview": "Native 保留原 Code 开发流程。每个实验明确选择开发自测或独立容器验收。",
+    "overview": "Deepagent 保留原 Code 开发流程。每个实验明确选择开发自测或独立容器验收。",
     "policy": "验收方式",
     "policies": {
       "shared-environment-v1": "开发自测（同工作区）",
