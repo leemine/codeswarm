@@ -57,6 +57,7 @@ _TERMINAL_TOMBSTONES = 1024
 _DURABLE_EVENT_TYPES = frozenset(
     {
         "chat.ask_user_question",
+        "chat.interaction_resolved",
         "chat.error",
         "chat.final",
         "chat.tool_result",

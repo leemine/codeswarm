@@ -128,3 +128,25 @@ def load_execution_catalog(
         default_profile_id=default_profile_id,
         host_authorization=authorization,
     )
+
+
+def source_for_bound_fingerprint(
+    source: ExecutionConfigSource, fingerprint: str, *, allow_runtime_authorization: bool = True
+) -> ExecutionConfigSource:
+    """Recover construction identity only when the sole delta is explicit host authorization.
+
+    This does not apply permissions. The live Runtime must confirm the current
+    host decision before admitting another Turn. Provider payload/revision/mode
+    are included in both candidate hashes and cannot be waived by this path.
+    Legacy vendor flags and adding/removing explicit authorization remain strict.
+    """
+    from openjiuwen.harness.engine.config import config_fingerprint
+
+    spec = source.resolve()
+    if config_fingerprint(spec) == fingerprint:
+        return source
+    if allow_runtime_authorization and spec.authorization is not None and spec.provider_id in {"opencode", "codex"}:
+        original = replace(spec, authorization=ExecutionAuthorization(not spec.authorization.full_access))
+        if config_fingerprint(original) == fingerprint:
+            return ExecutionConfigSource(explicit=original)
+    raise ValueError("execution configuration fingerprint changed")

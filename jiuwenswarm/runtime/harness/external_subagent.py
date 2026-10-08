@@ -235,12 +235,41 @@ class ExternalSubagentExecutionFactory:
             if self._work_mode is not None
             else work_research_enabled
         )
+        self._runtime_authorization = None
         self._live: dict[str, ExternalSubagentExecution] = {}
         self._cleanup_pending: dict[str, ExecutionSession] = {}
         self._reserved: set[str] = set()
         self._browser_identities: dict[str, Any] = {}
         self._browser_resources: dict[str, Any] = {}
         self._lock = asyncio.Lock()
+
+    async def update_authorization(self, authorization) -> None:
+        async with self._lock:
+            self._runtime_authorization = authorization
+            sessions = tuple(execution._session for execution in self._live.values() if not execution.closed)
+            for session in sessions:
+                session._authorization_unconfirmed = True
+        results = await asyncio.gather(
+            *(self._update_child_authorization(session, authorization) for session in sessions),
+            return_exceptions=True,
+        )
+        if any(isinstance(result, BaseException) for result in results):
+            raise RuntimeError("child runtime permission application failed")
+
+    async def _update_child_authorization(self, session, authorization) -> None:
+        from jiuwenswarm.runtime.harness.surface import compile_surface_policy
+
+        surface = self._parent_route.surface
+        policy = (
+            compile_surface_policy(
+                surface,
+                authorization=authorization,
+                include_personal_context=False,
+            ).runtime_policy
+            if surface is not None
+            else None
+        )
+        await session.update_authorization(authorization, runtime_policy=policy)
 
     @property
     def parent_binding(self):
@@ -394,6 +423,8 @@ class ExternalSubagentExecutionFactory:
                 release=self._release,
             )
             async with self._lock:
+                if self._runtime_authorization is not None:
+                    await self._update_child_authorization(session, self._runtime_authorization)
                 self._live[request.subagent_id] = execution
             return execution
         except BaseException as create_error:

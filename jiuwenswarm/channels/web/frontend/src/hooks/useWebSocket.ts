@@ -4613,6 +4613,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           pendingSubagentAssignmentRef.current.delete(event.activity.subagent_id);
         }
       }),
+      webClient.on('chat.interaction_resolved', ({ payload }) => {
+        const sessionId = resolveEventSessionId(payload);
+        if (!sessionId || payload.kind !== 'tool_approval' || typeof payload.interaction_id !== 'string') return;
+        const store = useChatStore.getState();
+        const question = store.getRuntime(sessionId)?.pendingQuestions.find(
+          (item) => item.request_id === payload.interaction_id,
+        );
+        if (question) store.consumePendingQuestion(sessionId, question);
+      }),
       webClient.on('chat.ask_user_question', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;

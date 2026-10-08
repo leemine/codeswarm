@@ -80,6 +80,11 @@ class EngineAgentAdapter:
         self._continuation_seed_binding = None
         if route.provider_id == "native":
             raise ValueError("EngineAgentAdapter requires an External provider")
+        self._permission_desired = execution_authorization(route.bound.spec)
+        self._permission_effective = None
+        self._permission_revision = 0
+        self._permission_error = None
+        self._permission_task = None
         self._route = route
         self._surface = route.surface
         self._context_snapshot = None
@@ -196,6 +201,8 @@ class EngineAgentAdapter:
         self._session = self._build_session()
 
     def _build_session(self) -> ExecutionSession:
+        self._permission_effective = None
+        self._permission_task = None
         binding = self._route.bound.binding
         if self._tool_gateway is None and self._route.provider_id in {
             "codex",
@@ -458,9 +465,120 @@ class EngineAgentAdapter:
         target_session_id: str | None = None,
         reload_scopes: set[str] | None = None,
     ) -> None:
-        del config_base, env_overrides, target_session_id, reload_scopes
-        # The effective Provider snapshot is immutable for this binding.
-        return None
+        del env_overrides
+        if target_session_id and target_session_id != self._route.bound.binding.host_session_id:
+            return
+        if reload_scopes and "permissions" not in reload_scopes:
+            return
+        self._request_runtime_permissions(config_base)
+
+    @property
+    def runtime_permission_status(self) -> dict | None:
+        if self._route.bound.spec.authorization is None:
+            return None
+        session = self._session
+        effective = (
+            self._permission_effective if session is not None and session.started and not session.closed else None
+        )
+        return {
+            "revision": self._permission_revision,
+            "desired_full_access": self._permission_desired.full_access,
+            "effective_full_access": effective.full_access if effective is not None else None,
+            "state": "failed"
+            if self._permission_error
+            else "applied"
+            if effective == self._permission_desired and (self._permission_task is None or self._permission_task.done())
+            else "pending",
+        }
+
+    def _request_runtime_permissions(self, config=None) -> None:
+        if self._route.bound.spec.authorization is None:
+            return  # Preserve the vendor-specific legacy contract.
+        from jiuwenswarm.common.config import get_config
+        from openjiuwen.harness_protocol import ExecutionAuthorization
+
+        current = config if isinstance(config, dict) else get_config()
+        enabled = (current.get("permissions") or {}).get("enabled")
+        desired = (
+            ExecutionAuthorization(not enabled)
+            if type(enabled) is bool
+            else execution_authorization(self._route.bound.spec)
+        )
+        if desired != self._permission_desired:
+            self._permission_desired = desired
+            self._permission_revision += 1
+            self._permission_error = None
+        session = self._session
+        if session is None or not session.started or session.closed:
+            return
+        from openjiuwen.harness_protocol import HarnessCapability
+
+        if not session.engine.harness.card.supports(HarnessCapability.RUNTIME_AUTHORIZATION):
+            if desired == execution_authorization(self._route.bound.spec):
+                self._permission_effective = desired
+                return
+            self._permission_error = "UnsupportedHarnessCapabilityError"
+            return
+        if self._permission_effective == desired and self._permission_error is None:
+            return
+        if self._permission_task is None or self._permission_task.done():
+            self._permission_task = asyncio.create_task(self._apply_runtime_permissions(session))
+
+    async def _apply_runtime_permissions(self, session) -> None:
+        try:
+            while self._session is session and not session.closed:
+                desired, revision = self._permission_desired, self._permission_revision
+                from jiuwenswarm.runtime.harness.surface import compile_surface_policy
+
+                surface = (
+                    compile_surface_policy(
+                        self._surface,
+                        authorization=desired,
+                        include_personal_context=self._personal_context_runtime_enabled,
+                    )
+                    if self._surface is not None
+                    else None
+                )
+                operations = [
+                    session.update_authorization(
+                        desired,
+                        runtime_policy=surface.runtime_policy if surface else None,
+                    )
+                ]
+                if self._subagent_runtime is not None:
+                    operations.append(self._subagent_runtime.update_authorization(desired))
+                results = await asyncio.gather(*operations, return_exceptions=True)
+                if any(isinstance(result, BaseException) for result in results):
+                    raise RuntimeError("runtime permission application failed")
+                if self._session is not session or session.closed:
+                    raise RuntimeError("permission update owner changed")
+                if revision != self._permission_revision:
+                    continue
+                self._surface = surface
+                self._permission_effective = desired
+                self._permission_error = None
+                return
+        except BaseException as exc:
+            if self._session is session:
+                self._permission_error = type(exc).__name__
+                self._permission_effective = None
+                session._authorization_unconfirmed = True
+            # The control task is observed by admission/status. Do not emit an
+            # unhandled task exception or claim application after partial failure.
+
+    async def _ensure_runtime_permissions(self, session) -> None:
+        if self._route.bound.spec.authorization is None:
+            return
+        self._request_runtime_permissions()
+        task = self._permission_task
+        if task is not None:
+            await asyncio.shield(task)
+        if (
+            self._session is not session
+            or self._permission_error is not None
+            or self._permission_effective != self._permission_desired
+        ):
+            raise RuntimeError("runtime permission change is not confirmed")
 
     async def process_message_impl(
         self, request: AgentRequest, inputs: dict[str, Any]
@@ -788,6 +906,7 @@ class EngineAgentAdapter:
                 raise ValueError("External interaction answer is stale or unknown")
             return
 
+        await self._ensure_runtime_permissions(session)
         immediate = str(params.get("input_mode") or "").strip().lower() == "steer"
         if goal_attempt is None and self._ordinary_owner is not None:
             self._ordinary_send_attempted = True

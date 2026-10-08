@@ -276,3 +276,22 @@ async def test_history_view_mode_fallback_cannot_change_recipient(field, value, 
         assert socket.sent == []
     finally:
         await channel.unregister_ws(socket)
+
+
+@pytest.mark.asyncio
+async def test_auto_approval_resolution_preserves_exact_interaction_identity():
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    ws = Socket()
+    key = RoutingKey('user', 'web', 'default', AgentRef.default(), 'session')
+    await channel.register_ws(ws, key)
+    try:
+        message = artifact_message()
+        message.event_type = EventType.CHAT_INTERACTION_RESOLVED
+        message.payload = {'event_type': 'chat.interaction_resolved',
+                           'interaction_id': 'exact-tool-request', 'kind': 'tool_approval'}
+        routing = RoutingTarget('godview', routing_keys=[key], delivery=make_delivery_target('web'))
+        await channel.send_confirmed(message, routing_target=routing)
+        assert ws.sent[0]['payload']['interaction_id'] == 'exact-tool-request'
+        assert ws.sent[0]['payload']['kind'] == 'tool_approval'
+    finally:
+        await channel.unregister_ws(ws)

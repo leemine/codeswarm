@@ -1,0 +1,15 @@
+# Runtime permission switching
+
+2026-10-08. OpenCode and Codex Single sessions accept trusted host changes between default permissions and full access without replacing their construction Binding. Native retains its existing permission path. Other provider and Team bindings continue to reject configuration drift.
+
+Admission reconstructs an old spec only when flipping explicit authorization reproduces its entire original fingerprint. Model, plugin, workspace, provider and revision changes remain strict. The adapter maintains desired/effective authorization and a revision, waits for the existing serialized Turn boundary, and prevents further input when native application is unconfirmed. Live product children are updated concurrently with the parent; newly created children inherit the current decision before accepting input. Plan and mandatory resource authorization continue to constrain full access.
+
+The existing `surface.capabilities.get` response includes `runtime_permission_status`. The original permission selector displays pending or failed state until application is confirmed. Automatically resolved tool approvals emit an exact `chat.interaction_resolved` receipt through the original IO/history/Web transport; ordinary user questions are not answered or cleared.
+
+Core supplies the optional `RUNTIME_AUTHORIZATION` control. OpenCode confirms owned service exit and resumes the same native Session to clear remembered permissions before verifying appended rules; Codex resumes the same thread and verifies its native sandbox/approval settings. No input is replayed.
+
+Validation before dependency upgrade used local paired source: permission controller and binding guards, child propagation, existing Native permission behavior, exact Web receipt payload, cold capability projection and recovery tests passed. The real OpenCode/Codex CLI suite uses isolated directories and loopback model fixtures. Web testing covered four rounds in one Session, restart/refresh recovery, renewed approval after tightening, automatic card closure and subsequent input. This does not claim a sql2java conversion or a remote-model end-to-end run.
+
+Merge requires a remotely merged core revision in every `pyproject.toml` reference and `uv.lock`, plus clean CI `uv sync --locked --group test --python 3.13`, installed-source verification and the stable regression profile. Local editable/PYTHONPATH runs do not replace that gate. Deployment of an already running preview remains separate from Git merge.
+
+Dependency handoff: core PR https://github.com/leemine/code-core/pull/57 merged as `ef159d7c19cb0a58b18457e47bf4a4f22291cad4`. `uv lock` changed only its source references. A fresh Python 3.13 environment installed with `uv sync --locked --group test --python 3.13` confirmed `direct_url.json` and the imported module both point to that revision in site-packages. The affected local suite passed 191 tests without PYTHONPATH. The existing CI pysbd warm-up was required for initial compilation; no warning/test allowlist changed. Core PR and merged-head stable runs both passed.

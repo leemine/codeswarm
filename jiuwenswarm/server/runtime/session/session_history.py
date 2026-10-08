@@ -160,6 +160,8 @@ def _has_persistable_assistant_payload(
         payload.get("tool_call") or payload.get("tool_calls")
     ):
         return True
+    if et == "chat.interaction_resolved":
+        return payload.get("kind") == "tool_approval" and bool(payload.get("interaction_id"))
     if et == "chat.ask_user_question":
         request_id = payload.get("request_id")
         questions = payload.get("questions")

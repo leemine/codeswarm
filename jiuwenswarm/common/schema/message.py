@@ -495,6 +495,7 @@ class EventType(Enum):
     CHAT_SUBTASK_UPDATE = "chat.subtask_update"
     CHAT_SUBAGENT_ACTIVITY = "chat.subagent_activity"
     CHAT_ASK_USER_QUESTION = "chat.ask_user_question"
+    CHAT_INTERACTION_RESOLVED = "chat.interaction_resolved"
     PLAN_APPROVAL_REQUIRED = "plan.approval_required"
     CHAT_SESSION_RESULT = "chat.session_result"
     GOAL_SNAPSHOT = "goal.snapshot"

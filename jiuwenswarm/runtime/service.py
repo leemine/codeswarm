@@ -1019,6 +1019,12 @@ class AgentRuntime:
         )
 
     async def _mark_pending_interaction(self, event: RuntimeEvent) -> None:
+        if event.event_type == "chat.interaction_resolved":
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            interaction_id = payload.get("interaction_id")
+            if payload.get("kind") == "tool_approval" and isinstance(interaction_id, str) and interaction_id:
+                await self._clear_pending_interaction(event.session_id or "default", interaction_id)
+            return
         key = (
             "request_id"
             if event.event_type == "chat.ask_user_question"
