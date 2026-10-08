@@ -1086,30 +1086,42 @@ function AppContent({
       }
     },
   });
+  const [permissionRuntimeState, setPermissionRuntimeState] = useState<'pending' | 'applied' | 'failed' | undefined>();
   const applicationPluginState = useApplicationPlugins(isConnected);
   const applicationPlugins = applicationPluginState.plugins;
   const visibleApplicationPlugins = enabledApplicationPlugins(applicationPlugins);
   const settingsRequest = useMemo(() => resolveSettingsRequest(request), [request, resolveSettingsRequest]);
 
   useEffect(() => {
+    setPermissionRuntimeState(undefined);
     if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID) return;
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const targetSessionId = sessionId;
-    void request<{ surface_capabilities?: unknown }>('surface.capabilities.get', {
-      session_id: targetSessionId,
-    }).then(payload => {
-      if (cancelled || sessionIdRef.current !== targetSessionId) return;
-      const manifest = parseSurfaceCapabilityManifest(payload?.surface_capabilities);
-      if (manifest) {
-        useSessionStore.getState().setSurfaceCapabilityManifest(targetSessionId, manifest);
+    const expectedFullAccess = serverConfig?.permissions_enabled === 'false';
+    const refresh = async () => {
+      try {
+        const payload = await request<{
+          surface_capabilities?: unknown;
+          runtime_permission_status?: { state: 'pending' | 'applied' | 'failed'; desired_full_access: boolean } | null;
+        }>('surface.capabilities.get', { session_id: targetSessionId });
+        if (cancelled || sessionIdRef.current !== targetSessionId) return;
+        const manifest = parseSurfaceCapabilityManifest(payload?.surface_capabilities);
+        if (manifest) useSessionStore.getState().setSurfaceCapabilityManifest(targetSessionId, manifest);
+        const status = payload?.runtime_permission_status;
+        const state = status && status.desired_full_access !== expectedFullAccess ? 'pending' : status?.state;
+        setPermissionRuntimeState(state);
+        if (state === 'pending') timer = setTimeout(refresh, 1500);
+      } catch (error) {
+        if (!cancelled) console.warn('Failed to load Surface capability manifest:', error);
       }
-    }).catch(error => {
-      console.warn('Failed to load Surface capability manifest:', error);
-    });
+    };
+    void refresh();
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
-  }, [isConnected, mode, request, sessionId]);
+  }, [isConnected, mode, request, sessionId, serverConfig?.permissions_enabled, isProcessing]);
 
   const applySubagentHistoryReplay = useCallback((sid: string, items: HistorySubagentReplayItem[]) => {
     const subagentStore = useSubagentStore.getState();
@@ -3940,6 +3952,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                         }
                         heartbeatPanelOpen={heartbeatPanelOpen}
                         onToggleHeartbeatPanel={handleToggleHeartbeatPanel}
+                        permissionRuntimeState={permissionRuntimeState}
                         onSavePermission={savePermissionSilent}
                         historyPager={chatHistoryPager}
                         isHistoryRestoring={isRestoringHistorySession}

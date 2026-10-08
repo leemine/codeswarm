@@ -103,6 +103,7 @@ class ExecutionSession:
         self._recovery = recovery
         self._output_router: TurnOutputRouter | None = None
         self._lifecycle_lock = asyncio.Lock()
+        self._authorization_unconfirmed = False
         self._started = False
         self._closed = False
         self._exit_state = ExecutionExitState.NOT_STARTED
@@ -198,9 +199,35 @@ class ExecutionSession:
             self._started = True
             self._exit_state = ExecutionExitState.RUNNING
 
+    async def update_authorization(self, authorization, *, runtime_policy=None) -> None:
+        from openjiuwen.harness_protocol import WorkspaceAccess
+
+        harness = self.engine.harness
+        if not harness.card.supports(HarnessCapability.RUNTIME_AUTHORIZATION):
+            raise UnsupportedHarnessCapabilityError("runtime authorization is unsupported")
+        if not self._started or self._closed:
+            raise RuntimeError("runtime authorization requires a live session")
+        self._authorization_unconfirmed = True
+        auto_approve = (
+            runtime_policy.workspace_access is WorkspaceAccess.FULL_ACCESS
+            if runtime_policy is not None
+            else authorization.full_access
+        )
+        self.io.set_tool_auto_approval(auto_approve)
+        try:
+            await harness.update_authorization(authorization, runtime_policy=runtime_policy)
+            if self.engine.harness is not harness or self._closed:
+                raise RuntimeError("authorization owner changed")
+        except BaseException:
+            self.io.set_tool_auto_approval(False)
+            raise
+        self._authorization_unconfirmed = False
+
     async def send(
         self, content: HarnessInput, *, immediate: bool = False
     ) -> SendReceipt:
+        if self._authorization_unconfirmed:
+            raise RuntimeError("runtime authorization is unconfirmed")
         router = self._require_router()
         receipt = await router.submit(
             lambda: self.io.send(content, immediate=immediate)

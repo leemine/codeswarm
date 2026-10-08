@@ -281,6 +281,11 @@ class ExternalSubagentRuntime:
     def parent_session(self) -> ExternalSubagentParentSession:
         return self._parent_session
 
+    async def update_authorization(self, authorization) -> None:
+        if self._closed:
+            raise RuntimeError("subagent runtime is closed")
+        await self._factory.update_authorization(authorization)
+
     def has_control(self) -> bool:
         controls = getattr(self._parent_host, "_subagent_controls", None)
         return bool(controls)

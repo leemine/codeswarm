@@ -4967,12 +4967,14 @@ class AgentWebSocketServer:
                     )
                 else:
                     profile_id = metadata.get("execution_profile_id")
+                    permission_status = None
                     manifest = None
                     if isinstance(profile_id, str) and profile_id.strip():
                         lookup = getattr(self._agent_manager, "get_agent_for_session_nowait", None)
                         agent = lookup(request.channel_id, session_id) if callable(lookup) else None
                         adapter = getattr(agent, "_adapter", None)
                         manifest = getattr(adapter, "ui_capability_manifest", None)
+                        permission_status = getattr(adapter, "runtime_permission_status", None)
                         if manifest is None:
                             from jiuwenswarm.common.config import get_config
                             from jiuwenswarm.runtime.harness.cold_surface_manifest import cold_surface_manifest
@@ -4983,6 +4985,18 @@ class AgentWebSocketServer:
                                 session_id=session_id, browser_available=browser_runtime_enabled(os.environ),
                             )
 
+                    if isinstance(profile_id, str) and permission_status is None:
+                        from jiuwenswarm.common.config import get_config
+                        from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
+                        catalog = load_execution_catalog(get_config())
+                        selected = catalog.source(explicit_profile_id=profile_id).resolve() if catalog else None
+                        if (selected is not None and selected.authorization is not None
+                                and selected.provider_id in {"opencode", "codex"}
+                                and not str(metadata.get("mode", "")).startswith("team")):
+                            permission_status = {
+                                "revision": 0, "state": "pending", "effective_full_access": None,
+                                "desired_full_access": selected.authorization.full_access,
+                            }
                     if manifest is None:
                         from openjiuwen.harness_protocol import RuntimeSurface
 
@@ -5005,6 +5019,7 @@ class AgentWebSocketServer:
                             "session_id": session_id,
                             "surface_capabilities": manifest.record(),
                             "surface_capabilities_fingerprint": manifest.fingerprint,
+                            "runtime_permission_status": permission_status,
                         },
                         metadata=request.metadata,
                     )

@@ -770,6 +770,7 @@
     }
   },
   "chat": {
+    "permissionRuntime": {"pending": "Pending", "failed": "Switch failed"},
     "slashPicker": {
       "commands": "Commands",
       "skills": "Skills",

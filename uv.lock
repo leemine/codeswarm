@@ -2963,7 +2963,7 @@ wheels = [
 [[package]]
 name = "openjiuwen"
 version = "0.1.18"
-source = { git = "https://github.com/leemine/code-core.git?rev=d8de17a3c13dba1cd37279e51d4aac483c6eb3d3#d8de17a3c13dba1cd37279e51d4aac483c6eb3d3" }
+source = { git = "https://github.com/leemine/code-core.git?rev=ef159d7c19cb0a58b18457e47bf4a4f22291cad4#ef159d7c19cb0a58b18457e47bf4a4f22291cad4" }
 dependencies = [
     { name = "agentdescent" },
     { name = "aiofiles" },
@@ -5894,11 +5894,11 @@ requires-dist = [
     { name = "mutagen", specifier = ">=1.47.0,<2" },
     { name = "mutagen", marker = "extra == 'harmony'", specifier = ">=1.47.0" },
     { name = "numpy", specifier = ">=1.24.0,<3" },
-    { name = "openjiuwen", git = "https://github.com/leemine/code-core.git?rev=d8de17a3c13dba1cd37279e51d4aac483c6eb3d3" },
-    { name = "openjiuwen", marker = "extra == 'harmony'", git = "https://github.com/leemine/code-core.git?rev=d8de17a3c13dba1cd37279e51d4aac483c6eb3d3" },
-    { name = "openjiuwen", extras = ["claude"], marker = "extra == 'claude'", git = "https://github.com/leemine/code-core.git?rev=d8de17a3c13dba1cd37279e51d4aac483c6eb3d3" },
-    { name = "openjiuwen", extras = ["codex"], marker = "extra == 'codex'", git = "https://github.com/leemine/code-core.git?rev=d8de17a3c13dba1cd37279e51d4aac483c6eb3d3" },
-    { name = "openjiuwen", extras = ["postgres", "zmq"], marker = "extra == 'distribute'", git = "https://github.com/leemine/code-core.git?rev=d8de17a3c13dba1cd37279e51d4aac483c6eb3d3" },
+    { name = "openjiuwen", git = "https://github.com/leemine/code-core.git?rev=ef159d7c19cb0a58b18457e47bf4a4f22291cad4" },
+    { name = "openjiuwen", marker = "extra == 'harmony'", git = "https://github.com/leemine/code-core.git?rev=ef159d7c19cb0a58b18457e47bf4a4f22291cad4" },
+    { name = "openjiuwen", extras = ["claude"], marker = "extra == 'claude'", git = "https://github.com/leemine/code-core.git?rev=ef159d7c19cb0a58b18457e47bf4a4f22291cad4" },
+    { name = "openjiuwen", extras = ["codex"], marker = "extra == 'codex'", git = "https://github.com/leemine/code-core.git?rev=ef159d7c19cb0a58b18457e47bf4a4f22291cad4" },
+    { name = "openjiuwen", extras = ["postgres", "zmq"], marker = "extra == 'distribute'", git = "https://github.com/leemine/code-core.git?rev=ef159d7c19cb0a58b18457e47bf4a4f22291cad4" },
     { name = "opentelemetry-api", specifier = ">=1.28.0,<2" },
     { name = "opentelemetry-api", marker = "extra == 'harmony'", specifier = ">=1.28.0" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.28.0,<2" },

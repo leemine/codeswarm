@@ -1792,7 +1792,7 @@ class AgentManager:
             if search_changed and scope_set:
                 scope_set.add("search")
             model_scope = "model" in scope_set
-            global_scope = search_changed or bool(scope_set & {"model", "multimodal", "search"})
+            global_scope = search_changed or bool(scope_set & {"model", "multimodal", "search", "permissions"})
             if not scope_set or "search" in scope_set:
                 from jiuwenswarm.agents.harness.common.tools.mcp_toolkits import refresh_mcp_paid_search_tools
 

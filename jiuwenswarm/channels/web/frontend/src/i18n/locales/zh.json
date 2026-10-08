@@ -761,6 +761,7 @@
     }
   },
   "chat": {
+    "permissionRuntime": {"pending": "待生效", "failed": "切换失败"},
     "slashPicker": {
       "commands": "指令",
       "skills": "技能",

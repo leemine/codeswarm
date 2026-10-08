@@ -161,6 +161,7 @@ interface ChatPanelProps {
   /** 切换心跳面板展开状态 */
   onToggleHeartbeatPanel?: () => void;
   permissionProfile: Permission;
+  permissionRuntimeState?: 'pending' | 'applied' | 'failed';
   onSavePermission: (updates: Record<string, string>) => Promise<void>;
   /** Goal（持续目标）控制，见 GoalBar 组件 */
   onSetGoal?: (sessionId: string, objective: string) => void | Promise<void>;
@@ -992,6 +993,7 @@ export const ChatPanel = React.memo(function ChatPanel({
   heartbeatPanelOpen = false,
   onToggleHeartbeatPanel,
   permissionProfile,
+  permissionRuntimeState,
   onSavePermission,
   onSetGoal,
   onPauseGoal,
@@ -1915,6 +1917,7 @@ export const ChatPanel = React.memo(function ChatPanel({
                   onNavigateToAgents={onNavigateToAgents}
                   onAgentGroupIdentityChange={setTeamGroupIdentity}
                   permissionProfile={permissionProfile}
+                  permissionRuntimeState={permissionRuntimeState}
                   onSavePermission={onSavePermission}
                   onSetGoal={onSetGoal}
                   onPauseGoal={onPauseGoal}
@@ -1992,6 +1995,7 @@ export const ChatPanel = React.memo(function ChatPanel({
             onNavigateToAgents={onNavigateToAgents}
             onAgentGroupIdentityChange={setTeamGroupIdentity}
             permissionProfile={permissionProfile}
+            permissionRuntimeState={permissionRuntimeState}
             onSavePermission={onSavePermission}
             onSetGoal={onSetGoal}
             onPauseGoal={onPauseGoal}

@@ -319,6 +319,7 @@ interface InputAreaProps {
   /** Keeps the selected Expert Team identity available to the conversation surface. */
   onAgentGroupIdentityChange?: (identity: AgentGroupIdentity | null) => void;
   permissionProfile: Permission;
+  permissionRuntimeState?: 'pending' | 'applied' | 'failed';
   onSavePermission: (updates: Record<string, string>) => Promise<void>;
   /** 目标待设置态（"+"菜单选了「目标」）下发送时调用，取代普通 onSubmit/排队逻辑 */
   onSetGoal?: (sessionId: string, objective: string) => void | Promise<void>;
@@ -687,6 +688,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     onNavigateToAgents,
     onAgentGroupIdentityChange,
     permissionProfile,
+    permissionRuntimeState,
     onSavePermission,
     onSetGoal,
     onPauseGoal,
@@ -4082,6 +4084,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   <PermissionSelector
                     mode={mode}
                     permissionProfile={permissionProfile}
+                    permissionRuntimeState={permissionRuntimeState}
                     onSavePermission={onSavePermission}
                   />
                 )}
@@ -5026,11 +5029,13 @@ function PermissionSelector({
   disabled = false,
   mode,
   permissionProfile,
+  permissionRuntimeState,
   onSavePermission,
 }: {
   disabled?: boolean;
   mode: AgentMode;
   permissionProfile: Permission;
+  permissionRuntimeState?: 'pending' | 'applied' | 'failed';
   onSavePermission: (updates: Record<string, string>) => Promise<void>;
 }) {
   const { t } = useTranslation();
@@ -5109,7 +5114,14 @@ function PermissionSelector({
             <span className="chat-mode-select__icon" aria-hidden="true">
               <currentPerm.icon className="w-4 h-4" />
             </span>
-            <span className="chat-mode-select__label">{t(currentPerm.i18nKey)}</span>
+            <span className="chat-mode-select__label" data-testid="chat-panel-permission-label">
+              {t(currentPerm.i18nKey)}
+              {permissionRuntimeState && permissionRuntimeState !== 'applied' && (
+                <span data-testid="chat-panel-permission-runtime-status" data-variant={permissionRuntimeState}>
+                  {' · '}{t(`chat.permissionRuntime.${permissionRuntimeState}`)}
+                </span>
+              )}
+            </span>
           </span>
           <svg
             className="chat-mode-select__chevron"
