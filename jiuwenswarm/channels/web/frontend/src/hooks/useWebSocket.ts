@@ -16,7 +16,6 @@ import {
   WebConnectionState,
   InterruptResultPayload,
   InterruptIntent,
-  AskUserQuestionPayload,
   EvolutionStatusPayload,
   UserAnswer,
   MediaItem,
@@ -56,6 +55,7 @@ import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import {
   bindPendingPermissionCard,
   pendingQuestionIdentity,
+  normalizeQuestionPayload,
   shouldClearPermissionQuestionsForLifecycleEvent,
 } from '../stores/pendingQuestionQueue';
 import { requestLogin } from '../stores/authStore';
@@ -4626,46 +4626,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
         const questionPayload = payload as Record<string, unknown>;
-        const evolutionMeta =
-          questionPayload.evolution_meta && typeof questionPayload.evolution_meta === 'object'
-            ? (questionPayload.evolution_meta as Record<string, unknown>)
-            : questionPayload._evolution_meta && typeof questionPayload._evolution_meta === 'object'
-              ? (questionPayload._evolution_meta as Record<string, unknown>)
-              : undefined;
-        const questions = Array.isArray(questionPayload.questions) ? questionPayload.questions : [];
-        const approvalSchema =
-          typeof questionPayload.approval_schema === 'string'
-            ? questionPayload.approval_schema
-            : undefined;
-        const planApprovalKind =
-          typeof questionPayload.plan_approval_kind === 'string'
-            ? questionPayload.plan_approval_kind
-            : undefined;
-        const planContent =
-          typeof questionPayload.plan_content === 'string'
-            ? questionPayload.plan_content
-            : undefined;
-        const planLanguage =
-          questionPayload.plan_language === 'cn' || questionPayload.plan_language === 'en'
-            ? questionPayload.plan_language
-            : undefined;
-        const normalizedPayload: AskUserQuestionPayload = {
-          request_id: typeof questionPayload.request_id === 'string' ? questionPayload.request_id : '',
-          source: typeof questionPayload.source === 'string' ? questionPayload.source : undefined,
-          questions,
-          ...(Number.isInteger(questionPayload.session_generation)
-            && Number(questionPayload.session_generation) > 0
-            ? { sessionGeneration: Number(questionPayload.session_generation) }
-            : {}),
-          ...(approvalSchema ? { approvalSchema } : {}),
-          ...(evolutionMeta ? { evolutionMeta } : {}),
-          ...(planApprovalKind ? { planApprovalKind } : {}),
-          ...(planContent !== undefined ? { planContent } : {}),
-          ...(planLanguage ? { planLanguage } : {}),
-          ...(questionPayload.swarmflow_meta && typeof questionPayload.swarmflow_meta === 'object'
-            ? { swarmflowMeta: questionPayload.swarmflow_meta as AskUserQuestionPayload['swarmflowMeta'] }
-            : {}),
-        };
+        const normalizedPayload = normalizeQuestionPayload(questionPayload);
+        const { planApprovalKind, planContent } = normalizedPayload;
         // 计划正文走对话气泡，不再塞进审批卡片：审批栏只保留「执行」和
         // 「改进意见 + 下一步/跳过」。修订后再次提交会是新的 request_id，
         // 所以每一版计划都会留下自己的气泡。

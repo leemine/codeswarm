@@ -127,11 +127,15 @@ async def test_legacy_control_does_not_gain_continuation_handle(transaction):
 async def test_real_facade_does_not_reconcile_new_control_id(transaction, monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter import interface, interface_deep
     a = await arranged(transaction)
+    facade = interface.JiuWenSwarm()
+    facade.__dict__.update(a.facade.__dict__)
+    a.facade = facade
+    a.tx.manager.get_agent_for_session_nowait.return_value = facade
     a.facade._ensure_adapter = Mock(return_value=a.adapter)
     a.facade._adapter_mode_for_request = Mock(return_value='normal')
     a.facade._select_execution_before_mcp = interface.JiuWenSwarm._select_execution_before_mcp
     a.facade._session_manager = SimpleNamespace(get_session_id=lambda sid: sid)
-    a.facade._build_inputs = Mock(return_value=({}, '', False))
+    a.facade._build_inputs = Mock(return_value=({}, '', SimpleNamespace(text='')))
     a.facade.reconcile_session_mcp = AsyncMock(side_effect=AssertionError('control cannot reconcile'))
     monkeypatch.setattr(interface, 'restore_chat_send_equipment_params', Mock())
     delivered = []

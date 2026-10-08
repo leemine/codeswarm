@@ -50,6 +50,8 @@
     },
     "pr-stable": {
       "suites": [
+        "codeswarm.python.evaluation",
+        "codeswarm.web.evaluation",
         "codeswarm.python.execution-construction",
         "codeswarm.python.browser-artifact-delivery",
         "codeswarm.python.acp",
@@ -76,6 +78,90 @@
     }
   },
   "suites": [
+    {
+      "id": "codeswarm.python.evaluation",
+      "owner": "evaluation",
+      "tier": "unit",
+      "runner": "pytest",
+      "workdir": ".",
+      "writable_workdir": true,
+      "capabilities": [
+        "filesystem",
+        "process"
+      ],
+      "required": true,
+      "shard_timeout_seconds": 180,
+      "discover": {
+        "command": [
+          "{python}",
+          "-m",
+          "pytest",
+          "tests/unit_tests/extensions/evaluation",
+          "--collect-only",
+          "-q",
+          "-o",
+          "addopts=",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "parser": "pytest",
+        "timeout_seconds": 90
+      },
+      "command": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/unit_tests/extensions/evaluation",
+        "-q",
+        "-o",
+        "addopts=",
+        "-o",
+        "asyncio_mode=auto",
+        "-p",
+        "no:cacheprovider",
+        "--timeout=30",
+        "--timeout-method=signal",
+        "--junitxml={junit}"
+      ]
+    },
+    {
+      "id": "codeswarm.web.evaluation",
+      "owner": "evaluation",
+      "tier": "contract",
+      "runner": "web-scripts",
+      "workdir": "jiuwenswarm/channels/web/frontend",
+      "capabilities": [
+        "filesystem",
+        "dom"
+      ],
+      "required": true,
+      "shard_timeout_seconds": 120,
+      "discover": {
+        "command": [
+          "{python}",
+          "{repo}/tools/run_web_scripts.py",
+          "--package",
+          "{repo}/jiuwenswarm/channels/web/frontend/package.json",
+          "--only",
+          "test:evaluation",
+          "--list"
+        ],
+        "parser": "web-scripts-json",
+        "timeout_seconds": 30
+      },
+      "command": [
+        "{python}",
+        "{repo}/tools/run_web_scripts.py",
+        "--package",
+        "{repo}/jiuwenswarm/channels/web/frontend/package.json",
+        "--only",
+        "test:evaluation",
+        "--junit",
+        "{junit}",
+        "--script-timeout",
+        "60"
+      ]
+    },
     {
       "id": "codeswarm.web.governance",
       "owner": "web",

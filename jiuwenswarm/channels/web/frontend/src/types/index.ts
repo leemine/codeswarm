@@ -43,6 +43,8 @@ export interface Session {
   updated_at: string;
   is_active?: boolean;
   is_processing?: boolean;
+  /** Original live Runtime controls, filtered against the current generation. */
+  pending_interactions?: Record<string, unknown>[];
   current_task?: string;
   tools?: string[];
   team_name?: string;

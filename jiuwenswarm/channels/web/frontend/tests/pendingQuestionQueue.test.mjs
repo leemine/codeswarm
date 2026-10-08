@@ -7,6 +7,7 @@ import {
   consumePendingQuestion,
   enqueuePendingQuestions,
   pendingQuestionIdentity,
+  normalizeQuestionPayload,
   shouldClearPermissionQuestionsForLifecycleEvent,
 } from '../node_modules/.cache/pending-question-queue/pendingQuestionQueue.mjs';
 
@@ -157,4 +158,16 @@ test('mixed cards, missing questions, and invalid legacy request identities fail
   for (const request_id of ['', ' ', null, 12, 'x'.repeat(513)]) {
     assert.deepEqual(enqueuePendingQuestions([], { ...legacy(), request_id }), []);
   }
+});
+
+
+test('Code reconnect and live question use one original control identity', () => {
+  const wire = { request_id: 'original-control', source: 'ask_user_interrupt', session_generation: 3,
+    questions: [{ question: 'Choose', options: [{ label: 'READY' }] }] };
+  const first = normalizeQuestionPayload(wire);
+  const reconnected = normalizeQuestionPayload({ ...wire });
+  assert.equal(first.sessionGeneration, 3);
+  assert.equal(enqueuePendingQuestions([first], reconnected).length, 1);
+  assert.deepEqual(consumePendingQuestion([first], reconnected), []);
+  assert.equal(normalizeQuestionPayload({}).request_id, '');
 });

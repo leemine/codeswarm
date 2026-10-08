@@ -204,6 +204,21 @@ class ReqMethod(Enum):
     AGENT_LIST = "3rdagent.list"
 
     # Unified asset publishing; dispatched by AgentServer independently of chats.
+    EVALUATION_CATALOG = "evaluation.catalog"
+    EVALUATION_TASK_SAVE = "evaluation.task.save"
+    EVALUATION_TASK_PUBLISH = "evaluation.task.publish"
+    EVALUATION_IMPORT_PREVIEW = "evaluation.import.preview"
+    EVALUATION_IMPORT_COMMIT = "evaluation.import.commit"
+    EVALUATION_DATASET_PUBLISH = "evaluation.dataset.publish"
+    EVALUATION_OPTIONS = "evaluation.options"
+    EVALUATION_EXPERIMENT_CREATE = "evaluation.experiment.create"
+    EVALUATION_EXPERIMENT_LIST = "evaluation.experiment.list"
+    EVALUATION_EXPERIMENT_GET = "evaluation.experiment.get"
+    EVALUATION_EXPERIMENT_START = "evaluation.experiment.start"
+    EVALUATION_EXPERIMENT_CANCEL = "evaluation.experiment.cancel"
+    EVALUATION_EVIDENCE = "evaluation.evidence"
+    EVALUATION_EXAMPLES = "evaluation.examples"
+
     ASSETS_PUBLISH_DESCRIBE = "assets.publish.describe"
     ASSETS_PUBLISH_PREPARE = "assets.publish.prepare"
     ASSETS_PUBLISH_COMMIT = "assets.publish.commit"

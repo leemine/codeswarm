@@ -3352,9 +3352,13 @@ def test_web_forwards_only_canonical_personal_context_rpc_methods():
     assert len(methods) == 25
 
 
-# =====================================================================
+# ==============================================================
+
+@pytest.mark.asyncio
 # _normalize_feishu_conf 纯函数测试
-# =====================================================================
+# ==============================================================
+
+@pytest.mark.asyncio
 
 
 def test_normalize_feishu_conf_empty():
@@ -3452,9 +3456,13 @@ def test_normalize_feishu_conf_apps_preserves_extra_fields():
     assert result["apps"][0]["enable_streaming"] is True  # 默认值仍在
 
 
-# =====================================================================
+# ==============================================================
+
+@pytest.mark.asyncio
 # _normalize_xiaoyi_conf 纯函数测试
-# =====================================================================
+# ==============================================================
+
+@pytest.mark.asyncio
 
 
 def test_normalize_xiaoyi_conf_empty():
@@ -3525,9 +3533,13 @@ def test_normalize_xiaoyi_conf_apps_empty_list():
     assert _normalize_xiaoyi_conf({"apps": []}) == {"apps": []}
 
 
-# =====================================================================
+# ==============================================================
+
+@pytest.mark.asyncio
 # get_conf 处理程序 — 验证归一化在读取时生效
-# =====================================================================
+# ==============================================================
+
+@pytest.mark.asyncio
 
 
 @pytest.mark.asyncio
@@ -3600,9 +3612,13 @@ async def test_channel_xiaoyi_get_conf_empty_returns_default_apps(monkeypatch):
     assert len(channel.responses[-1]["payload"]["config"]["apps"]) == 1
 
 
-# =====================================================================
+# ==============================================================
+
+@pytest.mark.asyncio
 # set_conf 处理程序 — 多应用模式（apps 键）
-# =====================================================================
+# ==============================================================
+
+@pytest.mark.asyncio
 
 
 @pytest.mark.asyncio
@@ -3701,9 +3717,13 @@ async def test_channel_xiaoyi_set_conf_apps_mode(monkeypatch):
     assert config["apps"][0]["mode"] == "xiaoyi_channel"
     assert config["apps"][0]["phone_tools_enabled"] is False
 
-# =====================================================================
+# ==============================================================
+
+@pytest.mark.asyncio
 # set_conf 处理程序 — 边界场景
-# =====================================================================
+# ==============================================================
+
+@pytest.mark.asyncio
 
 
 @pytest.mark.asyncio
@@ -3754,14 +3774,22 @@ async def test_channel_set_conf_invalid_params():
         assert channel.responses[-1]["code"] == "BAD_REQUEST"
 
 
-# =====================================================================
+# ==============================================================
+
+@pytest.mark.asyncio
 # 落盘测试 — 验证 update_channel_subsection_in_config 真实写回文件
-# =====================================================================
+# ==============================================================
+
+@pytest.mark.asyncio
 
 
-# =====================================================================
+# ==============================================================
+
+@pytest.mark.asyncio
 # 微信通道数值参数校验 — _validate_wechat_numeric_params + set_conf 拦截
-# =====================================================================
+# ==============================================================
+
+@pytest.mark.asyncio
 
 
 @pytest.mark.parametrize(
@@ -4090,3 +4118,19 @@ async def test_execution_options_forward_without_transport_session(monkeypatch):
     assert forwarded['params'] is params
     assert forwarded['session_id'] is None
     assert forwarded['agent_client'] is client
+
+
+@pytest.mark.asyncio
+async def test_models_list_keeps_configured_positions_for_exact_session_selection(monkeypatch):
+    from jiuwenswarm.server.runtime import opencode_zen
+    configured = [{"model_client_config": {"model_name": name}, "is_default": True}
+                  for name in ["", "same", "same"]]
+    monkeypatch.setattr(app_web_handlers, "get_config", lambda: {"models": {"defaults": configured}})
+    monkeypatch.setattr(app_web_handlers, "get_available_models", lambda *_: configured + [
+        {"model_client_config": {"model_name": "login-only"}}])
+    monkeypatch.setattr(opencode_zen, "get_zen_free_model_entries", lambda: [])
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    await channel.methods["models.list"](object(), "models", {}, "session")
+    entries = channel.responses[-1]["payload"]["models"]
+    assert [entry.get("selection_key") for entry in entries] == [None, "same#1", "same#2", None]

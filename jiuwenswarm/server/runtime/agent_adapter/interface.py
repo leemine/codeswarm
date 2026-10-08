@@ -3472,22 +3472,9 @@ class JiuWenSwarm:
             return
         if not is_interrupt_resume_payload(request.params):
             raise ValueError("control input must answer an active interaction")
-        adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
-        self._select_execution_before_mcp(adapter, request)
-        session_id = self._session_manager.get_session_id(request.session_id)
-        params = request.params if isinstance(request.params, dict) else {}
-        restore_chat_send_equipment_params(session_id, params)
-        inputs, _memory_mode, _user_turn = self._build_inputs(request)
-        from jiuwenswarm.runtime.continuation_control import continuation_control
-        retained = continuation_control(request, facade=self)
-        if retained is None:
-            await self.reconcile_session_mcp(
-                request.session_id,
-                compute_chat_send_mcp_needed(params),
-                model_name=params.get("model_name"),
-                history_before_request_id=request.request_id,
-            )
-        async with aclosing(adapter.process_message_stream_impl(request, inputs)) as stream:
+        # Control resumes the existing producer, but its outputs still need the
+        # original history/media projection used by normal Code turns.
+        async with aclosing(self.process_message_stream(request)) as stream:
             async for chunk in stream:
                 yield chunk
 
@@ -3741,12 +3728,15 @@ class JiuWenSwarm:
         # connectors before the agent runs. Always pass a list (never None):
         # empty clears selection when neither side contributes names.
         params = request.params if isinstance(request.params, dict) else {}
-        await self.reconcile_session_mcp(
-            request.session_id,
-            compute_chat_send_mcp_needed(params),
-            model_name=params.get("model_name"),
-            history_before_request_id=request.request_id,
-        )
+        from jiuwenswarm.runtime.continuation_control import continuation_control
+        retained = continuation_control(request, facade=self)
+        if retained is None:
+            await self.reconcile_session_mcp(
+                request.session_id,
+                compute_chat_send_mcp_needed(params),
+                model_name=params.get("model_name"),
+                history_before_request_id=request.request_id,
+            )
 
         # Team 模式：把整个 turn 交给 team_helpers。它先用 turn.text（用户原
         # 文）解析 /debug、$member 与 slash，再用同一个 render() 投递，因此
@@ -3970,7 +3960,11 @@ class JiuWenSwarm:
                     )
                     stream_done.set()
 
-        stream_task = asyncio.create_task(run_stream_task())
+        control_delivery = is_interrupt_resume_payload(request.params)
+        # The Coordinator's control claim is task-bound. Resume it in this task,
+        # while sharing the exact same history/media consumer below.
+        control_stream = adapter.process_message_stream_impl(request, inputs) if control_delivery else None
+        stream_task = None if control_delivery else asyncio.create_task(run_stream_task())
 
         suppress_a2ui_stream = False
         a2ui_pending_render_sent = False
@@ -4058,10 +4052,19 @@ class JiuWenSwarm:
                     or not stream_queue.empty()
                     or bool(team_a2ui_tasks)
             ):
-                try:
-                    item = await asyncio.wait_for(stream_queue.get(), timeout=0.1)
-                except asyncio.TimeoutError:
-                    continue
+                if control_stream is not None:
+                    try:
+                        item = ("chunk", await anext(control_stream))
+                    except StopAsyncIteration:
+                        await control_stream.aclose()
+                        control_stream = None
+                        stream_done.set()
+                        continue
+                else:
+                    try:
+                        item = await asyncio.wait_for(stream_queue.get(), timeout=0.1)
+                    except asyncio.TimeoutError:
+                        continue
 
                 event_type, data = item
                 if event_type == "team_a2ui_finalized":
@@ -4609,12 +4612,15 @@ class JiuWenSwarm:
                 ]
                 for task in unfinished_a2ui_tasks:
                     task.cancel()
-                if not stream_task.done():
+                if control_stream is not None:
+                    await control_stream.aclose()
+                if stream_task is not None and not stream_task.done():
                     stream_task.cancel()
                 if unfinished_a2ui_tasks:
                     await asyncio.gather(*unfinished_a2ui_tasks, return_exceptions=True)
                 try:
-                    await stream_task
+                    if stream_task is not None:
+                        await stream_task
                 except asyncio.CancelledError:
                     pass
                 except Exception:
@@ -4714,12 +4720,13 @@ class JiuWenSwarm:
         final_answer_chunks.close()
         durable_pending_final_chunks.close()
         durable_pending_reasoning_chunks.close()
-        yield AgentResponseChunk(
-            request_id=rid,
-            channel_id=cid,
-            payload={"is_complete": True},
-            is_complete=True,
-        )
+        if not control_delivery:
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={"is_complete": True},
+                is_complete=True,
+            )
 
     # ---------- 实例获取 ----------
 
@@ -4755,6 +4762,11 @@ class JiuWenSwarm:
         if getter is None:
             return None
         return getter(session_id)
+
+    def prepare_session_execution(self, request: AgentRequest) -> None:
+        """Pin the admitted route before plan-state sync can create a child."""
+        adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+        self._select_execution_before_mcp(adapter, request)
 
     async def ensure_live_session_instance(self, session_id: str | None):
         """Start the session-scoped adapter if needed and return its DeepAgent.

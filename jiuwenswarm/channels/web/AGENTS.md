@@ -148,3 +148,5 @@
 | `components/AssetPublishDrawer` | `asset-publish` | 四类资源发布表单、预检、任务及 OAuth 恢复 |
 | `components/marketplace` | `marketplace` | 公共市场布局与目录缓存状态 |
 | `App.tsx` | `app` | 应用外壳;全局布局与 toast |
+
+| `../../../extensions/evaluation/frontend` | `evaluation` | 评测任务库、实验与结果证据 |

@@ -1145,6 +1145,8 @@ class AgentWebSocketServer:
         self._previous_runtime_push_handler = None
         # RSI 服务域分发句柄（懒加载，见 _get_rsi_handlers）
         self._rsi_handlers = None
+        self._evaluation_service = None
+        self._evaluation_factory = None
         # Optional production Provider injection point.  The concrete class is
         # supplied by the composition root once it is available.
         self._rsi_harness_provider: Any = None
@@ -1378,6 +1380,11 @@ class AgentWebSocketServer:
         if self._server is not None:
             logger.warning("[AgentWebSocketServer] 服务端已在运行")
             return
+
+        factory = getattr(self, "_evaluation_factory", None)
+        if factory is not None and self._evaluation_service is None:
+            from jiuwenswarm.common.utils import get_root_dir
+            self._evaluation_service = factory(runtime=self._execution_runtime(), data_root=get_root_dir(), send_push=self.send_push)
 
         owner = self._kv_cache_application_owner
         await owner.activate_from_config()
@@ -1857,6 +1864,10 @@ class AgentWebSocketServer:
 
     async def _stop_main_services(self) -> None:
         """Stop AgentServer-owned services before optional host cleanup."""
+        evaluation = getattr(self, "_evaluation_service", None)
+        if evaluation is not None:
+            await evaluation.close()
+            self._evaluation_service = None
         task = getattr(self, "_asset_start_task", None)
         if task is not None:
             task.cancel()
@@ -2273,6 +2284,15 @@ class AgentWebSocketServer:
                     from jiuwenswarm.server.runtime.session.history_io import run_history_io
                     await run_history_io(host.prepare_source, sid, identity)
             response = await adapter.handle(request)
+            if (request.req_method == ReqMethod.SESSION_GET_METADATA and response.ok
+                    and isinstance(response.payload, dict)):
+                from jiuwenswarm.runtime.session_catalog import SessionGetInput
+                sid = str((request.params or {}).get("session_id") or request.session_id or "")
+                live_state = self._execution_runtime().get_session_interaction_state(
+                    SessionGetInput(channel_id=request.channel_id or "web", session_id=sid)
+                )
+                response.payload["pending_interactions"] = live_state["pending_interactions"]
+                response.payload["runtime_is_processing"] = live_state["is_processing"]
         except Exception as exc:  # noqa: BLE001
             logger.exception(
                 "[AgentWebSocketServer] Gateway adapter failed: request_id=%s method=%s",
@@ -2510,6 +2530,9 @@ class AgentWebSocketServer:
                     await send_wire_payload(
                         ws, encode_agent_response_for_wire(response, response_id=request.request_id)
                     )
+                return
+            if request.req_method is not None and request.req_method.value.startswith("evaluation."):
+                await self._handle_evaluation(ws, request, send_lock)
                 return
             if request.req_method is not None and request.req_method.value.startswith("assets.publish."):
                 await self._handle_asset_publish(ws, request, send_lock)
@@ -8637,6 +8660,34 @@ class AgentWebSocketServer:
             await start_hub_catalog_preload(SkillManager(workspace_dir=str(get_agent_workspace_dir())))
         except Exception:
             logger.warning("[HubCatalog] preload unavailable; requests may load on demand")
+
+    async def _handle_evaluation(self, ws, request, send_lock):
+        from jiuwenswarm.extensions.evaluation.backend.rpc import METHODS
+        from jiuwenswarm.extensions.evaluation.backend.adapters.store import CatalogError
+        from pydantic import ValidationError
+        try:
+            service = getattr(self, "_evaluation_service", None)
+            method = request.req_method.value
+            if request.channel_id != "web" or method not in METHODS or service is None:
+                raise CatalogError("EVALUATION_UNAVAILABLE")
+            identity = self._resolve_trusted_identity(request)
+            payload = await service.call(method, request.params or {}, identity)
+            # Recheck trusted identity before releasing private business records.
+            if self._resolve_trusted_identity(request) != identity:
+                raise PermissionError("identity changed")
+            ok = True
+        except PermissionError:
+            ok, payload = False, {"code": "FORBIDDEN", "error": "FORBIDDEN"}
+        except CatalogError as exc:
+            ok, payload = False, {"code": exc.code, "error": exc.code}
+        except (ValidationError, ValueError, TypeError):
+            ok, payload = False, {"code": "INVALID_PARAMS", "error": "INVALID_PARAMS"}
+        except Exception:
+            ok, payload = False, {"code": "EVALUATION_UNAVAILABLE", "error": "EVALUATION_UNAVAILABLE"}
+        response = AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
+                                 ok=ok, payload=payload, agent_ref=request.agent_ref)
+        async with send_lock:
+            await send_wire_payload(ws, encode_agent_response_for_wire(response, response_id=request.request_id))
 
     async def _handle_asset_publish(self, ws, request, send_lock):
         from jiuwenswarm.server.runtime.marketplace.asset_publish_api import PublishAPIError

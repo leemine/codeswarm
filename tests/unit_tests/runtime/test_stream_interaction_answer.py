@@ -595,6 +595,8 @@ async def test_real_facade_control_wrapper_closes_retained_adapter_stream(
 ) -> None:
     from jiuwenswarm.server.runtime.agent_adapter import interface
 
+    persist = AsyncMock(wraps=interface._append_request_assistant_history)
+    monkeypatch.setattr(interface, "_append_request_assistant_history", persist)
     await _seed_waiting(harness)
     closed = []
     answer = _answer()
@@ -623,6 +625,10 @@ async def test_real_facade_control_wrapper_closes_retained_adapter_stream(
         _build_inputs=Mock(return_value=({}, "", False)),
         reconcile_session_mcp=AsyncMock(),
     )
+    real_facade = interface.JiuWenSwarm()
+    real_facade.__dict__.update(facade.__dict__)
+    facade = real_facade
+    facade._build_inputs = Mock(return_value=({}, "", SimpleNamespace(text="")))
     monkeypatch.setattr(interface, "restore_chat_send_equipment_params", Mock())
     monkeypatch.setattr(
         interface, "compute_chat_send_mcp_needed", Mock(return_value=False)
@@ -642,6 +648,10 @@ async def test_real_facade_control_wrapper_closes_retained_adapter_stream(
             else:
                 remaining = [event async for event in stream]
                 assert [event.event_type for event in remaining] == ["chat.final"]
+        if ending == "exhaust":
+            assert any(call.kwargs.get("event_type") == "chat.final"
+                       and call.kwargs.get("content") == "done"
+                       for call in persist.await_args_list)
         assert closed == [harness.runtime]
         assert get_current_runtime() is None
     finally:

@@ -14,6 +14,7 @@
     "noEmit": true,
     "jsx": "react-jsx",
     "types": ["vite/client"],
+    "typeRoots": ["./node_modules/@types"],
 
     /* Linting */
     "strict": true,
@@ -27,6 +28,6 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["src", "tests/fixtures/settings-extension"],
+  "include": ["src", "tests/fixtures/settings-extension", "../../../extensions/evaluation/frontend"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }
