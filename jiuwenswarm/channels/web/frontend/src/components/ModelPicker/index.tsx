@@ -16,6 +16,7 @@ interface ModelPickerProps {
   /** Both conversation and scheduled-task callers receive the canonical model_name. */
   onChange: (modelName: string) => void;
   disabled?: boolean;
+  allowedSelectionKeys?: readonly string[] | null;
   onAddModel?: () => void;
   /** 过滤掉登录/免费模型，用于无法持久化免费模型凭据的场景；默认不过滤。 */
   excludeFreeModels?: boolean;
@@ -33,13 +34,19 @@ export default function ModelPicker({
   disabled = false,
   onAddModel,
   excludeFreeModels = false,
+  allowedSelectionKeys,
   testIdPrefix = 'model-picker',
 }: ModelPickerProps): JSX.Element {
   const { t } = useTranslation();
   const allModels = useSessionStore((state) => state.chatAvailableModels);
   const models = useMemo(
-    () => (excludeFreeModels ? allModels.filter((model) => model.is_free !== true) : allModels),
-    [allModels, excludeFreeModels],
+    () =>
+      allModels.filter(
+        (model) =>
+          (!excludeFreeModels || model.is_free !== true) &&
+          (!allowedSelectionKeys || allowedSelectionKeys.includes(model.selection_key || '')),
+      ),
+    [allModels, excludeFreeModels, allowedSelectionKeys],
   );
   const campaign = useFreeModelsCampaign();
   const { tooltip, handlers } = useAdaptiveTooltip();
@@ -47,7 +54,7 @@ export default function ModelPicker({
   const [position, setPosition] = useState<CSSProperties | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const selected = models.find((model) => model.model_name === value);
+  const selected = models.find((model) => model.selection_key === value || model.model_name === value);
   const freeModels = models.filter((model) => model.is_free === true);
   const groups = [
     {
@@ -57,7 +64,8 @@ export default function ModelPicker({
     },
     { id: 'free', label: t('chat.modelSelector.free'), models: freeModels },
   ];
-  const showFreeModelsCta = !excludeFreeModels && campaign.state !== 'off' && freeModels.length === 0;
+  const showFreeModelsCta =
+    !allowedSelectionKeys && !excludeFreeModels && campaign.state !== 'off' && freeModels.length === 0;
 
   useEffect(() => {
     if (disabled) setOpen(false);
@@ -141,7 +149,8 @@ export default function ModelPicker({
             </span>
           )}
           <span className={clsx('chat-mode-select__label', !value && 'text-text-muted')}>
-            {displayLabel ?? (selected ? selected.alias || selected.model_name : value || t('chat.modelSelector.placeholder'))}
+            {displayLabel ??
+              (selected ? selected.alias || selected.model_name : value || t('chat.modelSelector.placeholder'))}
           </span>
         </span>
         {!disabled && (
@@ -220,7 +229,9 @@ export default function ModelPicker({
                     <button
                       key={`${model.model_name}-${index}`}
                       type="button"
-                      onClick={() => handleSelect(model.model_name)}
+                      onClick={() =>
+                        handleSelect(allowedSelectionKeys ? model.selection_key || model.model_name : model.model_name)
+                      }
                       className={clsx(
                         'chat-mode-select__option',
                         model === selected && 'chat-mode-select__option--active',

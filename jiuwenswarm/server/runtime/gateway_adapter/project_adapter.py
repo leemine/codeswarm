@@ -535,6 +535,23 @@ def _create_project_locked(
     # alias for an existing governed workspace. Resolve symlinks before comparing.
     candidate = os.path.realpath(project_dir)
     authority = ProjectAccessStore()
+    # A private Session directory is already owned even though it has no
+    # Project registry entry. Never let project.create claim it as an alias.
+    owners = authority._load().get('session_sharing', {}).get('owners', {})
+    for record in owners.values():
+        source = record.get('source', {}) if isinstance(record, dict) else {}
+        if source.get('kind') != 'private':
+            continue
+        root = source.get('workspace')
+        if not isinstance(root, str) or not os.path.isabs(root):
+            return None, "private workspace authority unavailable", "FORBIDDEN"
+        root = os.path.realpath(root)
+        try:
+            overlaps = os.path.commonpath([candidate, root]) in {candidate, root}
+        except ValueError:
+            overlaps = False
+        if overlaps:
+            return None, "project directory overlaps a private Session workspace", "FORBIDDEN"
     for existing in project_store.list_projects(cache_bust=True):
         if not existing.project_dir:
             continue
@@ -1374,6 +1391,16 @@ async def _run_threaded(
     """
     try:
         def invoke():
+            from jiuwenswarm.governance.organization_auth import configured_authenticator
+            from jiuwenswarm.governance.project_git import GIT_METHODS
+            method = getattr(request.req_method, 'value', request.req_method)
+            if configured_authenticator() is not None and method in GIT_METHODS:
+                from jiuwenswarm.governance.session_boundary import current_git_request
+                permit = current_git_request(method, _request_params(request))
+                with permit.consume(method, _request_params(request)):
+                    return _call_project_scoped(permit.project_id,
+                        'read' if method in {'project.git.status', 'project.git.probe'} else 'write',
+                        fn, *args, **fn_kwargs)
             scope = _scope.get()
             if scope:
                 project_id, action = scope
@@ -1382,7 +1409,7 @@ async def _run_threaded(
             with ProjectAccessStore()._locked():
                 return fn(*args, **fn_kwargs)
         result = await asyncio.to_thread(invoke)
-    except ProjectAccessDenied:
+    except PermissionError:
         return build_error_response(request, "project permission required", code="FORBIDDEN")
     except LifecycleError as exc:
         return build_error_response(
@@ -1503,7 +1530,7 @@ class ProjectAdapter(GatewayAdapter):
                     project_id = project.project_id if project else ''
             read_methods = {
                 'project.info', 'project.get_sessions', 'project.get_cron_sessions',
-                'project.git.status', 'project.git.diff_status',
+                'project.git.status', 'project.git.probe', 'project.git.diff_status',
                 'project.git.turn_diff_list', 'project.git.turn_diff',
             }
             action = 'read' if method in read_methods else ('execute' if method == 'project.cron.resolve_binding' else 'write')

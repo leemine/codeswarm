@@ -60,19 +60,21 @@ function byId(id, variant) {
 }
 const click = async (element) => act(async () => element.click());
 
-async function mount({ mode = 'agent', profile = 'default', language = 'en', organizationAuth = false } = {}, run) {
-  const sessionId = 'input-permission-merge';
+async function mount({ mode = 'agent', profile = 'default', language = 'en', organizationAuth = false, sessionId = 'input-permission-merge', draft = '' } = {}, run) {
   useSessionStore.getState().ensureRuntime(sessionId);
   useSessionStore.getState().setMode(sessionId, mode);
+  useChatStore.getState().ensureRuntime(sessionId);
   useChatStore.getState().setActiveSessionId(sessionId);
+  useChatStore.getState().setInputValue(sessionId, draft);
   const previousWorkspace = useWorkspaceStore.getState();
   useWorkspaceStore.setState({ workMode: 'work', projects: [], selectedProject: null });
   await i18n.changeLanguage(language);
   const saved = [];
   const switched = [];
+  const submitted = [];
   const props = {
     organizationAuth,
-    onSubmit() {},
+    onSubmit(content, media) { submitted.push({ content, media }); },
     onInterrupt() {},
     onCancel() {},
     onPersistMedia: async () => ({}),
@@ -93,7 +95,7 @@ async function mount({ mode = 'agent', profile = 'default', language = 'en', org
     act(async () => root.render(createElement(I18nextProvider, { i18n }, createElement(InputArea, props))));
   try {
     await render();
-    await run({ saved, switched, props, render, sessionId });
+    await run({ saved, switched, submitted, props, render, sessionId });
   } finally {
     await act(async () => root.unmount());
     useChatStore.getState().setActiveSessionId(null);
@@ -249,5 +251,37 @@ test('nonorganization Goal attachment and armed send keep existing behavior', as
     await act(async () => useGoalStore.getState().setArmed(sessionId, true));
     await submitText('ordinary legacy goal');
     assert.deepEqual(calls, [[sessionId, 'ordinary legacy goal']]);
+  });
+});
+
+for (const organizationAuth of [true, false]) {
+  test(`new draft sends without project: organization=${organizationAuth}`, async () => {
+    const draft = 'Hi without a project';
+    await mount({ organizationAuth, sessionId: 'new', draft }, async ({ submitted, sessionId }) => {
+      const input = byId('chat-panel-input');
+      assert.equal(input.textContent, draft);
+      await click(byId('chat-panel-input-send'));
+      assert.equal(submitted.length, 1);
+      assert.equal(submitted[0].content, draft);
+      assert.equal(input.textContent, '');
+    });
+  });
+}
+
+
+test('existing session displays its Provider without a switch or new-session dialog', async () => {
+  await mount({}, async () => {
+    const binding = byId('chat-panel-execution-binding');
+    assert.equal(binding.tagName, 'SPAN');
+    assert.equal(document.querySelector('[data-testid="chat-panel-execution-trigger"]'), null);
+    await click(binding);
+    assert.equal(document.querySelector('[data-testid="chat-panel-execution-menu"]'), null);
+    assert.equal(document.querySelector('[data-testid="chat-panel-execution-new-dialog"]'), null);
+  });
+});
+test('new conversation retains its Provider picker', async () => {
+  await mount({ sessionId: 'new' }, async () => {
+    assert.equal(byId('chat-panel-execution-trigger').tagName, 'BUTTON');
+    assert.equal(document.querySelector('[data-testid="chat-panel-execution-binding"]'), null);
   });
 });

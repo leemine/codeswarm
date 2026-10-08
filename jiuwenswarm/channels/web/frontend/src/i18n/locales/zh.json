@@ -3232,7 +3232,40 @@
       "entryCount": "共 {{count}} 条演进经验"
     }
   },
+  "executionPicker": {
+    "boundHint": "此会话的执行引擎已固定。更换引擎请新建任务。",
+    "title": "执行引擎",
+    "builtin": "内置引擎",
+    "loading": "正在读取引擎配置…",
+    "loadFailed": "引擎暂不可用",
+    "retry": "重新加载",
+    "selectionUnavailable": "所选引擎配置已变化或不适用于当前任务，请重新选择。",
+    "chooseModel": "请选择该引擎可用的模型",
+    "boundNote": "当前会话的引擎已固定。选择其他引擎将新建任务。",
+    "newTitle": "使用 {{provider}} 新建任务",
+    "newDescription": "新任务从空白上下文开始，原会话与历史仍保留。",
+    "newTask": "新建任务",
+    "reason": {
+      "mode_unavailable": "不支持当前模式",
+      "model_unavailable": "没有匹配的模型配置",
+      "configuration_unavailable": "配置暂不可用",
+      "provider_unavailable": "当前入口尚未开放"
+    }
+  },
   "sessionSharing": {
+    "extraPermissions": "其他权限与可用范围",
+    "permissionStatus": {
+      "discuss": "尚未开放",
+      "approve": "尚未开放",
+      "download": "共享下载未开放",
+      "manage": "接收者入口待完善"
+    },
+    "permissionDescription": {
+      "discuss": "围绕共享内容交流；当前没有共享评论入口。",
+      "approve": "处理获委托的审批；当前不能代答原会话的工具审批。",
+      "download": "下载获授权的共享产物；查看对话不包含文件访问权。",
+      "manage": "在既有授权范围内转授权，并管理自己发出的分享。"
+    },
     "audit": {
       "refresh": "刷新审计记录",
       "title": "最近分享审计",
@@ -3648,7 +3681,6 @@
         "pathExists": "该项目路径已存在，请选择其他目录或直接从现有项目开始新对话",
         "nameExists": "该项目名已存在，请换个名称",
         "pathMissing": "项目目录不存在，请选择已存在的目录",
-        "projectUnavailable": "项目不可用，请刷新后重试",
         "archiveSessionBusy": "对话正在运行，无法归档。请先手动停止，再重试归档。",
         "deleteSessionBusy": "对话正在运行，无法删除。请先手动停止，再重试删除。",
         "archiveForbidden": "该任务不支持归档",

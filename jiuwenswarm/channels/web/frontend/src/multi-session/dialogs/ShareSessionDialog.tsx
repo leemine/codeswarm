@@ -4,7 +4,6 @@ import { Dialog } from '../../components/ui/Dialog/Dialog';
 import {
   sessionSharingApi,
   SharingMutationCommittedError,
-  sharingActions,
   type SessionShare,
   type SharingAction,
   type SharedSessionTarget,
@@ -246,22 +245,50 @@ function ShareSessionContent({
             </label>
             <fieldset disabled={busy} data-testid="multi-session-sharing-actions">
               <legend data-testid="multi-session-sharing-actions-label">{t('sessionSharing.actions')}</legend>
-              {sharingActions.map((action) => (
-                <label key={action} data-testid="multi-session-sharing-action-label" data-variant={action}>
-                  <input
-                    type="checkbox"
-                    checked={actions.includes(action)}
-                    onChange={(event) =>
-                      setActions((current) =>
-                        event.target.checked ? [...current, action] : current.filter((value) => value !== action),
-                      )
-                    }
-                    data-testid="multi-session-sharing-action"
-                    data-variant={action}
-                  />
-                  {t(`sessionSharing.action.${action}`)}
-                </label>
-              ))}
+              <label data-testid="multi-session-sharing-action-label" data-variant="view">
+                <input
+                  type="checkbox"
+                  checked={actions.includes('view')}
+                  onChange={(event) =>
+                    setActions((current) =>
+                      event.target.checked ? [...current, 'view'] : current.filter((value) => value !== 'view'),
+                    )
+                  }
+                  data-testid="multi-session-sharing-action"
+                  data-variant="view"
+                />
+                {t('sessionSharing.action.view')}
+              </label>
+              <details data-testid="multi-session-sharing-extra-permissions">
+                <summary data-testid="multi-session-sharing-extra-permissions-toggle">
+                  {t('sessionSharing.extraPermissions')}
+                </summary>
+                {(['discuss', 'approve', 'download', 'manage'] as const).map((action) => (
+                  <label key={action} data-testid="multi-session-sharing-action-label" data-variant={action}>
+                    <input
+                      type="checkbox"
+                      checked={actions.includes(action)}
+                      disabled={action !== 'manage'}
+                      onChange={(event) =>
+                        setActions((current) =>
+                          event.target.checked ? [...current, action] : current.filter((value) => value !== action),
+                        )
+                      }
+                      data-testid="multi-session-sharing-action"
+                      data-variant={action}
+                    />
+                    <span data-testid="multi-session-sharing-permission-description" data-variant={action}>
+                      {t(`sessionSharing.action.${action}`)}
+                      <small className="session-sharing-permission-status">
+                        {t(`sessionSharing.permissionStatus.${action}`)}
+                      </small>
+                      <small className="session-sharing-permission-description">
+                        {t(`sessionSharing.permissionDescription.${action}`)}
+                      </small>
+                    </span>
+                  </label>
+                ))}
+              </details>
             </fieldset>
             <label data-testid="multi-session-sharing-expiry-label">
               {t('sessionSharing.expiry')}

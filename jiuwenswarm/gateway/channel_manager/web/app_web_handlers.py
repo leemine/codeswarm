@@ -4863,6 +4863,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             label="surface.capabilities.get",
         )
 
+    async def _session_execution_options(ws, req_id, params, session_id, user_id=None):
+        from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
+
+        await proxy_unary_request(
+            channel=channel, agent_client=_resolve(agent_client), ws=ws,
+            req_id=req_id, params=params, session_id=None, user_id=user_id,
+            req_method=ReqMethod.SESSION_EXECUTION_OPTIONS, label="session.execution.options",
+        )
+
     async def _session_create(ws, req_id, params, session_id, user_id=None):
         """创建一个新 session（在 agent/sessions 下创建一个新目录）。
 
@@ -7116,6 +7126,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("openai_account.models.list", _openai_account_models_list)
 
     channel.register_method("session.list", _session_list)
+    channel.register_method("session.execution.options", _session_execution_options)
     channel.register_method("session.create", _session_create)
     channel.register_method("session.get_metadata", _session_get_metadata)
     channel.register_method("session.plan_status", _session_plan_status)

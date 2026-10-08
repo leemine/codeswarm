@@ -3246,7 +3246,40 @@
       "entryCount": "{{count}} entries total"
     }
   },
+  "executionPicker": {
+    "boundHint": "This session’s execution engine is fixed. Start a new task to choose another engine.",
+    "title": "Execution engine",
+    "builtin": "Built-in engine",
+    "loading": "Loading engine configuration…",
+    "loadFailed": "Engine unavailable",
+    "retry": "Reload",
+    "selectionUnavailable": "The selected engine configuration changed or is unavailable for this task. Select it again.",
+    "chooseModel": "Select a model supported by this engine",
+    "boundNote": "This session’s engine is fixed. Selecting another engine starts a new task.",
+    "newTitle": "Start a new task with {{provider}}",
+    "newDescription": "The new task starts with an empty context. Your original conversation and history remain available.",
+    "newTask": "New task",
+    "reason": {
+      "mode_unavailable": "Unavailable in this mode",
+      "model_unavailable": "No matching model configuration",
+      "configuration_unavailable": "Configuration unavailable",
+      "provider_unavailable": "Not yet available in this picker"
+    }
+  },
   "sessionSharing": {
+    "extraPermissions": "Other permissions and availability",
+    "permissionStatus": {
+      "discuss": "Not available yet",
+      "approve": "Not available yet",
+      "download": "Shared downloads unavailable",
+      "manage": "Recipient controls incomplete"
+    },
+    "permissionDescription": {
+      "discuss": "Discuss shared content. Shared comments are not available yet.",
+      "approve": "Handle delegated approvals. This does not allow answering the original session’s tool approvals.",
+      "download": "Download explicitly authorized shared artifacts. Viewing a conversation does not grant file access.",
+      "manage": "Delegate within the existing grant and manage shares you issue."
+    },
     "audit": {
       "refresh": "Refresh audit",
       "title": "Recent sharing audit",
@@ -3662,7 +3695,6 @@
         "pathExists": "This project path already exists. Choose another directory or start a new conversation from the existing project.",
         "nameExists": "This project name already exists. Please choose another name.",
         "pathMissing": "Project directory does not exist. Choose an existing directory.",
-        "projectUnavailable": "Project unavailable. Refresh and retry.",
         "archiveSessionBusy": "This conversation is running and cannot be archived. Stop it manually, then try again.",
         "deleteSessionBusy": "This conversation is running and cannot be deleted. Stop it manually, then try again.",
         "archiveForbidden": "This task does not support archiving.",

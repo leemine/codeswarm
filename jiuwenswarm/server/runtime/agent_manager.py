@@ -2227,6 +2227,8 @@ class AgentManager:
                     agent = await self.get_agent(
                         **get_kwargs,
                     )
+                    if getattr(request, "_bound_execution", None) is not None:
+                        agent.select_execution_for_request(request)
                     prepare = getattr(agent, "prepare_session", None)
                     if not callable(prepare):
                         raise RuntimeError("auto_permission_session_owner_unavailable")

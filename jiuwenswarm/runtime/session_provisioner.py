@@ -139,6 +139,7 @@ class SessionCreateInput:
     model_name: str = ""
     cron_id: str = ""
     execution_profile_id: str | None = None
+    execution_expected_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         _require_bool("persist_session", self.persist_session)
@@ -146,6 +147,14 @@ class SessionCreateInput:
         _require_bool("is_swarm", self.is_swarm)
         _require_bool("team_hint", self.team_hint)
         _require_optional_bool("work_mode_explicit", self.work_mode_explicit)
+        if self.execution_expected_fingerprint is not None and (
+            not isinstance(self.execution_expected_fingerprint, str)
+            or (self.execution_expected_fingerprint != "legacy-native" and (
+                len(self.execution_expected_fingerprint) != 64
+                or any(char not in "0123456789abcdef" for char in self.execution_expected_fingerprint)
+            ))
+        ):
+            raise ValueError("invalid execution configuration fingerprint")
         if self.execution_profile_id is not None and (
             not isinstance(self.execution_profile_id, str)
             or not self.execution_profile_id.strip()
@@ -930,6 +939,10 @@ class RuntimeSessionProvisioner:
                     raise SessionProvisionError(
                         "session execution configuration changed", code="CONFLICT"
                     )
+            expected = provision_input.execution_expected_fingerprint
+            actual = execution_fingerprint if execution_profile_id is not None else "legacy-native"
+            if expected is not None and expected != actual:
+                raise SessionProvisionError("execution configuration changed; select it again", code="CONFLICT")
             prewarm_eligible = (
                 execution_profile_id is None
                 and not is_swarm
