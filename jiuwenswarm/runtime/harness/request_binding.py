@@ -110,12 +110,16 @@ def bind_admitted_request_execution(
         raise ExecutionRecoveryUnavailableError(
             "execution configuration revision changed"
         )
-    from openjiuwen.harness.engine.config import config_fingerprint
+    from jiuwenswarm.runtime.harness.config_source import source_for_bound_fingerprint
 
-    if config_fingerprint(spec) != session_metadata.get("execution_config_fingerprint"):
-        raise ExecutionRecoveryUnavailableError(
-            "execution configuration fingerprint changed"
+    try:
+        source = source_for_bound_fingerprint(
+            source, session_metadata.get("execution_config_fingerprint"),
+            allow_runtime_authorization=not str(session_metadata.get("mode", "")).startswith("team"),
         )
+        spec = source.resolve()
+    except ValueError as exc:
+        raise ExecutionRecoveryUnavailableError(str(exc)) from exc
     mode = None
     if spec.provider_id != "native":
         mode = validate_surface_request(session_metadata, params or {})

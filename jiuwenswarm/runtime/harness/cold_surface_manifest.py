@@ -3,13 +3,12 @@
 from pathlib import Path
 
 from openjiuwen.harness.engine import ExecutionBinding
-from openjiuwen.harness.engine.config import config_fingerprint
 from openjiuwen.harness_protocol import RuntimeSurface
 from openjiuwen.harness_providers.construction import configured_provider_capabilities, execution_authorization
 
 from jiuwenswarm.common.runtime_workspace import RuntimeWorkspacePaths
 from jiuwenswarm.runtime.harness.capability_catalog import compile_capability_catalog
-from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
+from jiuwenswarm.runtime.harness.config_source import load_execution_catalog, source_for_bound_fingerprint
 from jiuwenswarm.runtime.harness.external_subagent_profiles import surface_external_subagent_profiles
 from jiuwenswarm.runtime.harness.surface import (
     EffectiveSurfaceSnapshot, SurfaceAdmissionError, build_surface_identity,
@@ -30,10 +29,16 @@ def cold_surface_manifest(metadata, *, config, channel_id, session_id, browser_a
     catalog = load_execution_catalog(config)
     if catalog is None:
         raise SurfaceAdmissionError('execution profile is no longer configured')
-    spec = catalog.source(explicit_profile_id=metadata['execution_profile_id']).resolve()
-    if (spec.config_revision != metadata.get('execution_config_revision')
-            or config_fingerprint(spec) != metadata.get('execution_config_fingerprint')):
+    source = catalog.source(explicit_profile_id=metadata['execution_profile_id'])
+    if source.resolve().config_revision != metadata.get('execution_config_revision'):
         raise SurfaceAdmissionError('execution configuration changed')
+    try:
+        spec = source_for_bound_fingerprint(
+            source, metadata.get('execution_config_fingerprint'),
+            allow_runtime_authorization=not str(metadata.get('mode', '')).startswith('team'),
+        ).resolve()
+    except ValueError as exc:
+        raise SurfaceAdmissionError('execution configuration changed') from exc
     mode = validate_surface_metadata(metadata)
     surface = RuntimeSurface(mode.split('.')[1])
     if spec.provider_id == 'native':

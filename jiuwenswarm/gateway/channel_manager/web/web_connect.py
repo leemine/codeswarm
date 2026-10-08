@@ -100,6 +100,7 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "personal_context.context.edges",
         "personal_context.context.end",
         "chat.ask_user_question",
+        "chat.interaction_resolved",
         "chat.subtask_update",
         "chat.subagent_activity",
         "chat.symphony_status",
