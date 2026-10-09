@@ -101,8 +101,22 @@ class ExecutionConfigCatalog:
         )
 
 
+# These stable IDs name trusted built-in recipes, never request-supplied config.
+INSTALLED_EXECUTION_PROFILES = MappingProxyType({
+    "builtin:opencode": "opencode",
+    "builtin:codex": "codex",
+})
+
+
+def installed_execution_profiles() -> tuple[str, ...]:
+    """Discover executable presence only; never start a CLI or inspect login."""
+    from shutil import which
+    return tuple(profile for profile, executable in INSTALLED_EXECUTION_PROFILES.items() if which(executable))
+
+
 def load_execution_catalog(
     config: Mapping[str, object],
+    *, selected_profile_id: str | None = None,
 ) -> ExecutionConfigCatalog | None:
     """Load the optional execution section of an already resolved server config.
 
@@ -111,6 +125,49 @@ def load_execution_catalog(
     """
     if not isinstance(config, Mapping):
         raise TypeError("server configuration must be an object")
+    if selected_profile_id in INSTALLED_EXECUTION_PROFILES:
+        # Explicit, host-owned defaults do not replace configured profiles or
+        # the legacy Native default. Resolution is independent of installation:
+        # a removed CLI must fail at startup, not relabel an existing Session.
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is not None:
+            raise ValueError("installed engine defaults require a personal environment")
+        if "execution" in config:
+            existing = load_execution_catalog(config)
+            if selected_profile_id in existing.profile_ids:
+                return existing
+            if any(existing.source(explicit_profile_id=profile).resolve().provider_id
+                   == INSTALLED_EXECUTION_PROFILES[selected_profile_id] for profile in existing.profile_ids):
+                raise ValueError("use the configured execution profile for this engine")
+        provider = INSTALLED_EXECUTION_PROFILES[selected_profile_id]
+        permissions = config.get("permissions")
+        enabled = permissions.get("enabled") if isinstance(permissions, Mapping) else None
+        provider_config = {}
+        if provider == "opencode":
+            from jiuwenswarm.common.utils import get_agent_workspace_dir
+            provider_config["runtime_root"] = str(get_agent_workspace_dir().resolve() / "opencode-runtime")
+            # The OpenCode adapter requires an explicit model in its isolated
+            # process. Reuse the host's personal model decoder/default selector.
+            # Unsupported model transports remain a startup error, not fallback.
+            from jiuwenswarm.common.config import get_default_models
+            entries = get_default_models(dict(config))
+            entry = next((item for item in entries if item.get("is_default")), entries[0] if entries else {})
+            client = entry.get("model_client_config", {})
+            if (client.get("client_provider") == "OpenAI" and client.get("model_name")
+                    and client.get("api_base") and not client.get("custom_headers")
+                    and client.get("auth_mode", "api_key") in (None, "", "api_key")
+                    and client.get("api_mode", "chat_completions") in (None, "", "chat_completions")
+                    and not str(client.get("api_key", "")).startswith("jiuwen-login:")):
+                provider_config["model"] = {
+                    "model": client["model_name"], "api_base": client["api_base"],
+                    "api_key": client.get("api_key") or None,
+                }
+        return ExecutionConfigCatalog({selected_profile_id: {
+            "provider_id": provider,
+            "config_revision": "installed-engine-v1",
+            "provider_config": provider_config,
+            "authorization": {"full_access": enabled is False},
+        }}, default_profile_id=selected_profile_id)
     if "execution" not in config:
         return None
     section = config["execution"]

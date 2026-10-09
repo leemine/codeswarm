@@ -241,7 +241,9 @@ export function ExecutionPicker({
                     <span>{executionProviderLabel(option.provider_id)}</span>
                     <small>
                       {option.available
-                        ? option.execution_profile_id || t('executionPicker.builtin')
+                        ? option.execution_profile_id?.startsWith('builtin:')
+                          ? t('executionPicker.engineDefaults')
+                          : option.execution_profile_id || t('executionPicker.builtin')
                         : t(`executionPicker.reason.${option.reason}`)}
                     </small>
                   </span>

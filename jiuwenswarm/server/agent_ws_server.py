@@ -5011,7 +5011,7 @@ class AgentWebSocketServer:
                     if isinstance(profile_id, str) and permission_status is None:
                         from jiuwenswarm.common.config import get_config
                         from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
-                        catalog = load_execution_catalog(get_config())
+                        catalog = load_execution_catalog(get_config(), selected_profile_id=profile_id)
                         selected = catalog.source(explicit_profile_id=profile_id).resolve() if catalog else None
                         if (selected is not None and selected.authorization is not None
                                 and selected.provider_id in {"opencode", "codex"}
@@ -5330,7 +5330,7 @@ class AgentWebSocketServer:
             naming_options = {}
             if metadata.get("execution_profile_id"):
                 from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
-                catalog = load_execution_catalog(config_base)
+                catalog = load_execution_catalog(config_base, selected_profile_id=metadata["execution_profile_id"])
                 if catalog is not None:
                     naming_options["execution_provider"] = catalog.source(
                         explicit_profile_id=metadata["execution_profile_id"],

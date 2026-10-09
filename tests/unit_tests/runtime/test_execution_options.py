@@ -135,15 +135,16 @@ def test_personal_supported_providers_keep_original_creation_routes():
 @pytest.mark.parametrize('config', [{}, {'execution': {'default_profile_id': 'native', 'profiles': {
     'native': {'provider_id': 'native', 'config_revision': 'r1'},
 }}}])
-def test_product_discovery_is_independent_of_configured_profiles(config):
+def test_product_discovery_is_independent_of_configured_profiles(config, monkeypatch):
+    monkeypatch.setattr("jiuwenswarm.runtime.harness.execution_options.installed_execution_profiles", lambda: ())
     before = json.dumps(config)
     result = execution_options(config, [], {'mode': 'agent.code.normal', 'work_mode': 'code'}, governed=False)
     missing = {row['provider_id']: row for row in result['unconfigured_providers']}
     assert {row['provider_id'] for row in result['options']} | set(missing) == {
         'native', 'opencode', 'codex', 'claudecode', 'dsh',
     }
-    assert missing['opencode'] == {'provider_id': 'opencode', 'reason': 'configuration_required'}
-    assert missing['codex']['reason'] == 'configuration_required'
+    assert missing['opencode'] == {'provider_id': 'opencode', 'reason': 'not_installed'}
+    assert missing['codex']['reason'] == 'not_installed'
     assert missing['claudecode']['reason'] == 'provider_unavailable'
     # Discovery has no profile/fingerprint and does not mutate the actual catalog.
     assert all(set(row) == {'provider_id', 'reason'} for row in missing.values())
@@ -160,3 +161,69 @@ def test_discovery_preserves_scenario_restrictions_and_does_not_duplicate_profil
     result = options({})
     missing = {row['provider_id']: row['reason'] for row in result['unconfigured_providers']}
     assert missing['codex'] == 'provider_unavailable'  # still governed
+
+
+@pytest.mark.parametrize("config", [{}, {"execution": {"default_profile_id": "native", "profiles": {
+    "native": {"provider_id": "native", "config_revision": "r1"},
+}}}])
+def test_installed_engines_selectable_without_profiles(config, monkeypatch):
+    from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
+    monkeypatch.setattr("jiuwenswarm.runtime.harness.execution_options.installed_execution_profiles",
+                        lambda: ("builtin:opencode", "builtin:codex"))
+    result = execution_options(config, [], {"mode": "agent.code.normal", "work_mode": "code"}, governed=False)
+    rows = {row["provider_id"]: row for row in result["options"]}
+    assert set(rows) == {"native", "opencode", "codex"}
+    assert all(row["available"] for row in rows.values())
+    for provider in ("opencode", "codex"):
+        row = rows[provider]
+        assert row["execution_profile_id"] == f"builtin:{provider}"
+        spec = load_execution_catalog(config, selected_profile_id=row["execution_profile_id"]).source().resolve()
+        metadata = {"execution_profile_id": row["execution_profile_id"],
+                    "execution_config_revision": spec.config_revision,
+                    "execution_config_fingerprint": row["config_fingerprint"]}
+        # CLI removal does not change the stored engine identity on refresh.
+        monkeypatch.setattr("jiuwenswarm.runtime.harness.execution_options.installed_execution_profiles", lambda: ())
+        assert execution_display(metadata, config)["provider_id"] == provider
+    assert result["default_profile_id"] == ("native" if config else None)
+
+
+def test_installed_defaults_preserve_mode_and_governance_restrictions(monkeypatch):
+    monkeypatch.setattr("jiuwenswarm.runtime.harness.execution_options.installed_execution_profiles",
+                        lambda: ("builtin:opencode", "builtin:codex"))
+    for mode in ("agent.code.plan", "team.code.normal"):
+        result = execution_options({}, [], {"mode": mode, "work_mode": "code"}, governed=False)
+        assert all(not row["available"] for row in result["options"] if row["provider_id"] != "native")
+    assert len(options({})["options"]) == 1
+    assert len(execution_options(configuration(), entries(),
+        {"mode": "agent.code.normal", "work_mode": "code"}, governed=False)["options"]) == 3
+
+
+def test_installed_opencode_reuses_default_model_without_exposing_secrets(monkeypatch):
+    monkeypatch.setattr("jiuwenswarm.runtime.harness.execution_options.installed_execution_profiles",
+                        lambda: ("builtin:opencode",))
+    config = {"models": {"defaults": entries()}}
+    result = execution_options(config, entries(), {"mode": "agent.code.normal", "work_mode": "code"}, governed=False)
+    row = result["options"][1]
+    assert row["available"] and row["model_selection_keys"] == ["example#0"]
+    for private in ("DO-NOT-EXPOSE", "127.0.0.1", "api_key"):
+        assert private not in json.dumps(result)
+    from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
+    spec = load_execution_catalog(config, selected_profile_id=row["execution_profile_id"]).source().resolve()
+    assert spec.provider_config["model"]["model"] == "example"
+    assert spec.provider_config["model"]["api_key"] == "DO-NOT-EXPOSE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["opencode", "codex"])
+async def test_builtin_choice_is_persisted_before_allocation(tmp_path, monkeypatch, provider):
+    from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+    state = _State()
+    _install_product_hooks(monkeypatch, tmp_path, state)
+    monkeypatch.setattr("jiuwenswarm.common.config.get_config", lambda: {})
+    profile = f"builtin:{provider}"
+    await _provisioner(state).prepare_session_create(_input(execution_profile_id=profile))
+    metadata = get_session_metadata("created-session", cache_bust=True)
+    assert metadata["execution_profile_id"] == profile
+    assert metadata["execution_config_revision"] == "installed-engine-v1"
+    assert metadata["surface_creation"]["execution_profile_id"] == profile
+    assert execution_display(metadata, {})["provider_id"] == provider

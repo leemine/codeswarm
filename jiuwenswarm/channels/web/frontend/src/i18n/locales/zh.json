@@ -3253,7 +3253,9 @@
     "newTitle": "使用 {{provider}} 新建任务",
     "newDescription": "新任务从空白上下文开始，原会话与历史仍保留。",
     "newTask": "新建任务",
+    "engineDefaults": "引擎默认设置",
     "reason": {
+      "not_installed": "尚未安装此引擎",
       "mode_unavailable": "不支持当前模式",
       "model_unavailable": "没有匹配的模型配置",
       "configuration_required": "尚未设置此引擎",

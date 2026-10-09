@@ -506,3 +506,46 @@ async def test_native_idle_does_not_override_failed_durable_checkpoint(tmp_path,
     resumed = _native_abort_tree(tmp_path, history)
     with pytest.raises(HarnessProtocolError, match='confirmed idle'):
         await resumed.session.start(resumed.context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reason,expected', [
+    ('explicit_model_required', 'compatible default model'),
+    ('cli_unavailable', 'executable is not installed'),
+])
+async def test_startup_error_retains_safe_actionable_cause(tmp_path, monkeypatch, reason, expected):
+    from openjiuwen.harness_providers.base import ProviderStartupError
+    adapter = EngineAgentAdapter(_route(tmp_path, provider_id='opencode'))
+    monkeypatch.setattr(adapter, '_compile_cold_surface_policy', lambda: None)
+    monkeypatch.setattr(adapter, '_external_context', lambda: object())
+    monkeypatch.setattr(adapter._projection, 'replay_product_artifacts', AsyncMock())
+    error = ProviderStartupError('private detail must not become UI text', error=OpenCodeError(reason).turn_error())
+    session = SimpleNamespace(started=False, start=AsyncMock(side_effect=error))
+    with pytest.raises(RuntimeError, match=expected) as raised:
+        await adapter._ensure_started(session)
+    assert 'private detail' not in str(raised.value)
+    assert adapter.route.provider_id == 'opencode'
+    session.start.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_builtin_runtime_directory_is_private_and_allocated_at_startup(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
+    from jiuwenswarm.runtime.harness.binding_store import ExecutionBindingStore
+    monkeypatch.setattr('jiuwenswarm.common.utils.get_agent_workspace_dir', lambda: tmp_path / 'internal')
+    source = load_execution_catalog({}, selected_profile_id='builtin:opencode').source()
+    runtime_root = tmp_path / 'internal' / 'opencode-runtime'
+    assert not runtime_root.exists()
+    route = _route(tmp_path, provider_id='opencode')
+    bound = ExecutionBindingStore().bind(source, subject_id='alice', host_session_id='session-1',
+                                         workspace=str(route.runtime_paths.cwd))
+    adapter = EngineAgentAdapter(replace(route, source=source, bound=bound))
+    adapter._route = replace(adapter.route, recovery=SimpleNamespace(execution_profile_id='builtin:opencode'))
+    monkeypatch.setattr(adapter, '_compile_cold_surface_policy', lambda: None)
+    monkeypatch.setattr(adapter, '_external_context', lambda: object())
+    monkeypatch.setattr(adapter._projection, 'replay_product_artifacts', AsyncMock())
+    session = SimpleNamespace(started=False, start=AsyncMock())
+    await adapter._ensure_started(session)
+    assert runtime_root.stat().st_mode & 0o777 == 0o700
+    session.start.assert_awaited_once()

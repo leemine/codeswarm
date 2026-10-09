@@ -3270,7 +3270,9 @@
     "newTitle": "Start a new task with {{provider}}",
     "newDescription": "The new task starts with an empty context. Your original conversation and history remain available.",
     "newTask": "New task",
+    "engineDefaults": "Engine defaults",
     "reason": {
+      "not_installed": "Engine is not installed",
       "mode_unavailable": "Unavailable in this mode",
       "model_unavailable": "No matching model configuration",
       "configuration_required": "Engine setup required",

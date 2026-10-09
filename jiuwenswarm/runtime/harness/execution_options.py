@@ -10,7 +10,9 @@ from collections.abc import Mapping
 from openjiuwen.harness.engine.config import config_fingerprint
 from openjiuwen.harness_providers.construction import PROVIDER_NAMES, compile_execution
 
-from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
+from jiuwenswarm.runtime.harness.config_source import (
+    INSTALLED_EXECUTION_PROFILES, installed_execution_profiles, load_execution_catalog,
+)
 from jiuwenswarm.runtime.harness.surface import canonical_surface_mode
 from jiuwenswarm.runtime.model_catalog import build_model_catalog
 
@@ -30,9 +32,16 @@ def execution_options(config: Mapping, entries, params, *, governed: bool):
     catalog = load_execution_catalog(config)
     models = build_model_catalog(entries).models
     profiles = catalog.profile_ids if catalog else (None,)
+    configured_providers = {
+        catalog.source(explicit_profile_id=profile).resolve().provider_id for profile in profiles
+    } if catalog else {"native"}
+    if not governed:
+        profiles = (*profiles, *(profile for profile in installed_execution_profiles()
+            if profile not in profiles and INSTALLED_EXECUTION_PROFILES[profile] not in configured_providers))
     options = []
     for profile_id in profiles:
-        spec = catalog.source(explicit_profile_id=profile_id).resolve() if catalog else None
+        selected_catalog = load_execution_catalog(config, selected_profile_id=profile_id)
+        spec = selected_catalog.source(explicit_profile_id=profile_id).resolve() if selected_catalog else None
         provider = spec.provider_id if spec else "native"
         reason = None
         model_keys = None  # None preserves the original Native model picker.
@@ -73,11 +82,11 @@ def execution_options(config: Mapping, entries, params, *, governed: bool):
                             binding = ModelCredentialBinding.from_config(client)
                             ContinuationTargets._execution(spec, binding)
                         model_keys.append(model.selection_key)
-                if not governed:
+                if not governed and (profile_id not in INSTALLED_EXECUTION_PROFILES or configured.model is None):
                     # Personal profiles may own their model configuration (or
                     # use the CLI default), as before this picker existed.
                     model_keys = None
-                elif not model_keys:
+                elif governed and not model_keys:
                     reason = "model_unavailable"
             except Exception:
                 reason = "configuration_unavailable"
@@ -104,7 +113,7 @@ def execution_options(config: Mapping, entries, params, *, governed: bool):
         if mode.startswith("team.") or mode.endswith(".plan"):
             reason = "mode_unavailable" if provider != "native" or governed and mode.startswith("team.") else "configuration_required"
         elif provider in {"native", "opencode"} or provider == "codex" and not governed:
-            reason = "configuration_required"
+            reason = "configuration_required" if governed or provider == "native" else "not_installed"
         else:
             reason = "provider_unavailable"
         unconfigured.append({"provider_id": provider, "reason": reason})
@@ -122,7 +131,7 @@ def execution_display(metadata, config):
         return {"execution_profile_id": None, "provider_id": "native"}
     provider = None
     try:
-        catalog = load_execution_catalog(config)
+        catalog = load_execution_catalog(config, selected_profile_id=profile_id)
         spec = catalog.source(explicit_profile_id=profile_id).resolve()
         if (spec.config_revision == metadata.get("execution_config_revision")
                 and config_fingerprint(spec) == metadata.get("execution_config_fingerprint")):

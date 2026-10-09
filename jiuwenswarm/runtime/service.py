@@ -3844,7 +3844,7 @@ class AgentRuntime:
             )
             if (isinstance(metadata, dict) and metadata.get("execution_profile_id")
                     and str(metadata.get("mode", "")).startswith("team.")):
-                catalog = load_execution_catalog(get_config())
+                catalog = load_execution_catalog(get_config(), selected_profile_id=metadata["execution_profile_id"])
                 if catalog is not None:
                     spec = catalog.source(explicit_profile_id=metadata["execution_profile_id"]).resolve()
                     if spec.provider_id != "native":
@@ -3881,7 +3881,7 @@ class AgentRuntime:
         metadata = get_session_metadata(request.session_id, cache_bust=True, enable_writeback=False)
         if not isinstance(metadata, dict) or not metadata.get("execution_profile_id"):
             return original
-        catalog = load_execution_catalog(get_config())
+        catalog = load_execution_catalog(get_config(), selected_profile_id=metadata["execution_profile_id"])
         try:
             spec = catalog.source(explicit_profile_id=metadata["execution_profile_id"]).resolve() if catalog else None
         except ValueError:

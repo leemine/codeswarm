@@ -270,3 +270,34 @@ def test_public_authorization_controls_product_approval_and_binding(
     with pytest.raises(ValueError, match="does not match"):
         store.bind(ExecutionConfigSource(explicit=changed), subject_id="alice", host_session_id="s1",
                    workspace=str(tmp_path))
+
+
+def test_installed_discovery_has_no_cli_or_login_side_effects(monkeypatch):
+    from jiuwenswarm.runtime.harness.config_source import installed_execution_profiles
+    monkeypatch.setattr("shutil.which", lambda name: "/test/codex" if name == "codex" else None)
+    assert installed_execution_profiles() == ("builtin:codex",)
+
+
+def test_builtin_selection_preserves_legacy_and_rejects_governed_and_broken_config(monkeypatch):
+    assert load_execution_catalog({}) is None
+    assert load_execution_catalog({}, selected_profile_id="unrecognized") is None
+    with pytest.raises(ValueError):
+        load_execution_catalog({"execution": {}}, selected_profile_id="builtin:codex")
+    monkeypatch.setattr("jiuwenswarm.governance.organization_auth.configured_authenticator", lambda: object())
+    with pytest.raises(ValueError, match="personal environment"):
+        load_execution_catalog({}, selected_profile_id="builtin:codex")
+
+
+def test_builtin_permissions_follow_existing_host_decision():
+    for enabled in (True, False):
+        spec = load_execution_catalog({"permissions": {"enabled": enabled}},
+                                      selected_profile_id="builtin:codex").source().resolve()
+        assert spec.authorization.full_access is (not enabled)
+
+
+def test_builtin_request_cannot_bypass_a_configured_engine_recipe():
+    config = {"execution": {"default_profile_id": "custom", "profiles": {
+        "custom": {"provider_id": "codex", "config_revision": "r1"},
+    }}}
+    with pytest.raises(ValueError, match="configured execution profile"):
+        load_execution_catalog(config, selected_profile_id="builtin:codex")

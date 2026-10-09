@@ -895,8 +895,10 @@ class RuntimeSessionProvisioner:
             from jiuwenswarm.common.config import get_config
             from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
 
-            catalog = load_execution_catalog(get_config())
             requested_profile_id = provision_input.execution_profile_id
+            catalog = load_execution_catalog(
+                get_config(), selected_profile_id=requested_profile_id or existing_metadata.get("execution_profile_id"),
+            )
             if requested_profile_id is not None and catalog is None:
                 raise SessionProvisionError(
                     "execution profile is not configured", code="BAD_REQUEST"
@@ -1589,7 +1591,7 @@ class RuntimeSessionProvisioner:
                 load_execution_catalog,
             )
 
-            catalog = load_execution_catalog(get_config())
+            catalog = load_execution_catalog(get_config(), selected_profile_id=profile_id)
             if catalog is None:
                 raise SessionProvisionError(
                     "source execution profile is no longer configured",

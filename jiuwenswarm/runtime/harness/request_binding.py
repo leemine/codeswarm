@@ -94,7 +94,7 @@ def bind_admitted_request_execution(
     from jiuwenswarm.common.utils import get_agent_workspace_dir
     from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
 
-    catalog = load_execution_catalog(get_config())
+    catalog = load_execution_catalog(get_config(), selected_profile_id=selected_profile_id)
     if catalog is None:
         raise ExecutionRecoveryUnavailableError(
             "execution profile is no longer configured"

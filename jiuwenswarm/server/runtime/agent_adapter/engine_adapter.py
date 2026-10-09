@@ -1327,7 +1327,37 @@ class EngineAgentAdapter:
                 self._check_continuation(continuation_request, continuation_context, session)
             else:
                 context = self._external_context()
-            await session.start(context)
+            if (self._route.provider_id == "opencode"
+                    and self._route.bound.spec.config_revision == "installed-engine-v1"
+                    and self._route.recovery is not None
+                    and self._route.recovery.execution_profile_id == "builtin:opencode"):
+                # Allocation belongs to admitted startup, never menu discovery.
+                # Core still verifies owner, mode and symlinks before launching.
+                from pathlib import Path
+                Path(self._route.bound.spec.provider_config["runtime_root"]).mkdir(
+                    mode=0o700, parents=True, exist_ok=True,
+                )
+            from openjiuwen.harness_providers.base import ProviderStartupError
+            try:
+                await session.start(context)
+            except ProviderStartupError as exc:
+                # The ordinary error stream retains text only. Surface safe,
+                # typed startup labels rather than dropping the actual cause.
+                messages = {
+                    "explicit_model_required": "configure a compatible default model and endpoint",
+                    "explicit_runtime_and_cwd_required": "private runtime directory or workspace is unavailable",
+                    "cli_unavailable": "the engine executable is not installed or not on PATH",
+                    "runtime_path_not_private": "the runtime directory must be privately owned with mode 0700",
+                    "binary_digest_mismatch": "the installed OpenCode version does not match the supported runtime",
+                    "supervisor_unavailable": "the Linux user service manager is unavailable",
+                    "unsupported_supervisor_platform": "this OpenCode runtime requires Linux user services and cgroups",
+                }
+                detail = messages.get(exc.error.code)
+                if detail is None and exc.error.category == "auth_required":
+                    detail = "sign in to the engine or check its model credentials"
+                if detail is None:
+                    raise
+                raise RuntimeError(f"{self._route.provider_id} startup failed: {detail}") from exc
 
     def _compile_cold_surface_policy(self) -> None:
         if self._surface is None:

@@ -107,3 +107,16 @@ test('malformed or duplicate discovery entries cannot mask configured choices', 
   assert.equal(parseExecutionOptions(catalog), catalog); // earlier server response remains valid
   assert.equal(executionProviderLabel('claudecode'), 'Claude Code');
 });
+
+
+test('installed engine defaults use the original creation token and cannot switch silently', async () => {
+  for (const provider_id of ['opencode', 'codex']) {
+    const choice = { ...native, execution_profile_id: `builtin:${provider_id}`, provider_id };
+    const response = parseExecutionOptions({ options: [native, choice], default_profile_id: 'n' });
+    const params = { mode: 'agent.code.normal', work_mode: 'code' };
+    await prepareExecutionCreate(async () => response, params, choice);
+    assert.equal(params.execution_profile_id, choice.execution_profile_id);
+    assert.equal(params.execution_expected_fingerprint, choice.config_fingerprint);
+    assert.throws(() => selectCreationExecution(catalog, choice), /selectionUnavailable/);
+  }
+});
