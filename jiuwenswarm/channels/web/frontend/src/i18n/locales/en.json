@@ -4585,6 +4585,26 @@
     "authorityDigest": "Authoritative test digest",
     "assertions": "Executed assertions",
     "verifierCleanup": "Verifier container removed",
-    "dependencyLock": "Independent dependency lock path (optional)"
+    "dependencyLock": "Independent dependency lock path (optional)",
+    "rsiTab": "Recursive self-improvement",
+    "newExperiment": "New experiment",
+    "close": "Close",
+    "chooseTasks": "Choose tasks",
+    "confirmFreeze": "Confirm and freeze",
+    "taskChoiceHint": "Choose published task versions or a dataset. Create and import tasks in the task library.",
+    "automaticAcceptance": "Automatic acceptance configured",
+    "noTasks": "No published tasks. Create or import a task in the task library.",
+    "confirmPlan": "{{tasks}} tasks × {{repeats}} independent repeats = {{total}} planned trials",
+    "back": "Back",
+    "next": "Next",
+    "noRuns": "No experiments yet. Choose tasks and freeze your first configuration.",
+    "executionState": "Execution",
+    "acceptanceResult": "Acceptance",
+    "detailTabs": {
+      "run": "Run",
+      "results": "Results and evidence",
+      "config": "Frozen configuration"
+    },
+    "validSamples": "Valid automatic acceptance samples: {{passed}} / {{valid}}; excluded {{excluded}} (including {{unfinished}} unfinished). Exclusions remain in the main planned denominator."
   }
 }

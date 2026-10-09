@@ -6,6 +6,7 @@ import type { ApplicationPluginContribution } from './types';
 export interface ApplicationPluginsState {
   plugins: ApplicationPluginContribution[];
   loading: boolean;
+  loaded: boolean;
   error: string;
   refresh: () => Promise<void>;
 }
@@ -13,6 +14,7 @@ export interface ApplicationPluginsState {
 export function useApplicationPlugins(isGatewayConnected: boolean): ApplicationPluginsState {
   const [plugins, setPlugins] = useState<ApplicationPluginContribution[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState('');
 
   const refresh = useCallback(async () => {
@@ -21,6 +23,7 @@ export function useApplicationPlugins(isGatewayConnected: boolean): ApplicationP
     setError('');
     try {
       setPlugins(await fetchApplicationPlugins());
+      setLoaded(true);
     } catch (refreshError) {
       console.warn('Application plugin discovery failed:', refreshError);
       setError(refreshError instanceof Error ? refreshError.message : 'Application plugin discovery failed');
@@ -32,6 +35,7 @@ export function useApplicationPlugins(isGatewayConnected: boolean): ApplicationP
   useEffect(() => {
     if (!isGatewayConnected) {
       setPlugins([]);
+      setLoaded(false);
       setLoading(false);
       setError('');
       return;
@@ -40,8 +44,9 @@ export function useApplicationPlugins(isGatewayConnected: boolean): ApplicationP
     setLoading(true);
     setError('');
     void fetchApplicationPlugins(controller.signal)
-      .then(nextPlugins => {
+      .then((nextPlugins) => {
         setPlugins(nextPlugins);
+        setLoaded(true);
         setError('');
       })
       .catch((error: unknown) => {
@@ -55,5 +60,5 @@ export function useApplicationPlugins(isGatewayConnected: boolean): ApplicationP
     return () => controller.abort();
   }, [isGatewayConnected]);
 
-  return { plugins, loading, error, refresh };
+  return { plugins, loading, loaded, error, refresh };
 }

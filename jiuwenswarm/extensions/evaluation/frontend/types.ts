@@ -80,7 +80,12 @@ export interface Experiment {
     tasks: TaskRef[];
   };
   versions?: unknown;
-  statistics?: { passed: number; planned_trials: number; all_settled: boolean };
+  statistics?: {
+    passed: number;
+    planned_trials: number;
+    all_settled: boolean;
+    first_attempt_outcomes?: Record<string, number>;
+  };
   trials: {
     id: string;
     task_id: string;

@@ -4566,6 +4566,26 @@
     "authorityDigest": "权威测试摘要",
     "assertions": "实际执行断言数",
     "verifierCleanup": "验收容器已清理",
-    "dependencyLock": "独立验收依赖锁路径（可选）"
+    "dependencyLock": "独立验收依赖锁路径（可选）",
+    "rsiTab": "递归自我改进",
+    "newExperiment": "新建实验",
+    "close": "关闭",
+    "chooseTasks": "选择任务",
+    "confirmFreeze": "确认并冻结",
+    "taskChoiceHint": "选择已发布任务版本或任务集；手动创建与 JSONL 导入在任务库完成。",
+    "automaticAcceptance": "已配置自动验收",
+    "noTasks": "暂无已发布任务，请先在任务库创建或导入。",
+    "confirmPlan": "{{tasks}} 个任务 × {{repeats}} 次独立重复 = {{total}} 个计划样本",
+    "back": "上一步",
+    "next": "下一步",
+    "noRuns": "暂无实验，选择任务并冻结首个实验配置。",
+    "executionState": "执行状态",
+    "acceptanceResult": "验收结论",
+    "detailTabs": {
+      "run": "运行",
+      "results": "结果 / 证据",
+      "config": "冻结配置"
+    },
+    "validSamples": "有效自动验收样本：{{passed}} / {{valid}}；排除 {{excluded}}（含未结束 {{unfinished}}）。排除项仍保留在主指标的全部计划分母中。"
   }
 }

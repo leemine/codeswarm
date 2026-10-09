@@ -22,6 +22,7 @@ class EvaluationApplicationPlugin(ApplicationPluginExtension):
                 render_mode="bundled",
                 component=self.plugin_id,
                 position=80,
+                nav_group="experiments",
             ),
         )
 

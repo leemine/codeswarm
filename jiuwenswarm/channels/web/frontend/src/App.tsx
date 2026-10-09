@@ -22,7 +22,7 @@ import { DesktopTextEditContextMenu } from './components/DesktopTextEditContextM
 import { SessionSidebar } from './components/SessionSidebar';
 import { SkillPanel } from './components/SkillPanel';
 import { AgentManagementPanel } from './components/AgentManagementPanel';
-import { RsiPage } from './features/rsi/RsiPage';
+import { ExperimentsContainer } from './applicationPlugins/ExperimentsContainer';
 import {
   normalizeRSIEnabled,
   setRSIFeatureEnabled,
@@ -413,7 +413,19 @@ function AppContent({
   const [chatWelcomeVariant, setChatWelcomeVariant] = useState<'group-create' | null>(null);
   const [trajectoryUiRequested, setTrajectoryUiRequested] = useState(false);
 
-  const [activeNav, setActiveNav] = useState<MainNavKey>('chat');
+  const [activeNav, setActiveNav] = useState<MainNavKey>(() => {
+    const saved = sessionStorage.getItem('jiuwen:experiments:nav');
+    return sessionStorage.getItem('jiuwen:experiments:path') === window.location.pathname && (saved === 'experiments' || saved === 'app:evaluation-experiments') ? saved : 'chat';
+  });
+  useEffect(() => {
+    if (activeNav === 'experiments' || activeNav.startsWith('app:')) {
+      sessionStorage.setItem('jiuwen:experiments:nav', activeNav);
+      sessionStorage.setItem('jiuwen:experiments:path', window.location.pathname);
+    } else {
+      sessionStorage.removeItem('jiuwen:experiments:nav');
+      sessionStorage.removeItem('jiuwen:experiments:path');
+    }
+  }, [activeNav]);
   const masterEnabled = usePersonalContextStore(
     (s) => s.config.collection_enabled || s.config.agent_use_enabled,
   );
@@ -651,11 +663,14 @@ function AppContent({
     setSingleAgentPanelSelectedSubagentId,
   } = useSingleAgentPanelState();
 
+  const preserveInitialExperimentsNav = useRef(activeNav === 'experiments' || activeNav === 'app:evaluation-experiments');
   useEffect(() => {
+    const preserveNav = preserveInitialExperimentsNav.current;
+    preserveInitialExperimentsNav.current = false;
     if (route.kind === 'chat-session') {
       sessionIdRef.current = route.sessionId;
       setSessionId(route.sessionId);
-      setActiveNav('chat');
+      if (!preserveNav) setActiveNav('chat');
     } else if (route.kind === 'chat-new') {
       if (window.location.pathname !== '/chat/new') {
         navigate({ kind: 'chat-new' }, { replace: true });
@@ -668,7 +683,7 @@ function AppContent({
       }
       sessionIdRef.current = 'new';
       setSessionId('new');
-      setActiveNav('chat');
+      if (!preserveNav) setActiveNav('chat');
       setTeamAreaExpanded(false);
       setSingleAgentPanelExpanded(false);
     }
@@ -884,26 +899,6 @@ function AppContent({
     import.meta.env.MODE,
     typeof serverConfig?.runtime_platform === 'string' ? serverConfig.runtime_platform : undefined,
   );
-  const rsiFeatureEnabled = useRSIFeatureEnabled();
-  const hiddenNavItems = useMemo<MainNavKey[]>(() => {
-    const base = getHiddenNavItemsForPlatform(frontendPlatform);
-    const rsiFiltered: MainNavKey[] = rsiFeatureEnabled
-      ? base
-      : [...base, 'experiments'];
-    // feature 关闭时移除全部个人上下文入口
-    if (!FEATURE_PERSONAL_CONTEXT_UI) {
-      return [...rsiFiltered, 'personalContext', 'personalContextSettings'];
-    }
-    // 总开关关闭时隐藏导航入口（设置页入口保留，供打开总开关）
-    if (!masterEnabled) return [...rsiFiltered, 'personalContext'];
-    return rsiFiltered;
-  }, [frontendPlatform, masterEnabled, rsiFeatureEnabled]);
-
-  useEffect(() => {
-    if (!rsiFeatureEnabled && activeNav === 'experiments') {
-      setActiveNav('chat');
-    }
-  }, [activeNav, rsiFeatureEnabled]);
 
   useEffect(() => {
     if (!serverConfig) {
@@ -1091,6 +1086,34 @@ function AppContent({
   const applicationPluginState = useApplicationPlugins(isConnected);
   const applicationPlugins = applicationPluginState.plugins;
   const visibleApplicationPlugins = enabledApplicationPlugins(applicationPlugins);
+  const experimentPlugins = visibleApplicationPlugins.filter(plugin => plugin.nav_group === 'experiments');
+  const rsiFeatureEnabled = useRSIFeatureEnabled();
+  const hiddenNavItems = useMemo<MainNavKey[]>(() => {
+    const base = getHiddenNavItemsForPlatform(frontendPlatform);
+    const rsiFiltered: MainNavKey[] = (rsiFeatureEnabled || experimentPlugins.length > 0)
+      ? base
+      : [...base, 'experiments'];
+    // feature 关闭时移除全部个人上下文入口
+    if (!FEATURE_PERSONAL_CONTEXT_UI) {
+      return [...rsiFiltered, 'personalContext', 'personalContextSettings'];
+    }
+    // 总开关关闭时隐藏导航入口（设置页入口保留，供打开总开关）
+    if (!masterEnabled) return [...rsiFiltered, 'personalContext'];
+    return rsiFiltered;
+  }, [frontendPlatform, masterEnabled, rsiFeatureEnabled, experimentPlugins.length]);
+
+  useEffect(() => {
+    if (isConnected && applicationPluginState.loaded && !applicationPluginState.loading && !applicationPluginState.error && !rsiFeatureEnabled && !experimentPlugins.length && activeNav === 'experiments') {
+      setActiveNav('chat');
+    }
+  }, [activeNav, rsiFeatureEnabled, experimentPlugins.length, isConnected, applicationPluginState.loaded, applicationPluginState.loading, applicationPluginState.error]);
+
+  useEffect(() => {
+    if (applicationPluginState.loaded && activeNav === 'app:evaluation-experiments' && !experimentPlugins.some(plugin => plugin.nav_key === activeNav)) {
+      setActiveNav(rsiFeatureEnabled || experimentPlugins.length ? 'experiments' : 'chat');
+    }
+  }, [activeNav, rsiFeatureEnabled, experimentPlugins, applicationPluginState.loaded]);
+
   const settingsRequest = useMemo(() => resolveSettingsRequest(request), [request, resolveSettingsRequest]);
 
   useEffect(() => {
@@ -4061,9 +4084,9 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
             </div>
           </>
         )}
-        {activeNav === 'experiments' && (
+        {(activeNav === 'experiments' || experimentPlugins.some(plugin => plugin.nav_key === activeNav)) && (
           <div className="app-section">
-            <RsiPage />
+            <ExperimentsContainer rsiEnabled={rsiFeatureEnabled} plugins={experimentPlugins} legacyNav={activeNav} />
           </div>
         )}
         {hasVisitedAgents && (
@@ -4171,7 +4194,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
             />
           </div>
         )}
-        {activeApplicationPlugin && (
+        {activeApplicationPlugin && activeApplicationPlugin.nav_group !== 'experiments' && (
           <div className="app-section">
             <ApplicationPluginOutlet contribution={activeApplicationPlugin} />
           </div>
