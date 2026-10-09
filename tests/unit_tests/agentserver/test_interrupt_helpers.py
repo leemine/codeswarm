@@ -1103,6 +1103,60 @@ def test_protocol_user_input_projects_as_question_not_permission():
     }
 
 
+@pytest.mark.asyncio
+async def test_codex_questions_round_trip_original_controls(monkeypatch):
+    from openjiuwen.harness_protocol.interactions import (
+        InteractionResponseStatus,
+        UserInputResponse,
+    )
+    from openjiuwen.harness_providers.codex.config import CodexHarnessConfig
+    from openjiuwen.harness_providers.codex.harness import CodexHarness
+    from openjiuwen.harness_providers.io_adapter import HarnessIOAdapter
+    from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import EngineAgentAdapter
+
+    harness = CodexHarness(CodexHarnessConfig())
+    adapter = HarnessIOAdapter(harness)
+    questions = [
+        {"id": "choice", "header": "Choice", "question": "Choose A or B?",
+         "options": [{"label": "A", "description": "First"},
+                     {"label": "B", "description": "Second"}]},
+        {"id": "details", "header": "Details", "question": "Any details?",
+         "options": []},
+    ]
+
+    async def answer_from_ui(request):
+        chunk = adapter._interaction_chunk(request)
+        payload = convert_interactions_to_ask_user_question([chunk.payload])
+        assert payload is not None
+        assert [q["question"] for q in payload["questions"]] == [
+            q["question"] for q in questions
+        ]
+        assert payload["questions"][0]["header"] == "Choice"
+        assert payload["questions"][0]["options"][1]["description"] == "Second"
+        interactive = EngineAgentAdapter._interaction_answer({
+            "request_id": payload["request_id"],
+            "source": payload["source"],
+            "answers": [
+                {"question": payload["questions"][0]["question"],
+                 "selected_options": ["B"]},
+                {"question": payload["questions"][1]["question"],
+                 "selected_options": [], "custom_input": "Custom details"},
+            ],
+        })
+        assert interactive is not None
+        return UserInputResponse(
+            request_id=request.request_id,
+            status=InteractionResponseStatus.COMPLETED,
+            content=interactive.user_inputs[request.request_id],
+        )
+
+    monkeypatch.setattr(harness, "_request_interaction", answer_from_ui)
+    assert await harness._route_user_input({"itemId": "ask", "questions": questions}) == {
+        "answers": {"choice": {"answers": ["B"]},
+                    "details": {"answers": ["Custom details"]}},
+    }
+
+
 def test_protocol_user_input_falls_back_to_prompt_and_choices():
     payload = convert_interactions_to_ask_user_question(
         [
