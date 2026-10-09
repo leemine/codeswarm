@@ -332,3 +332,45 @@ async def test_detached_turn_keeps_original_request_id_for_targeted_cancel(monke
     assert cancelled.matched == 1 and cancelled.cancelled == 1
     await projection(ProjectedOutput("turn", terminal=TurnEventKind.ABORTED))
     await runtime._session_coordinator.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("during_release", [True, False])
+async def test_late_detached_terminal_during_stop_does_not_admit_work_or_report_failure(
+    monkeypatch, during_release,
+):
+    from jiuwenswarm.runtime.service import AgentRuntime
+    from jiuwenswarm.runtime.session import RuntimeSessionCoordinator
+
+    runtime = object.__new__(AgentRuntime)
+    runtime._session_coordinator = RuntimeSessionCoordinator()
+    runtime._admission_controller = None
+    await runtime._session_coordinator.register_session("s", "web")
+    push = AsyncMock(return_value=True)
+    monkeypatch.setattr(mod, "send_runtime_push", push)
+    monkeypatch.setattr(mod, "build_server_push_message", lambda **kwargs: kwargs)
+    monkeypatch.setattr(mod, "get_session_delivery_context", lambda _sid: {})
+    monkeypatch.setattr(mod, "get_session_metadata", lambda *_args, **_kwargs: {})
+    parser = MagicMock()
+    projection = mod.NativeDetachedProjection(
+        "s", SimpleNamespace(_parse_stream_chunk=parser), runtime=runtime,
+        request_id_for_turn=lambda _turn_id: "original-request",
+    )
+
+    async def late_terminal():
+        await projection(ProjectedOutput("late-turn", terminal=TurnEventKind.ABORTED))
+
+    try:
+        await runtime._session_coordinator.close_session(
+            "s", release_resources=late_terminal if during_release else None,
+        )
+        if not during_release:
+            await late_terminal()
+        await late_terminal()  # Replay must not manufacture another owner/error.
+        push.assert_not_awaited()
+        parser.assert_not_called()
+        assert runtime._session_coordinator.snapshot_session("s").executions == ()
+        assert projection._turns == {}
+    finally:
+        await projection.close()
+        await runtime._session_coordinator.close()

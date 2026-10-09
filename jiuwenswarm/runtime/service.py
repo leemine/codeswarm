@@ -1090,8 +1090,15 @@ class AgentRuntime:
 
     def begin_detached_native_turn(
         self, session_id: str, turn_id: str, request_id: str | None = None
-    ) -> SessionExecutionSnapshot:
-        """Give a provider Turn with no Web reader an existing Runtime owner."""
+    ) -> SessionExecutionSnapshot | None:
+        """Give live detached output an owner; stopped Sessions reject late output."""
+        snapshot = self._session_coordinator.snapshot_session(session_id)
+        if snapshot is not None and snapshot.state in {
+            RuntimeSessionState.QUIESCING, RuntimeSessionState.CLOSED,
+        }:
+            # Stop can release a provider that emits its final detached event.
+            # Observation must not admit new work through that existing fence.
+            return None
         return self._session_coordinator.begin_detached_turn(
             session_id, request_id or f"native-turn-{turn_id}"
         )
