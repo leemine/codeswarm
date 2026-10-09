@@ -23,7 +23,7 @@
 }
 .evaluation-columns {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(300px, 1.6fr) minmax(240px, 1fr);
+  grid-template-columns: minmax(220px, 1fr) minmax(300px, 2fr);
   gap: 16px;
   margin: 20px 0;
   align-items: start;
@@ -143,3 +143,58 @@
     grid-template-columns: 1fr;
   }
 }
+.evaluation-wizard {
+  border: 1px solid var(--color-border-default);
+  background: var(--color-surface-page);
+  padding: 20px;
+  border-radius: 10px;
+  margin: 16px 0;
+}
+.evaluation-wizard-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.evaluation-steps {
+  display: flex;
+  gap: 20px;
+  list-style: none;
+  padding: 0;
+  color: var(--color-text-secondary);
+  flex-wrap: wrap;
+}
+.evaluation-steps [aria-current='step'] {
+  color: var(--color-text-link);
+  font-weight: 600;
+}
+.evaluation-experiments {
+  margin-top: 0;
+}
+.evaluation-run-layout > .evaluation-list {
+  border-right: 1px solid var(--color-border-default);
+  padding-right: 20px;
+  max-height: 65vh;
+  overflow: auto;
+}
+.evaluation-run-layout .evaluation-list li {
+  flex-wrap: wrap;
+}
+.evaluation-app [hidden] {
+  display: none;
+}
+@media (max-width: 720px) {
+  .evaluation-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .evaluation-wizard {
+    padding: 12px;
+  }
+  .evaluation-run-layout > .evaluation-list {
+    border-right: 0;
+    padding-right: 0;
+    max-height: 220px;
+  }
+}
+
+.evaluation-task-library .evaluation-import { grid-column: 1 / -1; }

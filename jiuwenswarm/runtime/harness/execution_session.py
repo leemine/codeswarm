@@ -260,7 +260,11 @@ class ExecutionSession:
         return self._require_router().outputs(turn_id)
 
     def abandon_output(self, turn_id: str) -> None:
-        self._require_router().abandon(turn_id)
+        # Strict stop may already have released the reader's router. Abandoning
+        # that finished ownership is idempotent and must not mask its outcome.
+        router = self._output_router
+        if router is not None:
+            router.abandon(turn_id)
 
     async def abort(self, *, immediate: bool = False) -> None:
         if (

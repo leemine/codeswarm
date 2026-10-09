@@ -12605,8 +12605,11 @@ class JiuWenSwarmDeepAdapter:
             bindings = self._native_execution_bindings
             pending = set(getattr(self, '_native_pending_exit_tasks', set()))
             strict = require_owned_exit or bool(pending) or getattr(self, '_native_strict_exit_required', False)
-            native_agent = execution._native.agent if strict else None
+            native_agent = (
+                getattr(self, "_native_pending_stop_agent", None) or execution._native.agent
+            ) if strict else None
             if strict:
+                self._native_pending_stop_agent = native_agent
                 self._native_strict_exit_required = True
                 pending.update(self._native_owned_exit_tasks(native_agent))
                 self._native_pending_exit_tasks = pending
@@ -12633,6 +12636,14 @@ class JiuWenSwarmDeepAdapter:
                 if remaining:
                     raise RuntimeError('Native owned execution tasks have not exited')
                 self._native_pending_exit_tasks = set()
+            if require_owned_exit:
+                from jiuwenswarm.server.runtime.agent_adapter.permission_continuation import (
+                    discard_stopped_tool_continuation,
+                )
+                await discard_stopped_tool_continuation(
+                    native_agent, self._parent_session_id,
+                )
+            self._native_pending_stop_agent = None
             self._native_strict_exit_required = False
             self._native_execution = None
             self._native_execution_bindings = None

@@ -56,7 +56,23 @@ old Binding or cold archive.
 When the section is absent the loader returns `None`; a present but malformed
 section (including `execution: null`) fails validation. A configured default
 selects new sessions; existing sessions without a selection retain the legacy
-route. There is no selection UI or packaged default `execution` section yet.
+route. The original Code/Work creation picker discovers installed OpenCode/Codex
+executables on PATH in personal environments. It offers stable
+`builtin:opencode` / `builtin:codex` selection IDs when no profile configures
+that engine. Resolve a persisted built-in ID using
+`load_execution_catalog(config, selected_profile_id=...)`; raw provider
+configuration is never accepted from the client.
+
+Built-in recipes are host-owned, fingerprinted and follow the existing global
+permission decision. OpenCode receives a private runtime root under the host
+workspace and its compatible default OpenAI chat model through the existing
+personal model decoder. Codex retains its SDK/CLI defaults and login. Discovery
+only checks executable presence; SDK, platform, CLI integrity, model and login
+checks run at startup. Removing a CLI never relabels existing sessions.
+Changing the default model or runtime root invalidates an OpenCode binding and
+requires a new session. Configured recipes remain authoritative and cannot be
+bypassed by requesting a built-in ID. Plan/Team and governed combinations
+retain their existing admission limits.
 
 The generic `prepare_execution` result is an unstarted core `HarnessEngine`.
 The Native Single route below uses the already assembled DeepAgent instead of

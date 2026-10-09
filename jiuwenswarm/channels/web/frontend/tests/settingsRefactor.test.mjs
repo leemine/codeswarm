@@ -1110,6 +1110,7 @@ test('every visible Settings control maps to an exact persistence field or RPC',
     'asr_api_base',
     'asr_api_key',
     'asr_model',
+    'evaluation_enabled',
     'symphony_evolution_enabled',
     'kv_cache_affinity_enabled',
     'proactive_recommendation_enabled',
@@ -1119,6 +1120,7 @@ test('every visible Settings control maps to an exact persistence field or RPC',
     'asr_api_base',
     'asr_api_key',
     'asr_model',
+    'evaluation_enabled',
     'external_cli_agent_claude_cli_path',
     'external_cli_agent_claude_enabled',
     'external_cli_agent_claude_use_builtin',
@@ -1959,6 +1961,8 @@ test('legacy page translations and Harness package state are removed without del
 
   for (const locale of [zh, en]) {
     assert.deepEqual(Object.keys(locale.browser).sort(), ['errors', 'pane']);
+    assert.equal(locale.browser.pane.addressPlaceholder.length > 0, true);
+    assert.match(source('src/components/DesktopBrowserPane/index.tsx'), /browser\.pane\.addressPlaceholder/);
     assert.deepEqual(Object.keys(locale.channels.labels).sort(), supportedChannelIds);
     assert.deepEqual(Object.keys(locale.config).sort(), expectedConfigSections);
     assert.equal(locale.extensions, undefined);

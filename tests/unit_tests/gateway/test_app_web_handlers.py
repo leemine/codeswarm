@@ -1537,6 +1537,7 @@ async def test_task_full_duplex_switch_round_trips_through_config_rpc(monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("feature", ["rsi", "evaluation"])
 @pytest.mark.parametrize(
     ("raw_config", "expected"),
     [
@@ -1544,7 +1545,8 @@ async def test_task_full_duplex_switch_round_trips_through_config_rpc(monkeypatc
         ({"rsi": {"enabled": False}}, "false"),
     ],
 )
-async def test_config_get_returns_rsi_switch(monkeypatch, raw_config, expected):
+async def test_config_get_returns_rsi_switch(monkeypatch, raw_config, expected, feature):
+    raw_config = {feature: value for _, value in raw_config.items()}
     channel = FakeWebChannel()
     monkeypatch.setattr(app_web_handlers, "get_config_raw", lambda: raw_config)
     monkeypatch.setattr(app_web_handlers, "get_config", lambda: raw_config)
@@ -1558,11 +1560,12 @@ async def test_config_get_returns_rsi_switch(monkeypatch, raw_config, expected):
     )
 
     assert channel.responses[-1]["ok"] is True
-    assert channel.responses[-1]["payload"]["rsi_enabled"] == expected
+    assert channel.responses[-1]["payload"][feature + "_enabled"] == expected
 
 
 @pytest.mark.asyncio
-async def test_config_save_all_persists_rsi_switch(monkeypatch):
+@pytest.mark.parametrize("feature", ["rsi", "evaluation"])
+async def test_config_save_all_persists_rsi_switch(monkeypatch, feature):
     channel = FakeWebChannel()
     persisted: list[bool] = []
     reload_options_seen: list[dict] = []
@@ -1570,16 +1573,16 @@ async def test_config_save_all_persists_rsi_switch(monkeypatch):
     monkeypatch.setattr(
         app_web_handlers,
         "get_config_raw",
-        lambda: {"rsi": {"enabled": True}},
+        lambda: {feature: {"enabled": True}},
     )
     monkeypatch.setattr(
         app_web_handlers,
         "get_config",
-        lambda: {"rsi": {"enabled": False}},
+        lambda: {feature: {"enabled": False}},
     )
     monkeypatch.setattr(
         app_web_handlers,
-        "update_rsi_enabled_in_config",
+        "update_" + feature + "_enabled_in_config",
         lambda enabled: persisted.append(enabled),
     )
 
@@ -1598,7 +1601,7 @@ async def test_config_save_all_persists_rsi_switch(monkeypatch):
     await channel.methods["config.save_all"](
         object(),
         "req-set-rsi",
-        {"config": {"rsi_enabled": False}},
+        {"config": {feature + "_enabled": False}},
         "sess-set-rsi",
     )
 
@@ -1606,11 +1609,11 @@ async def test_config_save_all_persists_rsi_switch(monkeypatch):
     assert reload_options_seen == [
         {
             "target_channel_id": "web",
-            "reload_scopes": ["agent_runtime"],
+            "reload_scopes": ["web_ui" if feature == "evaluation" else "agent_runtime"],
         }
     ]
     assert channel.responses[-1]["payload"] == {
-        "updated": ["rsi_enabled"],
+        "updated": [feature + "_enabled"],
         "applied_without_restart": True,
         "models_count": None,
     }

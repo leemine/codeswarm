@@ -4,6 +4,7 @@ import {
   prepareExecutionCreate,
   parseExecutionOptions,
   selectCreationExecution,
+  executionProviderLabel,
 } from '../node_modules/.cache/execution-options/executionOptions.js';
 const native = {
   execution_profile_id: 'n',
@@ -74,4 +75,48 @@ test('malformed catalog and duplicated identifiers fail closed', () => {
     { ...catalog, options: [{ ...oc, model_selection_keys: [{}] }] },
   ])
     assert.throws(() => parseExecutionOptions(value));
+});
+
+test('unconfigured engines remain discoverable without becoming creation choices', async () => {
+  const response = parseExecutionOptions({
+    options: [native],
+    default_profile_id: 'n',
+    unconfigured_providers: [{ provider_id: 'opencode', reason: 'configuration_required' }],
+  });
+  assert.equal(response.unconfigured_providers[0].provider_id, 'opencode');
+  assert.throws(() => selectCreationExecution(response, oc), /selectionUnavailable/);
+  const params = { mode: 'agent.code.normal', work_mode: 'code' };
+  await prepareExecutionCreate(async () => response, params, native);
+  assert.equal(params.execution_profile_id, 'n');
+  assert.equal(executionProviderLabel(native.provider_id), 'Deepagent');
+  assert.equal(native.provider_id, 'native');
+});
+
+test('malformed or duplicate discovery entries cannot mask configured choices', () => {
+  for (const unconfigured_providers of [
+    {},
+    [null],
+    [{ provider_id: 'opencode' }],
+    [{ provider_id: 'native', reason: 'configuration_required' }],
+    [
+      { provider_id: 'dsh', reason: 'provider_unavailable' },
+      { provider_id: 'dsh', reason: 'provider_unavailable' },
+    ],
+  ])
+    assert.throws(() => parseExecutionOptions({ ...catalog, unconfigured_providers }));
+  assert.equal(parseExecutionOptions(catalog), catalog); // earlier server response remains valid
+  assert.equal(executionProviderLabel('claudecode'), 'Claude Code');
+});
+
+
+test('installed engine defaults use the original creation token and cannot switch silently', async () => {
+  for (const provider_id of ['opencode', 'codex']) {
+    const choice = { ...native, execution_profile_id: `builtin:${provider_id}`, provider_id };
+    const response = parseExecutionOptions({ options: [native, choice], default_profile_id: 'n' });
+    const params = { mode: 'agent.code.normal', work_mode: 'code' };
+    await prepareExecutionCreate(async () => response, params, choice);
+    assert.equal(params.execution_profile_id, choice.execution_profile_id);
+    assert.equal(params.execution_expected_fingerprint, choice.config_fingerprint);
+    assert.throws(() => selectCreationExecution(catalog, choice), /selectionUnavailable/);
+  }
 });

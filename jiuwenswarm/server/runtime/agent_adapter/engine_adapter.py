@@ -114,6 +114,8 @@ class EngineAgentAdapter:
         self._ordinary_runtime = None
         self._ordinary_turn = None
         self._ordinary_terminal = set()
+        self._ordinary_reader_done = asyncio.Event()
+        self._ordinary_reader_done.set()
         self._ordinary_detached = False
         self._ordinary_send_attempted = False
         self._ordinary_request = None
@@ -755,6 +757,7 @@ class EngineAgentAdapter:
             self._ordinary_owner, self._ordinary_runtime = owner, runtime
             self._ordinary_turn = None
             self._ordinary_terminal.clear()
+            self._ordinary_reader_done.clear()
             self._ordinary_detached = False
             self._ordinary_send_attempted = False
             self._ordinary_request = request
@@ -783,6 +786,7 @@ class EngineAgentAdapter:
                     # abort/ABORTED proves that its Provider resources exited.
                     await self._stop_heartbeat_execution(session)
                 self._ordinary_detached = True
+                self._ordinary_reader_done.set()
                 if owner is not None and (
                     completed
                     or owns_heartbeat
@@ -1069,7 +1073,23 @@ class EngineAgentAdapter:
         try:
             goal = self._goal_runtime
             if self._ordinary_owner is not None and intent not in {"pause", "resume"}:
-                await self._stop_owned_execution_once(self._session)
+                session, route = self._session, self._route
+
+                def check_owner():
+                    if self._session is not session or self._route is not route:
+                        raise RuntimeError("External Session owner changed during cancel")
+
+                # Keep the single output consumer alive until it observes the
+                # abort terminal. A terminal alone is not exit proof: strict
+                # owned cleanup must still confirm Provider/MCP/child exit.
+                try:
+                    async with asyncio.timeout(5):
+                        await session.abort(immediate=False)
+                        await self._ordinary_reader_done.wait()
+                except TimeoutError:
+                    logger.warning("External cancel did not drain its terminal before strict stop")
+                check_owner()
+                await self._stop_owned_execution_once(session, ownership_check=check_owner)
                 if goal is not None and goal.owner is not None:
                     await goal.runtime.request_external_execution_cancel(goal.owner)
             elif (
@@ -1327,7 +1347,45 @@ class EngineAgentAdapter:
                 self._check_continuation(continuation_request, continuation_context, session)
             else:
                 context = self._external_context()
-            await session.start(context)
+            from jiuwenswarm.runtime.harness.installed_codex import prepare_codex_startup
+            prepare_codex_startup(self._route)
+            if (self._route.provider_id == "opencode"
+                    and self._route.bound.spec.config_revision == "installed-engine-v1"
+                    and self._route.recovery is not None
+                    and self._route.recovery.execution_profile_id == "builtin:opencode"):
+                # Allocation belongs to admitted startup, never menu discovery.
+                # Core still verifies owner, mode and symlinks before launching.
+                from pathlib import Path
+                Path(self._route.bound.spec.provider_config["runtime_root"]).mkdir(
+                    mode=0o700, parents=True, exist_ok=True,
+                )
+            from openjiuwen.harness_providers.base import ProviderStartupError
+            try:
+                await session.start(context)
+                if self._session is session and self._route.bound.spec.authorization is not None:
+                    # Startup already validates this frozen policy. Reapplying
+                    # an unchanged policy needlessly closes/resumes Codex before
+                    # its first Turn has persisted the new native thread.
+                    self._permission_effective = execution_authorization(self._route.bound.spec)
+                    self._permission_error = None
+            except ProviderStartupError as exc:
+                # The ordinary error stream retains text only. Surface safe,
+                # typed startup labels rather than dropping the actual cause.
+                messages = {
+                    "explicit_model_required": "configure a compatible default model and endpoint",
+                    "explicit_runtime_and_cwd_required": "private runtime directory or workspace is unavailable",
+                    "cli_unavailable": "the engine executable is not installed or not on PATH",
+                    "runtime_path_not_private": "the runtime directory must be privately owned with mode 0700",
+                    "binary_digest_mismatch": "the installed OpenCode version does not match the supported runtime",
+                    "supervisor_unavailable": "the Linux user service manager is unavailable",
+                    "unsupported_supervisor_platform": "this OpenCode runtime requires Linux user services and cgroups",
+                }
+                detail = messages.get(exc.error.code)
+                if detail is None and exc.error.category == "auth_required":
+                    detail = "sign in to the engine or check its model credentials"
+                if detail is None:
+                    raise
+                raise RuntimeError(f"{self._route.provider_id} startup failed: {detail}") from exc
 
     def _compile_cold_surface_policy(self) -> None:
         if self._surface is None:

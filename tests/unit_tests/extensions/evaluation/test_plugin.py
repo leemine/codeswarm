@@ -25,6 +25,11 @@ async def test_plugin_load_and_instance_services(tmp_path):
     assert await ExtensionLoader(registry).load_extension(root)
     registry.require_capabilities({"evaluation.application": ">=1,<2"})
     plugin = registry.get_application_plugin("evaluation-experiments")
+    from jiuwenswarm.extensions.application_host import application_plugin_manifest
+
+    contribution = application_plugin_manifest(registry)["plugins"][0]
+    assert contribution["nav_key"] == "app:evaluation-experiments"
+    assert contribution["nav_group"] == "experiments"
     first = plugin.compose(runtime=SimpleNamespace(), data_root=tmp_path / "first")
     second = plugin.compose(runtime=SimpleNamespace(), data_root=tmp_path / "second")
     try:

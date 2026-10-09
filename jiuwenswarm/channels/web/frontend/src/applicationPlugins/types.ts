@@ -11,6 +11,7 @@ export interface ApplicationPluginContribution {
   enabled?: boolean;
   id: string;
   nav_key: string;
+  nav_group?: string;
   title: string;
   title_i18n_key?: string;
   render_mode: 'bundled' | 'iframe' | 'none';

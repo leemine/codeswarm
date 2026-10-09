@@ -125,6 +125,11 @@ class NativeDetachedProjection:
                 snapshot = self._runtime.begin_detached_native_turn(
                     self._session_id, turn_id, state.request_id
                 )
+                if snapshot is None:
+                    self._turns.pop(turn_id, None)
+                    state.text.close()
+                    self._remember_terminal(turn_id)
+                    return
                 state.runtime_execution_id = snapshot.execution_id
             if item.chunk is not None:
                 from jiuwenswarm.server.runtime.session.history_io import (

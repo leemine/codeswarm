@@ -539,7 +539,9 @@ class AgentRuntime:
         def current_identity():
             # An MCP/server task must not accidentally borrow another browser's
             # ambient principal. The original live resolver still rechecks revoke.
-            return host_context.run(self._governance_identity, request)
+            # File workers and other consumers may recheck concurrently; a
+            # Context object cannot be entered by two threads at once.
+            return host_context.copy().run(self._governance_identity, request)
 
         def is_current():
             if self._closed or self._governance_generation(session_id) != generation:
@@ -1114,8 +1116,15 @@ class AgentRuntime:
 
     def begin_detached_native_turn(
         self, session_id: str, turn_id: str, request_id: str | None = None
-    ) -> SessionExecutionSnapshot:
-        """Give a provider Turn with no Web reader an existing Runtime owner."""
+    ) -> SessionExecutionSnapshot | None:
+        """Give live detached output an owner; stopped Sessions reject late output."""
+        snapshot = self._session_coordinator.snapshot_session(session_id)
+        if snapshot is not None and snapshot.state in {
+            RuntimeSessionState.QUIESCING, RuntimeSessionState.CLOSED,
+        }:
+            # Stop can release a provider that emits its final detached event.
+            # Observation must not admit new work through that existing fence.
+            return None
         return self._session_coordinator.begin_detached_turn(
             session_id, request_id or f"native-turn-{turn_id}"
         )
@@ -3903,7 +3912,7 @@ class AgentRuntime:
             )
             if (isinstance(metadata, dict) and metadata.get("execution_profile_id")
                     and str(metadata.get("mode", "")).startswith("team.")):
-                catalog = load_execution_catalog(get_config())
+                catalog = load_execution_catalog(get_config(), selected_profile_id=metadata["execution_profile_id"])
                 if catalog is not None:
                     spec = catalog.source(explicit_profile_id=metadata["execution_profile_id"]).resolve()
                     if spec.provider_id != "native":
@@ -3940,7 +3949,7 @@ class AgentRuntime:
         metadata = get_session_metadata(request.session_id, cache_bust=True, enable_writeback=False)
         if not isinstance(metadata, dict) or not metadata.get("execution_profile_id"):
             return original
-        catalog = load_execution_catalog(get_config())
+        catalog = load_execution_catalog(get_config(), selected_profile_id=metadata["execution_profile_id"])
         try:
             spec = catalog.source(explicit_profile_id=metadata["execution_profile_id"]).resolve() if catalog else None
         except ValueError:

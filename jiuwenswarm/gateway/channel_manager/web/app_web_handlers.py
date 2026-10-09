@@ -72,6 +72,7 @@ from jiuwenswarm.common.config import (
     update_permissions_profile_in_config,
     update_setup_guide_enabled_in_config,
     update_rsi_enabled_in_config,
+    update_evaluation_enabled_in_config,
     update_enable_free_models_in_config,
     update_memory_forbidden_enabled_in_config,
     update_memory_forbidden_description_in_config,
@@ -235,7 +236,7 @@ class _ConfigChangeSet:
                 scopes.add("agent_runtime")
             elif key_text == "trajectory_ui_enabled":
                 scopes.update({"agent_runtime", "web_ui"})
-            elif key_text == "task_full_duplex_enabled":
+            elif key_text in {"task_full_duplex_enabled", "evaluation_enabled"}:
                 scopes.add("web_ui")
             elif key_text.startswith("a2ui_") or key_text == "setup_guide_enabled":
                 scopes.add("web_ui")
@@ -1206,6 +1207,7 @@ _CONFIG_YAML_KEYS = frozenset({
     "memory_forbidden_description",
     "a2ui_enabled",
     "rsi_enabled",
+    "evaluation_enabled",
     "trajectory_ui_enabled",
     "task_full_duplex_enabled",
     "proactive_recommendation_enabled",
@@ -3294,6 +3296,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             rsi_cfg = raw.get("rsi") or {}
             payload["rsi_enabled"] = "true" if rsi_cfg.get("enabled", True) else "false"
+            evaluation_cfg = raw.get("evaluation") or {}
+            payload["evaluation_enabled"] = "true" if evaluation_cfg.get("enabled", True) else "false"
             for key, val in payload.items():
                 from jiuwenswarm.extensions.registry import ExtensionRegistry
                 if (("api_key" in key.lower() or "token" in key.lower())
@@ -3346,6 +3350,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("kv_cache_affinity_enabled", "false")
             payload.setdefault("permissions_enabled", "false")
             payload.setdefault("rsi_enabled", "true")
+            payload.setdefault("evaluation_enabled", "true")
             payload.setdefault("permissions_profile", "full_access")
             payload.setdefault("setup_guide_enabled", "true")
             payload.setdefault("skill_evolution", "false")
@@ -3608,6 +3613,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     update_setup_guide_enabled_in_config(parsed)
                 elif param_key == "rsi_enabled":
                     update_rsi_enabled_in_config(parsed)
+                elif param_key == "evaluation_enabled":
+                    update_evaluation_enabled_in_config(parsed)
                 elif param_key == "enable_free_models":
                     update_enable_free_models_in_config(parsed)
                 elif param_key == "memory_forbidden_enabled":

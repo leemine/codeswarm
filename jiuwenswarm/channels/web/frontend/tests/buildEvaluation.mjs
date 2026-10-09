@@ -23,3 +23,39 @@ await build({
     },
   ],
 });
+await build({
+  entryPoints: ['src/applicationPlugins/ExperimentsContainer.tsx'],
+  jsx: 'automatic',
+  bundle: true,
+  packages: 'external',
+  external: ['react', 'react/*'],
+  platform: 'node',
+  format: 'esm',
+  outfile: 'node_modules/.cache/evaluation-container/ExperimentsContainer.mjs',
+  loader: { '.css': 'empty' },
+  plugins: [
+    {
+      name: 'host-outlets',
+      setup(builder) {
+        builder.onResolve({ filter: /RsiPage|ApplicationPluginOutlet/ }, ({ path }) => ({
+          path,
+          namespace: 'test-outlet',
+        }));
+        builder.onLoad({ filter: /.*/, namespace: 'test-outlet' }, ({ path }) => ({
+          loader: 'js',
+          contents: path.includes('RsiPage')
+            ? `import React from 'react'; export function RsiPage() { return React.createElement('div',{'data-testid':'original-rsi-outlet'},'original RSI'); }`
+            : `import React from 'react'; export function ApplicationPluginOutlet({contribution}) { return React.createElement('div',{'data-testid':'plugin-outlet'},contribution.nav_key); }`,
+        }));
+      },
+    },
+  ],
+});
+await build({
+  entryPoints: ['src/applicationPlugins/useApplicationPlugins.ts'],
+  bundle: true,
+  packages: 'external',
+  platform: 'node',
+  format: 'esm',
+  outfile: 'node_modules/.cache/evaluation-container/useApplicationPlugins.mjs',
+});

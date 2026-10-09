@@ -359,7 +359,7 @@ async def prepare_chat_turn(
             )
             from jiuwenswarm.common.config import get_config
             from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
-            catalog = load_execution_catalog(get_config())
+            catalog = load_execution_catalog(get_config(), selected_profile_id=raw_metadata["execution_profile_id"])
             if catalog is not None and catalog.source(
                 explicit_profile_id=raw_metadata["execution_profile_id"]
             ).resolve().provider_id != "native":

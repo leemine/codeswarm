@@ -155,3 +155,31 @@ async def test_child_permission_update_marks_all_live_children_before_waiting():
     assert calls == [first, second]
     assert not closed._authorization_unconfirmed
     assert factory._runtime_authorization == ExecutionAuthorization(False)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_startup_does_not_restart_an_unused_codex_thread(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import EngineAgentAdapter
+
+    route = _route(tmp_path)
+    source = ExecutionConfigSource(explicit=replace(route.bound.spec, authorization=ExecutionAuthorization(False)))
+    bindings = ExecutionBindingStore()
+    bound = bindings.bind(source, subject_id='alice', host_session_id='session-1', workspace=route.bound.binding.workspace)
+    adapter = EngineAgentAdapter(replace(route, source=source, bound=bound, bindings=bindings))
+    session = SimpleNamespace(started=False, closed=False, update_authorization=AsyncMock(),
+        engine=SimpleNamespace(harness=SimpleNamespace(card=HarnessCard(name='test', implementation_version='1',
+            capabilities=frozenset({HarnessCapability.RUNTIME_AUTHORIZATION})))))
+    async def start(context):
+        session.started = True
+    session.start = start
+    adapter._session = session
+    monkeypatch.setattr('jiuwenswarm.common.config.get_config', lambda: {'permissions': {'enabled': True}})
+    await adapter._ensure_started(session)
+    await adapter._ensure_runtime_permissions(session)
+    session.update_authorization.assert_not_awaited()
+    assert adapter.runtime_permission_status['effective_full_access'] is False
+    # A later real policy change still uses the original checked update path.
+    adapter._request_runtime_permissions({'permissions': {'enabled': False}})
+    await adapter._permission_task
+    session.update_authorization.assert_awaited_once()

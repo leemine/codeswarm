@@ -101,6 +101,7 @@ def organization_ui_projection(method: str, params: object) -> dict[str, Any] | 
             else "true",
             "a2ui_enabled": flag(raw, "a2ui"),
             "rsi_enabled": flag(raw, "rsi", True),
+            "evaluation_enabled": flag(raw, "evaluation", True),
             "symphony_enabled": flag(raw, "symphony"),
             "permissions_profile": profile,
             "permissions_enabled": "true" if enabled else "false",

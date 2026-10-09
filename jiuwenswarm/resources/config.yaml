@@ -30,6 +30,10 @@ a2ui:
 rsi:
   enabled: true
 
+# Evaluation application; independent of the RSI tab.
+evaluation:
+  enabled: true
+
 symphony:
   enabled: false
   paths:

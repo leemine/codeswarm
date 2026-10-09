@@ -26,7 +26,7 @@ def cold_surface_manifest(metadata, *, config, channel_id, session_id, browser_a
     compiler's shape. They are not stored, admitted or passed to a Provider.
     No projectless Workspace is allocated and no recovery/context is loaded.
     """
-    catalog = load_execution_catalog(config)
+    catalog = load_execution_catalog(config, selected_profile_id=metadata["execution_profile_id"])
     if catalog is None:
         raise SurfaceAdmissionError('execution profile is no longer configured')
     source = catalog.source(explicit_profile_id=metadata['execution_profile_id'])

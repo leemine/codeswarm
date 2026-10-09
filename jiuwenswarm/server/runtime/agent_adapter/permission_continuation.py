@@ -72,6 +72,95 @@ def prepare_permission_wrappers(
     return tuple(wrappers)
 
 
+async def _discard_tool_calls(
+    instance: Any, loop_session: Any, target_sid: str, state: Any,
+    pending_tool_ids: list[str], *, reason: str, commit: bool = False,
+) -> bool:
+    """Balance the exact interrupted batch without executing any pending tool."""
+    ai_message = getattr(state, "ai_message", None)
+    state_calls = list(getattr(ai_message, "tool_calls", None) or [])
+    state_signature = [
+        (
+            str(getattr(call, "id", "") or ""),
+            str(getattr(call, "name", "") or ""),
+        )
+        for call in state_calls
+    ]
+    all_tool_ids = {tool_call_id for tool_call_id, _name in state_signature}
+    if (
+        not state_signature
+        or len(all_tool_ids) != len(state_signature)
+        or not set(pending_tool_ids).issubset(all_tool_ids)
+    ):
+        return False
+
+    react_agent = getattr(instance, "react_agent", None)
+    context_engine = getattr(react_agent, "context_engine", None)
+    context = (
+        context_engine.get_context(session_id=target_sid)
+        if context_engine is not None
+        else None
+    )
+    messages = list(context.get_messages() or []) if context is not None else []
+    assistant_index = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if getattr(messages[index], "tool_calls", None)
+        ),
+        -1,
+    )
+    if assistant_index < 0:
+        return False
+    context_signature: list[tuple[str, str]] = []
+    for call in list(
+        getattr(messages[assistant_index], "tool_calls", None) or []
+    ):
+        context_signature.append(
+            (
+                str(getattr(call, "id", "") or ""),
+                str(getattr(call, "name", "") or ""),
+            )
+        )
+    if context_signature != state_signature:
+        return False
+    pending_id_set = set(pending_tool_ids)
+    completed_ids = all_tool_ids - pending_id_set
+    tail_ids: list[str] = []
+    for message in messages[assistant_index + 1:]:
+        tool_call_id = str(getattr(message, "tool_call_id", "") or "")
+        if (
+            getattr(message, "role", None) != "tool"
+            or tool_call_id not in all_tool_ids
+            or tool_call_id in pending_id_set
+        ):
+            return False
+        tail_ids.append(tool_call_id)
+    if len(tail_ids) != len(completed_ids) or set(tail_ids) != completed_ids:
+        return False
+
+    added = 0
+    try:
+        for tool_call_id in pending_tool_ids:
+            await context.add_messages(
+                ToolMessage(
+                    tool_call_id=tool_call_id,
+                    content=reason,
+                )
+            )
+            added += 1
+        loop_session.update_state({INTERRUPTION_KEY: None})
+        await context_engine.save_contexts(loop_session)
+        if commit:
+            await loop_session.commit()
+    except Exception:
+        loop_session.update_state({INTERRUPTION_KEY: state})
+        if added:
+            context.pop_messages(added, with_history=True)
+        raise
+    return True
+
+
 async def discard_permission_continuation(
     instance: Any,
     target_sid: str,
@@ -110,85 +199,11 @@ async def discard_permission_continuation(
         if pending != frozen:
             return False
 
-        ai_message = getattr(state, "ai_message", None)
-        state_calls = list(getattr(ai_message, "tool_calls", None) or [])
-        state_signature = [
-            (
-                str(getattr(call, "id", "") or ""),
-                str(getattr(call, "name", "") or ""),
-            )
-            for call in state_calls
-        ]
-        all_tool_ids = {tool_call_id for tool_call_id, _name in state_signature}
-        if (
-            not state_signature
-            or len(all_tool_ids) != len(state_signature)
-            or not set(pending_tool_ids).issubset(all_tool_ids)
+        if not await _discard_tool_calls(
+            instance, loop_session, target_sid, state, pending_tool_ids,
+            reason="[INTERRUPTED - Superseded by new user input]",
         ):
             return False
-
-        react_agent = getattr(instance, "react_agent", None)
-        context_engine = getattr(react_agent, "context_engine", None)
-        context = (
-            context_engine.get_context(session_id=target_sid)
-            if context_engine is not None
-            else None
-        )
-        messages = list(context.get_messages() or []) if context is not None else []
-        assistant_index = next(
-            (
-                index
-                for index in range(len(messages) - 1, -1, -1)
-                if getattr(messages[index], "tool_calls", None)
-            ),
-            -1,
-        )
-        if assistant_index < 0:
-            return False
-        context_signature: list[tuple[str, str]] = []
-        for call in list(
-            getattr(messages[assistant_index], "tool_calls", None) or []
-        ):
-            context_signature.append(
-                (
-                    str(getattr(call, "id", "") or ""),
-                    str(getattr(call, "name", "") or ""),
-                )
-            )
-        if context_signature != state_signature:
-            return False
-        pending_id_set = set(pending_tool_ids)
-        completed_ids = all_tool_ids - pending_id_set
-        tail_ids: list[str] = []
-        for message in messages[assistant_index + 1:]:
-            tool_call_id = str(getattr(message, "tool_call_id", "") or "")
-            if (
-                getattr(message, "role", None) != "tool"
-                or tool_call_id not in all_tool_ids
-                or tool_call_id in pending_id_set
-            ):
-                return False
-            tail_ids.append(tool_call_id)
-        if len(tail_ids) != len(completed_ids) or set(tail_ids) != completed_ids:
-            return False
-
-        added = 0
-        try:
-            for tool_call_id in pending_tool_ids:
-                await context.add_messages(
-                    ToolMessage(
-                        tool_call_id=tool_call_id,
-                        content="[INTERRUPTED - Superseded by new user input]",
-                    )
-                )
-                added += 1
-            loop_session.update_state({INTERRUPTION_KEY: None})
-            await context_engine.save_contexts(loop_session)
-        except Exception:
-            loop_session.update_state({INTERRUPTION_KEY: state})
-            if added:
-                context.pop_messages(added, with_history=True)
-            raise
     except Exception:
         logger.debug(
             "[PermissionContinuation] exact permission continuation discard failed "
@@ -205,6 +220,29 @@ async def discard_permission_continuation(
         len(frozen_keys),
     )
     return True
+
+
+async def discard_stopped_tool_continuation(instance: Any, target_sid: str) -> None:
+    """After owned exit, durably cancel this original Session's tool checkpoint."""
+    from openjiuwen.core.single_agent.interrupt.state import ToolInterruptionState
+
+    loop_session = getattr(instance, "loop_session", None)
+    if loop_session is None:
+        return
+    state = loop_session.get_state(INTERRUPTION_KEY)
+    if not isinstance(state, ToolInterruptionState) or not state.interrupted_tools:
+        return
+    if loop_session.get_session_id() != target_sid:
+        raise RuntimeError("stopped tool continuation belongs to another Session")
+    pending_ids = list(state.interrupted_tools)
+    if any(entry.tool_call.id != call_id
+           for call_id, entry in state.interrupted_tools.items()):
+        raise RuntimeError("stopped tool continuation identity changed")
+    if not await _discard_tool_calls(
+        instance, loop_session, target_sid, state, pending_ids,
+        reason="[INTERRUPTED - Tool execution cancelled by user]", commit=True,
+    ):
+        raise RuntimeError("stopped tool continuation could not be discarded")
 
 
 def validate_manual_resume(loop_session: Any, query: InteractiveInput) -> None:

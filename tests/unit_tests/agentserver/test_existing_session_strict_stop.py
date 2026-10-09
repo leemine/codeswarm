@@ -179,3 +179,62 @@ async def test_strict_stop_does_not_fall_back_to_unproven_legacy_instance():
         await manager.stop_existing_session_runtime(channel_id='web', session_id='s')
     child._instance.stop.assert_not_called()
     assert root._session_adapters['s'] is child
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', [None, 'stop', 'commit', 'mismatch'])
+async def test_owned_cancel_discards_only_original_tool_checkpoint_after_exit(failure):
+    from openjiuwen.core.foundation.llm import AssistantMessage
+    from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+    from openjiuwen.core.single_agent.interrupt.state import (
+        INTERRUPTION_KEY, ToolInterruptEntry, ToolInterruptionState,
+    )
+
+    call = ToolCall(id='cancelled-call', type='function', name='send_file_to_user', arguments='{}')
+    assistant = AssistantMessage(content='', tool_calls=[call])
+    interrupted = ToolInterruptionState(ai_message=assistant, iteration=1,
+        interrupted_tools={call.id: ToolInterruptEntry(tool_call=call)})
+    state = {INTERRUPTION_KEY: interrupted}
+    messages = [assistant]
+    saved = {}
+    context = SimpleNamespace(get_messages=lambda: list(messages),
+        add_messages=AsyncMock(side_effect=messages.append),
+        pop_messages=lambda count, **_: messages.__delitem__(slice(-count, None)))
+    context_engine = SimpleNamespace(get_context=lambda **_: context,
+        save_contexts=AsyncMock())
+    session = SimpleNamespace(get_session_id=lambda: 'other' if failure == 'mismatch' else 's',
+        get_state=state.get, update_state=state.update)
+    execution = native(SimpleNamespace(loop_session=session,
+        react_agent=SimpleNamespace(context_engine=context_engine)))
+    async def commit():
+        assert execution.exit_state is ExecutionExitState.EXIT_CONFIRMED
+        if failure == 'commit':
+            raise OSError('synthetic checkpoint write failed')
+        saved.update(state)
+    session.commit = AsyncMock(side_effect=commit)
+    manager, _, root, child = tree(execution)
+    bindings = child._native_execution_bindings
+    if failure == 'stop':
+        execution.stop.side_effect = RuntimeError('original provider still running')
+    if failure is None:
+        assert await manager.stop_existing_session_runtime(channel_id='web', session_id='s')
+        assert saved[INTERRUPTION_KEY] is None  # Next recovery has no old approval.
+        assert [getattr(message, 'tool_call_id', None) for message in messages] == [None, call.id]
+        bindings.release.assert_called_once()
+    else:
+        with pytest.raises((RuntimeError, OSError)):
+            await manager.stop_existing_session_runtime(channel_id='web', session_id='s')
+        assert state[INTERRUPTION_KEY] is interrupted
+        assert messages == [assistant]
+        assert root._session_adapters['s'] is child
+        bindings.release.assert_not_called()
+    # Historical assistant/tool identity is retained; the old tool never runs.
+    assert messages[0] is assistant
+    if failure == 'commit':
+        # The real Provider drops its agent reference after stop; retry must
+        # retain the same original checkpoint owner until durable cleanup.
+        execution._native.agent = None
+        session.commit = AsyncMock(side_effect=lambda: saved.update(state))
+        assert await manager.stop_existing_session_runtime(channel_id='web', session_id='s')
+        assert saved[INTERRUPTION_KEY] is None
+        bindings.release.assert_called_once()

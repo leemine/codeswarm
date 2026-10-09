@@ -64,6 +64,7 @@ class FrontendContribution:
     component: str = ""
     entrypoint: str = ""
     position: int = 100
+    nav_group: str = ""
 
 
 class ApplicationPluginExtension(BaseExtension):

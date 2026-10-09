@@ -205,3 +205,19 @@ frontend:
     response = TestClient(app).get(manifest["entry_url"])
     assert response.status_code == 200
     assert response.text == "<h1>Hello</h1>"
+
+
+@pytest.mark.parametrize('rsi_enabled', [False, True])
+def test_evaluation_switch_uses_original_config_independently(monkeypatch, rsi_enabled):
+    from jiuwenswarm.common import config
+    from jiuwenswarm.extensions.evaluation.extension import EvaluationApplicationPlugin
+
+    raw = {'rsi': {'enabled': rsi_enabled}}
+    monkeypatch.setattr(config, 'get_config_raw', lambda: raw)
+    plugin = EvaluationApplicationPlugin()
+    assert plugin.is_enabled() is True
+    raw['evaluation'] = {'enabled': False}
+    assert plugin.is_enabled() is False
+    raw['evaluation']['enabled'] = True
+    assert plugin.is_enabled() is True
+    assert raw['rsi']['enabled'] is rsi_enabled

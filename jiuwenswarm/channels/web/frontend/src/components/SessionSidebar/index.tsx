@@ -114,7 +114,7 @@ export function SessionSidebar({
     item.labelKey ? t(item.labelKey) : item.label || item.key
   );
   const applicationPluginItems: NavItem[] = applicationPlugins
-    .filter((plugin) => plugin.enabled !== false)
+    .filter((plugin) => plugin.enabled !== false && plugin.nav_group !== 'experiments')
     .map((plugin) => ({
       key: plugin.nav_key as MainNavKey,
       labelKey: plugin.title_i18n_key,
@@ -126,7 +126,8 @@ export function SessionSidebar({
   // 定时任务（cron）是"任务"区内与会话同级的视图，没有独立的导航图标，
   // 因此进入定时任务时"任务"导航项也应保持选中态
   const isNavItemActive = (item: NavItem) =>
-    activeNav === item.key || (item.key === 'chat' && activeNav === 'cron');
+    activeNav === item.key || (item.key === 'chat' && activeNav === 'cron') ||
+    (item.key === 'experiments' && applicationPlugins.some(plugin => plugin.nav_group === 'experiments' && plugin.nav_key === activeNav));
 
   return (
     <aside className="sidebar sidebar--icon-rail" data-testid="session-sidebar-rail">

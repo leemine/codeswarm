@@ -336,10 +336,18 @@ class TurnOutputRouter:
             for task in (get, closed):
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(get, closed, return_exceptions=True)
-            if not staged and not delivered and get.done() and not get.cancelled() and get.exception() is None:
-                mailbox.recovered.appendleft(get.result())
-            mailbox.reader_idle.set()
+            try:
+                await asyncio.gather(get, closed, return_exceptions=True)
+            except BaseException:
+                # The selected item has not reached the reader until this
+                # cleanup returns. Preserve it for the original drain owner.
+                if delivered:
+                    mailbox.recovered.appendleft(item)
+                raise
+            finally:
+                if not staged and not delivered and get.done() and not get.cancelled() and get.exception() is None:
+                    mailbox.recovered.appendleft(get.result())
+                mailbox.reader_idle.set()
 
 
 __all__ = ["TurnOutputIncompleteError", "TurnOutputRouter"]

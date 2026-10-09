@@ -1118,6 +1118,14 @@ def _generic_user_input_questions(value_obj: Any) -> list[dict[str, Any]] | None
 
     provider_data = value_obj.get("provider_data")
     if isinstance(provider_data, Mapping):
+        # Codex matches replies by the original question text (or ID), not
+        # the rendered prompt containing headers and option descriptions.
+        if provider_data.get("tool_name") == "request_user_input":
+            raw_questions = provider_data.get("questions")
+            if isinstance(raw_questions, list) and raw_questions and all(
+                isinstance(question, Mapping) for question in raw_questions
+            ):
+                return _build_multi_questions(raw_questions)
         opencode = provider_data.get("opencode")
         if isinstance(opencode, Mapping):
             raw_questions = opencode.get("questions")
