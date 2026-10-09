@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from jiuwenswarm.common.utils import get_workspace_dir  # re-export for test patches
 from jiuwenswarm.server.runtime.mcp.package_manifest import resolve_mcp_package
@@ -53,6 +54,7 @@ def _cleanup_stale_auth_proc(name: str) -> None:
     if old is not None:
         try:
             old.kill()
+            old.wait(timeout=5)
         except Exception:  # noqa: BLE001
             pass
 
@@ -148,7 +150,7 @@ def _is_binary_not_found(exc: BaseException) -> bool:
     return False
 
 
-def _safe_split_command(command: str) -> list[str]:
+def _safe_split_command(command: str, *, path: str | None = None) -> list[str]:
     """Split a command string into an argv list for ``shell=False``.
 
     Enforces the two hard rules G.EDV.04 requires for shell=False to be safe:
@@ -175,7 +177,7 @@ def _safe_split_command(command: str) -> list[str]:
     if len(parts) > 1 and parts[1] == _SHELL_FORBIDDEN_SECOND:
         raise ValueError("refusing '-c' as second arg (shell invocation)")
     if (sys.platform == "win32" or _is_harmony_runtime()) and not os.path.dirname(parts[0]):
-        resolved = shutil.which(parts[0])
+        resolved = shutil.which(parts[0], path=path) if path is not None else shutil.which(parts[0])
         if resolved:
             parts[0] = resolved
     return parts
@@ -221,7 +223,7 @@ def default_runner(command: str, timeout: float = 120.0, env: dict[str, str] | N
     require_legacy_mcp_access()
     try:
         proc = subprocess.run(  # noqa: S603 - command from trusted cli.json
-            _safe_split_command(command),
+            (_safe_split_command(command, path=env.get("PATH")) if env is not None else _safe_split_command(command)),
             shell=False,
             capture_output=True,
             text=True,
@@ -298,8 +300,14 @@ def _extract_url(text: str, domain_hint: str = "") -> str | None:
         return None
     if domain_hint:
         for url in matches:
-            if domain_hint in url:
-                return url
+            try:
+                parsed = urlsplit(url)
+                if (parsed.scheme == "https" and parsed.hostname == domain_hint.lower()
+                        and parsed.username is None and parsed.password is None):
+                    return url
+            except ValueError:
+                continue
+        return None
     return matches[0]
 
 
@@ -442,48 +450,27 @@ class CliDriver:
         require_legacy_mcp_access()
         self.name = str(name or "").strip()
         self.manifest = manifest or load_cli_manifest(self.name) or CliManifest()
-        # Credential-derived env to inject into spawned CLI subprocesses. Some
-        # CLI MCPs (gitcode) authenticate via an env-var token the CLI's own
-        # ``auth status`` reads (gitcode reads GITCODE_TOKEN/GC_TOKEN from env)
-        # — NOT via OAuth. token-schema.json declares the required env keys;
-        # CliDriver merges the stored tokens into the subprocess env so
-        # ``status``/``install`` run with the token visible, and the absent
-        # ``auth login`` step never needs to run. None when the MCP has no
-        # token-schema (feishu/dingtalk/wecom — pure OAuth) → env inherits the
-        # parent process unchanged, so OAuth CLIs are unaffected.
+        from jiuwenswarm.governance.instance_access import capture_instance_mcp_check
+        self._check_owner = capture_instance_mcp_check()
+        self._bin_dir = _binary_dir_from_package() if runner is None else None
         self._cred_env = self._build_cred_env()
-        if runner is not None:
-            # Test path: caller injects its own runner; don't touch env (tests
-            # are pure logic and don't stand up a real workspace/credential store).
-            self._runner = runner
-        else:
-            cred_env = self._cred_env
-            # 将包内置的 gitcode 启动器目录注入 PATH，使 manifest 的裸命令
-            # （如 ``gitcode version``）无需 pip install 即可找到。注入父进程
-            # os.environ 而非仅 cred_env：Windows 的 CreateProcess 与
-            # _safe_split_command 按父环境 PATH 解析裸可执行名。
-            _bin_dir = _binary_dir_from_package()
-            if _bin_dir:
-                _cur = os.environ.get("PATH", "")
-                _prefix = f"{_bin_dir}{os.pathsep}"
-                if _cur:
-                    os.environ["PATH"] = (
-                        _cur if _cur.startswith(_prefix) else f"{_prefix}{_cur}"
-                    )
-                else:
-                    os.environ["PATH"] = _bin_dir
-                if cred_env is not None:
-                    cred_env = dict(cred_env)
-                    cred_env["PATH"] = (
-                        f"{_prefix}{cred_env.get('PATH', _cur)}"
-                    )
-            self._runner = (
-                (lambda cmd: default_runner(cmd, env=cred_env))
-                if cred_env is not None
-                else (lambda cmd: default_runner(cmd))
-            )
+        self._runner = runner if runner is not None else self._run_command
         # Optional injector for authWaitForExit start (tests); default uses real Popen.
         self._proc_runner = proc_runner
+
+    def _child_environment(self):
+        self._check_owner()
+        env = self._build_cred_env()
+        if self._bin_dir:
+            env = dict(os.environ) if env is None else dict(env)
+            env['PATH'] = self._bin_dir + os.pathsep + env.get('PATH', '')
+        self._check_owner()
+        return env
+
+    def _run_command(self, command):
+        result = default_runner(command, env=self._child_environment())
+        self._check_owner()
+        return result
 
     def _build_cred_env(self) -> dict[str, str] | None:
         """Merge this MCP's CredentialStore tokens (keyed by its token-schema
@@ -541,7 +528,8 @@ class CliDriver:
         # cannot be parsed.
         if m.version_cmd:
             res = self._runner(m.version_cmd)
-            version = _parse_version(res.combined_output)
+            version = _parse_version(res.combined_output) if res.succeeded else None
+            version_ok = res.succeeded
             if m.min_version and version:
                 version_ok = _version_eq(version, m.min_version)
                 if not version_ok:
@@ -556,7 +544,12 @@ class CliDriver:
             logger.info("[cli_driver] %s skip init (version %s ok)", self.name, version)
         elif init_cmd:
             res = self._runner(init_cmd)
-            if not res.succeeded:
+            if res.succeeded:
+                err = ""
+                kind = ""
+                version_ok = True
+            else:
+                version_ok = False
                 err = f"init failed (rc={res.returncode}): {res.combined_output}"
                 logger.warning("[cli_driver] %s init failed: %s", self.name, err)
             if res.error_kind == ERR_BINARY_NOT_FOUND:
@@ -564,16 +557,17 @@ class CliDriver:
             # re-check version after install
             if m.version_cmd:
                 res2 = self._runner(m.version_cmd)
-                version = _parse_version(res2.combined_output)
+                version = _parse_version(res2.combined_output) if res2.succeeded else None
+                version_ok = res.succeeded and res2.succeeded
                 if m.min_version and version:
-                    version_ok = _version_eq(version, m.min_version)
+                    version_ok = version_ok and _version_eq(version, m.min_version)
                 elif m.min_version:
                     version_ok = False
                     err = (err + "; " if err else "") + f"could not parse version after init: {res2.combined_output}"
                 if res2.error_kind == ERR_BINARY_NOT_FOUND:
                     kind = ERR_BINARY_NOT_FOUND
         return InstallResult(
-            name=self.name, installed=True,
+            name=self.name, installed=version_ok,
             version=version, min_version=m.min_version,
             version_ok=version_ok, error=err, error_kind=kind,
             runtime=m.runtime_type, install_cmd=init_cmd,
@@ -622,7 +616,7 @@ class CliDriver:
         url = _extract_url(res.combined_output, domain) if domain else None
         return AuthStepResult(
             name=self.name, step_index=index, command=cmd,
-            succeeded=res.succeeded, needs_user_action=bool(domain),
+            succeeded=res.succeeded, needs_user_action=res.succeeded and bool(domain),
             auth_url=url, auth_domain=domain,
             output=res.combined_output,
             error="" if res.succeeded else f"rc={res.returncode}: {res.combined_output}",
@@ -640,28 +634,40 @@ class CliDriver:
         from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
 
         require_legacy_mcp_access()
+        pending = _PENDING_AUTH_PROCS.get(self.name)
+        if pending is not None and pending.poll() is None:
+            self.auth_proc_done()  # Recheck the original owner's authority.
+            if getattr(pending, "_mcp_step_index", None) == index:
+                result = getattr(pending, "_mcp_auth_result", None)
+                if result is not None:
+                    return result
         if self._proc_runner is not None:
             # Test path: injector returns (proc, initial_output_string).
             proc, out = self._proc_runner(cmd)
             _cleanup_stale_auth_proc(self.name)
+            proc._mcp_owner_check = self._check_owner
+            proc._mcp_step_index = index
             _PENDING_AUTH_PROCS[self.name] = proc
             url = _extract_url(out, domain) if domain else None
-            return AuthStepResult(
+            result = AuthStepResult(
                 name=self.name, step_index=index, command=cmd,
                 succeeded=True, needs_user_action=True,
                 auth_url=url, auth_domain=domain, output=out
             )
+            proc._mcp_auth_result = result
+            return result
         import time
+        env = self._child_environment()
         try:
             proc = subprocess.Popen(  # noqa: S603 - command from trusted cli.json
-                _safe_split_command(cmd),
+                _safe_split_command(cmd, path=env.get("PATH") if env is not None else None),
                 shell=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                env=self._cred_env,
+                env=env,
             )
         except (OSError, ValueError) as exc:
             return AuthStepResult(
@@ -671,12 +677,33 @@ class CliDriver:
                 error_kind=ERR_BINARY_NOT_FOUND if _is_binary_not_found(exc) else "",
             )
         _cleanup_stale_auth_proc(self.name)
+        proc._mcp_owner_check = self._check_owner
+        proc._mcp_step_index = index
         _PENDING_AUTH_PROCS[self.name] = proc
         url: str | None = None
         deadline = time.time() + 8.0
         chunks: list[str] = []
+        import queue
+        import threading
+        output = queue.Queue()
+        def read_output():
+            if proc.stdout:
+                for line in proc.stdout:
+                    output.put(line)
+            output.put(None)
+        threading.Thread(target=read_output, daemon=True).start()
         while time.time() < deadline:
-            line = proc.stdout.readline() if proc.stdout else ""
+            try:
+                self._check_owner()
+            except Exception:
+                _cleanup_stale_auth_proc(self.name)
+                raise
+            try:
+                line = output.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if line is None:
+                break
             if line:
                 chunks.append(line)
                 if domain:
@@ -690,22 +717,62 @@ class CliDriver:
                     break
                 time.sleep(0.2)
         out = "".join(chunks)
-        return AuthStepResult(
+        rc = proc.poll()
+        if rc is not None and rc != 0:
+            return AuthStepResult(
+                name=self.name, step_index=index, command=cmd,
+                succeeded=False, needs_user_action=False,
+                error=f"auth command failed (rc={rc})",
+            )
+        result = AuthStepResult(
             name=self.name, step_index=index, command=cmd,
             succeeded=True, needs_user_action=True,
             auth_url=url, auth_domain=domain, output=out
         )
+        proc._mcp_auth_result = result
+        return result
 
     def auth_proc_done(self) -> bool | None:
         """True if the pending auth proc exited, False if still running, None if none."""
         proc = _PENDING_AUTH_PROCS.get(self.name)
         if proc is None:
             return None
+        try:
+            self._check_owner()
+            check = getattr(proc, '_mcp_owner_check', None)
+            if check is not None:
+                check()
+            else:
+                from jiuwenswarm.governance.organization_auth import configured_authenticator
+                if configured_authenticator() is not None:
+                    raise PermissionError('Original OAuth owner unavailable')
+        except Exception:
+            _cleanup_stale_auth_proc(self.name)
+            raise
         rc = proc.poll()
         if rc is None:
             return False
-        _PENDING_AUTH_PROCS.pop(self.name, None)
+        if rc != 0:
+            raise ValueError(f"auth command failed (rc={rc})")
         return True
+
+    def auth_step_complete(self, index: int) -> bool:
+        """Check an intermediate step without requiring the final user identity."""
+        step = self.manifest.auth_steps[index]
+        if not step.get("authWaitForExit"):
+            return False
+        done = self.auth_proc_done()
+        if done is None:
+            raise ValueError("Authorization was cancelled or expired. Retry connect.")
+        proc = _PENDING_AUTH_PROCS.get(self.name)
+        if getattr(proc, "_mcp_step_index", index) != index:
+            raise ValueError("Authorization step has changed. Retry connect.")
+        if done:
+            return True
+        # Some initialization commands stay alive after writing their config.
+        # Use only the manifest's existing step-specific success probe.
+        skip_cmd = _pick_per_platform(step.get("skipIf")) or ""
+        return bool(skip_cmd and self._runner(skip_cmd).succeeded)
 
     def auth_steps_count(self) -> int:
         return len(self.manifest.auth_steps)
@@ -716,6 +783,8 @@ class CliDriver:
             return StatusResult(name=self.name, authenticated=False, output="no status command")
         res = self._runner(m.status_cmd)
         out = res.combined_output
+        if not res.succeeded:
+            return StatusResult(name=self.name, authenticated=False, output=out)
         if m.status_match_str:
             # statusMatch in cli.json is a regex pattern (e.g.
             # "authenticated"\s*:\s*true for dingtalk, "id"\s*:\s*" for wecom).

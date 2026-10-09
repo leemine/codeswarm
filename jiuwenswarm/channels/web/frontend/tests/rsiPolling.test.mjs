@@ -12,6 +12,7 @@ const mocks = {
     export const rsiUsageGet = id => globalThis.rsiPollingProbe('usage', id);
     export const rsiTreeGet = id => globalThis.rsiPollingProbe('tree', id);
     export const rsiTaskList = async () => [];
+    export const rsiTaskInventory = async () => ({ tasks: [], canExecute: true });
   `,
   '../rsiStore': 'export const useRsiStore = selector => selector(globalThis.rsiPollingState);',
   'react-i18next': 'export const useTranslation = () => ({ t: key => key });',

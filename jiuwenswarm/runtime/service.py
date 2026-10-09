@@ -349,7 +349,10 @@ class _CurrentNativeToolResources:
             if self._owns_session(execution, proof.agent, proof.session) is not True:
                 raise GovernanceError('MCP executor has no original Session owner')
             return native_mcp_resources(execution, operation)
-        return NativeToolResourceResolver(grants, owns_session=self._owns_session).resources_for_tool(execution, operation)
+        return NativeToolResourceResolver(
+            grants, owns_session=self._owns_session,
+            personal_context_read=getattr(self._authority, 'read_uses', None),
+        ).resources_for_tool(execution, operation)
 
 
 class AgentRuntime:
@@ -558,6 +561,9 @@ class AgentRuntime:
                        and item.request_id == original_request_id and not item.state.terminal
                        and not item.cancellation_requested for item in current.executions)
 
+        if self._organization_session_host is not None:
+            from jiuwenswarm.governance.personal_context_resources import PersonalContextResources
+            resources = PersonalContextResources(resources, identity, is_current=is_current)
         resolver = self._tool_resource_resolver
         if resolver is None and callable(getattr(self._resource_authorizer, "resources_for_tool", None)):
             resolver = self._resource_authorizer
@@ -696,13 +702,33 @@ class AgentRuntime:
             return self._session_coordinator.native_request_lifecycle(
                 session_id, original_request_id, native, check,
                 require_principal=configured_authenticator() is not None)
-        return ExecutionResourceAuthorities({
+        providers = {
             provider: BoundToolResourceAuthority(
                 ResourceExecutionContext(project_id, identity, session_id, str(Path(workspace).resolve()), provider),
                 authorizer=resources, resolver=resolver,
                 current_identity=current_identity, is_current_execution=is_current,
             ) for provider in ("native", "codex", "opencode")
-        }, model_authorizer=model_authority, mcp_authorizer=mcp_authority,
+        }
+        original_native = providers['native']
+        async def native_with_instance_mcp(operation):
+            from jiuwenswarm.governance.instance_access import authorize_native_catalog
+            from jiuwenswarm.governance.instance_mcp import authorize_instance_mcp
+            try:
+                catalog = authorize_native_catalog(original_native.execution, operation,
+                    current_identity=current_identity, is_current=is_current,
+                    owns_session=owns_artifact_tool)
+                if catalog is not None:
+                    return catalog
+                allowed = authorize_instance_mcp(original_native.execution, operation,
+                    current_identity=current_identity, is_current=is_current,
+                    owns_session=owns_artifact_tool)
+                if allowed is not None:
+                    return allowed
+            except Exception:
+                return False
+            return await original_native(operation)
+        providers['native'] = native_with_instance_mcp
+        return ExecutionResourceAuthorities(providers, model_authorizer=model_authority, mcp_authorizer=mcp_authority,
            artifact_issuer_factory=artifact_factory, external_model_authorizer=external_model_authority,
            native_lifecycle_factory=native_lifecycle_factory)
 
@@ -2203,6 +2229,11 @@ class AgentRuntime:
         _agent_execution: RuntimeAgentExecution | None = None,
     ) -> list[RuntimeEvent]:
         """Execute one non-streaming request and return Runtime events."""
+        if self._organization_session_host is not None and self._is_stateless_method_request(request):
+            from jiuwenswarm.governance.application_boundary import RULES
+            method = request.req_method.value
+            if method in RULES:
+                return await self._invoke_application_catalog(request)
         if self._organization_session_host is not None and self._is_readonly_goal_get_request(request):
             from jiuwenswarm.runtime.native_goal_read import read_goal
             self._require_started()
@@ -2253,6 +2284,34 @@ class AgentRuntime:
             )
         finally:
             reset_runtime_context(token)
+
+    async def _invoke_application_catalog(self, request: AgentRequest) -> list[RuntimeEvent]:
+        """Use the existing stateless consumer without inventing a chat owner."""
+        from jiuwenswarm.common.schema.agent import AgentResponse
+        from jiuwenswarm.governance.application_boundary import (
+            admit_application_request, builtin_catalog_projection,
+        )
+        from jiuwenswarm.governance.session_boundary import current_application_permit
+        from jiuwenswarm.runtime.events import RuntimeEvent
+        method = request.req_method.value
+        original = current_application_permit(method)
+        permit = admit_application_request(method, request.params or {},
+            identity_resolver=original.identity_resolver, host=self._organization_session_host)
+        projection = builtin_catalog_projection(method, request.params or {})
+        if projection is not None:
+            response = AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
+                                     ok=True, payload=projection)
+        else:
+            self._require_started()
+            agent = await self._get_stateless_agent(request.channel_id or 'default')
+            if not original.revalidate() or not permit.revalidate():
+                raise PermissionError('application authority changed')
+            response = await agent.process_message(request)
+        if not original.revalidate() or not permit.revalidate():
+            raise PermissionError('application authority changed')
+        return [RuntimeEvent.from_agent_message(response, request_id=request.request_id,
+            channel_id=request.channel_id or 'default', session_id=request.session_id,
+            default_agent_ref=request.agent_ref, default_complete=True)]
 
     async def _invoke_started(self, request: AgentRequest, **kwargs) -> list[RuntimeEvent]:
         from jiuwenswarm.governance.tool_context import tool_authority_scope

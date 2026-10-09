@@ -170,7 +170,9 @@ async def test_overlapping_resource_checks_keep_original_context_and_live_revoca
         assert await callback(tool)
         principal.set(bob)
         state.block = True
-        worker = asyncio.create_task(asyncio.to_thread(callback.check, tool))
+        # Exercise the complete Native authority, including its instance
+        # catalog/MCP wrapper, from a worker with its own event loop.
+        worker = asyncio.create_task(asyncio.to_thread(lambda: asyncio.run(callback(tool))))
         assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 3), 4)
         state.revoked = revoked
         # The worker is inside the original captured Context. Another valid

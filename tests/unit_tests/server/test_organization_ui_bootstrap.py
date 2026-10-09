@@ -97,6 +97,19 @@ class Channel:
         self.responses.append(response)
 
 
+def test_only_explicit_instance_maintainer_enters_original_config_editor(organization):
+    with organization_auth.authenticated_scope(organization.principal):
+        assert organization_ui_projection('models.list', {})['read_only']
+        raw = json.loads(organization.path.read_text())
+        raw['application_access'] = {'alice': {'settings': ['manage']}}
+        organization.path.write_text(json.dumps(raw))
+        assert organization_ui_projection('models.list', {}) is None
+        assert organization_ui_projection('config.get', {}) is None
+        raw['application_access'] = {}
+        organization.path.write_text(json.dumps(raw))
+        assert organization_ui_projection('models.list', {})['read_only']
+
+
 def request(method, params=None, channel="web"):
     return AgentRequest(
         request_id="bootstrap",
@@ -176,6 +189,7 @@ async def test_authenticated_web_and_adapter_use_same_secret_free_projection(
             "read_only": True,
             "api_key": "",
             "api_base": "",
+            "reasoning_level": "",
         }
         assert direct.payload["active_model"] == "visible-model"
 
@@ -202,7 +216,7 @@ async def test_bootstrap_rejects_parameter_smuggling_before_configuration_reads(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "method", ["config.set", "models.replace_all", "path.get", "path.set"]
+    "method", ["config.set", "models.replace_all", "path.set"]
 )
 async def test_organization_adapter_keeps_non_bootstrap_operations_closed(
     organization, method
@@ -326,3 +340,70 @@ def test_organization_model_keys_keep_complete_catalog_indices(organization, mon
     assert [item["model_name"] for item in result["models"]] == ["same", "same"]
     assert [item["alias"] for item in result["models"]] == ["Alice", "Bob"]
     assert "PRIVATE_" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_authenticated_browser_settings_are_visible_without_releasing_paths(organization, monkeypatch):
+    monkeypatch.setattr('jiuwenswarm.common.config.get_config_raw',
+                        lambda: {'browser': {'chrome_path': '/private/alice/chrome', 'headless': False}})
+    with organization_auth.authenticated_scope(organization.principal):
+        result = await ConfigAdapter().handle(request('path.get', {}))
+    assert result.ok
+    assert result.payload == {'chrome_path': '', 'headless': False, 'read_only': True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('operator, revoke_during', [(False, False), (True, False), (True, True)])
+async def test_runtime_catalog_keeps_application_authority_outside_chat(organization, operator, revoke_during):
+    from types import MethodType
+    from unittest.mock import AsyncMock, Mock
+    from jiuwenswarm.common.schema.agent import AgentResponse
+    from jiuwenswarm.runtime.service import AgentRuntime
+    from jiuwenswarm.governance.application_boundary import admit_application_request
+    from jiuwenswarm.governance.session_boundary import delivery_scope, set_delivery_permit
+    raw = json.loads(organization.path.read_text())
+    raw['application_access'] = {'alice': {'extensions': ['manage']}} if operator else {}
+    organization.path.write_text(json.dumps(raw))
+    async def consume(req):
+        if revoke_during:
+            raw['application_access'] = {}
+            organization.path.write_text(json.dumps(raw))
+        return AgentResponse(request_id=req.request_id, channel_id=req.channel_id,
+                             ok=True, payload={'packages': ['operator-private-fixture']})
+    agent = SimpleNamespace(process_message=AsyncMock(side_effect=consume))
+    runtime = SimpleNamespace(_organization_session_host=object(),
+        _is_stateless_method_request=AgentRuntime._is_stateless_method_request,
+        _require_started=Mock(), _get_stateless_agent=AsyncMock(return_value=agent))
+    runtime._invoke_application_catalog = MethodType(AgentRuntime._invoke_application_catalog, runtime)
+    req = request('plugin_packages.list', {'filter': 'mine'})
+    with organization_auth.authenticated_scope(organization.principal), delivery_scope():
+        permit = admit_application_request('plugin_packages.list', req.params,
+            identity_resolver=organization.principal.identity)
+        set_delivery_permit(permit)
+        if revoke_during:
+            with pytest.raises(PermissionError):
+                await AgentRuntime.invoke(runtime, req)
+        else:
+            events = await AgentRuntime.invoke(runtime, req)
+            assert events[0].payload['packages'] == (['operator-private-fixture'] if operator else [])
+    assert agent.process_message.await_count == int(operator)
+
+
+@pytest.mark.asyncio
+async def test_maintainer_catalog_retains_configured_execution_selection_keys(organization, monkeypatch):
+    raw = json.loads(organization.path.read_text())
+    raw['application_access'] = {'alice': {'settings': ['manage']}}
+    organization.path.write_text(json.dumps(raw))
+    entries = organization.raw['models']['defaults']
+    entries.append({**entries[0], 'alias': 'same-name-second-account'})
+    monkeypatch.setattr(app_web_handlers, 'get_config', lambda: organization.raw)
+    monkeypatch.setattr(app_web_handlers, 'get_available_models', lambda cfg, sid: config.get_default_models(cfg))
+    channel = Channel()
+    app_web_handlers._register_web_handlers(app_web_handlers.WebHandlersBindParams(channel=channel))
+    with organization_auth.authenticated_scope(organization.principal):
+        await channel.methods['models.list'](SimpleNamespace(), 'owner-models', {}, None)
+    response = channel.responses[-1]
+    assert response['ok']
+    models = response['payload']['models']
+    assert [(m['origin_index'], m['selection_key']) for m in models[:2]] == [
+        (0, 'visible-model#0'), (1, 'visible-model#1')]

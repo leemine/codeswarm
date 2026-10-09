@@ -383,3 +383,22 @@ def test_incoming_listing_rechecks_before_returning_each_item(setup):
     store._resolve = changing
     assert store.list_for_actor(READER) == []
     assert calls[0] >= 2
+
+
+def test_disabling_sharing_preserves_owner_identity_and_private_read(setup):
+    store, _, _ = setup
+    enabled = [True]
+    store._sharing_enabled = lambda: enabled[0]
+    record = grant(store)
+    assert check(store, record)
+    enabled[0] = False
+    assert not check(store, record)
+    assert store.registered_owner('session')[0] == OWNER
+    assert store.authorize('session', OWNER, 'view', history=scope()).allowed
+    with pytest.raises(SessionSharingDenied):
+        grant(store)
+    # Revoke remains available while sharing is disabled, so re-enabling the
+    # feature cannot resurrect a grant explicitly revoked by its owner.
+    store.revoke(record['share_id'], OWNER, expected_revision=record['revision'])
+    enabled[0] = True
+    assert not check(store, record)

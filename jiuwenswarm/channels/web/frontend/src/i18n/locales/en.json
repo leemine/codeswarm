@@ -289,6 +289,7 @@
       },
       "openaiAccount": "OpenAI account",
       "agentOsReadonly": "AgentOS read-only",
+      "sharedCatalogReadonly": "Shared catalog, read-only",
       "keepOneModel": "At least one editable model must remain",
       "missingCustomName": "Unnamed configuration",
       "reloadAfterFailure": "Reload and verify",
@@ -3837,6 +3838,8 @@
     "title": "Clarifications"
   },
   "connectorMarket": {
+    "readonly": "Read-only catalog",
+    "readonlyNotice": "This is the instance built-in catalog. Installation, connections and custom configuration are managed by the instance operator. Catalog visibility does not grant access to another account’s resources.",
     "title": "Extensions",
     "subtitle": "Create and manage plugins and connectors",
     "tabs": {
@@ -4251,6 +4254,7 @@
     }
   },
   "rsi": {
+    "instanceOwnerRequired": "Experiment execution and installation require the instance owner. You can view your own experiment records.",
     "title": "Experiments",
     "createExperiment": "Create Experiment",
     "empty": {
@@ -4295,7 +4299,7 @@
       "evaluationMethodComingSoon": "Coming soon",
       "testerModelLabel": "Tester model",
       "datasetLabel": "Evaluation dataset file",
-      "datasetPlaceholder": "Select a local evaluation dataset JSON file",
+      "datasetPlaceholder": "Enter a dataset path on the server, or browse",
       "datasetTip": "Select one evaluation JSON file; the top level is a cases array. Each case contains case_id and input, with optional assets and reference.",
       "datasetFieldTipTitle": "Dataset field format",
       "browse": "Browse",
@@ -4304,7 +4308,7 @@
       "optimizationInstructionLabel": "Optimization instruction (optional; one of instruction/paper required)",
       "optimizationInstructionPlaceholder": "Upload at least one of instruction or artifact",
       "paperLabel": "Paper folder (optional; one of instruction/paper required)",
-      "paperPlaceholder": "Select a paper folder",
+      "paperPlaceholder": "Enter a LaTeX folder path on the server, or browse",
       "paperPickerTitle": "Select paper folder",
       "paperInfoBar": "Paper optimization produces a LaTeX folder and attempts to generate a PDF. Make sure MiKTeX or TeX Live is installed and latexmk or pdflatex is available; otherwise, PDF generation may fail.",
       "webProxyLabel": "Literature proxy (optional)",
@@ -4313,7 +4317,7 @@
       "webProxyConfigured": "Configured",
       "webProxyNotConfigured": "Not configured (proxy recommended)",
       "programLabel": "Program Path",
-      "programPlaceholder": "Select a program folder",
+      "programPlaceholder": "Enter a program path on the server, or browse",
       "validate": "Validate",
       "validating": "Validating…",
       "valid": "Validated, {{count}} samples",
@@ -4494,6 +4498,7 @@
     "workflowList": "Workflow List"
   },
   "evaluation": {
+    "unavailable": "Not supported here: evaluation experiments currently require a local single-user installation and are not yet available with shared-backend authentication. RSI experiments are unaffected.",
     "title": "Evaluation experiments",
     "shared": "Development self-tests use the execution workspace; this is not independent acceptance.",
     "refresh": "Refresh",

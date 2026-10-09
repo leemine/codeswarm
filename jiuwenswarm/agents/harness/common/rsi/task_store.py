@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import threading
 from collections.abc import Callable
@@ -52,7 +53,13 @@ class RsiTaskStore:
 
     @staticmethod
     def task_dir(tasks_root: Path, task_id: str) -> Path:
-        return Path(tasks_root) / task_id
+        if not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,199}", task_id):
+            raise RsiTaskNotFound("unavailable")
+        root = Path(tasks_root).resolve()
+        target = root / task_id
+        if target.is_symlink() or (target / "task.json").is_symlink():
+            raise RsiTaskNotFound("unavailable")
+        return target
 
     # -- 增查删 --
 
@@ -81,7 +88,7 @@ class RsiTaskStore:
         tasks: list[RsiTask] = []
         with _LOCK:
             for task_dir in sorted(self.tasks_root.iterdir()):
-                if not task_dir.is_dir():
+                if task_dir.is_symlink() or (task_dir / "task.json").is_symlink() or not task_dir.is_dir():
                     continue
                 payload = self._read_task_dir(task_dir)
                 if payload is None:

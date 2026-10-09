@@ -134,12 +134,12 @@ export const pluginPackagesApi = {
   // v2 §3.1：filter 值跟 mcp.list 保持一致用无连字符的 'builtin'（不是文档原文的 'built-in'，
   // 见文件头注释）；缺省/非法值后端按全量处理。
   list: async (filter?: 'builtin+hub' | 'mine'): Promise<CatalogItems<PluginPackageSummary>> => {
-    const payload = await requestEquipmentList<{ packages: RawPluginPackageSummary[]; cache?: CatalogCacheMetadata }>(
+    const payload = await requestEquipmentList<{ packages: RawPluginPackageSummary[]; cache?: CatalogCacheMetadata; read_only?: boolean }>(
       webRequest,
       'plugin_packages.list',
       { ...(filter ? { filter } : {}) },
     );
-    return withCatalogCache(payload.packages.map(fromRawSummary), payload.cache);
+    return withCatalogCache(payload.packages.map(fromRawSummary), payload.cache, payload.read_only === true);
   },
   show: async (id: string): Promise<PluginPackageDetail> => {
     const payload = await webRequest<{ package: RawPluginPackageDetail }>('plugin_packages.show', { id }, { timeoutMs: 90000 });

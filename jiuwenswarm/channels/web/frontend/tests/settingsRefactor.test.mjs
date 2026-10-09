@@ -1513,7 +1513,7 @@ test('Settings tags use the shared UI Tag component and semantic variants', () =
   assert.match(generalSettings, /const connectionVariant:\s*TagVariant/);
   assert.match(modelsSettings, /<Tag\s+variant="info"[^>]*>\{t\('settingsPanel\.models\.primary'\)\}<\/Tag>/s);
   assert.match(modelsSettings, /<Tag\s+variant="neutral"[^>]*>\{t\('settingsPanel\.models\.groupDefault'\)\}<\/Tag>/s);
-  assert.match(modelsSettings, /<Tag\s+variant="neutral"[^>]*>\{t\('settingsPanel\.models\.agentOsReadonly'\)\}<\/Tag>/s);
+  assert.match(modelsSettings, /<Tag\s+variant="neutral"[^>]*>\{t\(catalogReadOnly \? 'settingsPanel\.models\.sharedCatalogReadonly' : 'settingsPanel\.models\.agentOsReadonly'\)\}<\/Tag>/s);
   assert.match(uiIndex, /export \{ Tag, type TagProps, type TagVariant \} from '\.\/Tag\/Tag'/);
   assert.match(tagSource, /export type TagVariant = 'success' \| 'info' \| 'warning' \| 'danger' \| 'neutral'/);
   assert.match(

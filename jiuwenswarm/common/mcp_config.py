@@ -38,20 +38,9 @@ _ORGANIZATION_MCP_DENIED = "organization-scoped MCP authorization required"
 
 
 def require_legacy_mcp_access() -> None:
-    """Reject installation-wide MCP consumers in organization mode.
-
-    A valid login or a configured placeholder resolver is not credential/use
-    authorization. A future scoped consumer must supply its own host authority;
-    this legacy path deliberately has no caller-controlled bypass.
-    """
-    from jiuwenswarm.governance.organization_auth import configured_authenticator
-
-    try:
-        organization = configured_authenticator()
-    except Exception:
-        raise PermissionError(_ORGANIZATION_MCP_DENIED) from None
-    if organization is not None:
-        raise PermissionError(_ORGANIZATION_MCP_DENIED)
+    """Compatibility entry point for the centralized instance MCP policy."""
+    from jiuwenswarm.governance.instance_access import require_instance_mcp_access
+    require_instance_mcp_access()
 
 
 def _resolve_string(value: str, resolver) -> str:
@@ -211,6 +200,13 @@ def build_mcp_server_config(
         if params:
             payload["params"] = params
 
+    from jiuwenswarm.governance.organization_auth import configured_authenticator, current_identity
+    if configured_authenticator() is not None:
+        from dataclasses import asdict
+        # Even an explicit custom ID cannot select a previous owner's cache.
+        owner_scope = json.dumps(asdict(current_identity()), sort_keys=True)
+        payload.pop("server_id", None)
+        server_id_scope = "instance-owner:" + hashlib.sha256(owner_scope.encode()).hexdigest()
     if server_id_scope and "server_id" not in payload:
         payload["server_id"] = _stable_mcp_server_id(server_id_scope, name, payload)
 

@@ -392,9 +392,11 @@ function AppContent({
   settingsPageDefinition,
   resolveSettingsRequest,
   organizationAuth = false,
+  sharingEnabled = true,
   onOpenSharedSession,
 }: {
   organizationAuth?: boolean;
+  sharingEnabled?: boolean;
   onOpenSharedSession?: (target: SharedSessionTarget) => void;
   settingsPageDefinition: SettingsPageDefinition;
   resolveSettingsRequest: (openSourceRequest: SettingsRequest) => SettingsRequest;
@@ -3912,7 +3914,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 onNew={(options) => requestSessionNavigation('new', options)}
                 onSelect={requestSessionNavigation}
                 onOpenCron={() => handleNavigate('cron')}
-                onOpenSharedSessions={organizationAuth ? () => { setSharingDialogSessionId(null); setSharingInboxOpen(true); } : undefined}
+                onOpenSharedSessions={organizationAuth && sharingEnabled ? () => { setSharingDialogSessionId(null); setSharingInboxOpen(true); } : undefined}
                 onSessionDeleted={handleSessionDeleted}
                 isCronActive={false}
                 collapsed={conversationSidebarCollapsed}
@@ -3960,7 +3962,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                         onExportShare={handleExportShare}
                         shareActionLabel={organizationAuth ? t('sessionSharing.title') : undefined}
                         isExportingShare={isExportingShare}
-                        canExportShare={Boolean(sessionId && sessionId !== NEW_CONVERSATION_ID && (organizationAuth || !isProcessing || isPaused))}
+                        canExportShare={Boolean(sessionId && sessionId !== NEW_CONVERSATION_ID && (organizationAuth ? sharingEnabled : !isProcessing || isPaused))}
                         sessionTitle={sessionTitle}
                         sessionProjectName={sessionProjectName}
                         sessionProject={sessionProject}
@@ -4131,7 +4133,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
               onNew={(options) => requestSessionNavigation('new', options)}
               onSelect={requestSessionNavigation}
               onOpenCron={() => handleNavigate('cron')}
-                onOpenSharedSessions={organizationAuth ? () => { setSharingDialogSessionId(null); setSharingInboxOpen(true); } : undefined}
+                onOpenSharedSessions={organizationAuth && sharingEnabled ? () => { setSharingDialogSessionId(null); setSharingInboxOpen(true); } : undefined}
                 onSessionDeleted={handleSessionDeleted}
               isCronActive
               collapsed={conversationSidebarCollapsed}
@@ -4388,7 +4390,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
       />
 
       {/* 登录弹窗：默认不显示，由 requestLogin() 等事件唤起 */}
-      {organizationAuth && (sharingDialogSessionId || sharingInboxOpen) && (
+      {organizationAuth && sharingEnabled && (sharingDialogSessionId || sharingInboxOpen) && (
         <ShareSessionDialog
           key={`${sharingDialogSessionId ?? 'inbox'}:${sessionId}`}
           sessionId={sharingDialogSessionId ?? undefined}
@@ -4403,7 +4405,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
           }}
         />
       )}
-      {organizationAuth && sharedHistoryTarget && (
+      {organizationAuth && sharingEnabled && sharedHistoryTarget && (
         <SharedHistoryDialog target={sharedHistoryTarget} onClose={() => setSharedHistoryTarget(null)} />
       )}
       <LoginDialog />
@@ -4416,9 +4418,11 @@ function App({
   settingsPageDefinition,
   resolveSettingsRequest,
   organizationAuth = false,
+  sharingEnabled = true,
   onOpenSharedSession,
 }: {
   organizationAuth?: boolean;
+  sharingEnabled?: boolean;
   onOpenSharedSession?: (target: SharedSessionTarget) => void;
   settingsPageDefinition: SettingsPageDefinition;
   resolveSettingsRequest: (openSourceRequest: SettingsRequest) => SettingsRequest;
@@ -4428,6 +4432,7 @@ function App({
       <DesktopTextEditContextMenu />
       <AppContent
         organizationAuth={organizationAuth}
+        sharingEnabled={sharingEnabled}
         onOpenSharedSession={onOpenSharedSession}
         settingsPageDefinition={settingsPageDefinition}
         resolveSettingsRequest={resolveSettingsRequest}
@@ -4459,6 +4464,7 @@ function AppWithAuth({
   const [authStatus, setAuthStatus] = useState<'checking' | 'loggedOut' | 'loggedIn' | 'noIam'>('checking');
   const [remote, setRemote] = useState(false);
   const [organization, setOrganization] = useState(false);
+  const [sharingEnabled, setSharingEnabled] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -4469,6 +4475,7 @@ function AppWithAuth({
         if (cancelled) return null;
         if (status.enabled) {
           setOrganization(true);
+          setSharingEnabled(status.sharing_enabled === true);
           setAuthStatus(status.authenticated ? 'loggedIn' : 'loggedOut');
           return null;
         }
@@ -4536,6 +4543,7 @@ function AppWithAuth({
       {(remote || organization) && <LogoutButton organization={organization} />}
       <App
         organizationAuth={organization}
+        sharingEnabled={sharingEnabled}
         onOpenSharedSession={onOpenSharedSession}
         settingsPageDefinition={settingsPageDefinition}
         resolveSettingsRequest={resolveSettingsRequest}

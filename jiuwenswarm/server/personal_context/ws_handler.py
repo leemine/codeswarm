@@ -343,6 +343,13 @@ async def handle_personal_context_request(
     """Execute one parsed PersonalContext request without introducing a PersonalContext wire protocol."""
 
     try:
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is not None:
+            from jiuwenswarm.governance.personal_context import personal_context_home
+            from jiuwenswarm.governance.session_boundary import current_application_permit
+            permit = current_application_permit(request.req_method.value)
+            if host._home != personal_context_home(permit.identity).resolve():
+                raise PermissionError("Personal context owner mismatch")
         if request.req_method in {
             ReqMethod.PERSONAL_CONTEXT_CONTEXT_STREAM_GRAPH,
             ReqMethod.PERSONAL_CONTEXT_CONTEXT_STREAM_TREE,

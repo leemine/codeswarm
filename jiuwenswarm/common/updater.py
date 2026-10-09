@@ -149,7 +149,13 @@ class UpdaterService:
             return token[:2] + "****" + token[-2:] if len(token) > 4 else "****"
         return token[:4] + "****" + token[-4:]
 
-    def check(self, manual: bool = False) -> dict[str, Any]:
+    @staticmethod
+    def _authorize(authorize):
+        if authorize is not None and authorize() is not True:
+            raise PermissionError("Update operation no longer authorized")
+
+    def check(self, manual: bool = False, *, authorize=None) -> dict[str, Any]:
+        self._authorize(authorize)
         config = self._load_config()
         if not config["enabled"]:
             self._update_status(state="disabled", error="Updater is disabled.")
@@ -157,7 +163,9 @@ class UpdaterService:
 
         self._update_status(state="checking", error="")
         try:
+            self._authorize(authorize)
             self._check(config)
+            self._authorize(authorize)
         except Exception as exc:
             self._update_status(
                 latest_version="",
@@ -174,7 +182,8 @@ class UpdaterService:
             )
         return self.get_status()
 
-    def start_download(self) -> dict[str, Any]:
+    def start_download(self, *, authorize=None) -> dict[str, Any]:
+        self._authorize(authorize)
         status = self.get_status()
         install_mode = status.get("install_mode", "desktop")
 
@@ -202,6 +211,7 @@ class UpdaterService:
             self._executor_callback,
         )
 
+        executor.set_authority(authorize)
         pip_state = "upgrading" if install_mode == "pip" else "downloading"
         self._update_status(
             state=pip_state,
@@ -220,7 +230,8 @@ class UpdaterService:
         thread.start()
         return self.get_status()
 
-    def start_upgrade(self) -> dict[str, Any]:
+    def start_upgrade(self, *, authorize=None) -> dict[str, Any]:
+        self._authorize(authorize)
         status = self.get_status()
         install_mode = status.get("install_mode", "desktop")
 
@@ -250,16 +261,27 @@ class UpdaterService:
             error="",
         )
 
+        executor.set_authority(authorize)
         try:
             executor.upgrade()
         except Exception as exc:
+            executor.cancel_restart()
             self._update_status(
                 state="error",
                 error=f"Upgrade failed: {exc}",
             )
             return self.get_status()
 
-        threading.Timer(3.0, os.kill, args=[os.getpid(), signal.SIGTERM]).start()
+        def restart_if_current():
+            try:
+                self._authorize(authorize)
+            except Exception:
+                executor.cancel_restart()
+                self._update_status(state="error", installing=False,
+                                    error="Update restart authorization revoked")
+                return
+            os.kill(os.getpid(), signal.SIGTERM)
+        threading.Timer(3.0, restart_if_current).start()
 
         return self.get_status()
 

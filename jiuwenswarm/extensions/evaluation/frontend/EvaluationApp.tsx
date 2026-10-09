@@ -14,28 +14,59 @@ import './evaluation.css';
 export default function EvaluationApp() {
   const { t } = useTranslation();
   const [section, setSection] = useState('runs');
-  const [catalog, setCatalog] = useState<Catalog>({
-    schema_version: 1,
-    tasks: [],
-    drafts: [],
-    datasets: [],
-  });
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshVersion, setRefreshVersion] = useState(0);
   const [selected, setSelected] = useState<TaskRef[]>([]);
   const [error, setError] = useState('');
   const updateCatalog = useCallback((value: Catalog) => setCatalog(value), []);
   useEffect(() => {
     let active = true;
+    setLoading(true);
+    setError('');
     void request<Catalog>('catalog')
       .then((value) => {
         if (active) setCatalog(value);
       })
       .catch((err) => {
-        if (active) setError(err.code || err.message);
+        if (active) {
+          setCatalog(null);
+          setSelected([]);
+          setError(err.code || err.message);
+        }
+      })
+      .finally(() => {
+        if (active) setLoading(false);
       });
     return () => {
       active = false;
     };
-  }, []);
+  }, [refreshVersion]);
+  if (!catalog) {
+    return (
+      <main className="evaluation-app" data-testid="evaluation-app">
+        <header className="evaluation-header" data-testid="evaluation-header">
+          <h1 data-testid="evaluation-title">{t('evaluation.title')}</h1>
+          <Button
+            data-testid="evaluation-refresh"
+            disabled={loading}
+            onClick={() => setRefreshVersion((current) => current + 1)}
+          >
+            {t('evaluation.refresh')}
+          </Button>
+        </header>
+        {error === 'FORBIDDEN' ? (
+          <p role="status" data-testid="evaluation-unavailable">
+            {t('evaluation.unavailable')}
+          </p>
+        ) : error ? (
+          <p role="alert" className="evaluation-error" data-testid="evaluation-error">
+            {error}
+          </p>
+        ) : null}
+      </main>
+    );
+  }
   return (
     <main className="evaluation-app" data-testid="evaluation-app">
       <header className="evaluation-header" data-testid="evaluation-header">

@@ -133,6 +133,7 @@ async def host(native, monkeypatch):
         request_no=0,
     )
     adapter = object.__new__(interface_deep.JiuWenSwarmDeepAdapter)
+    adapter._registered_mcp_servers = {}
     adapter._instance = outer
     adapter._is_session_scoped_adapter = True
     adapter._parent_session_id = "sid"

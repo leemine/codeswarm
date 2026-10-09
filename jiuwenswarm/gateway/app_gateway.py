@@ -1266,12 +1266,15 @@ class GatewayServer(BaseWebChannel):
 
         from jiuwenswarm.governance.organization_auth import connection_principal
         try:
+            if route.ws_channel is not None:
+                await route.ws_channel.bind_authenticated_identity(ws)
             principal = connection_principal(ws)
         except (OSError, ValueError, KeyError, TypeError, PermissionError):
             await ws.close(code=1008, reason="authentication required")
             return
         self._clients.add(ws)
-        ws_user_id = principal.identity().actor_id if principal else self._extract_ws_user_id(ws)
+        ws_user_id = (principal.identity().actor_id if principal else
+                      getattr(ws, "_verified_iam_user_id", None) or self._extract_ws_user_id(ws))
         setattr(ws, "_gateway_user_id", ws_user_id)
         setattr(ws, "_gateway_agent_type", "jiuwenswarm")
         uid_marker = "" if ws_user_id else " uid_empty=yes"

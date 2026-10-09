@@ -36,7 +36,7 @@ SHARE_METHODS = frozenset({
 })
 GLOBAL_METHODS = frozenset({
     'config.get', 'models.list', 'session.execution.options',
-    'session.list', 'project.list', 'project.create', 'project.info',
+    'session.list', 'session.archived.list', 'project.list', 'project.create', 'project.info',
     'project.content.get', 'project.content.update', 'project.get_sessions',
     'project.resources.list', 'project.resources.grant', 'project.resources.revoke',
     'project.get_cron_sessions', 'project.pinned_sessions',
@@ -44,10 +44,24 @@ GLOBAL_METHODS = frozenset({
 
 
 INVENTORY_METHODS = frozenset({
-    'session.list', 'project.list', 'project.info', 'project.get_sessions',
+    'session.list', 'session.archived.list', 'project.list', 'project.info', 'project.get_sessions',
     'project.get_cron_sessions', 'project.pinned_sessions', 'session.share.list',
     'project.resources.list',
 })
+
+
+def validate_workflow_read(params):
+    """The existing snapshot RPC has four reads and no execution authority."""
+    actions = {
+        'list': {'offset', 'limit'},
+        'get_workflow': {'workflow_id', 'workflow_run_id', 'phase_offset', 'phase_limit'},
+        'get_phase': {'workflow_id', 'workflow_run_id', 'phase_id', 'agent_offset', 'agent_limit'},
+        'get_agent': {'workflow_id', 'workflow_run_id', 'phase_id', 'agent_id'},
+    }
+    action = params.get('action', 'list')
+    if (not isinstance(action, str) or action not in actions
+            or set(params) - (actions[action] | {'action', 'session_id'})):
+        raise SessionSharingDenied('Exact read-only workflow parameters required')
 
 
 def _inventory_revision(host):
@@ -73,7 +87,10 @@ def organization_sharing_host():
     auth = configured_authenticator()
     if auth is None:
         return None
-    return SharingHostService(auth.resolve_actor, known_actor=auth.known_actor)
+    # Ownership/resource authority remains present when sharing is disabled.
+    # This switch controls grants and recipient reads, never owner operations.
+    return SharingHostService(auth.resolve_actor, known_actor=auth.known_actor,
+                              sharing_enabled=lambda: auth._config().get('sharing_enabled', True) is True)
 
 
 def _session(value):
@@ -153,6 +170,7 @@ class SessionRequestPermit:
     goal_read_result: object | None = None
     resource_mutation_request: object | None = None
     project_git_request: object | None = None
+    application_check: Callable[[], bool] | None = None
 
     def allows_cleanup(self, method: str, params: dict, identity: TrustedIdentity,
                        envelope_session: str | None = None) -> bool:
@@ -173,6 +191,8 @@ class SessionRequestPermit:
     def revalidate(self) -> bool:
         try:
             if self.identity_resolver() != self.identity:
+                return False
+            if self.application_check is not None and self.application_check() is not True:
                 return False
             if self.project_git_request is not None:
                 self.project_git_request.check()
@@ -247,6 +267,10 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
                 cleanup = (sid, None)
         else:
             cleanup = (sid, host.cleanup_owner_stamp(sid, identity))
+    elif method == 'command.workflows':
+        validate_workflow_read(params)
+        sid = _session(sid or envelope_session)
+        owners.append((sid, host.owner_revision(sid, identity)))
     elif method == 'command.goal':
         from .goal_read import capture_goal_read_route, validate_goal_get
         validate_goal_get(params)
@@ -264,7 +288,9 @@ def admit_session_request(method: str, params: dict, *, identity_resolver: Calla
         from .workspace_download import capture_workspace_request
         sid = _session(sid or envelope_session)
         workspace_download = capture_workspace_request(host, identity_resolver, sid, params)
-        owners.append((sid, host.owner_revision(sid, identity)))
+        from .rsi_download import ExperimentDownloadPermit
+        if type(workspace_download) is not ExperimentDownloadPermit:
+            owners.append((sid, host.owner_revision(sid, identity)))
     elif method in OWNER_METHODS:
         sid = _session(sid or envelope_session)
         owners.append((sid, host.owner_revision(sid, identity)))
@@ -335,6 +361,28 @@ def set_delivery_permit(permit):
     if not isinstance(permit, SessionRequestPermit):
         raise TypeError('host Session permit required')
     _delivery.set(permit)
+
+
+def current_application_permit(method):
+    """Require the exact admitted application operation at its data consumer."""
+    permit = _delivery.get()
+    if (not isinstance(permit, SessionRequestPermit) or permit.method != method
+            or permit.application_check is None or not permit.revalidate()):
+        raise SessionSharingDenied('Original application request permit required')
+    return permit
+
+
+def require_workflow_read(session_id, params):
+    """Bind the legacy live/checkpoint reader to its original owner permit."""
+    from .organization_auth import configured_authenticator
+    if configured_authenticator() is None:
+        return
+    validate_workflow_read(params)
+    permit = _delivery.get()
+    if (not isinstance(permit, SessionRequestPermit) or permit.method != 'command.workflows'
+            or len(permit.owners) != 1 or permit.owners[0][0] != session_id
+            or params.get('session_id', session_id) != session_id or not permit.revalidate()):
+        raise SessionSharingDenied('Original workflow owner read permit required')
 
 
 def bind_goal_read_delivery(session_id, identity, result):

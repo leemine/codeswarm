@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+import asyncio
+from types import SimpleNamespace
 
 from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
 
@@ -60,3 +62,63 @@ async def test_config_revision_changes_when_a_user_disables_a_channel() -> None:
 
     assert manager.get_conf("telegram") == {}
     assert manager.get_conf_revision("telegram") == initial_revision + 1
+
+
+async def test_revoked_channel_update_cancels_consumer_before_restoring_previous():
+    allowed = [True]
+    started = asyncio.Event()
+    events = []
+    async def apply(config):
+        if config['telegram']['enabled']:
+            events.append('start-new')
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                events.append('new-exited')
+        else:
+            events.append('restore-old')
+    manager = ChannelManager(_MessageHandler(), config={'telegram': {'enabled': False}},
+                             on_config_updated=apply)
+    task = asyncio.create_task(manager.set_conf('telegram', {'enabled': True},
+                                                authority_check=lambda: allowed[0]))
+    await started.wait()
+    allowed[0] = False
+    with pytest.raises(PermissionError):
+        await asyncio.wait_for(task, 2)
+    assert events == ['start-new', 'new-exited', 'restore-old']
+    assert manager.get_conf('telegram') == {'enabled': False}
+
+
+async def test_revocation_after_stop_prevents_replacement_registration():
+    allowed = [True]
+    manager = None
+    async def apply(config):
+        if config['telegram']['enabled']:
+            await asyncio.sleep(0)
+            allowed[0] = False
+            manager.register_channel(SimpleNamespace(channel_id='telegram'))
+    manager = ChannelManager(_MessageHandler(), config={'telegram': {'enabled': False}},
+                             on_config_updated=apply)
+    with pytest.raises(PermissionError):
+        await manager.set_conf('telegram', {'enabled': True}, authority_check=lambda: allowed[0])
+    assert manager.enabled_channels == []
+    assert manager.get_conf('telegram') == {'enabled': False}
+
+
+async def test_channel_request_proof_is_released_after_configuration_transaction():
+    from jiuwenswarm.gateway.channel_manager.channel_manager import _check_configuration_authority
+    allowed = [True]
+    release = asyncio.Event()
+    async def lifetime():
+        await release.wait()
+        _check_configuration_authority()
+    workers = []
+    async def apply(_):
+        workers.append(asyncio.create_task(lifetime()))
+    manager = ChannelManager(_MessageHandler(), on_config_updated=apply)
+    await manager.set_conf('telegram', {'enabled': True}, authority_check=lambda: allowed[0])
+    allowed[0] = False
+    release.set()
+    await asyncio.gather(*workers)

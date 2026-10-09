@@ -1510,6 +1510,26 @@ def _combined_resume(
         for key, value in request.inputs.items():
             if key == "query":
                 continue
+            if key == "run":
+                # Each answer has its own transport request ID. The resumed
+                # round has one message route, owned by the combined request.
+                # Normalize only that correlation field; identities, Session,
+                # chain provenance and every other runtime field must agree.
+                from jiuwenswarm.agents.harness.common.tools.session_messaging_toolkit import (
+                    SESSION_MESSAGING_ROUTE_EXTRA_KEY,
+                )
+                if isinstance(value, dict):
+                    context = value.get("context")
+                    extra = context.get("extra") if isinstance(context, dict) else None
+                    route = extra.get(SESSION_MESSAGING_ROUTE_EXTRA_KEY) if isinstance(extra, dict) else None
+                    if route is not None:
+                        if not isinstance(route, dict) or route.get("request_id") != request.request_id:
+                            raise ValueError("interrupt answer message route does not belong to its request")
+                        value = {**value, "context": {**context, "extra": {
+                            **extra, SESSION_MESSAGING_ROUTE_EXTRA_KEY: {
+                                **route, "request_id": requests[-1].request_id,
+                            },
+                        }}}
             if key in inputs and inputs[key] is not value and inputs[key] != value:
                 raise ValueError("conflicting host metadata across interrupt answers")
             inputs[key] = value

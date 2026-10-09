@@ -290,6 +290,7 @@ export function ExternalCliAgentsSection({
     [changeCliPath, draftValues, onSelectFile, t],
   );
 
+  const claudeEnabled = draftValues[externalCliKey('claude', 'enabled')] === 'true';
   const claudeCliPath = draftValues[externalCliKey('claude', 'cli_path')] || '';
   const codexCliPath = draftValues[externalCliKey('codex', 'cli_path')] || '';
 
@@ -306,13 +307,13 @@ export function ExternalCliAgentsSection({
   }, [claudeCliPath, clearDetectResult, codexCliPath]);
 
   useEffect(() => {
-    if (!onDetect) return undefined;
+    if (!onDetect || !claudeEnabled) return undefined;
     const timer = window.setTimeout(
       () => void detect('claude', claudeCliPath),
       EXTERNAL_CLI_AUTO_DETECT_DELAY_MS,
     );
     return () => window.clearTimeout(timer);
-  }, [claudeCliPath, detect, onDetect]);
+  }, [claudeCliPath, claudeEnabled, detect, onDetect]);
 
   useEffect(() => {
     if (!onDetect || organizationAuth) return undefined;

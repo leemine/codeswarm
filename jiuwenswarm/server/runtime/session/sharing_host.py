@@ -73,11 +73,13 @@ class SharingHostService:
     remain independent checks; other actions are never inferred.
     """
     def __init__(self, directory: Callable[[TrustedIdentity, str], TrustedIdentity | None], *,
-                 known_actor: Callable[[TrustedIdentity], bool], storage=None):
+                 known_actor: Callable[[TrustedIdentity], bool], storage=None,
+                 sharing_enabled=lambda: True):
         self._directory = directory
         self._known_actor = known_actor
         self._storage = storage if storage is not None else ProjectAccessStore()
-        self.store = SessionSharingStore(self.resolve_source, storage=self._storage)
+        self.store = SessionSharingStore(self.resolve_source, storage=self._storage,
+                                        sharing_enabled=sharing_enabled)
 
     def target_resolver(self, requestor: TrustedIdentity, actor_id: str) -> TrustedIdentity | None:
         try:

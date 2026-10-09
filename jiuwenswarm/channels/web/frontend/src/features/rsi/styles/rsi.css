@@ -1852,8 +1852,49 @@ dialog.rsi-config-dialog.rsi-create-drawer::backdrop {
 }
 
 @media (max-width: 900px) {
+  .rsi-page:not(.rsi-page--intro) {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .rsi-rail {
+    flex: 0 0 auto;
+    max-height: 180px;
+    border-right: none;
+    border-bottom: 1px solid var(--color-rsi-border);
+  }
   .rsi-detail {
     padding: 16px 20px;
+  }
+  .rsi-detail:not(.rsi-detail--intro) {
+    flex: 1 0 auto;
+  }
+  .rsi-detail__header {
+    flex-direction: column;
+  }
+  .rsi-detail__header-actions {
+    width: 100%;
+  }
+  .rsi-detail__actions {
+    flex-wrap: wrap;
+  }
+  .rsi-result__body {
+    flex-wrap: wrap;
+    height: auto;
+    padding: 16px;
+  }
+  .rsi-result__thumb {
+    margin: 0;
+  }
+  .rsi-result__score-best {
+    flex: 1 1 180px;
+    margin-right: 0;
+  }
+  .rsi-result__metric {
+    flex: 1 1 100px;
+    margin-top: 0;
+  }
+  .rsi-canvas-area {
+    min-height: 360px;
   }
   .rsi-canvas-statusbar {
     padding: 0 12px;

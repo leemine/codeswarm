@@ -92,10 +92,11 @@ class AgentOSAuthenticator(CredentialAuthenticator):
         data = body.get("data", {}) if isinstance(body, dict) else {}
 
         # 5. 仅校验身份合法性（valid）；authorized 不参与门禁决策
-        if data.get("valid"):
+        user_id = data.get("user_id")
+        if data.get("valid") is True and isinstance(user_id, (str, int)) and not isinstance(user_id, bool) and str(user_id).strip():
             return AuthResult(
                 success=True,
-                user_id=str(data.get("user_id") or ""),
+                user_id=str(user_id).strip(),
                 extensions={
                     "username": data.get("username"),
                     "role": data.get("role"),

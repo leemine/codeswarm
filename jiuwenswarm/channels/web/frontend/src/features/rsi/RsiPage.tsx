@@ -15,6 +15,7 @@ import './styles/rsi.css';
 
 export function RsiPage() {
   const { t } = useTranslation();
+  const canExecute = useRsiStore((s) => s.canExecute);
   const list = useRsiStore((s) => s.list);
   const listLoading = useRsiStore((s) => s.listLoading);
   const listError = useRsiStore((s) => s.listError);
@@ -75,7 +76,12 @@ export function RsiPage() {
         {hasSelection ? <RsiDetail /> : <RsiIntroduction onCreate={() => setCreateOpen(true)} />}
       </div>
 
-      <CreateExperimentDialog open={createOpen} onClose={() => setCreateOpen(false)} onCreated={handleCreated} />
+      {!listLoading && !canExecute && (
+        <div className="rsi-error" role="status" data-testid="rsi-execution-permission">
+          {t('rsi.instanceOwnerRequired')}
+        </div>
+      )}
+      <CreateExperimentDialog open={createOpen && canExecute} onClose={() => setCreateOpen(false)} onCreated={handleCreated} />
 
       {/* 列表错误兜底提示（不阻断页面） */}
       {listError && (

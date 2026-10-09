@@ -47,9 +47,9 @@ export function formatCatalogCacheUpdatedAt(value: unknown, locale?: string, tim
     ...(timeZone ? { timeZone } : {}),
   }).format(timestamp);
 }
-export type CatalogItems<T> = T[] & { cache?: CatalogCacheMetadata };
-export function withCatalogCache<T>(items: T[], cache?: CatalogCacheMetadata): CatalogItems<T> {
-  return Object.assign(items, { cache });
+export type CatalogItems<T> = T[] & { cache?: CatalogCacheMetadata; readOnly?: boolean };
+export function withCatalogCache<T>(items: T[], cache?: CatalogCacheMetadata, readOnly = false): CatalogItems<T> {
+  return Object.assign(items, { cache, readOnly });
 }
 export function catalogScope(): string {
   try {

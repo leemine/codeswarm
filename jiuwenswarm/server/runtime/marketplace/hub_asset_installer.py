@@ -97,11 +97,21 @@ async def install_hub_asset_package(
     downloader: HubPackageExtractor | None = None,
 ) -> HubPackageInstallResult:
     """Resolve, validate, download, atomically commit, and record one Hub package."""
+    from jiuwenswarm.governance.application_boundary import require_application_consumer
+
+    method = {
+        "plugin": "plugin_packages.install",
+        "agent_template": "agent_templates.install",
+        "agent_group": "agent_groups.install",
+        "mcp": "mcp.install",
+    }[kind]
+    require_application_consumer(method)
     asset = str(asset_id or "").strip()
     if not asset:
         raise ValueError(f"Hub {kind} asset id is required")
     port = hub_port or create_default_hub_asset_port()
     detail = await port.query_asset(HubAssetQuery(kind=kind, asset_id=asset))
+    require_application_consumer(method)
     if detail.kind != kind:
         raise ValueError(f"Hub {kind} package type mismatch")
     if detail.asset_id != asset:
@@ -121,6 +131,7 @@ async def install_hub_asset_package(
     artifact = await port.resolve_download(
         HubDownloadRequest(kind=kind, asset_id=asset, version=detail.version)
     )
+    require_application_consumer(method)
     if artifact.kind != kind:
         raise ValueError(f"Hub {kind} artifact type mismatch")
     if artifact.asset_id != asset:
@@ -147,6 +158,7 @@ async def install_hub_asset_package(
     with tempfile.TemporaryDirectory(prefix=f"jiuwenswarm_hub_{kind}_") as temp:
         extracted = Path(temp)
         await package_downloader.download_and_extract(artifact, extracted)
+        require_application_consumer(method)
         package_root = _find_package_root(extracted, kind)
         _assert_no_symlinks(package_root)
 
@@ -157,6 +169,7 @@ async def install_hub_asset_package(
         try:
             shutil.copytree(package_root, staged)
             package_validator(staged, package_id)
+            require_application_consumer(method)
             staged.replace(destination)
         finally:
             shutil.rmtree(staging_parent, ignore_errors=True)
@@ -170,6 +183,7 @@ async def install_hub_asset_package(
         installed_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     )
     try:
+        require_application_consumer(method)
         state_store.upsert(record)
         if on_committed is not None:
             on_committed(record)

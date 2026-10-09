@@ -101,7 +101,7 @@ async def owner_workspace_download(request, channel):
             raise PermissionError("duplicate download selector")
         agent_client, route_check = capture_local_agent_route(channel)
         principal, permit = capture_http_download(request.headers, request.query_params)
-        if dict(permit._source.binding)["channel_id"] != channel.channel_id:
+        if permit.channel_id != channel.channel_id:
             raise PermissionError("original channel required")
 
         def check():

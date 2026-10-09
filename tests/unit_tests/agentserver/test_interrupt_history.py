@@ -263,6 +263,7 @@ class _ScriptedAdapter:
 async def _run_stream(
     monkeypatch: pytest.MonkeyPatch,
     payloads: list[dict[str, Any]],
+    *, resume: bool = False,
 ) -> List[dict[str, Any]]:
     facade = JiuWenSwarm()
     recorded: List[dict[str, Any]] = []
@@ -293,8 +294,14 @@ async def _run_stream(
         session_id="interrupt_history_sess",
         params={"query": "hello", "mode": "agent"},
     )
-    async for _chunk in facade.process_message_stream(request):
+    if resume:
+        request.params.update(query='', request_id='original-question', source='permission_interrupt',
+                              answers=[{'selected_options': ['allow_once']}])
+    stream = facade.deliver_control_input(request) if resume else facade.process_message_stream(request)
+    async for _chunk in stream:
         pass
+    if resume:
+        assert not any(r.get('role') == 'user' for r in recorded)
     return [r for r in recorded if r.get("role") == "assistant"]
 
 
@@ -386,3 +393,18 @@ def test_false_success_flag_still_counts_as_terminal():
         )
         is True
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('boundary', ['final', 'empty_final', 'interrupt'])
+async def test_control_resume_uses_original_durable_history_projection(monkeypatch, boundary):
+    ending = ({'event_type': 'chat.final', 'content': 'RESUMED-ANSWER'} if boundary == 'final'
+              else {'event_type': 'chat.final', 'content': ''} if boundary == 'empty_final'
+              else _ask_user_payload())
+    records = await _run_stream(monkeypatch, [
+        {'event_type': 'chat.delta', 'content': 'RESUMED-'},
+        {'event_type': 'chat.delta', 'content': 'ANSWER'}, ending,
+    ], resume=True)
+    assert _final_contents(records) == ['RESUMED-ANSWER']
+    if boundary == 'interrupt':
+        assert any(r.get('event_type') == 'chat.ask_user_question' for r in records)

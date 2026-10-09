@@ -36,9 +36,27 @@ def register_lifecycle_handlers(channel, resolve_client, resolve_cron):
             if not clients:
                 return
             try:
-                ok, response = await call(
-                    "project.lifecycle", {"events": True}, None, user_id
+                from jiuwenswarm.governance.organization_auth import (
+                    authenticated_scope, configured_authenticator, connection_principal,
                 )
+                principal = None
+                if configured_authenticator() is not None:
+                    # Poll under an actual live authenticated connection,
+                    # never promote the caller's routing user_id to authority.
+                    for candidate in clients:
+                        try:
+                            current = connection_principal(candidate)
+                            if current.identity().actor_id == user_id:
+                                principal = current
+                                break
+                        except (AttributeError, PermissionError, ValueError):
+                            continue
+                    if principal is None:
+                        return
+                with authenticated_scope(principal):
+                    ok, response = await call(
+                        "project.lifecycle", {"events": True}, None, user_id
+                    )
                 if ok:
                     for entry in response.get("events", []):
                         payload = entry["payload"]

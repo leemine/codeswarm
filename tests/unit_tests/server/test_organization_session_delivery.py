@@ -16,8 +16,129 @@ from jiuwenswarm.server.runtime.gateway_adapter.shared_history_adapter import Sh
 
 setup = host_tests.setup
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('method', ['updater.get_status', 'updater.get_conf'])
+@pytest.mark.parametrize('access', ['maintainer', 'reader', 'revoked_before_read', 'revoked_before_send'])
+async def test_updater_reads_use_original_web_admission_and_delivery(setup, monkeypatch, method, access):
+    from unittest.mock import Mock
+    from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
+    from jiuwenswarm.gateway.channel_manager.web import app_web_handlers
+    from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannel, WebChannelConfig
+    from jiuwenswarm.governance import application_boundary
+
+    host, _, _, _, _, _, _ = setup
+    grants = {} if access == 'reader' else {'settings': ['manage']}
+    monkeypatch.setattr(organization_auth, 'configured_authenticator', lambda: object())
+    monkeypatch.setattr(organization_auth, 'connection_principal',
+                        lambda ws: SimpleNamespace(identity=lambda: ALICE))
+    monkeypatch.setattr(session_boundary, 'organization_sharing_host', lambda: host)
+    original_admit = application_boundary.admit_application_request
+    monkeypatch.setattr(application_boundary, 'admit_application_request',
+                        lambda *a, **kw: original_admit(*a, **kw, policy_supplier=lambda _: grants))
+    updater = Mock()
+    updater.get_status.return_value = {'current_version': 'test-version'}
+    updater.get_runtime_config.return_value = {'release_api_url': 'https://private.invalid/releases'}
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    app_web_handlers._register_web_handlers(app_web_handlers.WebHandlersBindParams(
+        channel=channel, updater_service=updater))
+    async def normalize(params, **_):
+        if access == 'revoked_before_read':
+            grants.clear()
+        return params
+    channel._process_files = normalize
+    channel._on_message_cb = AsyncMock(return_value=False)
+    channel.register_ws = AsyncMock(side_effect=AssertionError('instance read is not a chat subscription'))
+    ws = SimpleNamespace(_jiuwen_ws_id='updater-browser', closed=False, send=AsyncMock())
+    queue = asyncio.Queue()
+    channel._send_queues['updater-browser'] = queue
+    await channel._handle_authenticated_raw_message(ws, json.dumps({
+        'type': 'req', 'id': 'updater-read', 'method': method, 'params': {},
+    }), {})
+    if access == 'revoked_before_send':
+        grants.clear()
+    queue.put_nowait(None)
+    await channel._writer_loop(ws, 'updater-browser')
+    read = updater.get_status if method == 'updater.get_status' else updater.get_runtime_config
+    if access in {'reader', 'revoked_before_read'}:
+        read.assert_not_called()
+    else:
+        read.assert_called_once_with()
+    if access == 'maintainer':
+        frame = json.loads(ws.send.call_args.args[0])
+        assert frame['ok'] and frame['payload'] == read.return_value
+    else:
+        frames = [json.loads(call.args[0]) for call in ws.send.call_args_list]
+        assert all(not frame.get('ok') for frame in frames)
+        assert 'private.invalid' not in str(frames)
+    channel.register_ws.assert_not_awaited()
+
 def request(params):
     return SimpleNamespace(params=params, request_id='read-1', channel_id='web', metadata={})
+
+
+@pytest.mark.parametrize('params', [
+    {'action': 'resume'}, {'action': 'list', 'actor_id': 'alice'},
+    {'action': 'list', 'path': '/private/checkpoint'}, {'action': []},
+    {'action': 'get_workflow', 'attach_goal': True},
+])
+def test_workflow_read_rejects_execution_or_authority_selectors(setup, params):
+    host, *_ = setup
+    with pytest.raises(PermissionError):
+        admit_session_request('command.workflows', {'session_id': 'session', **params},
+                              identity_resolver=lambda: ALICE, host=host)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('action', ['list', 'get_workflow', 'get_phase', 'get_agent'])
+@pytest.mark.parametrize('state', ['owner', 'recipient', 'revoked_before_read', 'revoked_before_send'])
+async def test_workflow_original_reader_keeps_owner_boundary(setup, monkeypatch, action, state):
+    from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+    from tests.unit_tests.agentserver.test_command_workflows_handler import (
+        _FakeWS, _FakeTeamManager, _FakeWorkflowHandler, _make_request, _snapshot_two_workflows,
+    )
+    host, access, project_id, _, _, _, scope = setup
+    grant(host, scope)
+    params = {'session_id': 'session', 'action': action}
+    if action != 'list':
+        params['workflow_id'] = 'wf_1'
+    if action in {'get_phase', 'get_agent'}:
+        params['phase_id'] = 'phase-1'
+    if action == 'get_agent':
+        params['agent_id'] = 'agent-1'
+    if state == 'recipient':
+        with pytest.raises(PermissionError):
+            admit_session_request('command.workflows', params, identity_resolver=lambda: BOB, host=host)
+        return
+    permit = admit_session_request('command.workflows', params, identity_resolver=lambda: ALICE, host=host)
+    monkeypatch.setattr(organization_auth, 'configured_authenticator', lambda: object())
+    def revoke():
+        access.replace_acl(project_id, 'admin', acl={}, expected_revision=2)
+    class Snapshot(_FakeWorkflowHandler):
+        def get_workflow_snapshot(self):
+            if state == 'revoked_before_send':
+                revoke()
+            return super().get_workflow_snapshot()
+    from unittest.mock import Mock
+    manager = Mock(return_value=_FakeTeamManager(Snapshot(_snapshot_two_workflows())))
+    monkeypatch.setattr('jiuwenswarm.agents.harness.team.get_team_manager', manager)
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    ws = _FakeWS()
+    with session_boundary.delivery_scope():
+        session_boundary.set_delivery_permit(permit)
+        if state == 'revoked_before_read':
+            revoke()
+            with pytest.raises(PermissionError):
+                await server._handle_command_workflows(ws, _make_request('session', params=params), asyncio.Lock())
+            manager.assert_not_called()
+            assert not ws.sent
+        else:
+            await server._handle_command_workflows(ws, _make_request('session', params=params), asyncio.Lock())
+            body = ''.join(ws.sent)
+            if state == 'revoked_before_send':
+                assert 'research-flow' not in body and 'hello world' not in body and 'FORBIDDEN' in body
+            else:
+                assert 'FORBIDDEN' not in body and 'wf_1' in body
 
 
 def test_share_read_fixed_range_and_cursor_identity(setup):
@@ -143,6 +264,34 @@ def test_owner_permit_never_revives_after_acl_restore(setup):
     access.replace_acl(project_id, 'admin', acl={'alice': ['read', 'admin']}, expected_revision=3)
     assert host.owner_current('session', ALICE)
     assert not permit.revalidate()
+
+
+@pytest.mark.asyncio
+async def test_rsi_inventory_transport_id_never_subscribes_to_a_chat(setup, monkeypatch):
+    from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
+    from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannel, WebChannelConfig
+    from jiuwenswarm.governance.application_boundary import admit_application_request
+    host, _, _, _, _, _, _ = setup
+    monkeypatch.setattr(organization_auth, 'configured_authenticator', lambda: object())
+    monkeypatch.setattr(organization_auth, 'connection_principal', lambda ws: SimpleNamespace(identity=lambda: BOB))
+    monkeypatch.setattr(session_boundary, 'organization_sharing_host', lambda: host)
+    def admit(method, params, **kwargs):
+        return admit_application_request(method, params, **kwargs, policy_supplier=lambda _: {})
+    monkeypatch.setattr('jiuwenswarm.governance.application_boundary.admit_application_request', admit)
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    channel._process_files = AsyncMock(side_effect=lambda params, **_: params)
+    channel.register_ws = AsyncMock(side_effect=AssertionError('RSI is not a chat subscription'))
+    handler = AsyncMock()
+    channel.register_method('rsi.task.list', handler)
+    channel._on_message_cb = AsyncMock(return_value=False)
+    ws = SimpleNamespace()
+    await channel._handle_authenticated_raw_message(ws, json.dumps({
+        'type': 'req', 'id': 'rsi-list', 'method': 'rsi.task.list',
+        'params': {'session_id': 'rsi-browser-route'},
+    }), {})
+    channel.register_ws.assert_not_awaited()
+    handler.assert_awaited_once()
+    assert not channel._ws_sessions
 
 
 @pytest.mark.asyncio

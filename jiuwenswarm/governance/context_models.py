@@ -33,7 +33,7 @@ class _PendingContextAuthority:
 def bind_context_model_factory(agent) -> None:
     """Adapt the locked SDK's per-engine factory; leave its registry/keys intact.
 
-    ef159d7c rebuilds compressor Models from credential-free client configs but
+    The locked SDK rebuilds forked compressor Models from credential-free configs but
     does not carry the original instance authority. There is no public factory
     hook or authority getter in that SDK. Keep this compatibility seam confined
     to the owning engine, including hot reload, without patching global Models.

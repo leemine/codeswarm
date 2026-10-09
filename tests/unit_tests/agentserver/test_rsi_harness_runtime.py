@@ -153,6 +153,32 @@ async def test_agent_manager_rsi_broadcast_targets_agent_and_code_only():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["activate", "deactivate"])
+async def test_rsi_broadcast_keeps_external_facade_without_constructing_native(operation):
+    from jiuwenswarm.server.runtime.agent_adapter.engine_adapter import EngineAgentAdapter
+    from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+
+    external = object.__new__(EngineAgentAdapter)
+    facade = object.__new__(JiuWenSwarm)
+    facade._adapter = external
+    assert await facade.ensure_instance() is None
+    native = FakeFacade()
+    manager = AgentManager()
+    manager.agents = {"web": {"code:external": facade, "agent:native": native}}
+    record = {"installation_id": "test-version", "runtime_path": "synthetic/plugin"}
+
+    result = await manager.broadcast_rsi_harness_change(
+        old_installation=record if operation == "deactivate" else None,
+        new_installation=record if operation == "activate" else None,
+    )
+
+    assert result == {"attempted": 1, "succeeded": 1, "failed": []}
+    assert native.calls == [(operation, "synthetic/plugin", "test-version")]
+    assert facade._adapter is external
+    assert not hasattr(external, "_instance")
+
+
+@pytest.mark.asyncio
 async def test_agent_manager_can_deactivate_new_version_when_no_old_active_exists():
     manager = AgentManager()
     agent = FakeFacade()

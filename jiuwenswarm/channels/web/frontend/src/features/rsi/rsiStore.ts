@@ -39,6 +39,7 @@ interface RsiDetailState {
 interface RsiState {
   list: RsiTaskListItem[];
   listLoading: boolean;
+  canExecute: boolean;
   listError: string | null;
 
   selectedTaskId: string | null;
@@ -89,6 +90,7 @@ const detailRequests = new Map<string, Promise<void>>();
 export const useRsiStore = create<RsiState>((set, get) => ({
   list: [],
   listLoading: false,
+  canExecute: false,
   listError: null,
   selectedTaskId: null,
   detail: {},
@@ -98,12 +100,13 @@ export const useRsiStore = create<RsiState>((set, get) => ({
   loadList: async () => {
     set({ listLoading: true, listError: null });
     try {
-      const { rsiTaskList } = await import('./rsiApi');
-      const list = await rsiTaskList();
-      set({ list, listLoading: false });
+      const { rsiTaskInventory } = await import('./rsiApi');
+      const { tasks: list, canExecute } = await rsiTaskInventory();
+      set({ list, canExecute, listLoading: false });
     } catch (e) {
       set({
         listLoading: false,
+  canExecute: false,
         listError: e instanceof Error ? e.message : String(e),
       });
     }
@@ -282,6 +285,7 @@ export const useRsiStore = create<RsiState>((set, get) => ({
     set({
       list: [],
       listLoading: false,
+  canExecute: false,
       listError: null,
       selectedTaskId: null,
       detail: {},

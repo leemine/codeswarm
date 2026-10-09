@@ -44,7 +44,7 @@ function modelIdentity(model: ModelEntry, index: number): string {
   return `${model.origin_index ?? `new-${index}`}:${model.model_name}:${model.alias ?? ''}`;
 }
 
-function parseModelsPayload(payload: unknown): { models: ModelEntry[]; activeModel?: string } {
+function parseModelsPayload(payload: unknown): { models: ModelEntry[]; activeModel?: string; readOnly: boolean } {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('INVALID_MODELS_LIST');
   const models = (payload as { models?: unknown }).models;
   if (!Array.isArray(models)) throw new Error('INVALID_MODELS_LIST');
@@ -65,7 +65,7 @@ function parseModelsPayload(payload: unknown): { models: ModelEntry[]; activeMod
   }
   const activeModel = (payload as { active_model?: unknown }).active_model;
   if (activeModel !== undefined && typeof activeModel !== 'string') throw new Error('INVALID_MODELS_LIST');
-  return { models: models as ModelEntry[], activeModel };
+  return { models: models as ModelEntry[], activeModel, readOnly: (payload as { read_only?: unknown }).read_only === true };
 }
 
 export function ModelsSettings() {
@@ -73,6 +73,7 @@ export function ModelsSettings() {
   const { isConnected, request, saveQueue } = useSettingsServices();
   const setAvailableModels = useSessionStore((state) => state.setAvailableModels);
   const [models, setModels] = useState<ModelEntry[]>([]);
+  const [catalogReadOnly, setCatalogReadOnly] = useState(false);
   const [catalog, setCatalog] = useState<VendorPresetMap>(EMPTY_VENDOR_CATALOG);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [catalogLoading, setCatalogLoading] = useState(false);
@@ -95,7 +96,7 @@ export function ModelsSettings() {
   const editableModels = useMemo(() => getEditableModels(models), [models]);
   const modelDisplayGroups = useMemo(() => getModelDisplayGroups(models), [models]);
   const hasModelsError = Boolean(modelsError);
-  const actionsDisabled = !isConnected || modelsLoading || hasModelsError || saving;
+  const actionsDisabled = catalogReadOnly || !isConnected || modelsLoading || hasModelsError || saving;
 
   const toggleModelGroup = useCallback((modelName: string) => {
     setExpandedModelGroups((current) => ({ ...current, [modelName]: !current[modelName] }));
@@ -114,6 +115,7 @@ export function ModelsSettings() {
       if (currentRequestId !== modelsRequestId.current) return;
       const parsed = parseModelsPayload(payload);
       setModels(parsed.models);
+      setCatalogReadOnly(parsed.readOnly);
       setAvailableModels(parsed.models, parsed.activeModel);
     } catch (error) {
       if (currentRequestId === modelsRequestId.current) {
@@ -218,6 +220,7 @@ export function ModelsSettings() {
       const refreshedPayload = await request('models.list');
       const parsed = parseModelsPayload(refreshedPayload);
       setModels(parsed.models);
+      setCatalogReadOnly(parsed.readOnly);
       setAvailableModels(parsed.models, parsed.activeModel);
       showValidationToast({
         success: true,
@@ -312,7 +315,7 @@ export function ModelsSettings() {
     const isDuplicate = groupOrdinal !== undefined;
     const presentation = getCardPresentation(model, groupOrdinal);
     const isPrimary = model === editableModels[0];
-    const readOnly = model.is_agentos === true;
+    const readOnly = catalogReadOnly || model.read_only === true || model.is_agentos === true;
     const canSetPrimary = !readOnly && !isPrimary && (!isDuplicate || model.is_default === true);
     return (
       <article
@@ -331,7 +334,7 @@ export function ModelsSettings() {
             {isDuplicate && model.is_default ? (
               <Tag variant="neutral" data-testid="settings-models-card-group-default-tag" data-variant={model.origin_index ?? 'new'}>{t('settingsPanel.models.groupDefault')}</Tag>
             ) : null}
-            {readOnly ? <Tag variant="neutral" data-testid="settings-models-card-readonly-tag" data-variant={model.origin_index ?? 'new'}>{t('settingsPanel.models.agentOsReadonly')}</Tag> : null}
+            {readOnly ? <Tag variant="neutral" data-testid="settings-models-card-readonly-tag" data-variant={model.origin_index ?? 'new'}>{t(catalogReadOnly ? 'settingsPanel.models.sharedCatalogReadonly' : 'settingsPanel.models.agentOsReadonly')}</Tag> : null}
           </div>
           <p title={presentation.metadata} data-testid="settings-models-card-metadata" data-variant={model.origin_index ?? 'new'}>{presentation.metadata}</p>
         </div>
@@ -447,12 +450,12 @@ export function ModelsSettings() {
             </Button>
           </div>
         ) : null}
-        {!hasModelsError && !modelsLoading && editableModels.length === 0 ? (
+        {!hasModelsError && !modelsLoading && models.length === 0 ? (
           <div className="settings-models__empty" data-testid="settings-models-empty">
             <img src={settingsEmptyBoxIllustration} alt="" aria-hidden />
             <strong>{t('settingsPanel.models.empty')}</strong>
             <p>{t('settingsPanel.models.emptyDescription')}</p>
-            <Button variant="primary" disabled={!isConnected || saving} onClick={() => openModelDialog({})} data-testid="settings-models-empty-add-btn">
+            <Button variant="primary" disabled={actionsDisabled} onClick={() => openModelDialog({})} data-testid="settings-models-empty-add-btn">
               {t('settingsPanel.models.addModel')}
             </Button>
           </div>

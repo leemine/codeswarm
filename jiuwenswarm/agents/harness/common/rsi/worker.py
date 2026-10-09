@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import time
 from types import SimpleNamespace
@@ -70,6 +71,9 @@ class RsiWorker:
         self._last_enqueued: str | None = None
         self._resume_task_ids: set[str] = set()
         self._control_tasks: dict[str, asyncio.Task[Any]] = {}
+        # Request-local authority belongs to each queued execution, not to the
+        # first request that happened to start the long-lived worker loop.
+        self._execution_authorities: dict[str, tuple[Any, contextvars.Context]] = {}
         # ``_execution_tasks`` owns the slot supervisor; the actual provider
         # coroutine is tracked separately so Harness cancellation reaches it.
         self._execution_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -99,6 +103,7 @@ class RsiWorker:
           ``_ensure_runner`` 在运行中时自动跳过（并发=1 语义）。
         - 已排队任务幂等短路，避免状态机 QUEUED→QUEUED 自冲突。
         """
+        authority = self._capture_authority(task_id, 'rsi.training.start')
         task = self.store.get(task_id)
         if task.status == TaskStatus.PAUSED.value:
             self._conflict(task_id, "PAUSED 任务请走 resume")
@@ -112,6 +117,7 @@ class RsiWorker:
             cause="enqueue",
         )
         self._last_enqueued = task_id
+        self._execution_authorities[task_id] = authority
         self._queue.put_nowait(task_id)
         self._ensure_runner()
         return TaskStatus.QUEUED.value
@@ -186,6 +192,7 @@ class RsiWorker:
         - 排队中被 pause（从未真实执行，含服务重启丢队列）→ 恢复只是重新入队，
           执行走 ``adapter.run()`` 全新开始，不需要 Provider 的断点恢复。
         """
+        authority = self._capture_authority(task_id, 'rsi.training.resume')
         task = self.store.get(task_id)
         if task.status != TaskStatus.PAUSED.value:
             self._conflict(task_id, "仅 PAUSED 可 resume")
@@ -210,11 +217,60 @@ class RsiWorker:
         # 排队暂停且 Provider 不支持 resume（如 paper 桩实现）→ 不标记 resume，
         # 执行路径按全新 run() 处理，避免卡在 Provider.resume() 上。
         self._last_enqueued = task_id
+        self._execution_authorities[task_id] = authority
         self._queue.put_nowait(task_id)
         self._ensure_runner()
         return TaskStatus.QUEUED.value
 
     # -- 内部 --
+
+    def _capture_authority(self, task_id: str, method: str):
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        from jiuwenswarm.governance.rsi_boundary import require_experiment_owner
+        if configured_authenticator() is None:
+            check = lambda: configured_authenticator() is None
+        else:
+            permit = require_experiment_owner(method, {'task_id': task_id}, self.store)
+            check = permit.revalidate
+        return check, contextvars.copy_context()
+
+    def _execution_allowed(self, task_id: str) -> bool:
+        authority = self._execution_authorities.get(task_id)
+        if authority is None:
+            from jiuwenswarm.governance.organization_auth import configured_authenticator
+            return configured_authenticator() is None
+        try:
+            return authority[0]() is True
+        except Exception:
+            return False
+
+    async def _watch_authority(self, task_id, adapter, runner, check, generation):
+        """Use original Provider termination and wait for cleanup before reuse."""
+        while not runner.done():
+            if not self._is_current_execution(task_id, generation):
+                return
+            try:
+                allowed = check() is True
+            except Exception:
+                allowed = False
+            if allowed:
+                await asyncio.sleep(0.1)
+                continue
+            logger.warning('[RSI] execution authority revoked: task=%s', task_id)
+            if getattr(adapter, 'supports_terminate', False):
+                # Detached providers must confirm termination before cancelling
+                # the polling runner; cancellation alone would orphan them.
+                result = await asyncio.wait_for(
+                    adapter.terminate(task_id), _PROVIDER_TERMINATE_TIMEOUT_SECONDS)
+                status = _provider_status(result)
+                if status not in {'TERMINATED', 'COMPLETED', 'FAILED'}:
+                    raise RuntimeError('RSI provider exit unconfirmed after revocation')
+            self._termination_requested.add(task_id)
+            runner.cancel()
+            await asyncio.gather(runner, return_exceptions=True)
+            if self._is_current_execution(task_id, generation):
+                self._mark_terminated(task_id)
+            return
 
     def _ensure_runner(self) -> None:
         if self._run_task is not None and not self._run_task.done():
@@ -235,6 +291,10 @@ class RsiWorker:
             task_id = await self._queue.get()
             self._running_task_id = task_id
             try:
+                if not self._execution_allowed(task_id):
+                    self._mark_terminated(task_id)
+                    self._execution_authorities.pop(task_id, None)
+                    continue
                 self.store.update_status(
                     task_id,
                     [TaskStatus.QUEUED.value, TaskStatus.PAUSED.value],
@@ -250,7 +310,9 @@ class RsiWorker:
                         task_id,
                         resume=resume,
                         generation=generation,
-                    )
+                    ),
+                    context=(self._execution_authorities[task_id][1].copy()
+                             if task_id in self._execution_authorities else None),
                 )
                 self._execution_tasks[task_id] = exec_task
                 await exec_task
@@ -294,13 +356,42 @@ class RsiWorker:
             runner.cancel()
         released: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._slot_released[task_id] = released
+        task = self.store.get(task_id)
+        adapter = self._adapter_for(task.scenario, task.artifact_type)
+        authority = self._execution_authorities.get(task_id)
+        check = authority[0] if authority else lambda: self._execution_allowed(task_id)
+        watcher = asyncio.create_task(self._watch_authority(task_id, adapter, runner, check, generation))
+
+        def release_authority(_done):
+            if not _done.cancelled() and _done.exception() is not None:
+                logger.error("[RSI] execution exit remains unconfirmed: %s", task_id)
+            if self._execution_authorities.get(task_id) is authority:
+                self._execution_authorities.pop(task_id, None)
+
+        watcher.add_done_callback(release_authority)
         try:
-            await asyncio.wait({runner, released}, return_when=asyncio.FIRST_COMPLETED)
+            finished, _ = await asyncio.wait({runner, released, watcher}, return_when=asyncio.FIRST_COMPLETED)
+            if watcher in finished:
+                # A failed termination must not silently free the execution
+                # slot or report completion. Keep waiting for the real runner.
+                try:
+                    await watcher
+                except Exception:
+                    logger.exception('[RSI] revoked execution exit unconfirmed: %s', task_id)
+                    await runner
         finally:
             self._slot_released.pop(task_id, None)
             if self._execution_runners.get(task_id) is runner:
                 self._execution_runners.pop(task_id, None)
             released.cancel()
+            if runner.done():
+                watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
+            else:
+                # Existing pause/terminate may release the slot before a
+                # detached provider winds down. Keep its authority watcher.
+                self._winding_down.add(watcher)
+                watcher.add_done_callback(self._winding_down.discard)
         if runner.done():
             try:
                 await runner      # 异常照旧抛给 _run_loop 的处理分支

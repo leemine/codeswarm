@@ -39,8 +39,15 @@ def organization_ui_projection(method: str, params: object) -> dict[str, Any] | 
         raise PermissionError("organization authentication unavailable") from exc
     if not isinstance(identity, TrustedIdentity):
         raise PermissionError("organization authentication required")
-    if method not in {"config.get", "models.list"}:
-        raise PermissionError("organization configuration operation unavailable")
+    from jiuwenswarm.governance.application_boundary import admit_application_request, RULES
+    if method not in RULES or RULES[method].resource != 'settings':
+        raise PermissionError("application configuration operation unavailable")
+    admit_application_request(method, params or {}, identity_resolver=current_identity)
+    from jiuwenswarm.governance.application_boundary import application_can_manage
+    if application_can_manage(identity, 'settings'):
+        return None  # Preserve the original instance-owner configuration UI.
+    if not RULES[method].public_projection:
+        return None  # Explicit host permission, checked again by the delivery permit.
     if params is None:
         params = {}
     if not isinstance(params, dict) or params:
@@ -61,7 +68,17 @@ def organization_ui_projection(method: str, params: object) -> dict[str, Any] | 
         value = mapping(config.get(section)).get("enabled", default)
         return "true" if value is True else "false"
 
-    if method == "config.get":
+    if method == 'vendors.list':
+        from jiuwenswarm.common.model_vendor_registry import to_frontend_payload
+        payload = {'vendors': to_frontend_payload()}
+    elif method == 'path.get':
+        browser = mapping(mapping(get_config_raw()).get('browser'))
+        payload = {'chrome_path': '', 'headless': browser.get('headless') is not False,
+                   'read_only': True}
+    elif method == 'locale.get_conf':
+        lang = mapping(get_config_raw()).get('preferred_language')
+        payload = {'preferred_language': lang if lang in {'zh', 'en'} else 'zh'}
+    elif method == "config.get":
         raw = mapping(get_config_raw())
         platform = os.getenv("JIUWENSWARM_RUNTIME_PLATFORM", "default").strip().lower()
         platform = platform if platform in {"default", "harmony"} else "default"
@@ -128,11 +145,13 @@ def organization_ui_projection(method: str, params: object) -> dict[str, Any] | 
                     # or endpoint access, not a redacted value to save back.
                     "api_key": "",
                     "api_base": "",
+                    "reasoning_level": "",
                 }
             )
         payload = {
             "models": result,
             "active_model": result[0]["model_name"] if result else "",
+            "read_only": True,
         }
     try:
         if current_identity() != identity:

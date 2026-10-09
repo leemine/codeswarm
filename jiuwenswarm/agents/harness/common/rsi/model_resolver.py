@@ -9,6 +9,8 @@ single translation boundary between those two contracts.
 from __future__ import annotations
 
 import hashlib
+import os
+import tempfile
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -173,6 +175,13 @@ class RsiModelConfigResolver:
         if not str(mcc.get("api_base") or mcc.get("base_url") or "").strip():
             raise RsiModelConfigInvalid(f"模型缺少 api_base: {model_name}")
 
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        from jiuwenswarm.governance.rsi_boundary import instance_model_snapshot
+        secret = None
+        authority_check = lambda: configured_authenticator() is None
+        if configured_authenticator() is not None:
+            secret, authority_check = instance_model_snapshot(mcc, mco)
+
         try:
             model = (self._model_builder or _default_model_builder)(mcc, mco)
             client_data = _dump_model_part(getattr(model, "model_client_config", None))
@@ -186,6 +195,10 @@ class RsiModelConfigResolver:
             raise RsiModelConfigInvalid(f"模型 {model_name} 无法构造") from exc
         if not isinstance(client_data, dict) or not isinstance(request_data, dict):
             raise RsiModelConfigInvalid(f"模型 {model_name} 构造结果无效")
+        if secret is not None:
+            # Native's builder deliberately stores a placeholder and a live
+            # authorization callback. YAML cannot preserve that callback.
+            client_data["api_key"] = secret
 
         # ModelClientConfig must not retry inside the RSI engine: retry budget
         # belongs to the engine's stage policy.  The standalone member factory
@@ -201,12 +214,21 @@ class RsiModelConfigResolver:
             "model_request_config": request_data,
         }
         target_dir = Path(task_models_dir).expanduser().resolve()
-        target_dir.mkdir(parents=True, exist_ok=True)
+        target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         target = target_dir / f"{role_name}.yaml"
-        target.write_text(
-            yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
-            encoding="utf-8",
-        )
+        if not authority_check():
+            raise RsiModelConfigInvalid("模型配置授权已失效")
+        # mkstemp is private from creation; replace avoids following a stale
+        # role-file symlink or briefly publishing a world-readable credential.
+        fd, temporary = tempfile.mkstemp(dir=target_dir, prefix=".model-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                yaml.safe_dump(payload, stream, allow_unicode=True, sort_keys=False)
+            if not authority_check():
+                raise RsiModelConfigInvalid("模型配置授权已失效")
+            os.replace(temporary, target)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
         digest = hashlib.sha256(target.read_bytes()).hexdigest()
         return ResolvedRsiModel(
             reference=str(model_ref).strip(),

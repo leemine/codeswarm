@@ -150,3 +150,4 @@
 | `App.tsx` | `app` | 应用外壳;全局布局与 toast |
 
 | `../../../extensions/evaluation/frontend` | `evaluation` | 评测任务库、实验与结果证据 |
+| `features/rsi` | `rsi` | RSI 实验列表、创建、执行、产物与安装 |

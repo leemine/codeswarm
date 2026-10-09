@@ -4302,6 +4302,26 @@ class MessageHandler(ABC):
                     principal.identity()  # Re-read revocation after waiting.
                 principal_scope = authenticated_scope(principal)
                 principal_scope.__enter__()
+
+                if configured_authenticator() is not None:
+                    from jiuwenswarm.governance.application_boundary import RULES, admit_application_request
+                    from jiuwenswarm.governance.session_boundary import organization_sharing_host
+                    method = getattr(msg.req_method, "value", "")
+                    if method in RULES:
+                        # Application RPCs use the existing unary transport. A
+                        # browser routing ID is not a chat: do not inject mode,
+                        # resolve a Session, run prompt hooks or subscribe here.
+                        from jiuwenswarm.governance.personal_context import PERSONAL_CONTEXT_STREAMS
+                        if msg.is_stream and method not in PERSONAL_CONTEXT_STREAMS:
+                            raise PermissionError("application unary request required")
+                        admit_application_request(method, msg.params or {},
+                            identity_resolver=principal.identity, host=organization_sharing_host())
+                        env = self.message_to_e2a(msg)
+                        if msg.is_stream:
+                            await self._start_stream_task(msg, env, env.request_id or msg.id)
+                        else:
+                            await self._process_non_stream_request(msg, env)
+                        continue
                 
          
                 # 先处理受控通道的 Channel 控制指令（如 /new_session、/mode、/skills list）

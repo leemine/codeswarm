@@ -580,6 +580,18 @@ class RsiHarnessInstaller:
         # both requests cannot race on the same content-addressed version.
         self._install_lock = asyncio.Lock()
 
+    def _require_authority(self, method, task_id=None):
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is None:
+            return None
+        from jiuwenswarm.governance.session_boundary import current_application_permit
+        from jiuwenswarm.governance.rsi_boundary import experiment_owner_check, is_instance_owner
+        permit = current_application_permit(method)
+        if (not is_instance_owner(permit.identity)
+                or (task_id is not None and not experiment_owner_check(task_id, permit.identity, store=self.store))):
+            raise PermissionError('Experiment installation unavailable')
+        return permit
+
     async def install(self, task_id: str) -> dict[str, Any]:
         async with self._install_lock:
             return await self._install_unlocked(task_id)
@@ -587,9 +599,15 @@ class RsiHarnessInstaller:
     def list_versions(self) -> dict[str, Any]:
         """List retained RSI Harness versions without exposing local paths."""
 
+        permit = self._require_authority('rsi.harness.versions.list')
         active = self.activation_store.get_active()
         active_id = str((active or {}).get("installation_id") or "").strip() or None
         records = self.activation_store.list_versions()
+        if permit is not None:
+            from jiuwenswarm.governance.rsi_boundary import experiment_owner_check
+            records = [r for r in records if experiment_owner_check(r.get('task_id'), permit.identity, store=self.store)]
+            if active_id not in {r.get('installation_id') for r in records}:
+                active_id = None
         initial_id = (
             str(records[0].get("installation_id") or "").strip() if records else None
         )
@@ -627,6 +645,7 @@ class RsiHarnessInstaller:
         target = self.activation_store.get_version(wanted)
         if target is None:
             raise RsiBadRequest(f"未找到已安装的 RSI Harness 版本: {wanted}")
+        self._require_authority('rsi.harness.rollback', target.get('task_id'))
         old = self.activation_store.get_active()
         if old and old.get("installation_id") == wanted:
             response = self._response(
@@ -653,6 +672,7 @@ class RsiHarnessInstaller:
             raise RsiHarnessInstallFailed("RSI Harness 回退热加载失败，旧版本保持激活") from exc
         target["hot_load"] = hot_load
         try:
+            self._require_authority('rsi.harness.rollback', target.get('task_id'))
             self.activation_store.commit(target)
         except Exception as exc:
             live_restored = await self._restore_live(target, old)
@@ -706,6 +726,7 @@ class RsiHarnessInstaller:
         _validate_engine_manifest(runtime)
 
     async def _install_unlocked(self, task_id: str) -> dict[str, Any]:
+        self._require_authority('rsi.harness.install', task_id)
         normalized_task_id = str(task_id or "").strip()
         if (
             not normalized_task_id
@@ -819,6 +840,7 @@ class RsiHarnessInstaller:
             hot_load = await self._broadcast(old, record)
             record["hot_load"] = hot_load
             try:
+                self._require_authority('rsi.harness.install', task_id)
                 self.activation_store.commit(record)
                 pointer_committed = True
             except Exception as exc:
