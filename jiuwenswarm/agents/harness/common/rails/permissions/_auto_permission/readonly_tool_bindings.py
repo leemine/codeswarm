@@ -43,7 +43,7 @@ def _method_matches(owner, expected, name):
 
 def _invoke_matches(resource):
     # Tool's metaclass installs these SDK wrappers on every instance.
-    invoke = resource.invoke
+    invoke = _closure(resource.invoke, _ToolMeta.__call__, "_scoped_invoke")["_output_invoke"]
     for factory, name in (
         (callbacks.create_emit_after_decorator, "decorator.async_wrapper"),
         # No public equivalent identifies this SDK-installed executable wrapper.

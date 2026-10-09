@@ -896,6 +896,51 @@ async def test_readonly_rejects_rebound_methods(tmp_path, monkeypatch, defect, l
         manager.remove(name)
 
 
+@pytest.mark.parametrize("mutation", ["original", "without_scope", "proxy", "foreign", "output_proxy"])
+def test_readonly_requires_exact_sdk_scope_and_output_wrappers(tmp_path, monkeypatch, mutation):
+    from functools import wraps
+    from types import FunctionType
+    from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
+    from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission import readonly_tool_bindings as bindings
+
+    monkeypatch.setattr(tool_binding_module.Runner, "resource_mgr", ResourceMgr())
+    name = "cron_list_jobs"
+    tool = _readonly_resource(name, tmp_path, monkeypatch)
+    foreign = _readonly_resource(name, tmp_path, monkeypatch)
+    manager = AbilityManager(owner_id="scoped-readonly")
+    manager.add_ability(tool.card, tool)
+    ctx = _runtime_ctx(_Session(), tool_name=name, tool_args={})
+    ctx.agent.ability_manager = manager
+    invocation = before_tool_module._extract_invocation((ctx,), {})
+    original = tool.invoke
+    captured = dict(zip(original.__code__.co_freevars, original.__closure__))
+    output = captured["_output_invoke"].cell_contents
+
+    @wraps(original)
+    async def proxy(*args, **kwargs):
+        raise AssertionError("unverified proxy must never execute")
+
+    try:
+        assert bindings.trusted_readonly_binding(invocation, "session-a")
+        replacement = original
+        if mutation == "without_scope":
+            replacement = output
+        elif mutation == "proxy":
+            replacement = proxy
+        elif mutation == "foreign":
+            replacement = foreign.invoke
+        elif mutation == "output_proxy":
+            def cell(value):
+                return (lambda: value).__closure__[0]
+            replacement = FunctionType(original.__code__, original.__globals__,
+                closure=tuple(cell(proxy) if key == "_output_invoke" else captured[key]
+                              for key in original.__code__.co_freevars))
+        monkeypatch.setattr(tool, "invoke", replacement)
+        assert bindings.trusted_readonly_binding(invocation, "session-a") is (mutation == "original")
+    finally:
+        manager.remove(name)
+
+
 @pytest.mark.parametrize("case", [
     "valid", "other_owner", "other_func", "unbound", "missing", "none",
     "empty_owner", "empty_func", "empty_both",
