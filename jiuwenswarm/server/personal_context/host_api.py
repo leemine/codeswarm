@@ -23,7 +23,15 @@ import yaml
 
 from openjiuwen.harness.personal_context import PersonalContext
 
-from jiuwenswarm.common.config import get_config, get_default_models
+from jiuwenswarm.common.config import get_config, get_default_models as _legacy_models
+
+def get_default_models():
+    from jiuwenswarm.governance.organization_auth import configured_authenticator
+    if configured_authenticator() is not None:
+        from jiuwenswarm.governance.model_credentials import configured_model_metadata
+        return configured_model_metadata()
+    return _legacy_models()
+
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -151,6 +159,21 @@ def _reconcile_model_selection(stored: dict[str, object]) -> None:
       提供 model_client 与 model_request，否则整份配置直接校验失败。
     """
 
+    from jiuwenswarm.governance.organization_auth import configured_authenticator
+    if configured_authenticator() is not None:
+        model_id = stored.get("model_id")
+        index = _find_model_index_by_id(model_id) if model_id is not None else stored.get("model_index")
+        if index is None and model_id is None:
+            stored["model_index"] = None
+            if stored.get("strategy_profile") in {"agent", "balanced"}:
+                _raise_host_error("select an authorized model before enabling this strategy")
+            return
+        if not _model_index_is_usable(index):
+            _raise_host_error("selected personal context model is unavailable")
+        stored["model_index"] = index
+        stored["model_id"] = _model_entry_id(get_default_models()[index])
+        return
+
     if "model_id" in stored and stored.get("model_id") is not None:
         matched_index = _find_model_index_by_id(stored.get("model_id"))
         if matched_index is not None:
@@ -180,6 +203,9 @@ def _default_strategy_and_model() -> tuple[str, int | None, str | None]:
     因此无可用模型时只能回退 rules——否则首次启用会直接抛 invalid configuration。
     """
 
+    from jiuwenswarm.governance.organization_auth import configured_authenticator
+    if configured_authenticator() is not None:
+        return "rules", None, None
     model_index, model_id = _first_usable_model()
     if model_index is None:
         return "rules", None, None
@@ -660,17 +686,60 @@ async def _validate_repository_pat_for_write(
 class PersonalContextHostAPI:
     """The only JiuwenSwarm API for configuring and controlling embedded PersonalContext."""
 
-    def __init__(self, *, home: str | Path) -> None:
+    def __init__(self, *, home: str | Path, authority=None) -> None:
         self._home = Path(home).expanduser().resolve()
         self._config_path = self._home / _CONFIG_FILENAME
-        self._personal_context = PersonalContext(home=self._home)
+        self._authority = authority
+        self._authority_watch = None
+        options = {}
+        if authority is not None:
+            from jiuwenswarm.governance.personal_context_execution import private_fetch_environment
+            options = {"model_request_authority": authority,
+                       "fetch_environment": private_fetch_environment(self._home),
+                       "execution_check": authority.check}
+        self._core_options = options
+        self._personal_context = PersonalContext(home=self._home, **options)
         self._config: PersonalContext.Config | None = None
         self._stored_config: dict[str, object] | None = None
         self._operation_lock = asyncio.Lock()
         self._fetch_run_stop_lock = asyncio.Lock()
 
+    async def bind_request_authority(self, permit):
+        """Bind only the authenticated caller; expired work is stopped before renewal."""
+        if self._authority is None or permit.identity != self._authority.identity or not permit.revalidate():
+            raise PermissionError("personal context owner authority unavailable")
+        async with self._operation_lock:
+            previous = self._authority.permit
+            if previous is not None and not previous.revalidate():
+                await self._personal_context.deactivate_runtime(timeout_seconds=_STOP_TIMEOUT_SECONDS)
+            self._authority.permit = permit
+            if self._authority_watch is None or self._authority_watch.done():
+                self._authority_watch = asyncio.create_task(self._watch_authority())
+
+    async def _watch_authority(self):
+        while True:
+            await asyncio.sleep(0.1)
+            try:
+                if self._authority.config is None:
+                    self._authority.check_identity()
+                else:
+                    self._authority.check()
+            except Exception:
+                # Reuse Core's bounded stop, which waits for its own producers.
+                await self.stop()
+                return
+
+    def _authorize_candidate(self, candidate):
+        if self._authority is not None:
+            if not candidate.collection_enabled and not candidate.agent_use_enabled:
+                self._authority.check_identity()
+            else:
+                self._authority.validate(candidate)
+
     def _refresh_embedding_configuration(self) -> None:
-        model_name, base_url, api_key = _global_embedding_values()
+        model_name, base_url, api_key = (
+            (None, None, None) if self._authority is not None else _global_embedding_values()
+        )
         # Merged Core exposes this Host-owned seam as a protected method.
         self._personal_context._set_embedding_configuration(  # pylint: disable=protected-access
             model_name=model_name,
@@ -703,6 +772,7 @@ class PersonalContextHostAPI:
     ) -> None:
         """Apply one validated complete configuration while the Host lock is held."""
 
+        self._authorize_candidate(candidate)
         previous = self._config
         previous_stored = self._stored_config
         same_configuration = previous is not None and _configs_equivalent(
@@ -778,6 +848,8 @@ class PersonalContextHostAPI:
             phase = "set"
             rollback_runtime = True
             await self._personal_context.set_configuration(candidate)
+            if self._authority is not None:
+                self._authority.config = candidate
 
             if candidate.collection_enabled:
                 phase = "activate"
@@ -855,6 +927,7 @@ class PersonalContextHostAPI:
     ) -> None:
         """Atomically couple one hot Core update with its complete YAML snapshot."""
 
+        self._authorize_candidate(candidate)
         if self._stored_config is None:
             _raise_host_error("PersonalContext is not configured")
         previous_payload = _serialize_config(self._stored_config)
@@ -869,6 +942,8 @@ class PersonalContextHostAPI:
                 temporary = None
                 published = True
             apply_started = True
+            if self._authority is not None:
+                self._authority.config = candidate
             await apply()
             if not published:
                 if temporary is None:
@@ -882,6 +957,8 @@ class PersonalContextHostAPI:
             rollback_error: BaseException | None = None
             if apply_started:
                 try:
+                    if self._authority is not None:
+                        self._authority.config = self._config
                     await rollback()
                 except BaseException as restore_exc:
                     rollback_error = restore_exc
@@ -1395,6 +1472,8 @@ class PersonalContextHostAPI:
         """Delegate one immediate fetch request without changing configuration."""
 
         async with self._operation_lock:
+            if self._authority is not None:
+                self._authority.check()
             return await self._personal_context.run_fetch(service_id=service_id)
 
     async def stop_fetch_run(self, service_id: str) -> dict[str, object]:
@@ -1486,6 +1565,8 @@ class PersonalContextHostAPI:
                 )
             if normalized_provider != "feishu":
                 _raise_host_error("provider does not support authorization")
+            if self._authority is not None:
+                self._authority.check_provider_authorization(normalized_provider)
             if self._config is None:
                 _raise_host_error(
                     "PersonalContext configuration must be set before provider authorization"
@@ -1610,6 +1691,8 @@ class PersonalContextHostAPI:
                 )
             if normalized_provider != "feishu":
                 _raise_host_error("provider does not support authorization")
+            if self._authority is not None:
+                self._authority.check_provider_authorization(normalized_provider)
             if credentials is not None:
                 _raise_host_error("feishu authorization does not accept credentials")
             if self._config is None:
@@ -1628,7 +1711,7 @@ class PersonalContextHostAPI:
                     exc, "PersonalContext provider authorization failed"
                 ) from None
 
-    async def start(self) -> None:
+    async def start(self, *, activate_collection: bool = True) -> None:
         """Load the file once when needed and start the configured Core."""
 
         async with self._operation_lock:
@@ -1649,8 +1732,10 @@ class PersonalContextHostAPI:
                     ) from None
                 self._config = config
                 self._stored_config = stored
+                if self._authority is not None:
+                    self._authority.config = config
             config = self._config
-            if config is None or not config.collection_enabled:
+            if config is None or not config.collection_enabled or not activate_collection:
                 return
             try:
                 self._refresh_embedding_configuration()
@@ -1682,6 +1767,11 @@ class PersonalContextHostAPI:
                 "timeout_seconds must be greater than zero",
                 status_name="CONTEXT_PROACTIVE_RUNTIME_TIMEOUT",
             )
+        watcher = self._authority_watch
+        if watcher is not None and watcher is not asyncio.current_task():
+            watcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watcher
         async with self._operation_lock:
             try:
                 await self._personal_context.deactivate_runtime(
@@ -1702,12 +1792,14 @@ class PersonalContextHostAPI:
     ) -> None:
         """Restore after a failed candidate configuration operation."""
 
+        if self._authority is not None:
+            self._authority.config = previous
         await self._personal_context.deactivate_runtime(
             timeout_seconds=_STOP_TIMEOUT_SECONDS
         )
         if previous is None:
             previous_instance = self._personal_context
-            self._personal_context = PersonalContext(home=self._home)
+            self._personal_context = PersonalContext(home=self._home, **self._core_options)
             discard = getattr(previous_instance, "shutdown", None)
             if callable(discard):
                 discard()

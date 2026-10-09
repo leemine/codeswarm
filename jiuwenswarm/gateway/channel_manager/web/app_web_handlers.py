@@ -3131,6 +3131,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     heartbeat_controller = bind.heartbeat_controller
     updater_service = bind.updater_service
 
+    async def _set_channel_configuration(manager, name, config):
+        from jiuwenswarm.governance.application_boundary import require_application_consumer
+        permit = require_application_consumer(f'channel.{name}.set_conf')
+        options = {'authority_check': permit.revalidate} if permit is not None else {}
+        await manager.set_conf(name, config, **options)
+        require_application_consumer(f'channel.{name}.set_conf')
+
     from jiuwenswarm.common.schema.message import Message, EventType
 
     def _resolve(ref, key="value"):
@@ -4101,6 +4108,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             # 放到线程池里跑：目录缓存过期或凭据要续期时这里会同步请求 APIG（超时 10～15 秒），
             # 在事件循环上跑会让整个 Gateway 的连接陪着等。
             models = await asyncio.to_thread(get_available_models, config, auth_session)
+            configured_count = len(get_default_models(config))
             result = []
             active_model = ""
             configured_count = len(get_default_models(config))
@@ -4132,6 +4140,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     "endpoint_profile": mcc.get("endpoint_profile") or "",
                 }
                 if idx < configured_count and model_name:
+                    # Keep the editor DTO aligned with execution.options, just
+                    # like the ordinary account's read-only catalog. Login/Zen
+                    # overlays never acquire a configured-model position.
                     result_entry["selection_key"] = f"{model_name}#{idx}"
                 # An empty template entry is not a configured model yet; do
                 # not surface a synthetic context window until the user saves
@@ -4694,6 +4705,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             logger.warning("[openai_account.models.list] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
+    def _updater_authority(method):
+        from jiuwenswarm.governance.application_boundary import require_application_consumer
+        permit = require_application_consumer(method)
+        return permit.revalidate if permit is not None else None
+
     async def _updater_get_status(ws, req_id, params, session_id):
         service = updater_service or UpdaterService()
         await channel.send_response(ws, req_id, ok=True, payload=service.get_status())
@@ -4701,17 +4717,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _updater_check(ws, req_id, params, session_id):
         service = updater_service or UpdaterService()
         manual = bool((params or {}).get("manual", False)) if isinstance(params, dict) else False
-        payload = await asyncio.to_thread(service.check, manual)
+        payload = await asyncio.to_thread(service.check, manual,
+                                          authorize=_updater_authority("updater.check"))
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     async def _updater_download(ws, req_id, params, session_id):
         service = updater_service or UpdaterService()
-        payload = service.start_download()
+        payload = service.start_download(authorize=_updater_authority("updater.download"))
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     async def _updater_upgrade(ws, req_id, params, session_id):
         service = updater_service or UpdaterService()
-        payload = await asyncio.to_thread(service.start_upgrade)
+        payload = await asyncio.to_thread(service.start_upgrade,
+                                          authorize=_updater_authority("updater.upgrade"))
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     async def _updater_get_conf(ws, req_id, params, session_id):
@@ -4720,6 +4738,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     async def _updater_reset_source(ws, req_id, params, session_id):
         try:
+            _updater_authority("updater.reset_source")
             update_updater_in_config(dict(DEFAULT_SOURCE_CONFIG))
         except Exception as exc:  # noqa: BLE001
             logger.warning("[updater.reset_source] 写回 config.yaml 失败: %s", exc)
@@ -4755,6 +4774,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 return
 
         try:
+            _updater_authority("updater.set_conf")
             update_updater_in_config(updates)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[updater.set_conf] 写回 config.yaml 失败: %s", exc)
@@ -6186,7 +6206,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             existing_feishu = cm.get_conf("feishu")
             existing_apps = existing_feishu.get("apps", []) if isinstance(existing_feishu, dict) else []
             merged_apps = _merge_apps_by_id(normalized_apps, existing_apps)
-            await cm.set_conf("feishu", {"apps": merged_apps})
+            await _set_channel_configuration(cm, "feishu", {"apps": merged_apps})
             should_clear_agent_config_cache = False
             try:
                 replace_channel_subsection_with_cleanup("feishu", "apps", merged_apps, {"apps", "send_file_allowed"})
@@ -6268,7 +6288,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             existing_xiaoyi = cm.get_conf("xiaoyi")
             existing_apps = existing_xiaoyi.get("apps", []) if isinstance(existing_xiaoyi, dict) else []
             merged_apps = _merge_apps_by_id(normalized_apps, existing_apps)
-            await cm.set_conf("xiaoyi", {"apps": merged_apps})
+            await _set_channel_configuration(cm, "xiaoyi", {"apps": merged_apps})
             try:
                 replace_channel_subsection_with_cleanup("xiaoyi", "apps", merged_apps, {"apps", "send_file_allowed"})
                 await _clear_agent_config_cache(_resolve(agent_client))
@@ -6320,7 +6340,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            await cm.set_conf("telegram", params)
+            await _set_channel_configuration(cm, "telegram", params)
             conf = cm.get_conf("telegram")
             try:
                 update_channel_in_config("telegram", conf)
@@ -6371,7 +6391,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            await cm.set_conf("dingtalk", params)
+            await _set_channel_configuration(cm, "dingtalk", params)
             conf = cm.get_conf("dingtalk")
             should_clear_agent_config_cache = False
             try:
@@ -6427,7 +6447,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            await cm.set_conf("whatsapp", params)
+            await _set_channel_configuration(cm, "whatsapp", params)
             conf = cm.get_conf("whatsapp")
             try:
                 update_channel_in_config("whatsapp", conf)
@@ -6478,7 +6498,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            await cm.set_conf("discord", params)
+            await _set_channel_configuration(cm, "discord", params)
             conf = cm.get_conf("discord")
             try:
                 update_channel_in_config("discord", conf)
@@ -6529,7 +6549,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            await cm.set_conf("slack", params)
+            await _set_channel_configuration(cm, "slack", params)
             conf = cm.get_conf("slack")
             try:
                 update_channel_in_config("slack", conf)
@@ -6580,7 +6600,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            await cm.set_conf("wecom", params)
+            await _set_channel_configuration(cm, "wecom", params)
             conf = cm.get_conf("wecom")
             try:
                 update_channel_in_config("wecom", conf)
@@ -6642,7 +6662,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            await cm.set_conf("wechat", params)
+            await _set_channel_configuration(cm, "wechat", params)
             conf = cm.get_conf("wechat")
             try:
                 update_channel_in_config("wechat", conf)
@@ -6680,6 +6700,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
+            from jiuwenswarm.governance.application_boundary import require_application_consumer
+            permit = require_application_consumer("channel.wechat.unbind")
             from jiuwenswarm.gateway.channel_manager.im_platforms.wechat.wechat_connect import \
                 clear_wechat_bound_session, reset_wechat_login_ui_state
 
@@ -6688,8 +6710,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await reset_wechat_login_ui_state()
             # 若 YAML 里 bot_token 本就为空，仅删凭据文件时 dict 与上次相同，
             # _should_restart_channel 不会重启，扫码 UI 会一直停在 idle
+            require_application_consumer("channel.wechat.unbind")
             cm.mark_channel_restart_pending("wechat")
-            await cm.set_conf("wechat", new_conf)
+            if permit is None:
+                await cm.set_conf("wechat", new_conf)
+            else:
+                await cm.set_conf("wechat", new_conf, authority_check=permit.revalidate)
+            require_application_consumer("channel.wechat.unbind")
             final = cm.get_conf("wechat")
             try:
                 update_channel_in_config("wechat", final)
@@ -7801,7 +7828,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         request_params = dict(params if isinstance(params, dict) else {})
         if str(req_method.value).startswith("rsi."):
             request_params["session_id"] = session_id
-            if req_method is ReqMethod.RSI_ARTIFACT_DOWNLOAD and user_id:
+            from jiuwenswarm.governance.organization_auth import configured_authenticator
+            if (req_method is ReqMethod.RSI_ARTIFACT_DOWNLOAD and user_id
+                    and configured_authenticator() is None):
+                # Authenticated RSI downloads bind the signed principal at the
+                # original request/HTTP boundary. This legacy AgentOS routing
+                # hint must not become a caller-supplied authority selector.
                 request_params["_download_user_id"] = user_id
 
         await proxy_unary_request(

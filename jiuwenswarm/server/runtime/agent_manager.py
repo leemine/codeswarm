@@ -1694,11 +1694,12 @@ class AgentManager:
                 mode = str(cache_key).split(":", 1)[0]
                 if mode not in target_modes:
                     continue
-                attempted += 1
                 try:
                     ensure = getattr(agent, "ensure_instance", None)
-                    if callable(ensure):
-                        await ensure()
+                    if callable(ensure) and await ensure() is None:
+                        # External Providers have no DeepAgent to hot-load.
+                        continue
+                    attempted += 1
                     apply = getattr(agent, "apply_rsi_harness_install", None)
                     if not callable(apply):
                         raise RuntimeError("agent facade does not support RSI Harness installation")

@@ -60,7 +60,9 @@ def main() -> None:
         logger.error("Missing --parent-pid argument")
         sys.exit(1)
 
-    wait_for_pid_exit(parent_pid, timeout=60.0)
+    if not wait_for_pid_exit(parent_pid, timeout=60.0):
+        logger.error("Original updater process did not exit; restart cancelled")
+        return
 
     json_path = Path(restart_json_path)
     if not json_path.is_file():

@@ -126,6 +126,7 @@ def register_organization_auth(app: FastAPI) -> None:
                 "enabled": True,
                 "authenticated": True,
                 "actor_id": identity.actor_id,
+                "sharing_enabled": auth._config().get("sharing_enabled", True) is True,
             }
         except Exception:
             return {"enabled": True, "authenticated": False}

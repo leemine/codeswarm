@@ -60,6 +60,7 @@ class NativeToolResourceResolver:
         grants: Mapping[str, Any],
         *,
         owns_session: Callable[[ResourceExecutionContext, Any, Any], bool],
+        personal_context_read=None,
     ):
         if not callable(owns_session):
             raise TypeError("exact host Session ownership check is required")
@@ -79,6 +80,7 @@ class NativeToolResourceResolver:
             catalog[key] = definition.resource_id
         self._catalog = MappingProxyType(catalog)
         self._owns_session = owns_session
+        self._personal_context_read = personal_context_read
 
     def _use(self, kind, reference, action, path=None):
         resource_id = self._catalog.get((kind, reference))
@@ -155,8 +157,8 @@ class NativeToolResourceResolver:
         args = tool.arguments
         if set(args) - _FIELDS[tool.tool_name]:
             raise ValueError("unknown Native argument schema")
-        uses = [self._use("tool", f"native:{tool.tool_name}", "invoke")]
         if expected is BashTool:
+            uses = [self._use("tool", f"native:{tool.tool_name}", "invoke")]
             if (
                 not isinstance(args.get("command"), str)
                 or not args["command"].strip()
@@ -173,7 +175,12 @@ class NativeToolResourceResolver:
             or "\x00" in raw
         ):
             raise ValueError("a plain file path is required")
-        path = str(Path(_resolve_tool_file_path(operation, raw)).resolve())
+        unresolved = _resolve_tool_file_path(operation, raw)
+        path = str(Path(unresolved).resolve())
+        if (expected is ReadFileTool and self._personal_context_read is not None
+                and not Path(path).is_relative_to(execution.workspace)):
+            return self._checked_uses(proof, self._personal_context_read(execution, unresolved))
+        uses = [self._use("tool", f"native:{tool.tool_name}", "invoke")]
         actions = ("read",) if expected is ReadFileTool else ("read", "write")
         uses.extend(self._workspace_use(execution.workspace, path, actions))
         if expected is not ReadFileTool:

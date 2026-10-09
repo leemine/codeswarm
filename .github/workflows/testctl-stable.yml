@@ -68,6 +68,24 @@ jobs:
           TESTCTL_NETWORK_MODE: strict
           TESTCTL_BWRAP_SUDO: '1'
         run: python3 tools/testctl.py run --profile pr-stable
+      - name: Verify OAuth UI and disabled CLI detection
+        working-directory: jiuwenswarm/channels/web/frontend
+        run: |
+          npm run test:cli-auth-modal
+          npm run test:codex-governed-availability
+      - name: Verify instance MCP and maintenance consumers
+        env:
+          HOME: ${{ runner.temp }}/instance-consumer-home
+          TMPDIR: ${{ runner.temp }}/instance-consumer-tmp
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          mkdir -p "$HOME" "$TMPDIR"
+          cd "$TMPDIR"
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest --override-ini addopts='' -o asyncio_mode=auto --timeout=30 -q \
+            "$GITHUB_WORKSPACE/tests/unit_tests/agentserver/mcp" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/test_updater_authority.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/test_updater_install_mode.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/gateway/test_channel_manager_config.py"
       - name: Upload test archive
         if: always()
         uses: actions/upload-artifact@v7.0.1

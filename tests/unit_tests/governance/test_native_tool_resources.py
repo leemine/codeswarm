@@ -536,3 +536,87 @@ async def test_final_call_cannot_borrow_new_request_authority_after_transform(na
         assert not newer_calls
     finally:
         await framework.unregister(ToolCallEvents.TOOL_INVOKE_INPUT, change_request)
+
+
+@pytest.fixture
+def context_reader(native, monkeypatch):
+    from pathlib import Path
+    from dataclasses import replace
+    from jiuwenswarm.governance.personal_context import personal_context_home
+    from jiuwenswarm.governance.personal_context_resources import PersonalContextResources
+    from jiuwenswarm.runtime.service import _CurrentNativeToolResources
+
+    active = [True]
+    monkeypatch.setattr(Path, 'home', lambda: native.tmp)
+    monkeypatch.setattr('jiuwenswarm.governance.organization_auth.configured_authenticator',
+                        lambda: SimpleNamespace(known_actor=lambda identity: identity == native.identity))
+    home = personal_context_home(native.identity)
+    root = home / 'workspace' / 'context'
+    root.mkdir(parents=True)
+    config = home / 'personal_context.yaml'
+    config.write_text('agent_use_enabled: true\n')
+    page = root / 'description.md'
+    page.write_text('PRIVATE-CONTEXT-MARKER')
+    foreign = personal_context_home(replace(native.identity, subject_id='other')) / 'workspace' / 'context'
+    foreign.mkdir(parents=True)
+    (foreign / 'description.md').write_text('FOREIGN-SECRET')
+    authority = PersonalContextResources(native.store, native.identity, is_current=lambda: active[0])
+    execution = ResourceExecutionContext(native.pid, native.identity, 'root', str(native.work), 'native')
+    policy = BoundToolResourceAuthority(
+        execution, authorizer=authority,
+        resolver=_CurrentNativeToolResources(authority, lambda e, a, s: a is native.agent and s is native.session),
+        current_identity=lambda: native.identity, is_current_execution=lambda: active[0],
+    )
+    return SimpleNamespace(home=home, root=root, page=page, config=config, foreign=foreign,
+                           active=active, policy=policy)
+
+
+@pytest.mark.asyncio
+async def test_native_published_context_read_and_live_disable(native, context_reader):
+    c = context_reader
+    result = await native.invoke('read_file', {'file_path': str(c.page)}, authority=c.policy)
+    assert 'PRIVATE-CONTEXT-MARKER' in str(result)
+    c.config.write_text('agent_use_enabled: false\n')
+    denied = await native.invoke('read_file', {'file_path': str(c.page)}, authority=c.policy)
+    assert 'PRIVATE-CONTEXT-MARKER' not in str(denied)
+    c.config.write_text('agent_use_enabled: true\n')
+    c.active[0] = False
+    denied = await native.invoke('read_file', {'file_path': str(c.page)}, authority=c.policy)
+    assert 'PRIVATE-CONTEXT-MARKER' not in str(denied)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['foreign', 'config', 'source', 'symlink', 'escape', 'non_markdown', 'write', 'edit', 'bash'])
+async def test_context_read_capability_does_not_expand_other_access(native, context_reader, kind):
+    c = context_reader
+    path = c.page
+    name = 'read_file'
+    args = {}
+    if kind == 'foreign':
+        path = c.foreign / 'description.md'
+    elif kind == 'config':
+        path = c.config
+    elif kind == 'source':
+        path = c.home / 'source.md'
+        path.write_text('FOREIGN-SECRET')
+    elif kind == 'symlink':
+        path = c.root / 'alias.md'
+        path.symlink_to(c.foreign / 'description.md')
+    elif kind == 'escape':
+        path = c.root / '..' / '..' / 'source.md'
+        (c.home / 'source.md').write_text('FOREIGN-SECRET')
+    elif kind == 'non_markdown':
+        path = c.root / 'secret.yaml'
+        path.write_text('FOREIGN-SECRET')
+    elif kind == 'write':
+        name, args = 'write_file', {'content': 'CHANGED'}
+    elif kind == 'edit':
+        name, args = 'edit_file', {'old_string': 'PRIVATE-CONTEXT-MARKER', 'new_string': 'CHANGED'}
+    elif kind == 'bash':
+        name, args = 'bash', {'command': 'cat ' + str(c.page)}
+    if name != 'bash':
+        args['file_path'] = str(path)
+    result = await native.invoke(name, args, authority=c.policy)
+    assert 'FOREIGN-SECRET' not in str(result)
+    assert 'PRIVATE-CONTEXT-MARKER' not in str(result)
+    assert c.page.read_text() == 'PRIVATE-CONTEXT-MARKER'

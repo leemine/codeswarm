@@ -237,6 +237,9 @@ def hermetic_env(sandbox_env: dict[str, str]) -> dict[str, str]:
             "PYTHONUNBUFFERED": "1",
         }
     )
+    if sandbox_env.get("TMPDIR"):
+        # Fixtures beneath TMPDIR must not inherit another task's /tmp/.git.
+        env["GIT_CEILING_DIRECTORIES"] = sandbox_env["TMPDIR"]
     return env
 
 
@@ -279,10 +282,11 @@ def isolated_command(suite: dict, workdir: Path, command: list[str], junit_dir: 
         return command
     if suite.get("services") or "local_service" in suite.get("capabilities", []):
         raise TestCtlError(f"strict network namespace cannot host local service: {suite['id']}")
-    wrapper = bwrap_prefix() + ["--unshare-net", "--unshare-pid", "--die-with-parent", "--ro-bind", "/", "/", "--bind", "/tmp", "/tmp"]
-    # make_sandbox owns this directory, including HOME and TMPDIR. It may live
-    # outside /tmp; keep it writable without exposing its parent directory.
+    wrapper = bwrap_prefix() + ["--unshare-net", "--unshare-pid", "--die-with-parent", "--ro-bind", "/", "/", "--tmpfs", "/tmp"]
     if sandbox_root is not None:
+        # Only this shard's files cross the temporary-directory boundary.
+        # Product filesystem checks must still reject real parent repositories;
+        # a host /tmp/.git must not become an accidental fixture ancestor.
         wrapper.extend(["--bind", str(sandbox_root), str(sandbox_root)])
     if junit_dir is not None:
         wrapper.extend(["--bind", str(junit_dir), str(junit_dir)])

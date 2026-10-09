@@ -1207,6 +1207,8 @@ class SkillManager:
             )
             if blocked_detail:
                 return {"success": False, "detail": blocked_detail}
+        from jiuwenswarm.governance.application_boundary import require_application_consumer
+        require_application_consumer('skills.toggle')
         self.set_skill_enabled(name, enabled)
         result: dict[str, Any] = {
             "success": True,
@@ -3512,6 +3514,16 @@ class SkillManager:
         plugin_type / skill_type 规范化后写入 POST body（空则不传）。
         enrich 已废弃：保留入参以免旧调用方报错，但不再 GET /plugins。
         """
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is not None:
+            from jiuwenswarm.governance.session_boundary import current_application_permit
+            current_application_permit('skills.swarmskillshub.recommend')
+            # The shared navigation surface always requests the public catalog.
+            # Never borrow the instance token or caller-supplied identity/URL.
+            allowed = {'top_k', 'limit', 'category_id', 'plugin_type', 'skill_type',
+                       'language', 'locale', 'cache_mode', 'refresh', '_catalog_load'}
+            params = {key: value for key, value in params.items() if key in allowed}
+            params['_catalog_anonymous'] = True
         if params.get("cache_mode") == "prefer_cache":
             auth = {} if params.get("_catalog_anonymous") else self._resolve_teamskills_hub_auth_with_env(params)
             # Configured server credentials have one process-memory scope. Explicit

@@ -11,7 +11,7 @@ import json
 import logging
 import shutil
 from dataclasses import asdict, is_dataclass
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -123,6 +123,15 @@ class RsiTaskService:
 
     def create(self, params: dict[str, Any]) -> dict[str, Any]:
         """``rsi.task.create``（web §6.1 三分支校验）。返回 {task_id, status=CREATED}。"""
+        # Persist host-owned identity before any future authenticated creation
+        # is enabled. Caller-supplied ownership never enters the task record.
+        owner_identity = None
+        creation_permit = None
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is not None:
+            from jiuwenswarm.governance.session_boundary import current_application_permit
+            creation_permit = current_application_permit("rsi.task.create")
+            owner_identity = asdict(creation_permit.identity)
         scenario_raw = str(params.get("scenario") or "").strip().upper()
         artifact_type_raw = str(params.get("artifact_type") or "").strip().upper() or None
         scenario, artifact_type = validate_scenario(
@@ -319,7 +328,11 @@ class RsiTaskService:
             run_dir=run_dir,
             status=TaskStatus.CREATED.value,
             created_at=utcnow_iso(),
+            owner_identity=owner_identity,
         )
+        if creation_permit is not None and not creation_permit.revalidate():
+            _remove_uncommitted_task_dir(self.store.tasks_root, task_id)
+            raise PermissionError("Experiment authorization changed")
         # run_dir 建好（引擎产出落点）
         Path(run_dir).mkdir(parents=True, exist_ok=True)
         self.store.create(task)
@@ -362,7 +375,7 @@ class RsiTaskService:
 
     # -- I3 list --
 
-    def list(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+    def list(self, params: dict[str, Any], *, visible: Callable[[RsiTask], bool] | None = None) -> list[dict[str, Any]]:
         """``rsi.task.list``（web §6.2 六字段投影 + 可选过滤）。"""
         scenario_raw = params.get("scenario")
         artifact_type_raw = params.get("artifact_type")
@@ -386,7 +399,7 @@ class RsiTaskService:
             scenario=scenario.value if scenario else None,
             artifact_type=artifact_type.value if artifact_type else None,
         )
-        return [task.list_projection() for task in tasks]
+        return [task.list_projection() for task in tasks if visible is None or visible(task)]
 
     # -- I4 get --
 
@@ -777,6 +790,10 @@ class RsiArtifactDownloadService:
 def _download_fields(path: str, params: dict[str, Any]) -> dict[str, str]:
     """Issue the same short-lived HTTP file token used by chat attachments."""
 
+    from jiuwenswarm.governance.organization_auth import configured_authenticator
+    if configured_authenticator() is not None:
+        from jiuwenswarm.governance.rsi_download import issue_experiment_download
+        return issue_experiment_download(path, params.get('task_id'))
     session_id = str(params.get("session_id") or "").strip()
     # ``proxy_unary_request`` promotes the canonical ``user_id`` to the E2A
     # envelope and removes it from params.  Keep a dedicated internal copy for

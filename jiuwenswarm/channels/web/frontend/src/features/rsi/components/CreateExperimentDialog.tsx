@@ -443,6 +443,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
             <PathInput
               value={form.datasetFile}
               placeholder={t('rsi.createDialog.datasetPlaceholder')}
+              onChange={(value) => { update('datasetFile', value); setDatasetValid(null); }}
               onPick={() => pickPath('dataset')}
               icon="file"
             />
@@ -474,6 +475,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
               <PathInput
                 value={form.artifactPath}
                 placeholder={t('rsi.createDialog.paperPlaceholder')}
+                onChange={(value) => update('artifactPath', value)}
                 onPick={() => pickPath('artifact')}
               />
               {showErrors && validationErrors.paper && <Err text={validationErrors.paper} />}
@@ -502,6 +504,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
               <PathInput
                 value={form.artifactPath}
                 placeholder={t('rsi.createDialog.programPlaceholder')}
+                onChange={(value) => update('artifactPath', value)}
                 onPick={() => pickPath('artifact')}
               />
               {showErrors && validationErrors.program && <Err text={validationErrors.program} />}
@@ -692,17 +695,20 @@ function PathInput({
   value,
   placeholder,
   onPick,
+  onChange,
   icon = 'folder',
 }: {
   value: string;
   placeholder: string;
   onPick: () => void;
+  onChange: (value: string) => void;
   icon?: 'file' | 'folder';
 }) {
   return (
     <div className="rsi-create-dialog__path-input">
-      <input className="rsi-input" value={value} readOnly placeholder={placeholder} />
-      <button type="button" className="rsi-create-dialog__path-btn" onClick={onPick} aria-label="browse">
+      <input data-testid="rsi-source-path" className="rsi-input" value={value}
+        onChange={(event) => onChange(event.target.value)} aria-label={placeholder} placeholder={placeholder} />
+      <button data-testid="rsi-source-browse" type="button" className="rsi-create-dialog__path-btn" onClick={onPick} aria-label="browse">
         {icon === 'file' ? (
           <svg
             viewBox="0 0 24 24"

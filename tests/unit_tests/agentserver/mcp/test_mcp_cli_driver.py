@@ -795,3 +795,126 @@ class TestClassifyInstallFailure:
         exc = _classify_install_failure("dingtalk", self._mk())
         assert isinstance(exc, CliConnectError)
         assert isinstance(exc, ValueError)
+
+
+@pytest.mark.parametrize("url", [
+    "https://accounts.feishu.cn.evil.test/login",
+    "https://evil.test/accounts.feishu.cn/login",
+    "https://accounts.feishu.cn@evil.test/login",
+    "https://evil.test/?next=https%3A%2F%2Faccounts.feishu.cn",
+    "http://accounts.feishu.cn/login",
+    "https://cdn.npmmirror.com/binaries/lark-cli/v1.0.94/file.tgz",
+])
+def test_auth_url_requires_exact_https_host(url):
+    assert _extract_url(url, "accounts.feishu.cn") is None
+
+
+def test_failed_version_output_cannot_skip_install():
+    runner = _FakeRunner({
+        "version": CommandResult("version", 1, stderr="download v1.0.94 failed"),
+        "install": CommandResult("install", 1, stderr="offline"),
+    })
+    drv = CliDriver("version-fixture", CliManifest(
+        init_cmd="install", version_cmd="version", min_version="1.0.94",
+    ), runner)
+    result = drv.install()
+    assert runner.calls == ["version", "install", "version"]
+    assert not result.installed and not result.version_ok
+    assert result.version is None
+
+
+@pytest.mark.parametrize("match", [{"status_match": {"identity": "user"}},
+                                   {"status_match_str": "user"}])
+def test_failed_status_command_cannot_authenticate(match):
+    drv = CliDriver("status-fixture", CliManifest(status_cmd="status", **match),
+                    lambda cmd: CommandResult(cmd, 1, stdout='{"identity":"user"}'))
+    assert not drv.status().authenticated
+
+
+@pytest.mark.parametrize("rc,configured,advances", [
+    (0, False, True), (None, True, True), (None, False, False), (1, True, False),
+])
+def test_intermediate_step_uses_own_success_not_final_identity(rc, configured, advances):
+    from jiuwenswarm.server.runtime.mcp import registry
+    name = "step-fixture"
+    manifest = _mkmanifest()
+    runner = lambda cmd: CommandResult(cmd, 0 if configured else 1, stdout='{"identity":"bot"}')
+    drv = CliDriver(name, manifest, runner)
+    proc = _FakeAuthProc("")
+    proc._rc = rc
+    proc._mcp_owner_check = lambda: None
+    proc._mcp_step_index = 0
+    cli_driver._PENDING_AUTH_PROCS[name] = proc
+    try:
+        with patch.object(cli_driver, "CliDriver", return_value=drv), patch.object(
+            registry, "_connect_cli", return_value={"auth_required": True, "step_index": 1}
+        ) as advance:
+            if rc == 1:
+                with pytest.raises(ValueError, match="rc=1"):
+                    registry.complete_cli_auth(name, 0)
+            else:
+                result = registry.complete_cli_auth(name, 0)
+                assert result["step_index"] == (1 if advances else 0)
+            assert advance.called is advances
+    finally:
+        cli_driver._PENDING_AUTH_PROCS.pop(name, None)
+
+
+def test_cancelled_auth_does_not_use_old_authenticated_status():
+    from jiuwenswarm.server.runtime.mcp import registry
+    drv = CliDriver("cancelled-fixture", _mkmanifest(),
+                    lambda cmd: CommandResult(cmd, 0, stdout='{"identity":"user"}'))
+    with patch.object(cli_driver, "CliDriver", return_value=drv), patch.object(registry, "_connect_cli") as advance:
+        with pytest.raises(ValueError, match="cancelled"):
+            registry.complete_cli_auth(drv.name, 1)
+        advance.assert_not_called()
+
+
+def test_successful_last_command_still_requires_final_identity():
+    from jiuwenswarm.server.runtime.mcp import registry
+    drv = CliDriver("last-fixture", _mkmanifest(),
+                    lambda cmd: CommandResult(cmd, 0, stdout='{"identity":"bot"}'))
+    proc = _FakeAuthProc(""); proc.set_done()
+    proc._mcp_owner_check = lambda: None
+    proc._mcp_step_index = 1
+    cli_driver._PENDING_AUTH_PROCS[drv.name] = proc
+    try:
+        with patch.object(cli_driver, "CliDriver", return_value=drv), patch.object(registry, "_connect_cli") as advance:
+            assert registry.complete_cli_auth(drv.name, 1)["auth_pending"]
+            advance.assert_not_called()
+    finally:
+        cli_driver._PENDING_AUTH_PROCS.pop(drv.name, None)
+
+
+def test_duplicate_auth_start_reuses_live_process():
+    name = "repeat-fixture"
+    proc = _FakeAuthProc("")
+    calls = []
+    def start(cmd):
+        calls.append(cmd)
+        return proc, "https://open.feishu.cn/authorize"
+    drv = CliDriver(name, _mkmanifest(), lambda cmd: CommandResult(cmd, 1), start)
+    try:
+        first = drv.auth_step(0)
+        assert drv.auth_step(0) is first
+        assert len(calls) == 1
+    finally:
+        cli_driver._PENDING_AUTH_PROCS.pop(name, None)
+
+
+def test_stale_previous_step_cannot_advance_current_auth():
+    from jiuwenswarm.server.runtime.mcp import registry
+    name = "stale-step-fixture"
+    drv = CliDriver(name, _mkmanifest(), lambda cmd: CommandResult(cmd, 0))
+    proc = _FakeAuthProc("")
+    proc._mcp_owner_check = lambda: None
+    proc._mcp_step_index = 1
+    cli_driver._PENDING_AUTH_PROCS[name] = proc
+    try:
+        with patch.object(cli_driver, "CliDriver", return_value=drv), patch.object(registry, "_connect_cli") as advance:
+            with pytest.raises(ValueError, match="step has changed"):
+                registry.complete_cli_auth(name, 0)
+            advance.assert_not_called()
+            assert cli_driver._PENDING_AUTH_PROCS[name] is proc
+    finally:
+        cli_driver._PENDING_AUTH_PROCS.pop(name, None)

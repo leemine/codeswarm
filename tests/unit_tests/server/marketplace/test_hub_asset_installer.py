@@ -65,6 +65,68 @@ class _Downloader:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind,method", [
+    ("plugin", "plugin_packages.install"),
+    ("agent_template", "agent_templates.install"),
+    ("agent_group", "agent_groups.install"),
+])
+@pytest.mark.parametrize("revoke_at", ["query", "resolve", "download", "validate"])
+async def test_revoked_install_never_publishes_package_or_provenance(
+    tmp_path, monkeypatch, kind, method, revoke_at,
+):
+    from jiuwenswarm.governance.application_boundary import admit_application_request
+    from jiuwenswarm.governance.contracts import TrustedIdentity
+    from jiuwenswarm.governance import organization_auth, session_boundary
+    from jiuwenswarm.governance.session_sharing import SessionSharingDenied
+
+    grants = {"extensions": ["manage"]}
+    identity = TrustedIdentity("operator", "operator", "test:hub")
+    permit = admit_application_request(method, {}, identity_resolver=lambda: identity,
+                                       policy_supplier=lambda _: grants)
+    monkeypatch.setattr(organization_auth, "configured_authenticator", lambda: object())
+    stages = []
+
+    def checkpoint(stage):
+        stages.append(stage)
+        if stage == revoke_at:
+            grants.clear()
+
+    class Port(_HubPort):
+        async def query_asset(self, request):
+            result = await super().query_asset(request)
+            checkpoint("query")
+            return result
+
+        async def resolve_download(self, request):
+            result = await super().resolve_download(request)
+            checkpoint("resolve")
+            return result
+
+    class Downloader(_Downloader):
+        async def download_and_extract(self, artifact, destination):
+            await super().download_and_extract(artifact, destination)
+            (destination / artifact.package_name / "manifest.json").write_text(
+                '{"package_type":"' + kind + '"}')
+            checkpoint("download")
+
+    state = HubInstallStateStore(tmp_path / "state")
+    destination = tmp_path / "packages"
+    with session_boundary.delivery_scope():
+        session_boundary.set_delivery_permit(permit)
+        with pytest.raises(SessionSharingDenied):
+            await install_hub_asset_package(
+                kind=kind, asset_id="asset-uuid", destination_root=destination,
+                state_store=state, package_name_validator=lambda value: value,
+                package_validator=lambda *_: checkpoint("validate"),
+                hub_port=Port(), downloader=Downloader(),
+            )
+    assert stages[-1] == revoke_at
+    assert not (destination / "runtime-package").exists()
+    assert not list(destination.glob("*.staging-*"))
+    assert state.get("asset-uuid") is None
+
+
+@pytest.mark.asyncio
 async def test_install_commits_validated_package_and_provenance(tmp_path: Path) -> None:
     destination_root = tmp_path / "packages"
     state = HubInstallStateStore(tmp_path / "state")

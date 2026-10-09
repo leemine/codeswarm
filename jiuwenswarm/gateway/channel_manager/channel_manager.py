@@ -8,6 +8,7 @@ import dataclasses
 import logging
 import asyncio
 import time
+from contextvars import ContextVar
 from abc import ABC
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -15,6 +16,13 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from jiuwenswarm.gateway.routing.keys import ChannelKey
 
 logger = logging.getLogger(__name__)
+_configuration_authority = ContextVar('channel_configuration_authority', default=None)
+
+
+def _check_configuration_authority():
+    check = _configuration_authority.get()
+    if check is not None and check() is not True:
+        raise PermissionError('Channel configuration authorization revoked')
 
 if TYPE_CHECKING:
     from jiuwenswarm.gateway.channel_manager.base import BaseChannel
@@ -68,6 +76,7 @@ class ChannelManager(ABC):
         # state from a user changing or disabling that same channel while the
         # retry is sleeping.
         self._conf_revisions: dict[str, int] = {}
+        self._conf_update_lock = asyncio.Lock()
         self._on_config_updated = on_config_updated
         # 下一次 on_config_updated 时强制重启的 channel_id（例如微信解绑：YAML 中 bot_token 本就为空时配置 dict 对比不会变，但内存里仍有旧凭据）
         self._pending_channel_restart: set[str] = set()
@@ -130,6 +139,7 @@ class ChannelManager(ABC):
 
     def register_channel(self, channel: "BaseChannel") -> None:
         """注册 Channel，并为其注册「收到消息时转发给 MessageHandler」的回调."""
+        _check_configuration_authority()
         cid = channel.channel_id
         key = ChannelKey(cid, self._resolve_app_id(channel))
         self._channels[key] = channel
@@ -367,28 +377,54 @@ class ChannelManager(ABC):
         """Return the revision of configuration writes for one channel."""
         return self._conf_revisions.get(channel_id, 0)
 
-    async def set_conf(self, channel_id: str, new_conf: dict[str, Any]) -> None:
+    async def set_conf(
+        self, channel_id: str, new_conf: dict[str, Any], *, authority_check=None,
+    ) -> None:
         """更新指定 channel_id 的配置，并在必要时触发重新实例化回调.
 
         内部仍维护完整的 Channel 配置字典，并将其整体传给 on_config_updated，
         以兼容现有回调实现（如根据 channels.feishu 重建 FeishuChannel）。
         """
-        self._conf_revisions[channel_id] = self.get_conf_revision(channel_id) + 1
-        previous = self._config
-        merged = dict(previous)
-        merged[channel_id] = dict(new_conf or {})
-        self._config = merged
-        cb = self._on_config_updated
-        if cb is not None:
+        async with self._conf_update_lock:
+            # The Web settings adapter supplies its original operation proof.
+            # Startup and existing internal maintenance remain ordinary host
+            # operations, not synthetic login or chat requests.
+            holder = [authority_check]
+            def check():
+                return holder[0] is None or holder[0]() is True
+            token = _configuration_authority.set(check)
+            previous = self._config
+            callback_task = None
             try:
-                await cb(self._config)
-            except Exception:
-                # A channel callback may fail while constructing an optional
-                # integration.  Keep the manager's visible configuration in
-                # sync with the integrations that actually started, so a
-                # later retry is not mistaken for an unchanged no-op.
+                _check_configuration_authority()
+                self._conf_revisions[channel_id] = self.get_conf_revision(channel_id) + 1
+                merged = dict(previous)
+                merged[channel_id] = dict(new_conf or {})
+                self._config = merged
+                cb = self._on_config_updated
+                if cb is not None:
+                    callback_task = asyncio.create_task(cb(merged))
+                    while not callback_task.done():
+                        await asyncio.wait({callback_task}, timeout=0.1)
+                        _check_configuration_authority()
+                    await callback_task
+                _check_configuration_authority()
+            except BaseException:
+                if callback_task is not None:
+                    callback_task.cancel()
+                    await asyncio.gather(callback_task, return_exceptions=True)
                 self._config = previous
+                if callback_task is not None and authority_check is not None:
+                    # Compensate only the captured previous configuration,
+                    # after the failed consumer has actually exited.
+                    holder[0] = None
+                    await self._on_config_updated(previous)
                 raise
+            finally:
+                # Long-lived channel tasks must not retain the settings
+                # request proof after the configuration transaction ends.
+                holder[0] = None
+                _configuration_authority.reset(token)
 
     async def set_config(self, new_conf: dict[str, Any]) -> None:
         """兼容保留：整体替换配置的旧接口（不推荐新调用方使用）."""

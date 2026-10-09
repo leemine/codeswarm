@@ -624,16 +624,22 @@ const normalizeTaskListPayload = (value: unknown): RsiTaskListItem[] => {
 };
 
 export function rsiTaskList(params: RsiTaskListParams = {}): Promise<RsiTaskListItem[]> {
+  return rsiTaskInventory(params).then((result) => result.tasks);
+}
+
+export function rsiTaskInventory(params: RsiTaskListParams = {}): Promise<{ tasks: RsiTaskListItem[]; canExecute: boolean }> {
   if (isMockEnabled()) {
     let list = [...rsiMock.tasks];
     if (params.scenario) list = list.filter((item) => item.scenario === params.scenario);
     if (params.artifact_type) list = list.filter((item) => item.artifact_type === params.artifact_type);
-    return rsiMock.delay({ tasks: list }).then(normalizeTaskListPayload);
+    return rsiMock.delay({ tasks: list, canExecute: true });
   }
   const wire: Record<string, unknown> = {};
   if (params.scenario) wire.scenario = toWireScenario(params.scenario);
   if (params.artifact_type) wire.artifact_type = toWireArtifactType(params.artifact_type);
-  return webRequest<unknown>(METHOD.taskList, withRsiSession(wire)).then(normalizeTaskListPayload);
+  return webRequest<unknown>(METHOD.taskList, withRsiSession(wire)).then((value) => ({
+    tasks: normalizeTaskListPayload(value), canExecute: asRecord(value)?.can_execute === true,
+  }));
 }
 
 export function rsiTaskGet(taskId: string): Promise<RsiTaskGetResult> {

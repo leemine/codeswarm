@@ -504,6 +504,10 @@ def assert_runtime_owner(session_id: str) -> None:
     try:
         process = psutil.Process(owner["pid"])
         if abs(process.create_time() - owner["started_at"]) < 0.01:
+            # A terminated child can retain its PID until its supervisor reaps
+            # it. It cannot own live writers; PID existence alone is not liveness.
+            if process.status() in {psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}:
+                return
             raise LifecycleError(
                 "OPERATION_IN_PROGRESS",
                 "another live AgentServer owns the session runtime",

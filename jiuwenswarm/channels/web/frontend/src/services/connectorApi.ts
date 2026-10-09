@@ -184,8 +184,8 @@ export const connectorApi = {
   // "builtin" 处理，之前不传 filter 的单次调用会让"我的MCP"完全看不到自定义 MCP，是真实 bug，
   // 不是理论风险（评估过程见 cjh/feature/MCP/_migration/mcp-interface-v2-gap-assessment.md）。
   list: async (filter: 'builtin' | 'local'): Promise<CatalogItems<ConnectorSummary>> => {
-    const payload = await requestEquipmentList<{ items: RawConnectorSummary[]; cache?: CatalogCacheMetadata }>(webRequest, 'mcp.list', { filter });
-    return withCatalogCache(payload.items.map(fromRawSummary), payload.cache);
+    const payload = await requestEquipmentList<{ items: RawConnectorSummary[]; cache?: CatalogCacheMetadata; read_only?: boolean }>(webRequest, 'mcp.list', { filter });
+    return withCatalogCache(payload.items.map(fromRawSummary), payload.cache, payload.read_only === true);
   },
   show: async (id: string): Promise<ConnectorDetail> => {
     const payload = await webRequest<{ item: RawConnectorDetail }>('mcp.show', { id }, { timeoutMs: 90000 });

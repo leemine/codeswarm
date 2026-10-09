@@ -171,3 +171,22 @@ test('legacy Settings still replays a successful deferred Codex choice', async (
   assert.equal(calls.filter(([method]) => method === 'config.save_all').length, 1);
   assert.equal(select('unavailable'), null);
 });
+
+test('disabled Claude never auto-detects on mount or path edit; enabled Claude still detects', async () => {
+  const detects = [];
+  const onDetect = async (agent) => {
+    detects.push(agent);
+    return { cli_agent: agent, status: 'ok' };
+  };
+  const disabled = { ...values, external_cli_agent_claude_enabled: 'false' };
+  await section({ organizationAuth: true, draftValues: disabled, onDetect });
+  await tick(450);
+  await section({ organizationAuth: true, draftValues: {
+    ...disabled, external_cli_agent_claude_cli_path: '/synthetic/changed',
+  }, onDetect });
+  await tick(450);
+  assert.deepEqual(detects, []);
+  await section({ organizationAuth: true, draftValues: values, onDetect });
+  await tick(450);
+  assert.deepEqual(detects, ['claude']);
+});

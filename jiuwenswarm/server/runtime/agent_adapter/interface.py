@@ -2607,6 +2607,8 @@ class JiuWenSwarm:
         # Frontend contract uses `id`; accept legacy `name` as alias.
         name = params.get("id") if params.get("id") not in (None, "") else params.get("name")
         try:
+            from jiuwenswarm.governance.application_boundary import require_application_consumer
+            require_application_consumer(method.value)
             if method == ReqMethod.AGENT_GROUPS_LIST:
                 cards = await package_manager.list_agent_groups_with_hub(params)
                 payload: dict[str, Any] = {"agentGroups": cards}
@@ -3472,9 +3474,29 @@ class JiuWenSwarm:
             return
         if not is_interrupt_resume_payload(request.params):
             raise ValueError("control input must answer an active interaction")
-        # Control resumes the existing producer, but its outputs still need the
-        # original history/media projection used by normal Code turns.
-        async with aclosing(self.process_message_stream(request)) as stream:
+        adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+        self._select_execution_before_mcp(adapter, request)
+        session_id = self._session_manager.get_session_id(request.session_id)
+        params = request.params if isinstance(request.params, dict) else {}
+        restore_chat_send_equipment_params(session_id, params)
+        inputs, _memory_mode, _user_turn = self._build_inputs(request)
+        from jiuwenswarm.runtime.continuation_control import continuation_control
+        retained = continuation_control(request, facade=self)
+        if retained is None:
+            await self.reconcile_session_mcp(
+                request.session_id,
+                compute_chat_send_mcp_needed(params),
+                model_name=params.get("model_name"),
+                history_before_request_id=request.request_id,
+            )
+        # Reuse the original history/event consumer for approval continuations.
+        # Read the existing producer in this exact control-claim task: no new
+        # Runtime Turn, scheduler, output consumer or producer task is admitted.
+        stream = JiuWenSwarm._consume_prepared_message_stream(
+            self, request, adapter, inputs, _memory_mode, _user_turn,
+            session_id, False, control=True,
+        )
+        async with aclosing(stream):
             async for chunk in stream:
                 yield chunk
 
@@ -3762,7 +3784,20 @@ class JiuWenSwarm:
             memory_block = "\n\n".join(b for b in mem_ctx.memory_blocks if b)
             inputs["memory_block"] = memory_block
 
-        stream_queue = asyncio.Queue(maxsize=self.STREAM_QUEUE_MAXSIZE)
+        stream = self._consume_prepared_message_stream(
+            request, adapter, inputs, memory_mode, user_turn, session_id, is_team_mode,
+        )
+        async with aclosing(stream):
+            async for chunk in stream:
+                yield chunk
+
+    async def _consume_prepared_message_stream(
+        self, request, adapter, inputs, memory_mode, user_turn, session_id,
+        is_team_mode, *, control=False,
+    ):
+        """One original history projection for normal and resumed output."""
+        rid, cid = request.request_id, request.channel_id
+        stream_queue = None if control else asyncio.Queue(maxsize=self.STREAM_QUEUE_MAXSIZE)
         stream_done = asyncio.Event()
         producer_cancellation: asyncio.CancelledError | None = None
         final_answer_content = ""
@@ -3960,18 +3995,15 @@ class JiuWenSwarm:
                     )
                     stream_done.set()
 
-        control_delivery = is_interrupt_resume_payload(request.params)
-        # The Coordinator's control claim is task-bound. Resume it in this task,
-        # while sharing the exact same history/media consumer below.
-        control_stream = adapter.process_message_stream_impl(request, inputs) if control_delivery else None
-        stream_task = None if control_delivery else asyncio.create_task(run_stream_task())
+        direct_stream = adapter.process_message_stream_impl(request, inputs) if control else None
+        stream_task = None if control else asyncio.create_task(run_stream_task())
 
         suppress_a2ui_stream = False
         a2ui_pending_render_sent = False
         a2ui_stream_probe = ""
         team_a2ui_blocks = TeamA2UIBlockBuffer()
         repair_call = getattr(adapter, "repair_model_response", None)
-        retry_without_a2ui_call = self._make_retry_without_a2ui_call(
+        retry_without_a2ui_call = None if control else self._make_retry_without_a2ui_call(
             adapter=adapter,
             request=request,
         )
@@ -3984,7 +4016,7 @@ class JiuWenSwarm:
                 finalized = await finalize_assistant_response_if_a2ui(
                     decision.raw_block,
                     channel=cid,
-                    user_query=user_turn.text,
+                    user_query=getattr(user_turn, "text", ""),
                     request_id=f"{rid}:{decision.key[0]}:{decision.key[1]}",
                     repair_call=repair_call,
                     retry_without_a2ui_call=retry_without_a2ui_call,
@@ -4049,22 +4081,24 @@ class JiuWenSwarm:
         try:
             while (
                     not stream_done.is_set()
-                    or not stream_queue.empty()
+                    or (stream_queue is not None and not stream_queue.empty())
                     or bool(team_a2ui_tasks)
             ):
-                if control_stream is not None:
-                    try:
-                        item = ("chunk", await anext(control_stream))
-                    except StopAsyncIteration:
-                        await control_stream.aclose()
-                        control_stream = None
-                        stream_done.set()
-                        continue
-                else:
-                    try:
+                try:
+                    if direct_stream is not None:
+                        # anext must stay in the Coordinator's original claim
+                        # task; wait_for/create_task would lend its authority.
+                        try:
+                            item = ("chunk", await anext(direct_stream))
+                        except StopAsyncIteration:
+                            stream_done.set()
+                            break
+                    else:
                         item = await asyncio.wait_for(stream_queue.get(), timeout=0.1)
-                    except asyncio.TimeoutError:
-                        continue
+                except asyncio.TimeoutError:
+                    if control:
+                        raise
+                    continue
 
                 event_type, data = item
                 if event_type == "team_a2ui_finalized":
@@ -4612,14 +4646,14 @@ class JiuWenSwarm:
                 ]
                 for task in unfinished_a2ui_tasks:
                     task.cancel()
-                if control_stream is not None:
-                    await control_stream.aclose()
                 if stream_task is not None and not stream_task.done():
                     stream_task.cancel()
                 if unfinished_a2ui_tasks:
                     await asyncio.gather(*unfinished_a2ui_tasks, return_exceptions=True)
                 try:
-                    if stream_task is not None:
+                    if direct_stream is not None:
+                        await direct_stream.aclose()
+                    elif stream_task is not None:
                         await stream_task
                 except asyncio.CancelledError:
                     pass
@@ -4643,7 +4677,7 @@ class JiuWenSwarm:
         finalized_assistant_message = await finalize_assistant_response_if_a2ui(
             assistant_message,
             channel=cid,
-            user_query=user_turn.text,
+            user_query=getattr(user_turn, "text", ""),
             request_id=rid or "",
             repair_call=repair_call,
             retry_without_a2ui_call=retry_without_a2ui_call,
@@ -4697,7 +4731,7 @@ class JiuWenSwarm:
             yield final_chunk
 
         # cloud memory: after chat hook
-        if memory_mode == "cloud":
+        if not control and memory_mode == "cloud":
             assistant_message = final_answer_content or "".join(final_answer_chunks)
             after_ctx = MemoryHookContext(
                 session_id=request.session_id or "default",
@@ -4714,19 +4748,20 @@ class JiuWenSwarm:
         # 需要 auto_memory_enabled 和 memory.enabled 都为 true 才触发
         mode = request.params.get("mode", "code") if isinstance(request.params, dict) else "code"
         config = get_config()
-        if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
+        if not control and is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
             _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=True)
 
         final_answer_chunks.close()
         durable_pending_final_chunks.close()
         durable_pending_reasoning_chunks.close()
-        if not control_delivery:
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload={"is_complete": True},
-                is_complete=True,
-            )
+        if control:
+            return  # Preserve the original control stream's terminal envelope.
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=cid,
+            payload={"is_complete": True},
+            is_complete=True,
+        )
 
     # ---------- 实例获取 ----------
 
@@ -4747,7 +4782,10 @@ class JiuWenSwarm:
         """
         if self._adapter is None:
             return None
-        return await self._adapter.ensure_instance()
+        ensure = getattr(self._adapter, "ensure_instance", None)
+        if not callable(ensure):
+            return None
+        return await ensure()
 
     def get_live_session_instance(self, session_id: str | None):
         """Return the DeepAgent already running ``session_id``, if any.
@@ -4851,14 +4889,7 @@ class JiuWenSwarm:
         await reconcile(session_id, needed, **supported_kwargs)
 
     def sync_mcp_credentials(self) -> bool:
-        """Sync connected MCPs' tokens into os.environ (skill scripts).
-
-        Forwarded to the deep adapter. os.environ is process-global, so a
-        single live agent's sync covers the whole process; called from the
-        connect/disconnect handlers after a state.json write. Returns False
-        when no adapter is live yet (cold-start race) so the caller can fall
-        through to another live agent.
-        """
+        """Compatibility notification; private environments resolve at execution."""
         adapter = self._adapter
         if adapter is None:
             return False

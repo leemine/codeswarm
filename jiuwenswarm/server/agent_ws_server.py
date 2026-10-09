@@ -1198,6 +1198,7 @@ class AgentWebSocketServer:
         self._personal_context_host = PersonalContextHostAPI(
             home=Path.home() / ".jiuwenswarm" / ".personal_context",
         )
+        self._personal_context_hosts = {}
         self._personal_context_start_task: asyncio.Task[None] | None = None
         # checkpointer 后台预热任务 (start() 里 fire-and-forget, stop() 时 cancel)
         self._checkpointer_warmup_task: Optional[asyncio.Task] = None
@@ -1527,6 +1528,11 @@ class AgentWebSocketServer:
 
     async def _start_personal_context_best_effort(self) -> None:
         """Start optional PersonalContext without changing AgentServer readiness."""
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is not None:
+            # Legacy home has no declared owner. Do not collect or publish it
+            # into every authenticated user's model context during startup.
+            return
         start_cancelled: asyncio.CancelledError | None = None
         try:
             await self._personal_context_host.start()
@@ -1828,6 +1834,8 @@ class AgentWebSocketServer:
         stop_cancelled: asyncio.CancelledError | None = None
         try:
             await self._personal_context_host.stop()
+            for context_host in getattr(self, "_personal_context_hosts", {}).values():
+                await context_host.stop()
         except asyncio.CancelledError as exc:
             stop_cancelled = exc
         except Exception as exc:  # noqa: BLE001
@@ -2384,14 +2392,18 @@ class AgentWebSocketServer:
             await ws.close(code=1008, reason="authentication required")
             return
         with authenticated_scope(principal):
-            return await self._handle_authenticated_message(ws, json.dumps(data), send_lock)
+            return await self._handle_authenticated_message(
+                ws, json.dumps(data), send_lock, verified_service=principal is None,
+            )
 
-    async def _handle_authenticated_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
+    async def _handle_authenticated_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock,
+                                            *, verified_service: bool = False) -> None:
         from jiuwenswarm.governance.session_boundary import delivery_scope
         with delivery_scope():
-            await self._handle_authenticated_message_impl(ws, raw, send_lock)
+            await self._handle_authenticated_message_impl(ws, raw, send_lock, verified_service=verified_service)
 
-    async def _handle_authenticated_message_impl(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
+    async def _handle_authenticated_message_impl(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock,
+                                                 *, verified_service: bool = False) -> None:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
         try:
             data = json.loads(raw)
@@ -2456,12 +2468,17 @@ class AgentWebSocketServer:
         permit = None
         rewind_authority = None
         if configured_authenticator() is not None:
-            from jiuwenswarm.governance.session_boundary import admit_session_request, set_delivery_permit
+            # Only the outer verified, signed Gateway service envelope supplies
+            # this fact. No wire user_id/session/params can choose service scope.
+            # Maintenance is not a human Session and receives no chat/resource access.
+            if verified_service and request.req_method == ReqMethod.AGENT_RELOAD_CONFIG:
+                await self._handle_agent_reload_config(ws, request, send_lock, verified_service=True)
+                return
+            from jiuwenswarm.governance.session_boundary import set_delivery_permit
+            from jiuwenswarm.governance.application_boundary import admit_application_request
             try:
                 host = getattr(self, "_organization_session_host", None)
-                if host is None:
-                    raise PermissionError("Session authority unavailable")
-                permit = admit_session_request(
+                permit = admit_application_request(
                     request.req_method.value if request.req_method else "",
                     request.params or {}, identity_resolver=lambda: self._resolve_trusted_identity(request),
                     host=host, envelope_session=(
@@ -2486,6 +2503,28 @@ class AgentWebSocketServer:
                     await send_wire_payload(ws, encode_agent_response_for_wire(response, response_id=request.request_id))
                 return
 
+
+        if permit is not None:
+            from jiuwenswarm.governance.application_boundary import builtin_catalog_projection
+            try:
+                projection = builtin_catalog_projection(permit.method, request.params or {})
+                if permit.method == 'project.lifecycle':
+                    from jiuwenswarm.governance.lifecycle_inventory import project_lifecycle_projection
+                    projection = project_lifecycle_projection(request.params or {}, permit)
+                if projection is not None:
+                    if not permit.revalidate():
+                        raise PermissionError("application identity changed")
+                    response = AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
+                                             ok=True, payload=projection)
+                    async with send_lock:
+                        await send_wire_payload(ws, encode_agent_response_for_wire(response, response_id=request.request_id))
+                    return
+            except Exception:
+                response = AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
+                    ok=False, payload={"code": "FORBIDDEN", "error": "Application catalog unavailable."})
+                async with send_lock:
+                    await send_wire_payload(ws, encode_agent_response_for_wire(response, response_id=request.request_id))
+                return
 
         logger.info(
             "[AgentWebSocketServer] 收到请求: request_id=%s channel_id=%s is_stream=%s",
@@ -2542,8 +2581,37 @@ class AgentWebSocketServer:
                 runtime_callback = getattr(
                     manager, "set_personal_context_runtime_enabled", None
                 )
+                context_host = self._personal_context_host
+                if configured_authenticator() is not None:
+                    from jiuwenswarm.governance.personal_context import personal_context_home
+                    from jiuwenswarm.governance.session_boundary import current_application_permit
+                    context_permit = current_application_permit(request.req_method.value)
+                    home = personal_context_home(context_permit.identity)
+                    hosts = self._personal_context_hosts
+                    context_host = hosts.get(home)
+                    if context_host is None:
+                        from jiuwenswarm.governance.personal_context_execution import PersonalContextAuthority
+                        def decode_context_credential(value):
+                            registry = self._runtime._extension_registry
+                            crypto = registry.get_crypto_provider() if registry is not None else None
+                            if crypto is None:
+                                raise PermissionError("instance credential decoder unavailable")
+                            return crypto.decrypt(value)
+                        context_host = PersonalContextHostAPI(
+                            home=home, authority=PersonalContextAuthority(
+                                context_permit.identity, credential_decoder=decode_context_credential))
+                        hosts[home] = context_host
+                    # Loading private views must not start background collection
+                    # using an instance-wide model or embedding credential.
+                    from jiuwenswarm.governance.personal_context import PERSONAL_CONTEXT_WRITES
+                    if request.req_method.value in PERSONAL_CONTEXT_WRITES:
+                        await context_host.bind_request_authority(context_permit)
+                    await context_host.start(activate_collection=False)
+                    if not context_permit.revalidate():
+                        raise PermissionError("Personal context identity changed")
+                    runtime_callback = None
                 await handle_personal_context_request(
-                    self._personal_context_host,
+                    context_host,
                     ws,
                     request,
                     send_lock,
@@ -6717,10 +6785,12 @@ class AgentWebSocketServer:
     async def _handle_command_workflows(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """Handle command.workflows RPC — list summaries or get one workflow detail."""
         from jiuwenswarm.agents.harness.team import get_team_manager
+        from jiuwenswarm.governance.session_boundary import require_workflow_read
 
         session_id = request.session_id or ""
         channel_id = request.channel_id or "web"
         params = request.params if isinstance(request.params, dict) else {}
+        require_workflow_read(session_id, params)
         action = str(params.get("action") or "list").strip().lower()
         workflow_id = params.get("workflow_id") or params.get("workflow_run_id")
         wf_id_log = workflow_id.strip() if isinstance(workflow_id, str) else workflow_id
@@ -8753,12 +8823,15 @@ class AgentWebSocketServer:
     ) -> None:
         """Handle ``mcp.show`` RPC: return one MCP detail with tools."""
         try:
+            from jiuwenswarm.governance.application_boundary import require_application_consumer
+            require_application_consumer("mcp.show")
             from jiuwenswarm.server.runtime.mcp.marketplace import show_mcp_with_hub
             params = request.params or {}
             name = str(params.get("id") or params.get("name") or "").strip()
             if not name:
                 raise ValueError("mcp id or name is required")
             item = await show_mcp_with_hub(name)
+            require_application_consumer("mcp.show")
             if item is None:
                 raise KeyError(f"mcp '{name}' not found")
             # Connected MCP but ToolMgr returned no tools: fall back to a
@@ -9278,10 +9351,9 @@ class AgentWebSocketServer:
 
         Multi-step CLIs (e.g. feishu: config init → auth login): when a step
         completes and the next needs user action, ``complete_cli_auth`` returns
-        ``auth_required=True`` with the new ``step_index``; we adopt it as
-        ``cur_step`` so the next poll queries the new step — otherwise the
-        poller would re-query the old step forever (a real dead-loop on
-        multi-step CLIs).
+        ``auth_required=True`` with the new ``step_index``. Return that step
+        to the caller so the browser can open its URL and start the next wait.
+        Do not wait here for user action whose URL has never reached the UI.
 
         Only CLI MCPs reach here (form A/B/D return ``auth_required=False`` or
         ``credentials_required`` from :func:`connect_mcp`; only
@@ -9306,8 +9378,10 @@ class AgentWebSocketServer:
                     # action. Adopt the authoritative step_index so we don't
                     # loop on a stale step (dead-loop guard).
                     new_step = item.get("step_index")
-                    if isinstance(new_step, (int, float)):
-                        cur_step = max(cur_step, int(new_step))
+                    if isinstance(new_step, int) and new_step > cur_step:
+                        # The browser must visit the next step's URL before we
+                        # can wait for it. Reuse the existing auth_required RPC.
+                        return {"type": "auth_required", **self._mask_sensitive_fields(item)}
                     last_output = str(item.get("output") or item.get("matched") or "")[:300]
                     logger.debug(
                         "[mcp] _await_cli_auth '%s' still pending (attempt %d/%d, step %d): %s",
@@ -10950,8 +11024,12 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
-    async def _handle_agent_reload_config(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+    async def _handle_agent_reload_config(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock,
+                                        *, verified_service: bool = False) -> None:
         try:
+            if not verified_service:
+                from jiuwenswarm.governance.application_boundary import require_application_consumer
+                require_application_consumer('agent.reload_config')
             params = request.params or {}
             config_payload = params.get("config")
             env_overrides = params.get("env")
@@ -11081,6 +11159,8 @@ class AgentWebSocketServer:
     async def _handle_extensions_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """获取所有 Rail 扩展列表."""
         try:
+            from jiuwenswarm.governance.application_boundary import require_application_consumer
+            require_application_consumer('extensions.list')
             manager = get_rail_manager()
             extensions = manager.list_extensions()
 
@@ -11106,6 +11186,8 @@ class AgentWebSocketServer:
     async def _handle_extensions_import(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """导入新的 Rail 扩展（文件夹结构）."""
         try:
+            from jiuwenswarm.governance.application_boundary import require_application_consumer
+            require_application_consumer('extensions.import')
             params = request.params or {}
             folder_path = params.get("folder_path")
 
@@ -11141,6 +11223,8 @@ class AgentWebSocketServer:
     async def _handle_extensions_delete(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """删除 Rail 扩展."""
         try:
+            from jiuwenswarm.governance.application_boundary import require_application_consumer
+            require_application_consumer('extensions.delete')
             params = request.params or {}
             name = params.get("name")
 
@@ -11172,6 +11256,8 @@ class AgentWebSocketServer:
     async def _handle_extensions_toggle(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """切换 Rail 扩展的启用状态，并触发热更新."""
         try:
+            from jiuwenswarm.governance.application_boundary import require_application_consumer
+            require_application_consumer('extensions.toggle')
             params = request.params or {}
             name = params.get("name")
             enabled = params.get("enabled", False)
@@ -11187,10 +11273,12 @@ class AgentWebSocketServer:
             agent = self._agent_manager.get_agent_nowait()
             if agent is not None:
                 agent_instance = await agent.ensure_instance()
+                require_application_consumer('extensions.toggle')
                 if agent_instance is not None:
                     manager.set_agent_instance(agent_instance)
 
             # 2. 更新配置文件中的启用状态
+            require_application_consumer('extensions.toggle')
             extension = manager.toggle_extension(name, enabled)
 
             # 3. 触发热更新：根据 enabled 状态注册或注销 rail
@@ -11218,6 +11306,8 @@ class AgentWebSocketServer:
     async def _handle_hooks_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """获取当前 hooks 配置（供 TUI /hooks 命令浏览）."""
         try:
+            from jiuwenswarm.governance.application_boundary import require_application_consumer
+            require_application_consumer('hooks.list')
             config_base = get_config()
             hooks_config = load_hooks_config(config_base)
             summary = hooks_config.get_event_summary()

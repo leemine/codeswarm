@@ -365,6 +365,8 @@ class CredentialStore:
         Unix 下 chmod 600 防止多用户机其他账号读取；Windows 无 stat 权限
         语义（NTFS ACL 不走 mode），原子写仍生效。
         """
+        from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+        require_legacy_mcp_access()
         p = self._path(name)
         self._needs_reencrypt.discard(name)
         try:
@@ -406,6 +408,8 @@ class CredentialStore:
         return dict(self._load(name))
 
     def delete_mcp(self, name: str) -> None:
+        from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+        require_legacy_mcp_access()
         p = self._path(name)
         if p.is_file():
             try:

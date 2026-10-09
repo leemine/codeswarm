@@ -87,6 +87,23 @@ class FakeAgentClient:
             self.reload_finished.set()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('authenticated', [False, True])
+async def test_rsi_download_proxy_does_not_inject_legacy_identity_into_authenticated_request(monkeypatch, authenticated):
+    captured = []
+    async def proxy(**kwargs):
+        captured.append(kwargs['params'])
+    monkeypatch.setattr('jiuwenswarm.gateway.routing.e2a_proxy.proxy_unary_request', proxy)
+    monkeypatch.setattr('jiuwenswarm.governance.organization_auth.configured_authenticator',
+                        lambda: object() if authenticated else None)
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    await channel.methods['rsi.artifact.download'](
+        object(), 'download', {'task_id': 'rsi-own'}, None, user_id='alice')
+    assert captured[0]['task_id'] == 'rsi-own'
+    assert ('_download_user_id' in captured[0]) is (not authenticated)
+
+
 class _FakeModelsResponse:
     def __init__(self, model_ids):
         self.status_code = 200

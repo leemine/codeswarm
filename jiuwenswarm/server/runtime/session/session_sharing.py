@@ -31,10 +31,20 @@ from .sharing_audit import (
 
 
 class SessionSharingStore:
-    def __init__(self, authority_resolver: SessionAuthorityResolver, *, storage=None, clock=time.time):
+    def __init__(self, authority_resolver: SessionAuthorityResolver, *, storage=None, clock=time.time,
+                 sharing_enabled=lambda: True):
         self._resolve = authority_resolver
         self._storage = storage if storage is not None else ProjectAccessStore()
         self._clock = clock
+        self._sharing_enabled = sharing_enabled
+
+    def _require_sharing(self):
+        try:
+            enabled = self._sharing_enabled() is True
+        except Exception:
+            enabled = False
+        if not enabled:
+            raise SessionSharingDenied('sharing is unavailable')
 
     @staticmethod
     def _section(data):
@@ -132,6 +142,7 @@ class SessionSharingStore:
         return valid_expiry(expiry) and (parent is None or (expiry is not None and expiry <= parent))
 
     def _active(self, section, share_id, owner, source, seen=None):
+        self._require_sharing()
         seen = set() if seen is None else seen
         if share_id in seen or len(seen) >= 16:
             raise SessionSharingDenied('invalid sharing ancestry')
@@ -212,6 +223,7 @@ class SessionSharingStore:
 
     def _write_grant(self, session_id, grantor, target, *, actions, history, expires_at,
                      parent_share_id, share_id=None, expected_revision=0, audit_context=None):
+        self._require_sharing()
         self._session(session_id)
         grantor_data, target_data = self._identity(grantor), self._identity(target)
         actions = frozenset(actions)

@@ -118,6 +118,9 @@ class RsiTask:
     run_dir: str = ""
     updated_at: str | None = None
     status_history: list[dict[str, Any]] = field(default_factory=list)
+    # Durable host identity, never inferred from a browser session or share.
+    # None retains legacy instance-owned records without assigning a user.
+    owner_identity: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -146,6 +149,7 @@ class RsiTask:
             "run_dir",
             "updated_at",
             "status_history",
+            "owner_identity",
         }
         return cls(**{k: v for k, v in data.items() if k in known})
 

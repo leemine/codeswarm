@@ -56,6 +56,7 @@ export function RsiDetailHeader({
   onOpenArtifact,
 }: RsiDetailHeaderProps) {
   const { t } = useTranslation();
+  const canExecute = useRsiStore((s) => s.canExecute);
   const patchTaskStatus = useRsiStore((s) => s.patchTaskStatus);
   const removeListItem = useRsiStore((s) => s.removeListItem);
   const markTaskInstalled = useRsiStore((s) => s.markTaskInstalled);
@@ -276,7 +277,7 @@ export function RsiDetailHeader({
                 type="button"
                 className={className}
                 onClick={() => handleAction(action)}
-                disabled={busy}
+                disabled={busy || (!canExecute && action !== 'config')}
                 aria-label={action === 'delete' ? actionLabel.delete : undefined}
                 data-testid={`rsi-action-${action}`}
               >

@@ -157,8 +157,16 @@ async def test_await_multi_step_advances_step_index_then_connected() -> None:
             "feishu", 0, max_attempts=10, delay=0,
         )
 
-    # step_index sequence must advance: 0, 0, 1, 1 (NOT 0,0,0,0 — the
-    # dead-loop signature). Call 2 returns step_index=1, which the poller
-    # must adopt for call 3.
-    assert calls == [0, 0, 1, 1], f"step_index did not advance: {calls}"
+    assert calls == [0, 0]
+    assert result["type"] == "auth_required"
+    assert result["step_index"] == 1
+    assert result["auth_url"] == "https://accounts.feishu.cn/login?step=2"
+    server._finalize_cli_auth.assert_not_called()
+    # The browser opens the new URL, then makes its existing next-step RPC.
+    with patch(
+        "jiuwenswarm.server.runtime.mcp.registry.complete_cli_auth",
+        side_effect=fake_complete_cli_auth,
+    ):
+        result = await server._await_cli_auth("feishu", 1, max_attempts=10, delay=0)
+    assert calls == [0, 0, 1, 1]
     assert result["type"] == "connected"

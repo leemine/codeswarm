@@ -423,6 +423,7 @@ class WebChannel(BaseWsChannel):
         from jiuwenswarm.governance.organization_auth import connection_principal
         principal = connection_principal(ws)
         connection_user_id = (principal.identity().actor_id if principal is not None else
+                              getattr(ws, "_verified_iam_user_id", None) or
                               cls._extract_query_user_id(flat_query) or cls._extract_ws_header_user_id(ws))
         setattr(ws, _WEB_CONNECTION_USER_ID_ATTR, connection_user_id)
         return connection_user_id
@@ -475,17 +476,32 @@ class WebChannel(BaseWsChannel):
             self,
             invocation: _MethodHandlerInvocation,
     ) -> bool:
+        # File normalization/callbacks can await after admission. Recheck the
+        # original application permit before entering an instance consumer.
+        permit = getattr(invocation.ws, "_jiuwen_session_permits", {}).get(invocation.req_id)
+        if permit is not None and permit.application_check is not None:
+            if permit.method != invocation.method or not permit.revalidate():
+                await self.send_response(invocation.ws, invocation.req_id, ok=False,
+                                         error="Application authorization denied.", code="FORBIDDEN")
+                return False
         kwargs: dict[str, Any] = {}
         if "user_id" in inspect.signature(invocation.handler).parameters:
             kwargs["user_id"] = self._connection_user_id(invocation.ws)
         try:
-            await invocation.handler(
-                invocation.ws,
-                invocation.req_id,
-                invocation.params,
-                invocation.session_id,
-                **kwargs,
-            )
+            from jiuwenswarm.governance.session_boundary import delivery_scope, set_delivery_permit
+            # Gateway-owned consumers need the same original operation proof
+            # as AgentServer consumers. The scope follows awaits/to_thread,
+            # and is cleared before another request can reuse this task.
+            with delivery_scope():
+                if permit is not None and permit.application_check is not None:
+                    set_delivery_permit(permit)
+                await invocation.handler(
+                    invocation.ws,
+                    invocation.req_id,
+                    invocation.params,
+                    invocation.session_id,
+                    **kwargs,
+                )
             return True
         except Exception as e:
             ws_closed = bool(getattr(invocation.ws, "closed", False))
@@ -982,6 +998,16 @@ class WebChannel(BaseWsChannel):
             )
             return
 
+        # Experiment routes are application IDs, not chat subscriptions. Keep
+        # the original writer queues; each recipient is checked against the
+        # durable experiment owner at enqueue and again at actual delivery.
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        from jiuwenswarm.governance.rsi_boundary import RSI_EVENTS
+        rsi_event = msg.payload.get('event_type') if isinstance(msg.payload, dict) else None
+        if configured_authenticator() is not None and rsi_event in RSI_EVENTS and msg.type != 'res':
+            await self._broadcast_to(self._serialize_frame(msg), set(self._ws_by_id.values()))
+            return
+
         if msg.type == "res":
             if isinstance(msg.payload, dict):
                 res_payload = {**msg.payload}
@@ -1227,6 +1253,12 @@ class WebChannel(BaseWsChannel):
         query = parse_qs(parsed.query)
         remote = getattr(ws, "remote_address", None)
         _flat_query = {k: (v[0] if v else "") for k, v in query.items()}
+
+        try:
+            await self.bind_authenticated_identity(ws)
+        except PermissionError:
+            await ws.close(code=1008, reason="authentication required")
+            return
 
         # ── Path 分发(设计文档 §5.3.7) ──
         # /ws/git → GitDiffWebSocketHandler
@@ -1488,12 +1520,15 @@ class WebChannel(BaseWsChannel):
 
         from jiuwenswarm.governance.organization_auth import configured_authenticator, connection_principal
         from jiuwenswarm.governance.session_boundary import (
-            admit_session_request, organization_sharing_host, SHARE_METHODS,
+            organization_sharing_host, SHARE_METHODS,
+        )
+        from jiuwenswarm.governance.application_boundary import (
+            admit_application_request, builtin_catalog_projection,
         )
         organization = configured_authenticator() is not None
         if organization:
             try:
-                permit = admit_session_request(method, params,
+                permit = admit_application_request(method, params,
                     identity_resolver=lambda: connection_principal(ws).identity(), host=organization_sharing_host())
                 permits = getattr(ws, "_jiuwen_session_permits", None)
                 if permits is None:
@@ -1506,6 +1541,17 @@ class WebChannel(BaseWsChannel):
                 permits[req_id] = permit
             except Exception:
                 await self.send_response(ws, req_id, ok=False, error="Session authorization denied.", code="FORBIDDEN")
+                return
+
+        if organization:
+            try:
+                projection = builtin_catalog_projection(method, params)
+                if projection is not None:
+                    await self.send_response(ws, req_id, ok=True, payload=projection)
+                    return
+            except Exception:
+                await self.send_response(ws, req_id, ok=False,
+                    error="Application catalog unavailable.", code="INTERNAL_ERROR")
                 return
 
         # A cleanup permit cannot establish a history subscription or enter the
@@ -1544,7 +1590,11 @@ class WebChannel(BaseWsChannel):
             isinstance(_explicit_session_id, str) and bool(_explicit_session_id)
         )
         session_id = _explicit_session_id if has_explicit_session else self._make_session_id()
-        route_session = has_explicit_session and not (organization and method in SHARE_METHODS)
+        # Application unary requests can carry their own transport ID (RSI).
+        # It is not a chat subscription and cannot replace the active route.
+        route_session = has_explicit_session and not (
+            organization and (method in SHARE_METHODS or permit.application_check is not None)
+        )
 
         # 追踪 ws → 真实 session_id，用于断连清理/日志。
         # 与 register_ws 一致：仅显式 session 入集；临时 id 只供 Message 构造，避免膨胀。

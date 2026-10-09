@@ -163,3 +163,27 @@ def test_direct_host_initialization_also_preserves_protection_marker(protected):
     store.path.unlink()
     assert store.is_protected(another.project_id)
     assert not store.authorize(another.project_id, 'owner', 'read').allowed
+
+@pytest.mark.parametrize('project_id', [None, 'default', 'default_code'])
+def test_private_creation_does_not_require_access_to_unrelated_projects(protected, monkeypatch, project_id):
+    from jiuwenswarm.governance.session_boundary import SessionRequestPermit
+    monkeypatch.setattr('jiuwenswarm.governance.organization_auth.configured_authenticator', lambda: object())
+    identity = TrustedIdentity('reader', 'reader', 'test-host')
+    permit = SessionRequestPermit(identity, lambda: identity, None, method='session.create')
+    authorize_resource_request(request(ReqMethod.SESSION_CREATE, project_id=project_id), identity,
+                               session_permit=permit)
+    with pytest.raises(ProjectAccessDenied):
+        authorize_resource_request(request(ReqMethod.SESSION_CREATE, project_id=project_id), identity)
+
+
+def test_private_creation_cannot_smuggle_protected_resource_reference(protected, monkeypatch):
+    from jiuwenswarm.governance.session_boundary import SessionRequestPermit
+    monkeypatch.setattr('jiuwenswarm.governance.organization_auth.configured_authenticator', lambda: object())
+    project, _ = protected
+    identity = TrustedIdentity('reader', 'reader', 'test-host')
+    permit = SessionRequestPermit(identity, lambda: identity, None, method='session.create')
+    for params in ({'project_dir': project.project_dir}, {'project_id': project.project_id},
+                   {'previous_session_id': 'private-session'}, {'nested': {'cwd': project.project_dir}}):
+        with pytest.raises(ProjectAccessDenied):
+            authorize_resource_request(request(ReqMethod.SESSION_CREATE, **params), identity,
+                                       session_permit=permit)

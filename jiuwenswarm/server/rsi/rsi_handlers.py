@@ -93,7 +93,10 @@ class RsiAgentServerHandlers:
         if request_session_id:
             params.setdefault("_rsi_session_id", request_session_id)
         try:
+            permit = self._authorize_task_read(method, params)
             payload = handler(params)
+            if permit is not None and not permit.revalidate():
+                raise RsiError("FORBIDDEN", "Experiment authorization changed")
             return {"ok": True, "payload": payload}
         except RsiError as exc:
             return {"ok": False, "error": exc.message, "code": exc.code}
@@ -123,15 +126,31 @@ class RsiAgentServerHandlers:
         if request_session_id:
             params.setdefault("_rsi_session_id", request_session_id)
         try:
+            permit = self._authorize_task_read(method, params)
             payload = handler(params)
             if inspect.isawaitable(payload):
                 payload = await payload
+            if permit is not None and not permit.revalidate():
+                raise RsiError("FORBIDDEN", "Experiment authorization changed")
             return {"ok": True, "payload": payload}
         except RsiError as exc:
             return {"ok": False, "error": exc.message, "code": exc.code}
         except Exception as exc:  # noqa: BLE001 - 统一 INTERNAL_ERROR 语义
             logger.exception("[RSI] %s failed: %s", method, exc)
             return {"ok": False, "error": str(exc), "code": "INTERNAL_ERROR"}
+
+    def _authorize_task_read(self, method, params):
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        from jiuwenswarm.governance.rsi_boundary import (
+            RSI_READ_METHODS, RSI_TASK_OPERATIONS, require_experiment_owner,
+        )
+        if configured_authenticator() is None:
+            return None
+        from jiuwenswarm.governance.session_boundary import current_application_permit
+        permit = current_application_permit(method)
+        if method in RSI_READ_METHODS or method in RSI_TASK_OPERATIONS:
+            return require_experiment_owner(method, params, self.context.store)
+        return permit
 
     # -- I1–I13 + Harness install --
 
@@ -150,7 +169,23 @@ class RsiAgentServerHandlers:
         return result
 
     def _do_task_list(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"tasks": self.context.task_service.list(params)}
+        from dataclasses import asdict
+        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        if configured_authenticator() is None:
+            return {"tasks": self.context.task_service.list(params), "can_execute": True}
+        from jiuwenswarm.governance.application_boundary import host_application_policy
+        from jiuwenswarm.governance.session_boundary import current_application_permit
+        permit = current_application_permit('rsi.task.list')
+        owner = asdict(permit.identity)
+        include_legacy = 'manage' in host_application_policy(permit.identity).get('rsi', [])
+        tasks = self.context.task_service.list(
+            params, visible=lambda task: task.owner_identity == owner
+            or (task.owner_identity is None and include_legacy),
+        )
+        if not permit.revalidate():
+            raise RsiError('FORBIDDEN', 'Experiment authorization changed')
+        from jiuwenswarm.governance.rsi_boundary import is_instance_owner
+        return {"tasks": tasks, "can_execute": is_instance_owner(permit.identity)}
 
     def _do_task_get(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.context.task_service.get(

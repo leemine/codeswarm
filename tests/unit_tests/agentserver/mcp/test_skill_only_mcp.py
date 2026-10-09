@@ -216,9 +216,9 @@ def _make_bare_adapter():
     return a
 
 
-def test_sync_writes_connected_connector_tokens_to_environ(tmp_path: Path,
+def test_shell_environment_returns_tokens_without_parent_mutation(tmp_path: Path,
                                                            monkeypatch) -> None:
-    """sync writes each connected MCP's stored tokens to os.environ."""
+    """Legacy connected credentials are supplied only to a child execution."""
     adapter = _make_bare_adapter()
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.mcp.state_store.list_connected_mcps",
@@ -233,15 +233,14 @@ def test_sync_writes_connected_connector_tokens_to_environ(tmp_path: Path,
     for k in ("WENDAO_API_KEY", "NETEASE_EMAIL_USER", "NETEASE_EMAIL_PASS"):
         monkeypatch.delenv(k, raising=False)
 
-    adapter._sync_mcp_credentials_environment()
+    assert adapter._sync_mcp_credentials_environment() is False
+    environment = adapter._mcp_shell_environment()
+    assert environment == {"WENDAO_API_KEY": "tok-w", "NETEASE_EMAIL_USER": "u@x", "NETEASE_EMAIL_PASS": "p"}
+    assert not any(key in os.environ for key in environment)
 
-    assert os.environ.get("WENDAO_API_KEY") == "tok-w"
-    assert os.environ.get("NETEASE_EMAIL_USER") == "u@x"
-    assert os.environ.get("NETEASE_EMAIL_PASS") == "p"
 
-
-def test_clear_removes_connector_env_keys(tmp_path: Path, monkeypatch) -> None:
-    """clear pops the MCP's token env keys (from store + schema)."""
+def test_clear_does_not_remove_host_owned_env_keys(tmp_path: Path, monkeypatch) -> None:
+    """Adapter cleanup cannot remove environment values supplied by the host."""
     adapter = _make_bare_adapter()
     monkeypatch.setenv("WENDAO_API_KEY", "tok")
     monkeypatch.setenv("OTHER_KEY", "keep")
@@ -256,7 +255,7 @@ def test_clear_removes_connector_env_keys(tmp_path: Path, monkeypatch) -> None:
 
     adapter._clear_mcp_credentials_environment("ctrip-wendao")
 
-    assert "WENDAO_API_KEY" not in os.environ
+    assert os.environ["WENDAO_API_KEY"] == "tok"
     assert os.environ.get("OTHER_KEY") == "keep"
 
 
