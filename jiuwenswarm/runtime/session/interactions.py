@@ -1,5 +1,7 @@
 """Read projection of original history against live Runtime control ownership."""
 
+from .model import SessionWorkKind
+
 
 def project_interaction_state(snapshot, records):
     live = [item for item in snapshot.executions
@@ -24,4 +26,9 @@ def project_interaction_state(snapshot, records):
             ) if key in record
         }
         questions[control_id]["session_generation"] = snapshot.generation
-    return {"is_processing": bool(live), "pending_interactions": list(questions.values())}
+    # A goal status/control RPC can initialize a cold session without executing
+    # a model turn. Real producers and any owned waiting control remain busy.
+    processing = bool(controls) or any(
+        item.work_kind is not SessionWorkKind.GOAL_CONTROL for item in live
+    )
+    return {"is_processing": processing, "pending_interactions": list(questions.values())}

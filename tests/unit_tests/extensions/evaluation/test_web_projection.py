@@ -7,12 +7,50 @@ import pytest
 from jiuwenswarm.extensions.evaluation.backend.adapters.runtime_execution import RuntimeExecution
 from jiuwenswarm.runtime.events import RuntimeEvent
 from jiuwenswarm.runtime.session.interactions import project_interaction_state
-from jiuwenswarm.runtime.session.model import SessionExecutionState as State
+from jiuwenswarm.runtime.session.model import SessionExecutionState as State, SessionWorkKind
 
 
-def execution(state=State.WAITING_FOR_CONTROL, generation=2, ids=("live",)):
+def execution(state=State.WAITING_FOR_CONTROL, generation=2, ids=("live",),
+              work_kind=SessionWorkKind.CHAT_STREAM):
     return NS(state=state, generation=generation, waiting_control_ids=ids,
-              waiting_control_id=ids[0] if ids else None, created_at=10)
+              waiting_control_id=ids[0] if ids else None, created_at=10, work_kind=work_kind)
+
+
+@pytest.mark.parametrize("state", [State.QUEUED, State.RUNNING, State.WAITING_FOR_CONTROL])
+def test_goal_read_during_cold_history_restore_is_not_model_execution(state):
+    from jiuwenswarm.common.schema.agent import AgentRequest
+    from jiuwenswarm.common.schema.message import ReqMethod
+    from jiuwenswarm.runtime.service import AgentRuntime
+    read = AgentRequest(request_id="goal-read", channel_id="web", session_id="s",
+                        req_method=ReqMethod.COMMAND_GOAL, params={"action": "get"})
+    kind = AgentRuntime.session_work_kind(read)
+    assert kind is SessionWorkKind.GOAL_CONTROL
+    snapshot = NS(generation=2, executions=[execution(state, ids=(), work_kind=kind)])
+    assert project_interaction_state(snapshot, ()) == {
+        "is_processing": False, "pending_interactions": []}
+
+
+@pytest.mark.parametrize("kind", list(SessionWorkKind))
+def test_goal_status_read_does_not_hide_live_execution_or_question(kind):
+    snapshot = NS(generation=2, executions=[
+        execution(State.RUNNING, ids=(), work_kind=SessionWorkKind.GOAL_CONTROL),
+        execution(work_kind=kind)])
+    records = [dict(event_type="chat.ask_user_question", request_id="live",
+                    timestamp=11, questions=[{"question": "choose"}])]
+    projection = project_interaction_state(snapshot, records)
+    assert projection["is_processing"] is True
+    assert [q["request_id"] for q in projection["pending_interactions"]] == ["live"]
+
+
+def test_goal_read_does_not_hide_running_producers_without_controls():
+    for kind in SessionWorkKind:
+        if kind is SessionWorkKind.GOAL_CONTROL:
+            continue
+        snapshot = NS(generation=2, executions=[
+            execution(State.RUNNING, ids=(), work_kind=SessionWorkKind.GOAL_CONTROL),
+            execution(State.RUNNING, ids=(), work_kind=kind)])
+        assert project_interaction_state(snapshot, ()) == {
+            "is_processing": True, "pending_interactions": []}
 
 
 def test_reconnect_never_makes_old_resolved_or_cancelled_history_actionable():
