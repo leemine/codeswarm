@@ -549,3 +549,48 @@ async def test_builtin_runtime_directory_is_private_and_allocated_at_startup(tmp
     await adapter._ensure_started(session)
     assert runtime_root.stat().st_mode & 0o777 == 0o700
     session.start.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_cancel_drains_terminal_before_strict_exit_and_cold_resume(tmp_path, recovery_env):
+    from openjiuwen.harness_protocol import TurnEventKind
+    history = []
+    x = _native_abort_tree(tmp_path, history)
+    await x.session.start(x.context)
+    receipt = await x.session.send(HarnessInput('ordinary slow request'))
+    await x.native.prompted.wait()
+    owner = object()
+    released = []
+    def release(value):
+        assert x.session.exit_state is ExecutionExitState.EXIT_CONFIRMED
+        released.append(value)
+    x.adapter._ordinary_owner = owner
+    x.adapter._ordinary_runtime = SimpleNamespace(release_external_execution=release)
+    x.adapter._ordinary_request = SimpleNamespace(request_id='ordinary')
+    x.adapter._ordinary_reader_done.clear()
+    async def consume():
+        try:
+            return [item async for item in x.session.outputs(receipt.turn_id)]
+        finally:
+            x.adapter._ordinary_reader_done.set()
+    reader = asyncio.create_task(consume())
+    try:
+        result = await x.adapter.process_interrupt(SimpleNamespace(
+            params={'intent':'cancel'}, request_id='cancel', channel_id='web', metadata={}))
+        output = await reader
+        assert result.ok
+        assert any(item.terminal is TurnEventKind.ABORTED for item in output)
+        assert released == [owner]
+        assert x.native.closed
+        x.session.abandon_output(receipt.turn_id)  # safe after the router has exited
+        resumed = _native_abort_tree(tmp_path, history)
+        try:
+            await resumed.session.start(resumed.context)
+            assert (await resumed.harness.export_checkpoint()).data['resumed'] is True
+        finally:
+            await resumed.session.stop()
+    finally:
+        if not reader.done():
+            reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+        await x.session.stop()

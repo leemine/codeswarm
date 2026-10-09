@@ -114,6 +114,8 @@ class EngineAgentAdapter:
         self._ordinary_runtime = None
         self._ordinary_turn = None
         self._ordinary_terminal = set()
+        self._ordinary_reader_done = asyncio.Event()
+        self._ordinary_reader_done.set()
         self._ordinary_detached = False
         self._ordinary_send_attempted = False
         self._ordinary_request = None
@@ -755,6 +757,7 @@ class EngineAgentAdapter:
             self._ordinary_owner, self._ordinary_runtime = owner, runtime
             self._ordinary_turn = None
             self._ordinary_terminal.clear()
+            self._ordinary_reader_done.clear()
             self._ordinary_detached = False
             self._ordinary_send_attempted = False
             self._ordinary_request = request
@@ -783,6 +786,7 @@ class EngineAgentAdapter:
                     # abort/ABORTED proves that its Provider resources exited.
                     await self._stop_heartbeat_execution(session)
                 self._ordinary_detached = True
+                self._ordinary_reader_done.set()
                 if owner is not None and (
                     completed
                     or owns_heartbeat
@@ -1069,7 +1073,23 @@ class EngineAgentAdapter:
         try:
             goal = self._goal_runtime
             if self._ordinary_owner is not None and intent not in {"pause", "resume"}:
-                await self._stop_owned_execution_once(self._session)
+                session, route = self._session, self._route
+
+                def check_owner():
+                    if self._session is not session or self._route is not route:
+                        raise RuntimeError("External Session owner changed during cancel")
+
+                # Keep the single output consumer alive until it observes the
+                # abort terminal. A terminal alone is not exit proof: strict
+                # owned cleanup must still confirm Provider/MCP/child exit.
+                try:
+                    async with asyncio.timeout(5):
+                        await session.abort(immediate=False)
+                        await self._ordinary_reader_done.wait()
+                except TimeoutError:
+                    logger.warning("External cancel did not drain its terminal before strict stop")
+                check_owner()
+                await self._stop_owned_execution_once(session, ownership_check=check_owner)
                 if goal is not None and goal.owner is not None:
                     await goal.runtime.request_external_execution_cancel(goal.owner)
             elif (
