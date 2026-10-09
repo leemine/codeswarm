@@ -1347,6 +1347,8 @@ class EngineAgentAdapter:
                 self._check_continuation(continuation_request, continuation_context, session)
             else:
                 context = self._external_context()
+            from jiuwenswarm.runtime.harness.installed_codex import prepare_codex_startup
+            prepare_codex_startup(self._route)
             if (self._route.provider_id == "opencode"
                     and self._route.bound.spec.config_revision == "installed-engine-v1"
                     and self._route.recovery is not None
@@ -1360,6 +1362,12 @@ class EngineAgentAdapter:
             from openjiuwen.harness_providers.base import ProviderStartupError
             try:
                 await session.start(context)
+                if self._session is session and self._route.bound.spec.authorization is not None:
+                    # Startup already validates this frozen policy. Reapplying
+                    # an unchanged policy needlessly closes/resumes Codex before
+                    # its first Turn has persisted the new native thread.
+                    self._permission_effective = execution_authorization(self._route.bound.spec)
+                    self._permission_error = None
             except ProviderStartupError as exc:
                 # The ordinary error stream retains text only. Surface safe,
                 # typed startup labels rather than dropping the actual cause.

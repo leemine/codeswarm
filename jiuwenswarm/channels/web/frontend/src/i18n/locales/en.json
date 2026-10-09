@@ -3271,6 +3271,8 @@
     "newDescription": "The new task starts with an empty context. Your original conversation and history remain available.",
     "newTask": "New task",
     "engineDefaults": "Engine defaults",
+    "engineModel": "Codex engine model",
+    "engineModelHint": "The model comes from the Codex engine configuration.",
     "reason": {
       "not_installed": "Engine is not installed",
       "mode_unavailable": "Unavailable in this mode",

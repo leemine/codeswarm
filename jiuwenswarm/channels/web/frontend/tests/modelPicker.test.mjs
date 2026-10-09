@@ -436,3 +436,27 @@ for (const language of ['en', 'zh']) {
     }, language);
   });
 }
+
+test('Codex uses engine model display for draft and restored Binding without changing host model choice', async () => {
+  await withFixture(async ({ mount, byId }) => {
+    const store = useSessionStore.getState();
+    store.ensureRuntime('new');
+    store.setExecutionChoice('new', {
+      execution_profile_id: 'builtin:codex', provider_id: 'codex',
+      config_fingerprint: 'a'.repeat(64), model_selection_keys: null,
+    });
+    useChatStore.setState({ activeSessionId: 'new' });
+    await mount(createElement(ChatModelSelector));
+    assert.equal(byId('chat-panel-engine-model').textContent, 'Codex engine model');
+    assert.equal(byId('chat-panel-model-selector-trigger'), null);
+    await act(async () => {
+      store.setExecutionDisplay(sessionId, { execution_profile_id: 'builtin:codex', provider_id: 'codex' });
+      useChatStore.setState({ activeSessionId: sessionId });
+    });
+    assert.ok(byId('chat-panel-engine-model'));
+    assert.equal(useSessionStore.getState().getRuntime(sessionId).selectedModelName, 'configured-a');
+    await act(async () => store.setExecutionDisplay(sessionId, null));
+    assert.equal(byId('chat-panel-engine-model'), null);
+    assert.ok(byId('chat-panel-model-selector-trigger'));
+  });
+});

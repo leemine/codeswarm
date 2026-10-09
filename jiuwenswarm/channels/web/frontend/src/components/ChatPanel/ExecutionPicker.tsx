@@ -29,9 +29,7 @@ export function ExecutionPicker({
   const draft = sessionId === NEW_CONVERSATION_ID;
   const choice = useSessionStore((s) => s.runtimes[sessionId]?.executionChoice);
   const [options, setOptions] = useState<ExecutionOptions | null>(null);
-  const [binding, setBinding] = useState<{ execution_profile_id: string | null; provider_id: string | null } | null>(
-    null,
-  );
+  const binding = useSessionStore((s) => s.runtimes[sessionId]?.executionDisplay ?? null);
   const [error, setError] = useState(false);
   const [reload, setReload] = useState(0);
   const [open, setOpen] = useState(false);
@@ -44,7 +42,7 @@ export function ExecutionPicker({
     const invalidate = () => {
       generation.current += 1;
       setOptions(null);
-      setBinding(null);
+      useSessionStore.getState().setExecutionDisplay(sessionId, null);
       setOpen(false);
     };
     const auth = onOrganizationCredentialChange(() => {
@@ -60,12 +58,12 @@ export function ExecutionPicker({
       auth();
       connection();
     };
-  }, []);
+  }, [sessionId]);
 
   useEffect(() => {
     const current = ++generation.current;
     setOptions(null);
-    setBinding(null);
+    useSessionStore.getState().setExecutionDisplay(sessionId, null);
     setError(false);
     setOpen(false);
     const load = draft
@@ -79,7 +77,8 @@ export function ExecutionPicker({
         })
       : webRequest<{ execution_display?: typeof binding }>('session.get_metadata', { session_id: sessionId }).then(
           (metadata) => {
-            if (current === generation.current) setBinding(metadata?.execution_display ?? null);
+            if (current === generation.current)
+              useSessionStore.getState().setExecutionDisplay(sessionId, metadata?.execution_display ?? null);
           },
         );
     void load.catch(() => {

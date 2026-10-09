@@ -138,6 +138,13 @@ def bind_admitted_request_execution(
         or session_metadata.get("user_id")
         or f"{channel_id}:{session_id}"
     ).strip()
+    from jiuwenswarm.runtime.harness.installed_codex import materialize_codex_source
+
+    source = materialize_codex_source(
+        source, profile_id=selected_profile_id, paths=runtime_paths,
+        subject_id=subject, session_id=session_id,
+    )
+    spec = source.resolve()
     prospective_binding = ExecutionBinding.create(
         spec,
         subject_id=subject,

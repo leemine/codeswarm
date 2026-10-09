@@ -512,6 +512,8 @@ export interface TeamMemberExecutionEvent {
 export interface SessionRuntime {
   /** In-memory creation choice; an existing Session always reads its server Binding. */
   executionChoice?: ExecutionChoice | null;
+  /** Read-only display from the existing server metadata endpoint. */
+  executionDisplay?: { execution_profile_id: string | null; provider_id: string | null } | null;
   mode: AgentMode;
   selectedModelName: string | null;
   projectDirectory: string | null;
@@ -631,6 +633,7 @@ interface SessionState {
   setAvailableModels: (models: ModelEntry[], activeModel?: string) => void;
   setSelectedModelName: (sessionId: string, name: string) => void;
   setExecutionChoice: (sessionId: string, choice: ExecutionChoice | null) => void;
+  setExecutionDisplay: (sessionId: string, display: SessionRuntime['executionDisplay']) => void;
 
   // B 类 actions（加 sessionId）
   setMode: (sessionId: string, mode: AgentMode) => void;
@@ -1952,6 +1955,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     });
   },
 
+  setExecutionDisplay: (sessionId, display) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return { runtimes: { ...state.runtimes, [sessionId]: { ...runtime, executionDisplay: display } } };
+    });
+  },
   setExecutionChoice: (sessionId, choice) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];

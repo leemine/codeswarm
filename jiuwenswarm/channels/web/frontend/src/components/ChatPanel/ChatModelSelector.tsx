@@ -14,6 +14,8 @@ export default function ChatModelSelector({ disabled = false }: { disabled?: boo
   const models = useSessionStore((state) => state.chatAvailableModels);
   const activeSessionId = useChatStore((state) => state.activeSessionId);
   const choice = useSessionStore((state) => state.runtimes[activeSessionId ?? '']?.executionChoice);
+  const display = useSessionStore((state) => state.runtimes[activeSessionId ?? '']?.executionDisplay);
+  const provider = activeSessionId === 'new' ? choice?.provider_id : display?.provider_id;
   const allowed = activeSessionId === 'new' ? choice?.model_selection_keys : undefined;
   const selectedModelName = useSessionStore(
     (state) => state.runtimes[activeSessionId ?? '']?.selectedModelName ?? null,
@@ -23,6 +25,17 @@ export default function ChatModelSelector({ disabled = false }: { disabled?: boo
   // Preserve the chat.send model resolution; the shared picker does not choose defaults.
   const selected = resolveChatModelSelection(models, selectedModelName, defaultModelName, availableModels);
   const exact = isExactModelSelectionKey(selectedModelName);
+  if (provider === 'codex') {
+    return (
+      <span
+        className="chat-mode-select__trigger"
+        data-testid="chat-panel-engine-model"
+        title={t('executionPicker.engineModelHint')}
+      >
+        {t('executionPicker.engineModel')}
+      </span>
+    );
+  }
   if (!selected && !exact && !allowed) return null;
   const incompatible = allowed && !allowed.includes(selected?.selection_key || selectedModelName || '');
 

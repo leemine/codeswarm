@@ -143,6 +143,18 @@ def load_execution_catalog(
         permissions = config.get("permissions")
         enabled = permissions.get("enabled") if isinstance(permissions, Mapping) else None
         provider_config = {}
+        revision = "installed-engine-v1"
+        if provider == "codex":
+            import os
+            from jiuwenswarm.runtime.harness.installed_codex import REVISION
+            revision = REVISION
+            # Explicit transport/tool environment only. HOME and CODEX_HOME
+            # are assigned from the admitted Session scope before binding.
+            provider_config["env"] = {key: os.environ[key] for key in (
+                "PATH", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+                "SSL_CERT_FILE", "SSL_CERT_DIR",
+            ) if key in os.environ}
         if provider == "opencode":
             from jiuwenswarm.common.utils import get_agent_workspace_dir
             provider_config["runtime_root"] = str(get_agent_workspace_dir().resolve() / "opencode-runtime")
@@ -164,7 +176,7 @@ def load_execution_catalog(
                 }
         return ExecutionConfigCatalog({selected_profile_id: {
             "provider_id": provider,
-            "config_revision": "installed-engine-v1",
+            "config_revision": revision,
             "provider_config": provider_config,
             "authorization": {"full_access": enabled is False},
         }}, default_profile_id=selected_profile_id)

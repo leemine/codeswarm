@@ -132,9 +132,13 @@ def execution_display(metadata, config):
     provider = None
     try:
         catalog = load_execution_catalog(config, selected_profile_id=profile_id)
-        spec = catalog.source(explicit_profile_id=profile_id).resolve()
-        if (spec.config_revision == metadata.get("execution_config_revision")
-                and config_fingerprint(spec) == metadata.get("execution_config_fingerprint")):
+        source = catalog.source(explicit_profile_id=profile_id)
+        from jiuwenswarm.runtime.harness.config_source import source_for_bound_fingerprint
+        spec = source_for_bound_fingerprint(
+            source, metadata.get("execution_config_fingerprint"),
+            allow_runtime_authorization=not str(metadata.get("mode", "")).startswith("team"),
+        ).resolve()
+        if spec.config_revision == metadata.get("execution_config_revision"):
             provider = spec.provider_id
     except Exception:
         pass

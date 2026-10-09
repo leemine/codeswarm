@@ -224,6 +224,18 @@ async def test_builtin_choice_is_persisted_before_allocation(tmp_path, monkeypat
     await _provisioner(state).prepare_session_create(_input(execution_profile_id=profile))
     metadata = get_session_metadata("created-session", cache_bust=True)
     assert metadata["execution_profile_id"] == profile
-    assert metadata["execution_config_revision"] == "installed-engine-v1"
+    assert metadata["execution_config_revision"] == ("installed-codex-v2" if provider == "codex" else "installed-engine-v1")
     assert metadata["surface_creation"]["execution_profile_id"] == profile
     assert execution_display(metadata, {})["provider_id"] == provider
+
+
+def test_bound_display_survives_only_a_supported_runtime_authorization_change():
+    from jiuwenswarm.runtime.harness.config_source import load_execution_catalog
+    from openjiuwen.harness.engine.config import config_fingerprint
+    before = {'permissions': {'enabled': False}}
+    spec = load_execution_catalog(before, selected_profile_id='builtin:codex').source().resolve()
+    metadata = {'mode': 'agent.code.normal', 'execution_profile_id': 'builtin:codex',
+        'execution_config_revision': spec.config_revision, 'execution_config_fingerprint': config_fingerprint(spec)}
+    assert execution_display(metadata, {'permissions': {'enabled': True}})['provider_id'] == 'codex'
+    assert execution_display({**metadata, 'mode': 'team.code.normal'}, {'permissions': {'enabled': True}})['provider_id'] is None
+    assert execution_display({**metadata, 'execution_config_revision': 'changed'}, before)['provider_id'] is None

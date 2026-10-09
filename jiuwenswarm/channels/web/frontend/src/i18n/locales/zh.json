@@ -3254,6 +3254,8 @@
     "newDescription": "新任务从空白上下文开始，原会话与历史仍保留。",
     "newTask": "新建任务",
     "engineDefaults": "引擎默认设置",
+    "engineModel": "Codex 引擎模型",
+    "engineModelHint": "模型由 Codex 引擎配置决定；此处不使用 Deepagent 的模型选择。",
     "reason": {
       "not_installed": "尚未安装此引擎",
       "mode_unavailable": "不支持当前模式",
