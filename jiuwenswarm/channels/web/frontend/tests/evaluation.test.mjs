@@ -95,7 +95,7 @@ test('independent acceptance shows authoritative evidence and preserves original
     {
       id: 'independent',
       definition: { name: 'Independent', model: 'model', acceptance_policy: 'independent-container-v1' },
-      statistics: { passed: 1, planned_trials: 1, all_settled: true },
+      statistics: { passed: 1, planned_trials: 1, all_settled: true, first_attempt_outcomes: { passed: 1 } },
       trials: [
         {
           id: 'trial',
@@ -123,6 +123,7 @@ test('independent acceptance shows authoritative evidence and preserves original
   ];
   await mount();
   assert.match(find('evaluation-attempt-outcome').textContent, /Independent acceptance passed/);
+  assert.match(find('evaluation-outcome-count').textContent, /Independent acceptance passed: 1/);
   assert.equal(find('evaluation-session-link').getAttribute('href'), '/chat/code-original');
   assert.match(find('evaluation-verifier-image').textContent, /sha256:fixed-image/);
   assert.match(find('evaluation-authority-digest').textContent, /fixed-authority/);
@@ -213,6 +214,7 @@ test('three-step creation freezes a single configuration and never starts execut
     });
     await act(async () => find('evaluation-wizard-next').click());
     assert.equal(find('evaluation-wizard-confirmation').hidden, false);
+    assert.match(find('evaluation-confirm-frozen').textContent, /Creating the experiment freezes this configuration/);
     assert.ok(find('evaluation-create').disabled);
     await act(async () => find('evaluation-acknowledge').click());
     await act(async () => find('evaluation-create').click());

@@ -334,7 +334,7 @@ export default function Experiments({
               Deepagent · {model} · {profile} · {timeout}s
             </p>
             <p data-testid="evaluation-confirm-policy">{t(`evaluation.policies.${policy}`)}</p>
-            <p data-testid="evaluation-confirm-frozen">{t('evaluation.frozen')}</p>
+            <p data-testid="evaluation-confirm-frozen">{t('evaluation.freezeOnCreate')}</p>
             <p data-testid="evaluation-policy-hint">
               {t(policy === 'independent-container-v1' ? 'evaluation.independentHint' : 'evaluation.shared')}
             </p>
@@ -528,7 +528,9 @@ export default function Experiments({
               <div className="evaluation-actions" data-testid="evaluation-outcome-counts">
                 {Object.entries(detail.statistics?.first_attempt_outcomes || {}).map(([outcome, count]) => (
                   <span key={outcome} data-testid="evaluation-outcome-count" data-variant={outcome}>
-                    {status(outcome)}: {count}
+                    {outcome === 'passed' && detail.definition.acceptance_policy === 'independent-container-v1'
+                      ? t('evaluation.independentPassed')
+                      : status(outcome)}: {count}
                   </span>
                 ))}
               </div>

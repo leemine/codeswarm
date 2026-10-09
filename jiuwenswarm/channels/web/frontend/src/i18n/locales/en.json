@@ -4531,6 +4531,7 @@
     "create": "Freeze and create experiment",
     "runs": "Experiments",
     "frozen": "Configuration frozen; copy to create a new experiment",
+    "freezeOnCreate": "Creating the experiment freezes this configuration; execution starts separately.",
     "start": "Start pending tasks",
     "cancel": "Request stop",
     "export": "Export evidence JSON",
