@@ -536,7 +536,9 @@ class AgentRuntime:
         def current_identity():
             # An MCP/server task must not accidentally borrow another browser's
             # ambient principal. The original live resolver still rechecks revoke.
-            return host_context.run(self._governance_identity, request)
+            # File workers and other consumers may recheck concurrently; a
+            # Context object cannot be entered by two threads at once.
+            return host_context.copy().run(self._governance_identity, request)
 
         def is_current():
             if self._closed or self._governance_generation(session_id) != generation:

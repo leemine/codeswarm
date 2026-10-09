@@ -112,3 +112,78 @@ async def test_default_runtime_maps_only_exact_owned_opencode_session(tmp_path, 
         assert not await callback(call)
     finally:
         project_store.invalidate_cache()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('revoked', [False, True])
+async def test_overlapping_resource_checks_keep_original_context_and_live_revocation(
+    tmp_path, monkeypatch, revoked,
+):
+    import asyncio
+    from contextvars import ContextVar
+    import threading
+
+    monkeypatch.setattr(project_store, 'get_agent_root_dir', lambda: tmp_path)
+    project_store.invalidate_cache()
+    project = project_store.create_project('Concurrent authority', str(tmp_path))
+    access = ProjectAccessStore()
+    access.initialize(project.project_id, 'alice')
+    alice = TrustedIdentity('alice', 'alice', 'host')
+    bob = TrustedIdentity('bob', 'bob', 'host')
+    principal = ContextVar('resource_check_principal', default=None)
+    entered, release = threading.Event(), threading.Event()
+    state = SimpleNamespace(block=False, revoked=False, checked=[])
+
+    def identity(_):
+        if state.block and threading.current_thread() is not threading.main_thread():
+            state.block = False
+            entered.set()
+            assert release.wait(3)
+        return None if state.revoked else principal.get()
+
+    def authorize(pid, subject, request):
+        state.checked.append(subject)
+        return ResourceDecision(True, pid, subject.actor_id, subject.subject_id,
+                                request, 1, 1, reference='native:read_file')
+
+    resources = SimpleNamespace(
+        authorize_resource=authorize,
+        resources_for_tool=lambda *_: (
+            ToolResourceUse(ResourceRequest('read-tool', 'invoke'), 'native:read_file'),
+        ),
+    )
+    runtime = AgentRuntime(initializer=AsyncMock(), trusted_identity_resolver=identity,
+                           resource_authorizer=resources)
+    runtime._started = True
+    execution = SimpleNamespace(execution_id='original', request_id='r',
+        state=SessionExecutionState.RUNNING, cancellation_requested=False)
+    snapshot = SimpleNamespace(generation=1, state=RuntimeSessionState.ACTIVE,
+                               executions=(execution,))
+    monkeypatch.setattr(runtime, '_governance_project', lambda *_args, **_kwargs: project.project_id)
+    monkeypatch.setattr(runtime._session_coordinator, 'snapshot_session', lambda _: snapshot)
+    request = AgentRequest('r', session_id='private', req_method=ReqMethod.CHAT_SEND)
+    token = principal.set(alice)
+    worker = None
+    try:
+        callback = runtime._resource_authorizers_for(request)['native']
+        tool = BeforeToolContext('a', 'private', 'turn', 'call', 'read_file', {})
+        assert await callback(tool)
+        principal.set(bob)
+        state.block = True
+        worker = asyncio.create_task(asyncio.to_thread(callback.check, tool))
+        assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 3), 4)
+        state.revoked = revoked
+        # The worker is inside the original captured Context. Another valid
+        # consumer must recheck under that same principal without entering
+        # the very same Context object concurrently or borrowing Bob.
+        overlap = await callback(tool)
+    finally:
+        release.set()
+        if worker is not None:
+            worker_result = await asyncio.wait_for(worker, 4)
+        principal.reset(token)
+        await runtime._session_coordinator.close()
+        project_store.invalidate_cache()
+    assert overlap is (not revoked)
+    assert worker_result is (not revoked)
+    assert state.checked and all(subject == alice for subject in state.checked)
