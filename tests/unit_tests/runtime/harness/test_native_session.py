@@ -626,6 +626,43 @@ async def test_cancelled_reader_recovers_item_taken_during_close():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("staged", [True, False])
+async def test_cancel_during_reader_cleanup_preserves_item_and_releases_owner(staged):
+    from jiuwenswarm.runtime.harness.output_router import _Mailbox, TurnOutputRouter
+    from openjiuwen.harness_providers.io_adapter import ProjectedOutput
+
+    waiting = asyncio.Event()
+
+    class Closed(asyncio.Event):
+        async def wait(self):
+            # Cancel exactly while _next joins its completed helper tasks.
+            asyncio.current_task().add_done_callback(lambda _: reader.cancel())
+            waiting.set()
+            return await super().wait()
+
+    router = TurnOutputRouter(SimpleNamespace())
+    mailbox = _Mailbox(router._new_buffer() if staged else asyncio.Queue())
+    mailbox.closed = Closed()
+    reader = asyncio.create_task(TurnOutputRouter._next(mailbox))
+    await waiting.wait()
+    item = ProjectedOutput("turn", terminal=TurnEventKind.FINISHED)
+    mailbox.queue.put_nowait(item)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await reader
+        assert mailbox.reader_idle.is_set()
+        assert list(mailbox.recovered) == [item]
+        router._mailboxes["turn"] = mailbox
+        router.abandon("turn")
+        await asyncio.wait_for(mailbox.drain_task, 1)
+        assert mailbox.drained.is_set() and not router.has_owner("turn")
+    finally:
+        close = getattr(mailbox.queue, "close", None)
+        if close:
+            close()
+
+
+@pytest.mark.asyncio
 async def test_steer_does_not_reopen_abandoned_turn_output(tmp_path):
     gate = asyncio.Event()
     execution, _, _, ctx, terminal, _ = _setup(
