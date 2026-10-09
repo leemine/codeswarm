@@ -133,6 +133,10 @@ class NativeExecutionScopeRail(DeepAgentRail):
 
     priority = 10000
 
+    def init(self, agent) -> None:
+        from jiuwenswarm.governance.context_models import bind_context_model_factory
+        bind_context_model_factory(agent)
+
     def callback_priority(self, event):
         from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
         return -10001 if event in {AgentCallbackEvent.AFTER_INVOKE,
