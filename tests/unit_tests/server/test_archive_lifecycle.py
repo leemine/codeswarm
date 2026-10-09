@@ -1192,3 +1192,52 @@ def test_has_parked_team_streams_requires_all_requests_round_ended(monkeypatch):
     assert not AgentRuntime.has_parked_team_streams(runtime, "sess_a")
     monkeypatch.setattr(team_manager, "_team_manager", None)
     assert not AgentRuntime.has_parked_team_streams(runtime, "sess_a")
+
+
+@pytest.mark.asyncio
+async def test_authenticated_archive_filters_before_paging_and_metadata_read(archive, monkeypatch):
+    from jiuwenswarm.governance import session_boundary
+    from jiuwenswarm.governance.contracts import TrustedIdentity
+    service, create, root, _ = archive
+    create('alice_archived')
+    create('bob_archived')
+    await service.session('alice_archived', 'archive', 'web')
+    await service.session('bob_archived', 'archive', 'web')
+    alice = TrustedIdentity('alice', 'alice', 'test:archive')
+    host = SimpleNamespace(owner_current=lambda sid, who: who == alice and sid == 'alice_archived')
+    monkeypatch.setattr(session_boundary, 'organization_sharing_host', lambda: host)
+    monkeypatch.setattr(session_boundary, 'current_inventory_identity', lambda: alice)
+    read = lc.read_json
+    def checked_read(path, *args, **kwargs):
+        assert 'bob_archived' not in str(path)
+        return read(path, *args, **kwargs)
+    monkeypatch.setattr(lc, 'read_json', checked_read)
+    page = service.list_sessions({'limit': 1})
+    assert page['total'] == 1
+    assert [s['session_id'] for s in page['sessions']] == ['alice_archived']
+
+
+@pytest.mark.skipif(sys.platform != 'linux', reason='Linux zombie lifecycle regression')
+def test_runtime_owner_blocks_live_process_but_not_exited_unreaped_child(monkeypatch):
+    import subprocess
+    import time
+    import psutil
+
+    child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
+                             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    process = psutil.Process(child.pid)
+    owner = {'pid': child.pid, 'started_at': process.create_time()}
+    monkeypatch.setattr(lc, 'state', lambda *args: {'runtime_owner': owner})
+    try:
+        with pytest.raises(lc.LifecycleError, match='another live AgentServer'):
+            lc.assert_runtime_owner('owned-session')
+        child.stdin.close()
+        deadline = time.monotonic() + 5
+        while process.status() != psutil.STATUS_ZOMBIE:
+            assert time.monotonic() < deadline
+            time.sleep(.01)
+        lc.assert_runtime_owner('owned-session')
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=5)

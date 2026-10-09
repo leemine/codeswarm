@@ -28,6 +28,7 @@ const mocks = {
       return { task_id: 'probe', status: 'CREATED' };
     };
     export const rsiTaskList = async () => [];
+    export const rsiTaskInventory = async () => ({ tasks: [], canExecute: true });
     export const rsiTrainingStart = async () => ({ status: 'RUNNING' });
   `,
   '../../services/webClient': 'export const webRequest = (method, params) => globalThis.rsiJudgeRequest(method, params);',

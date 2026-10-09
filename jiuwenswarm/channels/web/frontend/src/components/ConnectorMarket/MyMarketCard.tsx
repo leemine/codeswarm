@@ -3,6 +3,7 @@ import type { McpCardState } from './mcpState';
 import type { McpBusyKind } from '../../types/connector';
 
 interface MyMarketCardProps {
+  readOnly?: boolean;
   title: string;
   tags?: string[];
   description: string;
@@ -18,6 +19,7 @@ interface MyMarketCardProps {
 }
 
 export function MyMarketCard({
+  readOnly,
   title,
   tags = [],
   description,
@@ -31,5 +33,5 @@ export function MyMarketCard({
   quickAction = 'install',
   actionDisabled,
 }: MyMarketCardProps) {
-  return <MarketCard title={title} tags={tags} description={description} iconUrl={iconUrl} state={state} busyKind={busyKind} canOpenDetail={canOpenDetail} onOpenDetail={onOpenDetail} onUse={onUse} onQuickAdd={() => onQuickInstall?.()} quickAction={quickAction} actionDisabled={actionDisabled} />;
+  return <MarketCard readOnly={readOnly} title={title} tags={tags} description={description} iconUrl={iconUrl} state={state} busyKind={busyKind} canOpenDetail={canOpenDetail} onOpenDetail={onOpenDetail} onUse={onUse} onQuickAdd={() => onQuickInstall?.()} quickAction={quickAction} actionDisabled={actionDisabled} />;
 }

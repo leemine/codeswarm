@@ -493,6 +493,17 @@ class BaseWsChannel(BaseWebChannel):
                         "tools": [], "protocol_version": "1.0"}}
                     def guard():
                         return principal.identity() is not None
+                elif isinstance(data, dict) and data.get('event') in {
+                    'project.lifecycle.updated', 'project.deleted', 'session.lifecycle.updated',
+                    'session.archived', 'session.unarchived', 'session.deleted',
+                }:
+                    from jiuwenswarm.governance.lifecycle_inventory import lifecycle_event_delivery
+                    data, guard = lifecycle_event_delivery(data, principal.identity, organization_sharing_host())
+                elif isinstance(data, dict) and data.get('event') in {
+                    'rsi.training.status.changed', 'rsi.training.progress', 'rsi.training.tree.delta',
+                }:
+                    from jiuwenswarm.governance.rsi_boundary import experiment_event_delivery
+                    data, guard = experiment_event_delivery(data, principal.identity)
                 elif session_id:
                     permit = admit_session_request('history.get', {'session_id': session_id},
                         identity_resolver=principal.identity, host=organization_sharing_host())

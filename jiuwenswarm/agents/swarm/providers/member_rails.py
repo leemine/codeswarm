@@ -141,7 +141,8 @@ def _build_personal_context_rail(
     """Mount even when disabled so live members observe subsequent switch changes."""
     del params, context
     try:
-        return PersonalContextRail(Path.home() / ".jiuwenswarm" / ".personal_context")
+        from jiuwenswarm.governance.personal_context import personal_context_home
+        return PersonalContextRail(personal_context_home())
     except Exception as exc:
         logger.warning(
             "[swarm.personal_context] optional Rail construction failed (%s)",

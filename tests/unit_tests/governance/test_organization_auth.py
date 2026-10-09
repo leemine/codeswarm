@@ -227,7 +227,8 @@ async def test_agentserver_rejects_unsigned_and_restores_context(credentials):
     server = object.__new__(AgentWebSocketServer)
     seen = []
 
-    async def handle(ws, raw, lock):
+    async def handle(ws, raw, lock, *, verified_service=False):
+        assert verified_service is False
         seen.append((current_identity().actor_id, json.loads(raw)))
         await asyncio.sleep(0)
 
@@ -426,6 +427,7 @@ async def test_browser_cookie_origin_and_status_do_not_expose_credentials(creden
             "enabled": True,
             "authenticated": True,
             "actor_id": "alice",
+            "sharing_enabled": True,
         }
         assert tokens["alice"] not in response.text + status.text
         assert (
@@ -500,4 +502,59 @@ async def test_gateway_queue_rechecks_revoked_principal_before_controls(credenti
     await handler._forward_loop()
     assert len(errors) == 1 and not errors[0].ok
     control.assert_not_awaited()
+    assert current_identity() is None
+
+@pytest.mark.asyncio
+async def test_disabling_sharing_does_not_disable_login(credentials):
+    from jiuwenswarm.gateway.channel_manager.web.organization_auth_http import register_organization_auth
+    _, tokens, path = credentials
+    config = json.loads(path.read_text())
+    config['sharing_enabled'] = False
+    path.write_text(json.dumps(config))
+    app = FastAPI()
+    register_organization_auth(app)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='https://localhost') as client:
+        response = await client.post('/api/v1/auth/organization/login', json={'token': tokens['alice']},
+                                     headers={'X-Jiuwen-Auth': '1'})
+        assert response.status_code == 200
+        status = (await client.get('/api/v1/auth/organization/status')).json()
+        assert status['authenticated'] is True
+        assert status['actor_id'] == 'alice'
+        assert status['sharing_enabled'] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('sender', ['service', 'alice', 'unsigned', 'forged', 'replay', 'other_method'])
+async def test_only_verified_service_can_reload_without_human_session(credentials, sender):
+    from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+    auth, tokens, _ = credentials
+    server = object.__new__(AgentWebSocketServer)
+    server._resolve_trusted_identity = lambda request: current_identity()
+    server._organization_session_host = None
+    server._handle_agent_reload_config = AsyncMock()
+    ws = SimpleNamespace(close=AsyncMock(), send=AsyncMock())
+    payload = {'request_id': 'maintenance', 'req_method': 'agent.reload_config',
+               'session_id': 'sess_reload', 'user_id': 'agentos_test',
+               'params': {'config': {}, 'env': {}, 'reload_scopes': ['web_ui']}}
+    if sender == 'other_method':
+        payload['req_method'] = 'chat.send'
+    if sender == 'alice':
+        payload['params']['verified_service'] = True
+        with authenticated_scope(principal(auth, tokens, 'alice')):
+            wire = auth.sign(payload)
+    else:
+        with authenticated_scope(None):
+            wire = auth.sign(payload)
+    if sender == 'unsigned':
+        wire.pop(ASSERTION)
+    elif sender == 'forged':
+        wire['params']['config'] = {'injected': True}
+    elif sender == 'replay':
+        auth.verify(wire)
+    await server._handle_message(ws, json.dumps(wire), asyncio.Lock())
+    if sender == 'service':
+        server._handle_agent_reload_config.assert_awaited_once()
+        assert server._handle_agent_reload_config.await_args.kwargs == {'verified_service': True}
+    else:
+        server._handle_agent_reload_config.assert_not_awaited()
     assert current_identity() is None

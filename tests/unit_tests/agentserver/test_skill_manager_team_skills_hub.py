@@ -13,6 +13,30 @@ from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager, SkillRp
 _TEAM_SKILLS_HUB_ZIP_URL = "https://openjiuwen-market.obs.ap-southeast-1.myhuaweicloud.com/plugins/demo.zip"
 
 
+@pytest.mark.asyncio
+async def test_authenticated_public_recommendation_never_borrows_host_credentials(tmp_path, monkeypatch):
+    from jiuwenswarm.governance.application_boundary import admit_application_request
+    from jiuwenswarm.governance.contracts import TrustedIdentity
+    from jiuwenswarm.governance.session_boundary import delivery_scope, set_delivery_permit
+    manager = SkillManager(workspace_dir=str(tmp_path))
+    monkeypatch.setattr('jiuwenswarm.governance.organization_auth.configured_authenticator', lambda: object())
+    def private_auth(_):
+        raise AssertionError('public catalog read borrowed host credentials')
+    monkeypatch.setattr(manager, '_resolve_teamskills_hub_auth_with_env', private_auth)
+    async def post(path, **kwargs):
+        assert kwargs['headers'] == {'Content-Type': 'application/json'}
+        assert kwargs['json_body']['user_id'] == ''
+        return {'items': []}
+    monkeypatch.setattr(manager, '_team_skills_hub_http_post_data', post)
+    with delivery_scope():
+        identity = TrustedIdentity('alice', 'alice', 'test:hub')
+        permit = admit_application_request('skills.swarmskillshub.recommend', {'top_k': 10},
+                                          identity_resolver=lambda: identity)
+        set_delivery_permit(permit)
+        result = await manager.handle_skills_swarm_skills_hub_recommend({'top_k': 10})
+    assert result['success'] is True
+
+
 class TeamSkillsHubHarnessSkillManager(SkillManager):
     """公开受保护方法供单测（勿命名为 Test*，否则 pytest 会当成测试类收集）。"""
 

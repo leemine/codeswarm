@@ -761,6 +761,11 @@ class SessionArchiveService:
         return float(stamp)
 
     def list_sessions(self, params: dict) -> dict:
+        from jiuwenswarm.governance.session_boundary import (
+            organization_sharing_host, current_inventory_identity,
+        )
+        authority = organization_sharing_host()
+        identity = current_inventory_identity() if authority is not None else None
         root = get_agent_sessions_dir().parent / "sessions_archived"
         # One projects.json read for the whole listing; the former per-session
         # cache-busted lookup was an N+1 of locked full-file reads.
@@ -776,6 +781,10 @@ class SessionArchiveService:
         root_resolved = root.resolve()
         for directory in entries:
             sid = directory.name
+            # Filter before opening history/metadata, sorting or counting. A
+            # shared Session never becomes the recipient's archived Session.
+            if authority is not None and not authority.owner_current(sid, identity):
+                continue
             try:
                 if not self._listable_archived_directory(directory, root_resolved):
                     # Symlinked or junctioned entries must never surface
@@ -834,6 +843,10 @@ class SessionArchiveService:
                     "archived listing skipped session %s", sid, exc_info=True
                 )
                 continue
+        if authority is not None:
+            if current_inventory_identity() != identity:
+                raise PermissionError('archive identity changed')
+            items = [item for item in items if authority.owner_current(item['session_id'], identity)]
         return lc.page(items, params, "sessions", 200)
 
     @staticmethod

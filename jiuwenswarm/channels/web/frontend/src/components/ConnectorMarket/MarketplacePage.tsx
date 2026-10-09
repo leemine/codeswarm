@@ -1,6 +1,6 @@
 import SimpleSelect from '../CronPanel/SimpleSelect';
 import { InstallationFilterSelect, matchesInstallation, type InstallationFilter } from '../marketplace/InstallationFilterSelect';
-import { catalogCacheOf } from '../../features/catalogCache';
+import { catalogCacheOf, type CatalogItems } from '../../features/catalogCache';
 import { CatalogCacheNotice } from '../marketplace/CatalogCacheNotice';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -226,6 +226,9 @@ export function MarketplacePage({
   // 传 undefined 拿混合列表、靠前端 pkg.source 二次过滤是遗留写法，2026-08-19 对齐 MCP 侧改掉。
   const packages = usePluginPackageStore((s) => s.packages);
   const localPackages = usePluginPackageStore((s) => s.localPackages);
+  const readOnly = [packages, localPackages, builtinConnectors, myConnectors].some(
+    (items) => (items as CatalogItems<unknown>).readOnly === true,
+  );
   const [installationFilter, setInstallationFilter] = useState<InstallationFilter>('all');
   const pluginInstallingIds = usePluginPackageStore(s => s.installingIds);
   const installed = usePluginPackageStore((s) => s.installed);
@@ -496,6 +499,7 @@ export function MarketplacePage({
           subtitleTestId="connector-market-marketplace-subtitle"
         />
 
+        {readOnly && <p className="text-text-muted" data-testid="connector-market-readonly-notice">{t('connectorMarket.readonlyNotice')}</p>}
         <div className="page-toolbar" data-testid="page-toolbar">
           <div className="flex min-h-[34px] items-stretch">
             {/* "应用插件"不是可选中页签：作为 Tabs 动作项混排（onClick 直连，不经过 onChange、
@@ -512,11 +516,11 @@ export function MarketplacePage({
                   value: tab,
                   label: t(tab === 'my' ? 'connectorMarket.tabs.my' : `connectorMarket.tabs.${tab}Market`),
                 })),
-                {
+                ...(!readOnly ? [{
                   value: 'application-plugins',
                   label: t('connectorMarket.tabs.applicationPlugins'),
                   onClick: onOpenApplicationPlugins,
-                },
+                }] : []),
               ]}
             />
           </div>
@@ -532,7 +536,7 @@ export function MarketplacePage({
               placeholder={topTab === 'my' ? (i18n.language.startsWith('zh') ? (myKind === 'plugin' ? '搜索我的插件' : '搜索我的连接器') : (myKind === 'plugin' ? 'Search my plugins' : 'Search my connectors')) : t(`connectorMarket.search.${topTab}`)}
             />
 
-            {topTab === 'my' && (
+            {topTab === 'my' && !readOnly && (
               <div className="relative" ref={createMenuRef}>
                 <button
                   type="button"
@@ -639,6 +643,7 @@ export function MarketplacePage({
                 const { installed: mcpInstalled } = deriveMcpAvailability(connector.installed, cs);
                 return (
                   <MyMarketCard
+                    readOnly={readOnly}
                     key={connector.id}
                     title={connector.displayName}
                     description={connector.description ?? ''}
@@ -658,6 +663,7 @@ export function MarketplacePage({
                 const pluginConnected = (pluginConnectionStateMap[pkg.id] ?? 'disconnected') === 'connected';
                 return (
                   <MyMarketCard
+                    readOnly={readOnly}
                     key={pkg.id}
                     title={localizedText(pkg.displayName, i18n.language)}
                     tags={(pkg.tags ?? []).map(tag => localizedText(tag, i18n.language))}
@@ -685,6 +691,7 @@ export function MarketplacePage({
                 const { installed: mcpInstalled } = deriveMcpAvailability(connector.installed, cs);
                 return (
                   <MarketCard
+                    readOnly={readOnly}
                     key={connector.id}
                     title={connector.displayName}
                     description={connector.description ?? ''}
@@ -704,6 +711,7 @@ export function MarketplacePage({
                 const pluginConnected = (pluginConnectionStateMap[pkg.id] ?? 'disconnected') === 'connected';
                 return (
                   <MarketCard
+                    readOnly={readOnly}
                     key={pkg.id}
                     title={localizedText(pkg.displayName, i18n.language)}
                     tags={(pkg.tags ?? []).map(tag => localizedText(tag, i18n.language))}

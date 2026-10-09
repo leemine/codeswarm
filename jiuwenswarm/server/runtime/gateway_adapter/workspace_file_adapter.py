@@ -127,7 +127,7 @@ class WorkspaceFileAdapter(GatewayAdapter):
                 raise PermissionError('original host required')
             permit = capture_workspace_request(self._sharing_host,
                 lambda: self._identity_resolver(request), request.session_id, request.params)
-            if dict(permit._source.binding)['channel_id'] != request.channel_id:
+            if permit.channel_id != request.channel_id:
                 raise PermissionError('original channel required')
             offset, limit = request.params['offset'], request.params['limit']
             data = await asyncio.to_thread(permit.read, offset, limit)

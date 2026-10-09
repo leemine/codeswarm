@@ -30,11 +30,17 @@ export function CliAuthModal({ name, initial, onCancel, onConnected }: CliAuthMo
   const { t } = useTranslation();
   const waitAuth = useConnectorStore((s) => s.waitAuth);
   const [step, setStep] = useState(initial);
+  const waitRequestRef = useRef<{
+    step: ConnectorConnectResponse;
+    promise: ReturnType<typeof waitAuth>;
+  } | null>(null);
+  const retryingRef = useRef(false);
   const [status, setStatus] = useState<'waiting' | 'error'>('waiting');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [justAdvanced, setJustAdvanced] = useState(false);
   const requestSeqRef = useRef(0);
-  const [retrySeq, setRetrySeq] = useState(0);
+  const connect = useConnectorStore((s) => s.connect);
+  const disconnect = useConnectorStore((s) => s.disconnect);
 
   useEffect(() => {
     return () => {
@@ -45,7 +51,7 @@ export function CliAuthModal({ name, initial, onCancel, onConnected }: CliAuthMo
   }, []);
 
   useEffect(() => {
-    if (step.authUrl) {
+    if (step.authUrl && waitRequestRef.current?.step !== step) {
       // 收到响应后自动开窗——不是在用户点击事件里同步触发，可能被浏览器弹窗拦截器挡掉；
       // 挡掉了也没关系，下面渲染的"打开授权链接"按钮可以让用户自己手动开一次。
       window.open(step.authUrl, '_blank', 'noopener,noreferrer');
@@ -53,7 +59,10 @@ export function CliAuthModal({ name, initial, onCancel, onConnected }: CliAuthMo
     const seq = ++requestSeqRef.current;
     setStatus('waiting');
     setErrorMessage(null);
-    waitAuth(name, step.stepIndex ?? 0).then((response) => {
+    if (waitRequestRef.current?.step !== step) {
+      waitRequestRef.current = { step, promise: waitAuth(name, step.stepIndex ?? 0) };
+    }
+    waitRequestRef.current.promise.then((response) => {
       if (seq !== requestSeqRef.current) return; // 已卸载/已发起新一轮，丢弃过期结果
       if (!response) {
         setStatus('error');
@@ -75,15 +84,33 @@ export function CliAuthModal({ name, initial, onCancel, onConnected }: CliAuthMo
       setErrorMessage(t('connectorMarket.cliAuth.error'));
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, name, retrySeq]);
+  }, [step, name]);
 
   function handleManualOpen() {
     if (step.authUrl) window.open(step.authUrl, '_blank', 'noopener,noreferrer');
   }
 
-  function handleRetry() {
+  async function handleRetry() {
+    if (retryingRef.current) return;
+    retryingRef.current = true;
+    const seq = ++requestSeqRef.current;
+    setStatus('waiting');
     setJustAdvanced(false);
-    setRetrySeq((v) => v + 1);
+    const response = await connect(name);
+    retryingRef.current = false;
+    if (seq !== requestSeqRef.current) return;
+    if (response?.type === 'connected') onConnected();
+    else if (response?.type === 'auth_required') setStep(response);
+    else {
+      setStatus('error');
+      setErrorMessage(t('connectorMarket.cliAuth.error'));
+    }
+  }
+
+  function handleCancel() {
+    requestSeqRef.current += 1;
+    void disconnect(name);
+    onCancel();
   }
 
   const stepsTotal = step.stepsTotal ?? 1;
@@ -100,7 +127,7 @@ export function CliAuthModal({ name, initial, onCancel, onConnected }: CliAuthMo
   return createPortal(
     <div data-connector-auth-modal="true" data-testid="connector-market-cli-auth-modal" className="fixed inset-0 z-[10100] flex items-center justify-center bg-overlay-cron-dialog">
       <div className="relative w-[420px] rounded-2xl bg-card p-6 shadow-xl">
-        <button type="button" onClick={onCancel} className="absolute right-5 top-5 text-text-muted hover:text-text" data-testid="connector-market-cli-auth-modal-close">
+        <button type="button" onClick={handleCancel} className="absolute right-5 top-5 text-text-muted hover:text-text" data-testid="connector-market-cli-auth-modal-close">
           <X size={18} />
         </button>
 

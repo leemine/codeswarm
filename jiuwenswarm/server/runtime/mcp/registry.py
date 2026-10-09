@@ -10,6 +10,9 @@ and exposes MCP records for the ``mcp.*`` RPC handlers. Connection state is deri
 
 from __future__ import annotations
 
+from functools import wraps
+from threading import RLock
+
 import logging
 from pathlib import Path
 from typing import Any
@@ -942,6 +945,21 @@ def _classify_install_failure(n: str, inst: Any) -> CliConnectError:
     )
 
 
+_CLI_LOCKS: dict[str, Any] = {}
+_CLI_LOCKS_GUARD = RLock()
+
+
+def _serialize_cli_operation(fn):
+    @wraps(fn)
+    def serialized(name, *args, **kwargs):
+        with _CLI_LOCKS_GUARD:
+            lock = _CLI_LOCKS.setdefault(str(name).strip(), RLock())
+        with lock:
+            return fn(name, *args, **kwargs)
+    return serialized
+
+
+@_serialize_cli_operation
 def _connect_cli(name: str, step_index: int, *, install_only: bool = False) -> dict[str, Any]:
     """Run install + version + auth steps for a CLI MCP.
 
@@ -1004,6 +1022,8 @@ def _connect_cli(name: str, step_index: int, *, install_only: bool = False) -> d
                 )
             raise ValueError(f"mcp '{n}' auth step {idx} failed: {step.error}")
         return _connect_cli(n, idx + 1, install_only=install_only)
+    if steps_total and not drv.status().authenticated:
+        raise ValueError(f"mcp '{n}' final identity verification failed")
     return _finalize_cli(n, inst, install_only=install_only)
 
 
@@ -1098,6 +1118,7 @@ def _finalize_cli(name: str, install_result: Any, *, install_only: bool = False)
     }
 
 
+@_serialize_cli_operation
 def complete_cli_auth(name: str, step_index: int, *, install_only: bool = False) -> dict[str, Any]:
     """Resume a CLI connect after the user completed OAuth in browser.
 
@@ -1112,34 +1133,24 @@ def complete_cli_auth(name: str, step_index: int, *, install_only: bool = False)
     n = str(name or "").strip()
     drv = CliDriver(n)
     idx = max(0, int(step_index))
-    # Check status FIRST: some authWaitForExit CLIs (wecom-cli init, dws auth
-    # login) don't exit promptly after the user completes OAuth in the browser
-    # — the proc keeps running. Status is the authoritative signal; the proc's
-    # liveness is only a fallback hint for CLIs whose status command can't tell.
-    status = drv.status()
-    if not status.authenticated:
-        # Status says not authenticated — fall back to "still waiting" if the
-        # auth proc is still running (the user may not have finished in browser).
-        proc_done = drv.auth_proc_done()
-        if proc_done is False:
-            return {
-                "name": n,
-                "integration_type": "cli",
-                "auth_required": True,
-                "auth_pending": True,
-                "step_index": idx,
-                "output": "auth process still running",
-            }
-        return {
-            "name": n,
-            "integration_type": "cli",
-            "auth_required": True,
-            "auth_pending": True,
-            "step_index": idx,
-            "matched": status.matched,
-            "output": status.output,
-        }
-    return _connect_cli(n, idx + 1, install_only=install_only)
+    if idx >= drv.auth_steps_count():
+        raise ValueError("Invalid authorization step")
+    # A completed initialization step is not a completed user login. Conversely,
+    # a failed/cancelled process must not advance just because old status exists.
+    complete = drv.auth_step_complete(idx)
+    if idx + 1 < drv.auth_steps_count():
+        if complete:
+            return _connect_cli(n, idx + 1, install_only=install_only)
+    elif drv.status().authenticated:
+        return _connect_cli(n, idx + 1, install_only=install_only)
+    return {
+        "name": n,
+        "integration_type": "cli",
+        "auth_required": True,
+        "auth_pending": True,
+        "step_index": idx,
+        "output": "waiting for authorization",
+    }
 
 
 def _wipe_stored_credentials(n: str) -> None:
@@ -1158,8 +1169,13 @@ def _wipe_stored_credentials(n: str) -> None:
         logger.warning("[mcp.registry] wipe credentials '%s' failed: %s", n, exc)
 
 
+@_serialize_cli_operation
 def disconnect_mcp(name: str) -> dict[str, Any]:
     """Remove an MCP. For CLI form: unauth + remove skills first."""
+    from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+    require_legacy_mcp_access()
+    from jiuwenswarm.server.runtime.mcp.cli_driver import _cleanup_stale_auth_proc
+    _cleanup_stale_auth_proc(str(name or "").strip())
     n = str(name or "").strip()
     if not n:
         raise ValueError("mcp name is required")
@@ -1219,6 +1235,8 @@ def register_custom_mcp(name: str, config: dict[str, Any]) -> dict[str, Any]:
     transport/command/args/env or url/headers directly. The entry is written
     enabled with a ``mcp:<name>`` server_id_scope.
     """
+    from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+    require_legacy_mcp_access()
     n = str(name or "").strip()
     if not n:
         raise ValueError("mcp name is required")
@@ -1301,6 +1319,8 @@ def delete_custom_mcp(name: str) -> dict[str, Any]:
     this owns persistent cleanup only. Raises ``ValueError`` for built-in /
     empty name, ``KeyError`` when no state record exists.
     """
+    from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+    require_legacy_mcp_access()
     n = str(name or "").strip()
     if not n:
         raise ValueError("mcp name is required")
@@ -1336,6 +1356,8 @@ def save_mcp_credentials(name: str, tokens: dict[str, Any]) -> dict[str, Any]:
     are never echoed back. :func:`connect_mcp` reads them when resolving
     ``${VAR}`` placeholders at connect time.
     """
+    from jiuwenswarm.common.mcp_config import require_legacy_mcp_access
+    require_legacy_mcp_access()
     from jiuwenswarm.server.runtime.mcp.credential import CredentialStore
     n = str(name or "").strip()
     if not n:

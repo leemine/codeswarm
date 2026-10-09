@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -37,6 +38,25 @@ class UpgradeExecutor(ABC):
     ) -> None:
         self._config = config
         self._status_callback = status_callback
+        self._authority = None
+        self._restart_process = None
+        self._restart_file = None
+
+    def set_authority(self, authorize):
+        self._authority = authorize
+        self._check_authority()
+
+    def _check_authority(self):
+        if self._authority is not None and self._authority() is not True:
+            raise PermissionError("Update operation no longer authorized")
+
+    def cancel_restart(self):
+        process = self._restart_process
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        if self._restart_file is not None:
+            self._restart_file.unlink(missing_ok=True)
 
     @abstractmethod
     def install(self) -> None:
@@ -94,6 +114,7 @@ class DesktopExecutor(UpgradeExecutor):
         timeout = self._config["timeout_seconds"]
         download_url = str(self._config.get("download_url", ""))
         asset_name = str(self._config.get("asset_name", ""))
+        self._check_authority()
         headers = self._download_headers()
 
         final_path = _updates_dir() / asset_name
@@ -102,6 +123,7 @@ class DesktopExecutor(UpgradeExecutor):
         try:
             self._download_file(download_url, partial_path, headers, timeout)
 
+            self._check_authority()
             partial_path.replace(final_path)
             size = final_path.stat().st_size
             self._status_callback({
@@ -127,6 +149,7 @@ class DesktopExecutor(UpgradeExecutor):
         headers: dict[str, str],
         timeout: int,
     ) -> None:
+        self._check_authority()
         request = Request(url, headers=headers)
         destination.parent.mkdir(parents=True, exist_ok=True)
         with (
@@ -141,7 +164,9 @@ class DesktopExecutor(UpgradeExecutor):
 
             downloaded = 0
             while True:
+                self._check_authority()
                 chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+                self._check_authority()
                 if not chunk:
                     break
                 handle.write(chunk)
@@ -175,13 +200,16 @@ class PipExecutor(UpgradeExecutor):
             "error": "",
         })
 
+        process = None
         try:
+            self._check_authority()
             editable_info = self._check_editable_install(package)
             if editable_info:
                 raise RuntimeError(editable_info)
 
             pip_args = self._build_install_args(package, timeout)
 
+            self._check_authority()
             process = subprocess.Popen(
                 pip_args,
                 stdout=subprocess.PIPE,
@@ -189,25 +217,37 @@ class PipExecutor(UpgradeExecutor):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                start_new_session=os.name == "posix",
             )
 
             lines: list[str] = []
             last_report = 0.0
-            if process.stdout:
-                for raw_line in iter(process.stdout.readline, ""):
-                    line = raw_line.rstrip("\r\n")
-                    lines.append(line)
-                    now = time.time()
-                    if now - last_report >= 0.5:
-                        last_report = now
-                        self._status_callback({
-                            "downloaded_bytes": min(len(lines), 99),
-                            "total_bytes": 100,
-                            "current_activity": line,
-                            "error": "",
-                        })
-
+            import queue
+            import threading
+            output = queue.Queue()
+            def read_output():
+                if process.stdout:
+                    for line in process.stdout:
+                        output.put(line)
+                output.put(None)
+            threading.Thread(target=read_output, daemon=True).start()
+            while True:
+                self._check_authority()
+                try:
+                    raw_line = output.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if raw_line is None:
+                    break
+                line = raw_line.rstrip("\r\n")
+                lines.append(line)
+                now = time.time()
+                if now - last_report >= 0.5:
+                    last_report = now
+                    self._status_callback({"downloaded_bytes": min(len(lines), 99),
+                                           "total_bytes": 100, "current_activity": line, "error": ""})
             process.wait()
+            self._check_authority()
 
             if process.returncode != 0:
                 raise RuntimeError(
@@ -225,6 +265,17 @@ class PipExecutor(UpgradeExecutor):
                 "pip_output": pip_output,
             })
         except Exception as exc:
+            if process is not None and process.poll() is None:
+                if os.name == "posix":
+                    # This process group belongs exclusively to this install.
+                    # Package builders may have children holding stdout open.
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                else:
+                    process.kill()
+                process.wait(timeout=5)
             self._status_callback({
                 "state": "update_available",
                 "error": f"pip install failed: {exc}",
@@ -330,6 +381,7 @@ class PipExecutor(UpgradeExecutor):
         return args
 
     def upgrade(self) -> None:
+        self._check_authority()
         start_cmd_raw = os.getenv("JIUWENSWARM_START_CMD")
         if start_cmd_raw:
             try:
@@ -386,7 +438,11 @@ class PipExecutor(UpgradeExecutor):
             "timestamp": time.time(),
         }
         restart_file = _updates_dir() / ".restart_pending.json"
-        with open(restart_file, "w", encoding="utf-8") as f:
+        self._check_authority()
+        self._restart_file = restart_file
+        descriptor = os.open(restart_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.chmod(restart_file, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as f:
             f.write(json.dumps(restart_data, indent=2))
             f.flush()
             os.fsync(f.fileno())
@@ -397,8 +453,9 @@ class PipExecutor(UpgradeExecutor):
             "--parent-pid", str(os.getpid()),
         ]
 
+        self._check_authority()
         if sys.platform == "win32":
-            subprocess.Popen(
+            self._restart_process = subprocess.Popen(
                 helper_args,
                 creationflags=(
                     getattr(subprocess, "DETACHED_PROCESS", 0)
@@ -409,7 +466,7 @@ class PipExecutor(UpgradeExecutor):
                 stderr=subprocess.DEVNULL,
             )
         else:
-            subprocess.Popen(
+            self._restart_process = subprocess.Popen(
                 helper_args,
                 start_new_session=True,
                 stdout=subprocess.DEVNULL,

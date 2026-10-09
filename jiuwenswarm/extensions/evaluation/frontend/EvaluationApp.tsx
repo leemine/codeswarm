@@ -23,6 +23,7 @@ const emptyTask = (): Task => ({
 
 export default function EvaluationApp() {
   const { t } = useTranslation();
+  const [unavailable, setUnavailable] = useState(false);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [task, setTask] = useState<Task>(emptyTask);
   const [draftRevision, setDraftRevision] = useState(0);
@@ -36,8 +37,19 @@ export default function EvaluationApp() {
   const [busy, setBusy] = useState(false);
   const mounted = useRef(true);
   const refresh = useCallback(async () => {
-    const value = await request<Catalog>('catalog');
-    if (mounted.current) setCatalog(value);
+    try {
+      const value = await request<Catalog>('catalog');
+      if (mounted.current) {
+        setCatalog(value);
+        setUnavailable(false);
+      }
+    } catch (err) {
+      if (mounted.current) {
+        setCatalog(null);
+        setUnavailable((err as { code?: string }).code === 'FORBIDDEN');
+      }
+      throw err;
+    }
   }, []);
   const act = useCallback(async (operation: () => Promise<void>) => {
     setBusy(true);
@@ -60,6 +72,27 @@ export default function EvaluationApp() {
       mounted.current = false;
     };
   }, [act, refresh]);
+  if (!catalog) {
+    return (
+      <main className="evaluation-app" data-testid="evaluation-app">
+        <header className="evaluation-header" data-testid="evaluation-header">
+          <h1 data-testid="evaluation-title">{t('evaluation.title')}</h1>
+          <Button data-testid="evaluation-refresh" disabled={busy} onClick={() => void act(refresh)}>
+            {t('evaluation.refresh')}
+          </Button>
+        </header>
+        {unavailable ? (
+          <p role="status" data-testid="evaluation-unavailable">
+            {t('evaluation.unavailable')}
+          </p>
+        ) : error ? (
+          <p role="alert" className="evaluation-error" data-testid="evaluation-error">
+            {error}
+          </p>
+        ) : null}
+      </main>
+    );
+  }
   const change = (value: Partial<Task>) => setTask((current) => ({ ...current, ...value }));
   const edit = (value: Task, revision: number, published = false) => {
     setTask(value);

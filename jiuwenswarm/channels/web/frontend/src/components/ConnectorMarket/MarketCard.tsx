@@ -8,6 +8,7 @@ import { busyLabelKey } from './mcpState';
 import type { McpBusyKind } from '../../types/connector';
 
 interface MarketCardProps {
+  readOnly?: boolean;
   title: string;
   tags?: string[];
   description: string;
@@ -23,6 +24,7 @@ interface MarketCardProps {
 }
 
 export function MarketCard({
+  readOnly = false,
   title,
   tags = [],
   description,
@@ -57,7 +59,9 @@ export function MarketCard({
   // 安装操作使用与专家卡片一致的文字按钮，已连接仍保留会话入口。
   let actionSlot: React.ReactNode;
 
-  if (state === 'connecting') {
+  if (readOnly) {
+    actionSlot = <span className="text-text-muted" data-testid="connector-market-card-readonly">{t('connectorMarket.readonly')}</span>;
+  } else if (state === 'connecting') {
     actionSlot = (
       <span className="flex items-center gap-1 text-[12px] text-text-muted">
         <Loader2 size={13} className="animate-spin" />
@@ -87,7 +91,7 @@ export function MarketCard({
     <PageCard
       testId="connector-market-card"
       variant={title}
-      onClick={canOpenDetail ? onOpenDetail : undefined}
+      onClick={!readOnly && canOpenDetail ? onOpenDetail : undefined}
       avatar={avatarProp}
       title={title}
       label={tags}

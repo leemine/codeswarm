@@ -5,6 +5,7 @@ import http.client
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -27,6 +28,25 @@ SHARD_SPEC.loader.exec_module(shardplan)
 
 
 class TestProtocol(unittest.TestCase):
+    def test_isolated_git_fixture_does_not_inherit_host_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            temp = root / "tmp"
+            work = temp / "fixture"
+            work.mkdir(parents=True)
+            inherited = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                                       cwd=work, capture_output=True)
+            self.assertEqual(inherited.returncode, 0)
+            env = testctl.hermetic_env({"TMPDIR": str(temp)})
+            isolated = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                                      cwd=work, env=env, capture_output=True)
+            self.assertNotEqual(isolated.returncode, 0)
+            subprocess.run(["git", "init", "-q", str(work)], env=env, check=True)
+            own = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                                 cwd=work, env=env, capture_output=True, text=True)
+            self.assertEqual(own.stdout.strip(), str(work))
+
     def test_privileged_bwrap_prefix_is_explicit(self) -> None:
         with patch.dict(testctl.os.environ, {"TESTCTL_BWRAP_SUDO": "1"}):
             with patch.object(testctl.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
@@ -248,6 +268,8 @@ class TestProcessDeadline(unittest.TestCase):
         self.assertIn("--unshare-pid", command)
         self.assertIn("--die-with-parent", command)
         self.assertNotIn("--share-net", command)
+        self.assertIn("--tmpfs", command)
+        self.assertNotIn(["--bind", "/tmp", "/tmp"], [command[i:i+3] for i in range(len(command))])
         self.assertEqual(command[-2:], ["python", "fixture.py"])
 
 

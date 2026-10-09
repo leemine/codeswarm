@@ -746,7 +746,8 @@ async def test_answer_retains_handoff_and_does_not_duplicate_prompt(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_multiple_questions_resume_once(tmp_path):
+@pytest.mark.parametrize("message_route", [False, True])
+async def test_multiple_questions_resume_once(tmp_path, message_route):
     interrupts = [
         OutputSchema(
             type=INTERACTION, index=i, payload={"id": f"q{i}", "value": "Question"}
@@ -764,8 +765,16 @@ async def test_multiple_questions_resume_once(tmp_path):
             prompt = await asyncio.wait_for(anext(outputs), 3)
             query = InteractiveInput()
             query.update(prompt.payload.id, f"a{i}")
+            inputs = {"query": query}
+            if message_route:
+                from jiuwenswarm.agents.harness.common.tools.session_messaging_toolkit import (
+                    SessionMessagingRoute, with_session_messaging_route,
+                )
+                inputs = with_session_messaging_route(
+                    inputs, SessionMessagingRoute("s", f"r{i}", "alice"),
+                )
             assert await execution.answer_request(
-                SendInputRequest(request_id=f"r{i}", inputs={"query": query})
+                SendInputRequest(request_id=f"r{i}", inputs=inputs)
             )
         await asyncio.wait_for(terminal.wait(), 3)
         assert agent.send_input.await_count == 2
@@ -773,8 +782,40 @@ async def test_multiple_questions_resume_once(tmp_path):
             "q0": "a0",
             "q1": "a1",
         }
+        if message_route:
+            from jiuwenswarm.agents.harness.common.tools.session_messaging_toolkit import (
+                SESSION_MESSAGING_ROUTE_EXTRA_KEY,
+            )
+            delivered = agent.send_input.await_args.args[0]
+            route = delivered.inputs["run"]["context"]["extra"][SESSION_MESSAGING_ROUTE_EXTRA_KEY]
+            assert route == SessionMessagingRoute("s", "r1", "alice").to_wire()
+            assert delivered.request_id == "r1"
     finally:
         await execution.stop()
+
+
+@pytest.mark.parametrize("changed", ["session_id", "user_id", "chain_id", "request_id", "model"])
+def test_combined_answers_reject_other_host_context_changes(changed):
+    from jiuwenswarm.agents.harness.common.tools.session_messaging_toolkit import (
+        SessionMessagingRoute, with_session_messaging_route,
+    )
+    from jiuwenswarm.runtime.harness.native_session import _combined_resume
+
+    requests = []
+    for index in range(2):
+        rid = f"r{index}"
+        route = SessionMessagingRoute("s", rid, "alice")
+        if index == 1 and changed != "model":
+            setattr(route, changed, "different")
+        query = InteractiveInput()
+        query.update(f"q{index}", "yes")
+        inputs = with_session_messaging_route({"query": query}, route)
+        inputs["run"]["context"]["extra"]["model"] = (
+            "different" if index == 1 and changed == "model" else "fixed"
+        )
+        requests.append(SendInputRequest(request_id=rid, inputs=inputs))
+    with pytest.raises(ValueError):
+        _combined_resume(requests, requests[-1])
 
 
 @pytest.mark.asyncio

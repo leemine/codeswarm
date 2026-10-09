@@ -277,6 +277,34 @@ async def test_web_channel_invoke_method_handler_injects_user_id():
 
 
 @pytest.mark.asyncio
+async def test_gateway_application_consumer_keeps_original_permit_across_await():
+    import asyncio
+    from jiuwenswarm.governance.application_boundary import admit_application_request
+    from jiuwenswarm.governance.contracts import TrustedIdentity
+    from jiuwenswarm.governance.session_boundary import current_application_permit
+    identity = TrustedIdentity('alice', 'alice', 'test:authority')
+    policy = {'settings': ['manage']}
+    permit = admit_application_request('updater.get_conf', {}, identity_resolver=lambda: identity,
+                                       policy_supplier=lambda _: policy)
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    ws = FakeWebSocket(query_user_id='alice')
+    ws._jiuwen_session_permits = {'req-scope': permit}
+    seen = []
+    async def handler(*args):
+        seen.append(current_application_permit('updater.get_conf'))
+        await asyncio.sleep(0)
+        seen.append(await asyncio.to_thread(current_application_permit, 'updater.get_conf'))
+        policy.clear()
+        with pytest.raises(PermissionError):
+            current_application_permit('updater.get_conf')
+    assert await channel._invoke_method_handler(
+        _MethodHandlerInvocation(ws, 'updater.get_conf', 'req-scope', {}, None, handler))
+    assert seen == [permit, permit]
+    with pytest.raises(PermissionError):
+        current_application_permit('updater.get_conf')
+
+
+@pytest.mark.asyncio
 async def test_web_channel_cron_push_targets_only_its_agentos_user(monkeypatch):
     channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
     alice = FakeWebSocket(query_user_id="alice")

@@ -504,6 +504,10 @@ class WorkspaceDownloadPermit:
     def session_id(self):
         return self._source.session_id
 
+    @property
+    def channel_id(self):
+        return dict(self._source.binding)['channel_id']
+
     @classmethod
     def capture(cls, host, identity_resolver, session_id, token, *, token_validator, asset_owner=None):
         """token_validator must be the host's existing HMAC validator, never wire."""
@@ -514,6 +518,10 @@ class WorkspaceDownloadPermit:
             ):
                 _deny()
             payload = token_validator(token, session_id=session_id)
+            from .rsi_download import NAMESPACE, ExperimentDownloadPermit
+            if type(payload) is dict and NAMESPACE in payload:
+                return ExperimentDownloadPermit.capture(identity_resolver, session_id, token,
+                                                        token_validator=token_validator)
             if type(payload) is dict and payload.get("kind") == "verified_asset_v1":
                 return cls._capture_sealed(host, identity_resolver, session_id, token,
                     payload, token_validator, asset_owner)

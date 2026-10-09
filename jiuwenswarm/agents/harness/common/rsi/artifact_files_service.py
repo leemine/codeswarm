@@ -273,6 +273,11 @@ class RsiArtifactFilesService:
             return "text/plain"
         if suffix == ".csv":
             return "text/csv"
+        if suffix in {".yaml", ".yml"}:
+            # Host MIME databases disagree (octet-stream/application/yaml).
+            # These are already decoded as text by read_file; keep the UI's
+            # file visibility consistent with that contract.
+            return "text/plain"
         return mimetypes.guess_type(path.name)[0] or "application/octet-stream"
 
 

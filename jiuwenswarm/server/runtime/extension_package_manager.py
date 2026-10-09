@@ -2573,6 +2573,9 @@ def install_equipment_gated(kind: str, params: dict) -> tuple[bool, dict[str, An
     else:
         raise ValueError(f"unknown package kind: {kind}")
 
+    from jiuwenswarm.governance.application_boundary import require_application_consumer
+    require_application_consumer(f"{kind}.install")
+
     package_id = _lifecycle_package_id(params, kind_label)
     pending = unready_connectors(manifest_connector_names(kind, package_id))
     if pending:
@@ -2668,6 +2671,10 @@ async def install_equipment_from_hub_gated(
     hub_port: HubAssetPort | None = None,
     downloader: Any = None,
 ) -> tuple[bool, dict[str, Any]]:
+    from jiuwenswarm.governance.application_boundary import require_application_consumer
+    if kind not in {_AGENT_TEMPLATE_KIND, _PLUGIN_PACKAGE_KIND}:
+        raise ValueError(f"unknown package kind: {kind}")
+    require_application_consumer(f"{kind}.install")
     kind_label = _hub_asset_kind(kind)
     requested_id = _lifecycle_package_id(params, kind_label)
     state_store = _hub_install_state_store(kind)
@@ -2712,6 +2719,9 @@ def uninstall_equipment_with_notice(kind: str, params: dict) -> dict[str, Any]:
         uninstall_fn = uninstall_plugin_package
     else:
         raise ValueError(f"unknown package kind: {kind}")
+
+    from jiuwenswarm.governance.application_boundary import require_application_consumer
+    require_application_consumer(f"{kind}.uninstall")
 
     package_id = resolve_equipment_runtime_id(kind, params.get("id"))
     connectors = manifest_connector_names(kind, package_id)
@@ -3884,8 +3894,10 @@ async def install_agent_group_with_hub(
     params: dict, *, hub_port: HubAssetPort | None = None, downloader: Any = None
 ) -> None:
     """Acquire a Hub group by its asset ID, then install its local runtime package."""
+    from jiuwenswarm.governance.application_boundary import require_application_consumer
     from jiuwenswarm.agents.swarm.agent_group import load_agent_group_package
 
+    require_application_consumer("agent_groups.install")
     requested_id = _lifecycle_package_id(params, "agent_group")
     store = _hub_install_state_store(_AGENT_GROUP_KIND)
     record = store.get(requested_id) or store.get_by_package_id(requested_id)
@@ -3921,6 +3933,7 @@ async def install_agent_group_with_hub(
             downloader=downloader,
         )
         package_id = result.package_id
+    require_application_consumer("agent_groups.install")
     install_agent_group({"id": package_id})
     if store.get(requested_id) or store.get_by_package_id(package_id):
         upsert_agent_group_marketplace_entry(package_id, installed=True, source="hub")

@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useRsiStore } from '../rsiStore';
 import step1Image from '../../../assets/rsi/rsi-step1.svg';
 import step2Image from '../../../assets/rsi/rsi-step2.svg';
 import step3Image from '../../../assets/rsi/rsi-step3.svg';
@@ -15,6 +16,7 @@ const MAX_SCALE = 0.96;
 
 export function RsiIntroduction({ onCreate }: RsiIntroductionProps) {
   const { t } = useTranslation();
+  const canExecute = useRsiStore((s) => s.canExecute);
   const scalerRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const [scale, setScale] = useState(1);
@@ -60,7 +62,7 @@ export function RsiIntroduction({ onCreate }: RsiIntroductionProps) {
             <h1 className="rsi-intro__title">{t('rsi.intro.title')}</h1>
             <p className="rsi-intro__lead">{t('rsi.intro.lead')}</p>
           </div>
-          <button type="button" className="rsi-intro__create" onClick={onCreate}>
+          <button type="button" className="rsi-intro__create" onClick={onCreate} disabled={!canExecute} title={!canExecute ? t('rsi.instanceOwnerRequired') : undefined}>
             {t('rsi.createExperiment')}
           </button>
         </header>

@@ -4558,58 +4558,12 @@ class JiuWenSwarmDeepAdapter:
 
     @staticmethod
     def _sync_mcp_credentials_environment() -> bool:
-        """Inject MCP tokens into ``os.environ``.
+        """Compatibility hook; credentials are resolved only for child execution."""
+        return False
 
-        Skill-only MCPs (ctrip-wendao, netease-mail) run their bundled skill
-        script via BashTool, which inherits ``os.environ``. MCP stdio servers
-        get tokens via the McpServerConfig credential_resolver, but skill
-        scripts have no such hook — so their token env vars must be visible in
-        the agent process's own environment. This mirrors the browser
-        runtime's env-sync pattern (BashTool reads BROWSER_DRIVER the same way).
-
-        Idempotent: writes the current set of connected MCPs' tokens every
-        call. Called at agent init/reload and at connect/disconnect.
-
-        Returns True on a real sync (the caller stops on the first live agent
-        that can sync, since os.environ is process-global); False when the
-        credential store/state is unreadable (the caller falls through to try
-        another live agent — covers the cold-start race where the first agent
-        in ``self.agents`` has no adapter yet).
-        """
-        try:
-            require_legacy_mcp_access()
-        except PermissionError:
-            return False
-        try:
-            from jiuwenswarm.server.runtime.mcp.state_store import (
-                list_connected_mcps,
-            )
-            from jiuwenswarm.server.runtime.mcp.credential import (
-                CredentialStore,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(
-                "[JiuWenSwarmDeepAdapter] mcp credential sync skipped: %s", exc,
-            )
-            return False
-        store = CredentialStore()
-        for rec in list_connected_mcps():
-            n = str(rec.get("name", "")).strip()
-            if not n:
-                continue
-            try:
-                tokens = store.get_all(n)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(
-                    "[JiuWenSwarmDeepAdapter] mcp '%s' tokens read failed: %s",
-                    n, exc,
-                )
-                continue
-            for key, value in tokens.items():
-                k = str(key)
-                if k:
-                    os.environ[k] = str(value) if value is not None else ""
-        return True
+    def _mcp_shell_environment(self) -> dict[str, str]:
+        from jiuwenswarm.governance.instance_mcp import shell_environment
+        return shell_environment(self)
 
     @staticmethod
     def _mcp_env_keys(name: str) -> list[str]:
@@ -4637,14 +4591,8 @@ class JiuWenSwarmDeepAdapter:
         return sorted(keys)
 
     def _clear_mcp_credentials_environment(self, name: str) -> None:
-        """Remove a disconnected MCP's token env vars from ``os.environ``.
-
-        Companion to :meth:`_sync_mcp_credentials_environment`. Called from
-        the disconnect path so a stale token doesn't linger in the agent
-        environment after the user disconnects the MCP.
-        """
-        for k in self._mcp_env_keys(name):
-            os.environ.pop(k, None)
+        """Compatibility no-op: this adapter no longer owns global env values."""
+        return None
 
     def _sync_browser_runtime_environment(
         self,
@@ -4825,7 +4773,7 @@ class JiuWenSwarmDeepAdapter:
         if not self._filesystem_rail_enabled_for_profile():
             candidates = [rail for rail in candidates if not isinstance(rail, SysOperationRail)]
         if not any(isinstance(rail, SysOperationRail) for rail in candidates):
-            candidates.insert(0, SysOperationRail())
+            candidates.insert(0, SysOperationRail(bash_environment_provider=self._mcp_shell_environment))
         return candidates
 
     def _prepare_general_purpose_permission_update(self, expected: PermissionRailGroup, *, smart: bool):
@@ -4929,9 +4877,8 @@ class JiuWenSwarmDeepAdapter:
             config_base,
             runtime_enabled=browser_enabled,
         )
-        # Skill-only MCPs' bundled scripts read tokens from os.environ (BashTool
-        # inherits it). Sync now so a freshly built agent process has the
-        # connected MCPs' tokens available before any skill runs.
+        # Compatibility notification only. Bash resolves selected connector
+        # credentials immediately before child execution, never into os.environ.
         self._sync_mcp_credentials_environment()
 
         if browser_enabled:
@@ -5110,7 +5057,17 @@ class JiuWenSwarmDeepAdapter:
                         "[JiuWenSwarmDeepAdapter] MCP server_id missing after registration: %s", cfg
                     )
                     return False
-                self._instance.ability_manager.add(cfg)
+                native = getattr(self, '_native_execution', None)
+                if native is not None and native._tool_owner is not None:
+                    from jiuwenswarm.governance.organization_auth import configured_authenticator
+                    if configured_authenticator() is not None:
+                        from jiuwenswarm.governance.instance_mcp import install_instance_mcp_tools
+                        self._instance_mcp_registrations.extend(install_instance_mcp_tools(
+                            self, native, native._tool_owner[1], native._tool_owner[2], cfg))
+                    else:
+                        self._instance.ability_manager.add(cfg)
+                else:
+                    self._instance.ability_manager.add(cfg)
                 self._registered_mcp_server_ids.add(server_id)
                 self._registered_mcp_servers[server_id] = cfg
                 return True
@@ -5153,6 +5110,10 @@ class JiuWenSwarmDeepAdapter:
     async def _unregister_mcp_server(self, server_id: str) -> None:
         if self._instance is None:
             return
+        for record in list(getattr(self, '_instance_mcp_registrations', ())):
+            if record.config.server_id == server_id:
+                record.close()
+                self._instance_mcp_registrations.remove(record)
         cfg = self._registered_mcp_servers.get(server_id)
         server_name = getattr(cfg, "server_name", "") if cfg is not None else ""
         # openjiuwen's remove_mcp_server closes the MCP client (SSE/HTTP). For
@@ -5245,7 +5206,16 @@ class JiuWenSwarmDeepAdapter:
             return True
         applied_any = False
         first_error: str = ""
-        for adapter in self._iter_mcp_target_adapters():
+        targets = self._iter_mcp_target_adapters()
+        from jiuwenswarm.governance.organization_auth import configured_authenticator, current_identity
+        if configured_authenticator() is not None:
+            from jiuwenswarm.governance.session_boundary import organization_sharing_host
+            host, identity = organization_sharing_host(), current_identity()
+            targets = [target for target in targets
+                       if getattr(target, '_is_session_scoped_adapter', False)
+                       and host.owner_current(getattr(target, '_parent_session_id', None), identity)
+                       and (target is self or name in target._session_selected_mcp)]
+        for adapter in targets:
             if adapter._instance is None:
                 continue
             already = any(
@@ -7750,11 +7720,10 @@ class JiuWenSwarmDeepAdapter:
                     exc,
                 )
 
-    @staticmethod
-    def _build_filesystem_rail() -> SysOperationRail | None:
+    def _build_filesystem_rail(self) -> SysOperationRail | None:
         """Build SysOperationRail."""
         try:
-            fs_rail = SysOperationRail()
+            fs_rail = SysOperationRail(bash_environment_provider=self._mcp_shell_environment)
             logger.info("[JiuWenSwarmDeepAdapter] SysOperationRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SysOperationRail create failed: %s", exc)
@@ -11388,9 +11357,24 @@ class JiuWenSwarmDeepAdapter:
 
         async with self._personal_context_rail_lock:
             enabled = self._personal_context_rail_enabled(mode)
+            from jiuwenswarm.governance.organization_auth import configured_authenticator
+            from jiuwenswarm.governance.personal_context import personal_context_home
+            home = None
+            if configured_authenticator() is not None:
+                # A process-wide switch must never attach another account's home.
+                # Core reads this subject's live Agent-use switch on every call.
+                enabled = deprecate_mode(mode) in (
+                    {"agent.code.normal", "agent.code.plan"} if self._is_code_agent
+                    else {NEW_AGENT_WORK_NORMAL, NEW_AGENT_WORK_PLAN}
+                )
+            try:
+                home = personal_context_home()
+            except PermissionError:
+                enabled = False
             rail = self._personal_context_rail
+            home_changed = getattr(self, "_personal_context_rail_home", home) != home
 
-            if rail is not None and not enabled:
+            if rail is not None and (not enabled or home_changed):
                 try:
                     await self._instance.unregister_rail(rail)
                 except Exception as exc:  # noqa: BLE001
@@ -11408,9 +11392,7 @@ class JiuWenSwarmDeepAdapter:
 
             if rail is None:
                 try:
-                    rail = PersonalContextRail(
-                        Path.home() / ".jiuwenswarm" / ".personal_context"
-                    )
+                    rail = PersonalContextRail(home)
                     await self._instance.register_rail(rail)
                 except Exception as exc:  # noqa: BLE001
                     if rail is not None:
@@ -11430,6 +11412,7 @@ class JiuWenSwarmDeepAdapter:
                     )
                     return
                 self._personal_context_rail = rail
+                self._personal_context_rail_home = home
                 logger.info(
                     "[JiuWenSwarmDeepAdapter] PersonalContextRail registered for %s", mode
                 )
@@ -12444,6 +12427,7 @@ class JiuWenSwarmDeepAdapter:
             )
 
         mcp_registrations = []
+        self._instance_mcp_registrations = []
 
         def after_stop() -> None:
             # These records belong to this exact execution, including callers
@@ -12451,6 +12435,9 @@ class JiuWenSwarmDeepAdapter:
             for registration in reversed(mcp_registrations):
                 registration.close()
             mcp_registrations.clear()
+            for registration in reversed(self._instance_mcp_registrations):
+                registration.close()
+            self._instance_mcp_registrations.clear()
 
         async def before_start(instance: Any, session: Any) -> None:
             agent_factory(None)
@@ -12476,6 +12463,10 @@ class JiuWenSwarmDeepAdapter:
                         registration.close()
                     raise
                 mcp_registrations.extend(registrations)
+                from jiuwenswarm.governance.instance_mcp import install_instance_mcp_tools
+                for config in self._registered_mcp_servers.values():
+                    self._instance_mcp_registrations.extend(install_instance_mcp_tools(
+                        self, execution, instance.react_agent, session, config))
 
         async def dispatch_guard(request: Any, *, send: Any) -> Any:
             agent_factory(None)

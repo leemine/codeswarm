@@ -79,6 +79,11 @@ def authorize_resource_request(
     # performs the original project and resource authorization.
     if method == "session.execution.options":
         return
+    if method == 'path.get' and getattr(session_permit, 'application_check', None) is not None:
+        if session_permit.identity != identity or session_permit.method != method or not session_permit.revalidate():
+            raise ProjectAccessDenied('browser configuration authority changed')
+        # This exact application projection returns no filesystem path.
+        return
     if not method.startswith(_RESOURCE_PREFIXES):
         return
     from .organization_auth import configured_authenticator
@@ -107,7 +112,7 @@ def authorize_resource_request(
             # The original owner may stop its existing work despite source/ACL
             # revocation. This does not authorize content or a new execution.
             return
-    if configured_authenticator() is not None and (method in SHARE_METHODS or method == "session.list"):
+    if configured_authenticator() is not None and (method in SHARE_METHODS or method in {"session.list", "session.archived.list"}):
         # Persistent sharing evaluates the source owner's current project ACL;
         # a recipient does not inherit project membership. Session inventory
         # now filters durable ownership before reading or counting metadata.
@@ -136,6 +141,17 @@ def authorize_resource_request(
     paths = _referenced_values(params, frozenset({
         "project_dir", "cwd", "path", "file_path", "resolved_path", "initial_dir", "trusted_dirs",
     }))
+    # An exact authenticated creation permit without external resource references
+    # enters the Runtime's existing private-workspace provisioner. It is not an
+    # inventory request over every protected project in this shared installation.
+    if method == "session.create" and configured_authenticator() is not None:
+        from jiuwenswarm.common.work_mode import is_default_project_id
+        if not session_ids and not paths and all(is_default_project_id(pid) for pid in project_ids):
+            if (not isinstance(session_permit, SessionRequestPermit)
+                    or session_permit.method != method or session_permit.identity != identity
+                    or not session_permit.revalidate()):
+                raise ProjectAccessDenied("current private creation permit required")
+            return
     source_projects: set[str] = set()
     for session_id in session_ids:
         metadata = get_session_metadata(session_id, cache_bust=True, enable_writeback=False)

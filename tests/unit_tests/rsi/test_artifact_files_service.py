@@ -44,6 +44,20 @@ def test_zip_artifact_is_browsable_and_jsonl_is_text(tmp_path: Path):
     assert content["content"] == '{"event":"node"}\n'
 
 
+def test_harness_refs_yaml_is_visible_as_text_on_any_host(tmp_path, monkeypatch):
+    task = tmp_path / 'rsi-harness'
+    (task / 'run').mkdir(parents=True)
+    (task / 'task.json').write_text('{}')
+    refs = task / 'run' / 'candidate_harness_refs.yaml'
+    refs.write_text('harness_refs: {}\n')
+    monkeypatch.setattr('mimetypes.guess_type', lambda _: ('application/yaml', None))
+    service = RsiArtifactFilesService(SimpleNamespace(tasks_root=tmp_path))
+    listed = service.list_files({'task_id': task.name, 'path': str(refs)})
+    assert len(listed['files']) == 1
+    assert listed['files'][0]['type'] == 'text/plain'
+    assert service.read_file({'task_id': task.name, 'path': str(refs)})['encoding'] == 'text'
+
+
 def test_directory_artifact_is_browsable_and_files_are_readable(tmp_path: Path):
     task_id = "rsi-paper-directory"
     task_root = tmp_path / task_id

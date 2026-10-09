@@ -152,7 +152,7 @@ def test_connect_mcp_install_only_threads_through_auth(tmp_path: Path) -> None:
          patch.object(CliDriver, "auth_step", fake_auth_step), \
          patch.object(CliDriver, "auth_steps_count", fake_auth_steps_count), \
          patch.object(CliDriver, "status", fake_status), \
-         patch.object(CliDriver, "auth_proc_done", fake_auth_proc_done):
+         patch.object(CliDriver, "auth_step_complete", fake_auth_proc_done):
         from jiuwenswarm.server.runtime.mcp.registry import (
             connect_mcp, complete_cli_auth,
         )

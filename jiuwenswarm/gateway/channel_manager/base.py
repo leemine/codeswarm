@@ -235,6 +235,38 @@ class BaseWebChannel(BaseChannel):
     def set_handshake_auth(self, callback: Callable[..., Any]) -> None:
         self._handshake_auth = callback
 
+    async def bind_authenticated_identity(self, ws: Any) -> None:
+        """Bind the authenticator's subject before any connection routing.
+
+        The upgrade hook only decides whether to accept a socket. Revalidate
+        here instead of caching bearer credentials or trusting a query user ID.
+        Local channels without an authentication hook retain their old routing.
+        """
+        hook = self._handshake_auth
+        if hook is None:
+            return
+        from jiuwenswarm.extensions.agentos.auth.common import (
+            apply_auth_result_to_ws, extract_headers,
+        )
+        path = getattr(getattr(ws, "request", None), "path", None) or getattr(ws, "path", "")
+        result = hook(path=path, headers=extract_headers(ws),
+                      remote=str(getattr(ws, "remote_address", "")), channel=self.channel_id)
+        if inspect.isawaitable(result):
+            result = await result
+        if result is None or not result.success:
+            raise PermissionError("connection authentication failed")
+        # auth_enabled=false returns a legacy routing hint, not a verified actor.
+        if result.extensions.get("auth_method") != "token":
+            return
+        if not isinstance(result.user_id, str) or not result.user_id.strip():
+            raise PermissionError("authenticated subject is missing")
+        from jiuwenswarm.governance.organization_auth import connection_principal
+        principal = connection_principal(ws)
+        if principal is not None and principal.identity().actor_id != result.user_id:
+            raise PermissionError("authentication sources disagree")
+        apply_auth_result_to_ws(ws, result)
+        setattr(ws, "_verified_iam_user_id", result.user_id)
+
     async def handshake_auth_denied(
         self,
         *,
@@ -273,4 +305,3 @@ class BaseWebChannel(BaseChannel):
             return Response(status.value, status.phrase, Headers(headers), _UNAUTHORIZED_BODY)
 
         return status, headers, _UNAUTHORIZED_BODY
-

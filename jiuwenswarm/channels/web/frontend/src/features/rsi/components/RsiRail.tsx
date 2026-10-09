@@ -2,6 +2,7 @@
  * RSI 左侧实验管理栏：标题 + 创建按钮 + 实验列表。
  */
 import { useTranslation } from 'react-i18next';
+import { useRsiStore } from '../rsiStore';
 import type { RsiTaskListItem } from '../types';
 import { statusBadgeInfo, typeDisplayLabel } from '../rsiPresentation';
 
@@ -17,6 +18,7 @@ interface RsiRailProps {
 
 export function RsiRail({ tasks, loading, error, selectedTaskId, onSelect, onCreate, onRetry }: RsiRailProps) {
   const { t } = useTranslation();
+  const canExecute = useRsiStore((s) => s.canExecute);
 
   return (
     <aside className="rsi-rail" data-testid="rsi-rail">
@@ -24,7 +26,7 @@ export function RsiRail({ tasks, loading, error, selectedTaskId, onSelect, onCre
         <span className="rsi-rail__title">{t('rsi.title')}</span>
       </div>
       <div className="rsi-rail__create">
-        <button type="button" className="rsi-rail__create-btn" onClick={onCreate} data-testid="rsi-create-button">
+        <button type="button" className="rsi-rail__create-btn" onClick={onCreate} disabled={!canExecute} title={!canExecute ? t('rsi.instanceOwnerRequired') : undefined} data-testid="rsi-create-button">
           <svg
             viewBox="0 0 20 20"
             width="14"

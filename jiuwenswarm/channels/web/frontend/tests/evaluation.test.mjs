@@ -25,9 +25,11 @@ const root = createRoot(document.getElementById('root'));
 const find = (id) => document.querySelector(`[data-testid="${id}"]`);
 const calls = [];
 let experiments = [];
+let catalogError;
 webClient.request = async (method, params) => {
   calls.push({ method, params });
   if (method === 'evaluation.options') return { models: [], profiles: [], execution_available: false };
+  if (method === 'evaluation.catalog' && catalogError) throw catalogError;
   if (method === 'evaluation.catalog') return { tasks: [], drafts: [], datasets: [] };
   if (method === 'evaluation.experiment.list') return { experiments };
   if (method === 'evaluation.evidence') throw new Error('FORBIDDEN');
@@ -102,4 +104,29 @@ test('independent acceptance shows authoritative evidence and preserves original
   assert.match(find('evaluation-verifier-cleanup').textContent,/Yes/);
   assert.ok(find('evaluation-start').disabled);
   await unmount();
+});
+
+
+test('denied bootstrap shows unavailable without fetching or enabling experiment controls; refresh recovers', async () => {
+  calls.length = 0;
+  catalogError = Object.assign(new Error('Request denied or unavailable.'), { code: 'FORBIDDEN' });
+  await mount();
+  assert.ok(find('evaluation-unavailable'));
+  assert.equal(find('evaluation-error'), null);
+  assert.equal(find('evaluation-create'), null);
+  assert.equal(find('evaluation-library'), null);
+  assert.deepEqual(calls.map((call) => call.method), ['evaluation.catalog']);
+  catalogError = undefined;
+  await act(async () => find('evaluation-refresh').click());
+  assert.equal(find('evaluation-unavailable'), null);
+  assert.ok(find('evaluation-library'));
+});
+
+test('network errors are not mislabeled as unsupported deployment', async () => {
+  catalogError = Object.assign(new Error('Request timed out'), { code: 'REQUEST_TIMEOUT' });
+  await mount();
+  assert.equal(find('evaluation-unavailable'), null);
+  assert.match(find('evaluation-error').textContent, /REQUEST_TIMEOUT/);
+  assert.equal(find('evaluation-create'), null);
+  catalogError = undefined;
 });
