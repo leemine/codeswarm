@@ -33,6 +33,14 @@ export function useApplicationPlugins(isGatewayConnected: boolean): ApplicationP
   }, [isGatewayConnected]);
 
   useEffect(() => {
+    const onRefresh = () => {
+      void refresh();
+    };
+    window.addEventListener('jiuwen:application-plugins-refresh', onRefresh);
+    return () => window.removeEventListener('jiuwen:application-plugins-refresh', onRefresh);
+  }, [refresh]);
+
+  useEffect(() => {
     if (!isGatewayConnected) {
       setPlugins([]);
       setLoaded(false);

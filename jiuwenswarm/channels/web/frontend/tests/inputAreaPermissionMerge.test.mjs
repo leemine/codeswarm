@@ -60,6 +60,30 @@ function byId(id, variant) {
 }
 const click = async (element) => act(async () => element.click());
 
+for (const source of ['permission_interrupt', 'ask_user_interrupt']) {
+  test(`${source}: live control retains Stop after the previous producer ends`, async () => {
+    await mount({ draft: 'preserved follow-up' }, async ({ props, render, sessionId, submitted }) => {
+      let cancelled = 0;
+      props.onCancel = () => { cancelled += 1; };
+      props.isProcessing = false;
+      await act(async () => useChatStore.getState().enqueuePendingQuestion(sessionId, {
+        request_id: 'control-continuation',
+        source,
+        questions: [{ header: 'Control', question: 'Continue?', card_id: 'pending-control', options: [{ label: 'Allow' }] }],
+      }));
+      await render();
+      const stop = byId('chat-panel-input-send', 'stop');
+      assert.equal(stop.disabled, false);
+      await click(stop);
+      assert.equal(cancelled, 1);
+      assert.deepEqual(submitted, []);
+      assert.equal(useChatStore.getState().getRuntime(sessionId).inputValue, 'preserved follow-up');
+      await act(async () => useChatStore.getState().clearPendingQuestions(sessionId));
+      assert.equal(byId('chat-panel-input-send', 'send').dataset.variant, 'send');
+    });
+  });
+}
+
 async function mount({ mode = 'agent', profile = 'default', language = 'en', organizationAuth = false, sessionId = 'input-permission-merge', draft = '' } = {}, run) {
   useSessionStore.getState().ensureRuntime(sessionId);
   useSessionStore.getState().setMode(sessionId, mode);

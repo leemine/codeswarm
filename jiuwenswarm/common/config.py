@@ -921,6 +921,19 @@ def update_setup_guide_enabled_in_config(value: bool) -> None:
     update_config(mutator)
 
 
+def update_evaluation_enabled_in_config(value: bool) -> None:
+    """Persist the evaluation application switch through the original config lock."""
+    def mutator(data: dict[str, Any]) -> dict[str, Any]:
+        section = data.get("evaluation")
+        if not isinstance(section, dict):
+            section = {}
+            data["evaluation"] = section
+        section["enabled"] = value
+        return data
+
+    update_config(mutator)
+
+
 def update_rsi_enabled_in_config(value: bool) -> None:
     """原子更新 rsi.enabled（Web RSI 实验入口开关）。"""
     def mutator(data: dict[str, Any]) -> dict[str, Any]:

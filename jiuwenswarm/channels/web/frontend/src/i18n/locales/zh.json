@@ -462,9 +462,13 @@
       },
       "permissions_mode": { "title": "全局权限模式", "description": "为普通 Agent 与 Team 选择统一的安全护栏模式。" },
       "a2ui_enabled": { "title": "启用 A2UI", "description": "允许将支持的结果渲染成交互式界面。" },
+      "evaluation_enabled": {
+        "title": "启用评测实验",
+        "description": "显示「实验」中的评测页签；关闭后保留已有任务与实验记录。"
+      },
       "rsi_enabled": {
         "title": "启用 RSI",
-        "description": "显示侧边栏「实验」入口，可创建并查看 Harness 优化和产物优化（论文、程序）实验；关闭后隐藏该入口。"
+        "description": "显示「实验」中的递归自我改进页签，可创建并查看 Harness 优化和产物优化（论文、程序）实验；关闭后隐藏该页签。"
       },
       "trajectory_ui_enabled": {
         "title": "启用轨迹界面",

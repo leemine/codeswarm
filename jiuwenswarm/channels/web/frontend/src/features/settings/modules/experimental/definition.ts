@@ -40,6 +40,11 @@ export const experimentalModule: SettingsModuleDefinition = {
       items: [{ id: 'rsi-enabled', component: 'custom', render: RSISetting }],
     },
     {
+      id: 'evaluation',
+      titleKey: 'evaluation.title',
+      items: [{ id: 'evaluation-enabled', component: 'switch', key: 'evaluation_enabled' }],
+    },
+    {
       id: 'a2ui',
       titleKey: 'settingsPanel.experimental.a2ui',
       items: [{ id: 'a2ui', component: 'custom', render: A2UISetting }],

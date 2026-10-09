@@ -2137,7 +2137,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   // preparing a follow-up. A pending approval keeps Stop available and blocks Send.
   const hasDraft = hasTextDraft || attachments.length > 0 || isListening || isTranscribing;
   const isImageInterruptBlocked = isInterruptible && !isTeamMode && !isAgentMode && readyMediaItems.length > 0;
-  const showStop = isProcessing && !isPaused && (!hasDraft || hasPendingQuestion);
+  // A control continuation can await approval after the previous producer ends.
+  // Keep the original cancel action available while a live question remains.
+  const showStop = (isProcessing || hasPendingQuestion) && !isPaused && (!hasDraft || hasPendingQuestion);
   const hasReadyMedia = readyMediaItems.length > 0;
   const canSubmit =
     showStop ||

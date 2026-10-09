@@ -38,6 +38,7 @@ export function useSettingsConfig() {
         request('config.save_all', payload, { timeoutMs: 600_000 }),
       );
       setConfig((current) => ({ ...current, ...payload.config }));
+      window.dispatchEvent(new Event('jiuwen:application-plugins-refresh'));
       return result;
     },
     [request, saveQueue],

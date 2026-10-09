@@ -6,6 +6,11 @@ from jiuwenswarm.extensions.sdk import ApplicationPluginExtension, FrontendContr
 class EvaluationApplicationPlugin(ApplicationPluginExtension):
     plugin_id = "evaluation-experiments"
 
+    def is_enabled(self) -> bool:
+        from jiuwenswarm.common.config import get_config_raw
+
+        return (get_config_raw().get("evaluation") or {}).get("enabled", True) is not False
+
     async def initialize(self, config):
         del config
 

@@ -149,6 +149,7 @@ async def test_authenticated_web_and_adapter_use_same_secret_free_projection(
             "external_cli_agents_supported",
             "a2ui_enabled",
             "rsi_enabled",
+            "evaluation_enabled",
             "symphony_enabled",
             "permissions_profile",
             "permissions_enabled",

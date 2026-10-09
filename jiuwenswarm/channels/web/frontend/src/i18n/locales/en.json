@@ -471,9 +471,13 @@
         "description": "Choose the shared guardrail mode for ordinary Agents and Teams."
       },
       "a2ui_enabled": { "title": "Enable A2UI", "description": "Render supported results as interactive interfaces." },
+      "evaluation_enabled": {
+        "title": "Enable evaluation experiments",
+        "description": "Show the evaluation tab under Experiments. Turning it off retains existing tasks and experiment records."
+      },
       "rsi_enabled": {
         "title": "Enable RSI",
-        "description": "Show the Experiments entry in the sidebar for Harness optimization and artifact optimization (papers and programs). Turn it off to hide the entry."
+        "description": "Show the recursive self-improvement tab under Experiments for Harness optimization and artifact optimization (papers and programs). Turn it off to hide this tab."
       },
       "trajectory_ui_enabled": {
         "title": "Enable trajectory UI",
