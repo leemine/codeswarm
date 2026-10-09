@@ -11,6 +11,25 @@ from .model_consumer import model_request_authority
 from .resources import ResourceAccessDenied
 
 
+class _PendingContextAuthority:
+    """Permit history construction before request binding, never model IO."""
+
+    def __init__(self, agent, client, request):
+        self._agent, self._client, self._request = agent, client, request
+
+    def bind_for_call(self):
+        source = getattr(getattr(self._agent, 'deep_config', None), 'model', None)
+        authority = getattr(getattr(source, '_client', None), '_request_authority', None)
+        if authority is None:
+            raise ResourceAccessDenied('context model authority unavailable')
+        if (self._client != source.model_client_config
+                or self._request.model_name != source.model_config.model_name):
+            raise ResourceAccessDenied('context model differs from its owning model')
+        # Capture this exact source's logical-call authority now. No callback
+        # may be borrowed from a later Turn after this method returns.
+        return authority.bind_for_call()
+
+
 def bind_context_model_factory(agent) -> None:
     """Adapt the locked SDK's per-engine factory; leave its registry/keys intact.
 
@@ -36,12 +55,17 @@ def bind_context_model_factory(agent) -> None:
         # SDK client owns the factory, including Team member and entry checks.
         authority = getattr(getattr(source, '_client', None), '_request_authority', None)
         if authority is None:
-            if (client.api_key == 'MODEL_REQUEST_AUTHORITY'
-                    or model_request_authority({**client.model_dump(),
-                                                'model_name': request.model_name}) is not None):
+            if client.api_key == 'MODEL_REQUEST_AUTHORITY':
+                # Cold history warmup precedes the host's request-model binding.
+                # Construct the original processor now; deny actual use until
+                # that same engine has an exact, fully bound owning model.
+                authority = _PendingContextAuthority(agent, client, request)
+            elif model_request_authority({**client.model_dump(),
+                                          'model_name': request.model_name}) is not None:
                 raise ResourceAccessDenied('context model authority unavailable')
-            return original(kind, config)
-        if (client != source.model_client_config
+            else:
+                return original(kind, config)
+        elif (client != source.model_client_config
                 or request.model_name != source.model_config.model_name):
             # Never borrow the primary credential for an independent override.
             raise ResourceAccessDenied('context model differs from its owning model')

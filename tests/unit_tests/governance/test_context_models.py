@@ -77,6 +77,10 @@ def test_mismatched_compression_override_or_lost_authority_fails_before_http(def
         cfg.model = cfg.model.model_copy(update={'model_name': 'other-model'})
     else:
         source._client._request_authority = None
+        value = agent.react_agent.context_engine._create_processor('DialogueCompressor', cfg)
+        with pytest.raises(ResourceAccessDenied):
+            value._model._client._request_authority.bind_for_call()
+        return
     with pytest.raises(ResourceAccessDenied):
         agent.react_agent.context_engine._create_processor('DialogueCompressor', cfg)
 
@@ -90,6 +94,40 @@ def test_legacy_processor_keeps_literal_key_and_settings(monkeypatch):
     assert value._model.model_client_config.api_key == 'synthetic-config-key'
     assert value.config.trigger_context_ratio == 0.55
     assert value._model._client._request_authority is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mismatch', [False, True])
+async def test_cold_history_factory_waits_for_exact_owner_and_captures_original_call(mismatch):
+    agent, source, _ = owning_agent()
+    bind_context_model_factory(agent)
+    cfg = forked.DialogueCompressorConfig(model_client=source.model_client_config,
+                                         model=source.model_config)
+    agent.deep_config.model = None
+    value = agent.react_agent.context_engine._create_processor('DialogueCompressor', cfg)
+    factory = value._model._client._request_authority
+    with pytest.raises(ResourceAccessDenied):
+        factory.bind_for_call()
+    agent.deep_config.model = source
+    if mismatch:
+        cfg.model_client = cfg.model_client.model_copy(update={'api_base': 'https://other.invalid/v1'})
+        # A distinct deferred factory must not borrow the original credential.
+        agent.deep_config.model = None
+        value = agent.react_agent.context_engine._create_processor('DialogueCompressor', cfg)
+        agent.deep_config.model = source
+        with pytest.raises(ResourceAccessDenied):
+            value._model._client._request_authority.bind_for_call()
+        return
+    first = AsyncMock(return_value={'Authorization': 'Bearer first'})
+    second = AsyncMock(return_value={'Authorization': 'Bearer second'})
+    with tool_authority_scope(None, provider_authorizers=ExecutionResourceAuthorities({}, first)):
+        call = factory.bind_for_call()
+        await call(SimpleNamespace())
+    with tool_authority_scope(None, provider_authorizers=ExecutionResourceAuthorities({}, second)):
+        with pytest.raises(ResourceAccessDenied):
+            await call(SimpleNamespace())
+    second.assert_not_awaited()
+    assert first.await_args.kwargs == {'model_entry_fingerprint': 'e' * 64}
 
 
 @pytest.mark.asyncio
