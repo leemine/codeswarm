@@ -218,7 +218,7 @@ test('three-step creation freezes a single configuration and never starts execut
     assert.ok(find('evaluation-create').disabled);
     await act(async () => find('evaluation-acknowledge').click());
     await act(async () => find('evaluation-create').click());
-    assert.equal(find('evaluation-wizard'), null);
+    assert.equal(Boolean(find('evaluation-wizard')), false);
     assert.deepEqual(created.definition.tasks, [{ task_id: 'task', revision: 1 }]);
     assert.equal(created.definition.execution_profile_id, 'native');
     assert.equal(created.definition.name, 'Frozen UI');
@@ -228,3 +228,111 @@ test('three-step creation freezes a single configuration and never starts execut
     webClient.request = originalRequest;
   }
 });
+
+for (const scenario of ['list-failure', 'obsolete-poll']) {
+  test(`a confirmed freeze survives ${scenario} without offering a duplicate submission`, async () => {
+    sessionStorage.clear();
+    const originalRequest = webClient.request;
+    let created;
+    let creates = 0;
+    let listReads = 0;
+    const oldPoll = deferred();
+    webClient.request = async (method, params) => {
+      if (method === 'evaluation.options') return {
+        models: [{ selection_key: 'model', display_name: 'Model' }],
+        profiles: [{ id: 'native', revision: 'v1' }], execution_available: true,
+      };
+      if (method === 'evaluation.catalog') return {
+        tasks: [{ id: 'task', revision: 1, value: { name: 'Task', instruction: 'Do it' } }],
+        drafts: [], datasets: [],
+      };
+      if (method === 'evaluation.experiment.list') {
+        listReads += 1;
+        if (scenario === 'obsolete-poll' && listReads === 1) return oldPoll.promise;
+        if (created && scenario === 'list-failure') throw new Error('LIST_CONNECTION_LOST');
+        if (created) return { experiments: [created] };
+        return { experiments: [] };
+      }
+      if (method === 'evaluation.experiment.create') {
+        creates += 1;
+        created = { id: 'confirmed', definition: params.experiment, trials: [] };
+        return created;
+      }
+      throw new Error(`unexpected ${method}`);
+    };
+    try {
+      await mount();
+      await act(async () => find('evaluation-new-experiment').click());
+      await act(async () => find('evaluation-wizard-task-select').click());
+      await act(async () => find('evaluation-wizard-next').click());
+      await act(async () => {
+        const input = find('evaluation-experiment-name');
+        Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set.call(input, 'Confirmed freeze');
+        input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+        input.dispatchEvent(new dom.window.FocusEvent('focusout', { bubbles: true }));
+      });
+      await act(async () => find('evaluation-wizard-next').click());
+      await act(async () => find('evaluation-acknowledge').click());
+      await act(async () => find('evaluation-create').click());
+      if (scenario === 'list-failure') {
+        assert.match(find('evaluation-experiment-error').textContent, /LIST_CONNECTION_LOST/);
+      } else {
+        await act(async () => oldPoll.resolve({ experiments: [] }));
+      }
+      assert.equal(Boolean(find('evaluation-wizard')), false);
+      assert.equal(find('evaluation-run-name').textContent, 'Confirmed freeze');
+      assert.equal(creates, 1);
+      await act(async () => find('evaluation-run-refresh').click());
+      assert.equal(creates, 1);
+      assert.equal(find('evaluation-run-name').textContent, 'Confirmed freeze');
+    } finally {
+      webClient.request = originalRequest;
+    }
+  });
+}
+
+const { useApplicationPlugins } = await import('../node_modules/.cache/evaluation-container/useApplicationPlugins.mjs');
+let discoveryState;
+function DiscoveryProbe({ connected }) {
+  discoveryState = useApplicationPlugins(connected);
+  return React.createElement('div', { 'data-testid': 'discovery-probe' }, JSON.stringify(discoveryState));
+}
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+};
+for (const scenario of ['latest-refresh', 'disconnect']) {
+  test(`plugin discovery ignores obsolete responses after ${scenario}`, async () => {
+    const originalFetch = globalThis.fetch;
+    const pending = [];
+    globalThis.fetch = (_url, options) => {
+      const response = deferred();
+      pending.push({ ...response, signal: options.signal });
+      return response.promise;
+    };
+    const respond = (index, enabled) => act(async () => pending[index].resolve({
+      ok: true,
+      json: async () => ({ api_version: 1, plugins: [{ ...plugin, id: 'evaluation', enabled, render_mode: 'bundled', position: 80 }] }),
+    }));
+    try {
+      await act(async () => root.render(React.createElement(DiscoveryProbe, { connected: true })));
+      await act(async () => window.dispatchEvent(new dom.window.Event('jiuwen:application-plugins-refresh')));
+      assert.equal(pending.length, 2);
+      if (scenario === 'latest-refresh') {
+        await respond(1, false);
+        await respond(0, true);
+        assert.equal(discoveryState.plugins[0].enabled, false);
+      } else {
+        await act(async () => root.render(React.createElement(DiscoveryProbe, { connected: false })));
+        await respond(1, true);
+        assert.deepEqual(discoveryState.plugins, []);
+        assert.equal(discoveryState.loaded, false);
+      }
+      assert.equal(discoveryState.loading, false);
+    } finally {
+      await unmount();
+      globalThis.fetch = originalFetch;
+    }
+  });
+}

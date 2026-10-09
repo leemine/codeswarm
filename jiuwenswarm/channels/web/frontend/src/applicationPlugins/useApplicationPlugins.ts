@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { fetchApplicationPlugins } from './manifest';
 import type { ApplicationPluginContribution } from './types';
@@ -16,19 +16,29 @@ export function useApplicationPlugins(isGatewayConnected: boolean): ApplicationP
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState('');
+  const pending = useRef<AbortController | null>(null);
 
   const refresh = useCallback(async () => {
     if (!isGatewayConnected) return;
+    pending.current?.abort();
+    const controller = new AbortController();
+    pending.current = controller;
     setLoading(true);
     setError('');
     try {
-      setPlugins(await fetchApplicationPlugins());
+      const nextPlugins = await fetchApplicationPlugins(controller.signal);
+      if (controller.signal.aborted) return;
+      setPlugins(nextPlugins);
       setLoaded(true);
     } catch (refreshError) {
+      if (controller.signal.aborted) return;
       console.warn('Application plugin discovery failed:', refreshError);
       setError(refreshError instanceof Error ? refreshError.message : 'Application plugin discovery failed');
     } finally {
-      setLoading(false);
+      if (pending.current === controller) {
+        pending.current = null;
+        setLoading(false);
+      }
     }
   }, [isGatewayConnected]);
 
@@ -48,25 +58,12 @@ export function useApplicationPlugins(isGatewayConnected: boolean): ApplicationP
       setError('');
       return;
     }
-    const controller = new AbortController();
-    setLoading(true);
-    setError('');
-    void fetchApplicationPlugins(controller.signal)
-      .then((nextPlugins) => {
-        setPlugins(nextPlugins);
-        setLoaded(true);
-        setError('');
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted) return;
-        console.warn('Application plugin discovery failed:', error);
-        setError(error instanceof Error ? error.message : 'Application plugin discovery failed');
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => controller.abort();
-  }, [isGatewayConnected]);
+    void refresh();
+    return () => {
+      pending.current?.abort();
+      pending.current = null;
+    };
+  }, [isGatewayConnected, refresh]);
 
   return { plugins, loading, loaded, error, refresh };
 }

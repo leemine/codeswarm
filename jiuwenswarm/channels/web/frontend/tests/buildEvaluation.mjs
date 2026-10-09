@@ -51,3 +51,11 @@ await build({
     },
   ],
 });
+await build({
+  entryPoints: ['src/applicationPlugins/useApplicationPlugins.ts'],
+  bundle: true,
+  packages: 'external',
+  platform: 'node',
+  format: 'esm',
+  outfile: 'node_modules/.cache/evaluation-container/useApplicationPlugins.mjs',
+});

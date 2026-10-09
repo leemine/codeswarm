@@ -38,11 +38,13 @@ export default function Experiments({
   const [busy, setBusy] = useState(false);
   const key = useRef(crypto.randomUUID());
   const mounted = useRef(true);
+  const refreshRevision = useRef(0);
   const refresh = useCallback(async () => {
+    const revision = ++refreshRevision.current;
     const { experiments: values } = await request<{
       experiments: Experiment[];
     }>('experiment.list');
-    if (!mounted.current) return;
+    if (!mounted.current || revision !== refreshRevision.current) return;
     setExperiments(values);
     setDetail((current) => values.find((item) => item.id === (current?.id || selectedId.current)) || values[0]);
   }, []);
@@ -81,6 +83,7 @@ export default function Experiments({
     void poll();
     return () => {
       mounted.current = false;
+      refreshRevision.current += 1;
       globalThis.clearTimeout(timer);
     };
   }, [refresh]);
@@ -104,11 +107,14 @@ export default function Experiments({
         acceptance_policy: policy,
       },
     });
-    key.current = crypto.randomUUID();
-    await refresh();
+    // The create response confirms the freeze even if the following list read fails.
+    refreshRevision.current += 1;
+    setExperiments((current) => [result, ...current.filter((item) => item.id !== result.id)]);
     setDetail(result);
     setStep(null);
     setDetailTab('config');
+    key.current = crypto.randomUUID();
+    await refresh();
   };
   const exportEvidence = async (experiment: Experiment) => {
     // Fetch again through the authenticated host channel; cached UI is not authority.
