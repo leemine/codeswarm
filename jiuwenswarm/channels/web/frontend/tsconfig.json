@@ -28,6 +28,6 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["src", "tests/fixtures/settings-extension", "../../../extensions/evaluation/frontend"],
+  "include": ["src", "tests/fixtures/settings-extension", "../../../extensions/evaluation/frontend", "../../../extensions/taskboard/frontend"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

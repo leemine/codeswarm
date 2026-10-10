@@ -415,7 +415,11 @@ function AppContent({
   const [chatWelcomeVariant, setChatWelcomeVariant] = useState<'group-create' | null>(null);
   const [trajectoryUiRequested, setTrajectoryUiRequested] = useState(false);
 
+  const [returnTask, setReturnTask] = useState<{taskId: string; sessionId: string} | null>(() => {
+    try { return JSON.parse(sessionStorage.getItem('jiuwen:taskboard:return') || 'null'); } catch { return null; }
+  });
   const [activeNav, setActiveNav] = useState<MainNavKey>(() => {
+    if (route.kind === 'taskboard') return 'app:taskboard';
     const saved = sessionStorage.getItem('jiuwen:experiments:nav');
     return sessionStorage.getItem('jiuwen:experiments:path') === window.location.pathname && (saved === 'experiments' || saved === 'app:evaluation-experiments') ? saved : 'chat';
   });
@@ -669,7 +673,10 @@ function AppContent({
   useEffect(() => {
     const preserveNav = preserveInitialExperimentsNav.current;
     preserveInitialExperimentsNav.current = false;
-    if (route.kind === 'chat-session') {
+    if (route.kind === 'taskboard') {
+      setActiveNav('app:taskboard');
+      void useWorkspaceStore.getState().setWorkMode('code');
+    } else if (route.kind === 'chat-session') {
       sessionIdRef.current = route.sessionId;
       setSessionId(route.sessionId);
       if (!preserveNav) setActiveNav('chat');
@@ -3671,6 +3678,8 @@ function AppContent({
       }
       if (nav !== 'settings') setRequestedSettingsModuleId(null);
       setActiveNav(nav);
+      if (nav === 'app:taskboard') navigate({ kind: 'taskboard' });
+      if (nav === 'chat' && route.kind === 'taskboard') navigate(sessionId === NEW_CONVERSATION_ID ? {kind:'chat-new'} : {kind:'chat-session', sessionId});
       if (nav === 'chat') {
         setConversationSidebarCollapsed(false);
         if (isMobile) {
@@ -3687,7 +3696,7 @@ function AppContent({
       if (nav === 'skills') setHasVisitedSkills(true);
       if (nav === 'personalContext') setHasVisitedPersonalContext(true);
     },
-    [activeNav, isMobile, modelSetupGuideStep, setSingleAgentPanelExpanded, setHasVisitedPersonalContext, setRequestedSettingsModuleId, setTeamAreaExpanded, setToolPanelHidden, t],
+    [activeNav, navigate, route, sessionId, isMobile, modelSetupGuideStep, setSingleAgentPanelExpanded, setHasVisitedPersonalContext, setRequestedSettingsModuleId, setTeamAreaExpanded, setToolPanelHidden, t],
   );
 
   const handleNavigateToAgentManagement = useCallback(
@@ -3906,6 +3915,9 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
           </div>
         )}
 
+        {activeNav === 'chat' && returnTask?.sessionId === sessionId && (
+          <div className="taskboard-back"><button className="btn" data-testid="app-return-taskboard" onClick={() => { navigate({kind:'taskboard', taskId:returnTask.taskId}); setActiveNav('app:taskboard'); }}>{t('taskboard.back')}</button></div>
+        )}
         {activeNav === 'chat' && (
           <>
             <div className="chat-layout flex-1 flex min-h-0 overflow-hidden">
@@ -3914,6 +3926,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 onNew={(options) => requestSessionNavigation('new', options)}
                 onSelect={requestSessionNavigation}
                 onOpenCron={() => handleNavigate('cron')}
+                onOpenTaskboard={visibleApplicationPlugins.some(p=>p.plugin_id==='taskboard') ? () => handleNavigate('app:taskboard') : undefined}
                 onOpenSharedSessions={organizationAuth && sharingEnabled ? () => { setSharingDialogSessionId(null); setSharingInboxOpen(true); } : undefined}
                 onSessionDeleted={handleSessionDeleted}
                 isCronActive={false}
@@ -4133,6 +4146,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
               onNew={(options) => requestSessionNavigation('new', options)}
               onSelect={requestSessionNavigation}
               onOpenCron={() => handleNavigate('cron')}
+                onOpenTaskboard={visibleApplicationPlugins.some(p=>p.plugin_id==='taskboard') ? () => handleNavigate('app:taskboard') : undefined}
                 onOpenSharedSessions={organizationAuth && sharingEnabled ? () => { setSharingDialogSessionId(null); setSharingInboxOpen(true); } : undefined}
                 onSessionDeleted={handleSessionDeleted}
               isCronActive
@@ -4196,7 +4210,13 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
             />
           </div>
         )}
-        {activeApplicationPlugin && activeApplicationPlugin.nav_group !== 'experiments' && (
+        {activeApplicationPlugin?.plugin_id === 'taskboard' && (
+          <div className="chat-layout flex-1 flex min-h-0 overflow-hidden">
+            <ConversationSidebar activeSessionId={null} onNew={(options)=>requestSessionNavigation('new',options)} onSelect={requestSessionNavigation} onOpenCron={()=>handleNavigate('cron')} isCronActive={false} onOpenTaskboard={()=>handleNavigate('app:taskboard')} isTaskboardActive collapsed={conversationSidebarCollapsed} floating={conversationSidebarFloating} onToggleCollapse={()=>setConversationSidebarCollapsed(v=>!v)} />
+            <div className="flex-1 min-w-0 min-h-0"><ApplicationPluginOutlet contribution={activeApplicationPlugin} taskId={route.kind==='taskboard'?route.taskId:undefined} onOpenTask={(taskId)=>navigate({kind:'taskboard',taskId})} onOpenSession={async (targetSessionId,taskId)=>{await handleRestoreSession(targetSessionId);const context={taskId,sessionId:targetSessionId};setReturnTask(context);sessionStorage.setItem('jiuwen:taskboard:return',JSON.stringify(context));}} /></div>
+          </div>
+        )}
+        {activeApplicationPlugin && activeApplicationPlugin.plugin_id !== 'taskboard' && activeApplicationPlugin.nav_group !== 'experiments' && (
           <div className="app-section">
             <ApplicationPluginOutlet contribution={activeApplicationPlugin} />
           </div>

@@ -164,7 +164,9 @@ class _ApplicationPluginChannel:
         local_only: bool = False,
         available_when_disabled: bool = False,
     ) -> None:
-        async def enabled_handler(ws, req_id, params, session_id):  # noqa: ANN001
+        accepts_user_id = "user_id" in inspect.signature(handler).parameters
+
+        async def enabled_handler(ws, req_id, params, session_id, user_id=None):  # noqa: ANN001
             if not available_when_disabled and not self._plugin.is_enabled():
                 await self._channel.send_response(
                     ws,
@@ -174,7 +176,10 @@ class _ApplicationPluginChannel:
                     code="APPLICATION_PLUGIN_DISABLED",
                 )
                 return
-            await handler(ws, req_id, params, session_id)
+            if accepts_user_id:
+                await handler(ws, req_id, params, session_id, user_id=user_id)
+            else:
+                await handler(ws, req_id, params, session_id)
 
         self._channel.register_method(method, enabled_handler, local_only=local_only)
 

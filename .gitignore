@@ -107,3 +107,7 @@ report/index.html
 /sub_agents/
 /context/
 /.plans/
+
+/.taskboard-demo/
+
+/.taskboard-containers/

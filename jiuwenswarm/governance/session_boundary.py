@@ -35,6 +35,8 @@ SHARE_METHODS = frozenset({
     'session.share.continuation.options', 'session.share.continue',
 })
 GLOBAL_METHODS = frozenset({
+    # Instance/identity-scoped business data, authorized by TaskboardAdapter.
+    'taskboard.create', 'taskboard.list', 'taskboard.get', 'taskboard.update',
     'config.get', 'models.list', 'session.execution.options',
     'session.list', 'session.archived.list', 'project.list', 'project.create', 'project.info',
     'project.content.get', 'project.content.update', 'project.get_sessions',

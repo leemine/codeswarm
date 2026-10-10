@@ -2,6 +2,7 @@ import type { ComponentType } from 'react';
 
 import type {
   ApplicationPluginContribution,
+  ApplicationPluginPageProps,
   ApplicationPluginSettingsProps,
   ApplicationPluginTaskInputActionProps,
   ApplicationPluginTaskRuntimeProps,
@@ -13,12 +14,14 @@ type BundledPluginModule = {
   applicationPluginSettings?: ComponentType<ApplicationPluginSettingsProps>;
   applicationPluginTaskInputAction?: ComponentType<ApplicationPluginTaskInputActionProps>;
   applicationPluginTaskRuntime?: ComponentType<ApplicationPluginTaskRuntimeProps>;
-  default?: ComponentType;
+  default?: ComponentType<ApplicationPluginPageProps>;
 };
 
-const bundledModules = import.meta.glob<BundledPluginModule>('../../../../../extensions/*/frontend/index.tsx', { eager: true });
+const bundledModules = import.meta.glob<BundledPluginModule>('../../../../../extensions/*/frontend/index.tsx', {
+  eager: true,
+});
 
-const bundledComponents = new Map<string, ComponentType>();
+const bundledComponents = new Map<string, ComponentType<ApplicationPluginPageProps>>();
 const bundledSettingsComponents = new Map<string, ComponentType<ApplicationPluginSettingsProps>>();
 const bundledTaskInputActions: ComponentType<ApplicationPluginTaskInputActionProps>[] = [];
 const bundledTaskRuntimes: ComponentType<ApplicationPluginTaskRuntimeProps>[] = [];
@@ -58,12 +61,19 @@ export function ApplicationPluginTaskRuntimes(props: ApplicationPluginTaskRuntim
 
 function iframePermissions(permissions: string[] = []): string {
   const supported = new Set(permissions);
-  return [supported.has('camera') ? 'camera' : '', supported.has('microphone') ? 'microphone' : '', supported.has('display_capture') ? 'display-capture' : '']
+  return [
+    supported.has('camera') ? 'camera' : '',
+    supported.has('microphone') ? 'microphone' : '',
+    supported.has('display_capture') ? 'display-capture' : '',
+  ]
     .filter(Boolean)
     .join('; ');
 }
 
-export function ApplicationPluginOutlet({ contribution }: { contribution: ApplicationPluginContribution }) {
+export function ApplicationPluginOutlet({
+  contribution,
+  ...pageProps
+}: { contribution: ApplicationPluginContribution } & ApplicationPluginPageProps) {
   if (contribution.render_mode === 'none') return null;
   if (contribution.render_mode === 'iframe') {
     if (!contribution.entry_url) return null;
@@ -78,5 +88,5 @@ export function ApplicationPluginOutlet({ contribution }: { contribution: Applic
   }
 
   const Component = bundledComponents.get(contribution.plugin_id);
-  return Component ? <Component /> : null;
+  return Component ? <Component {...pageProps} /> : null;
 }

@@ -1,0 +1,3 @@
+PASS persisted local restart
+PASS concurrent writer conflict recovery
+{"checks":["full local process restart preserves task, status, result and existing session link","second real RPC writer triggers conflict, UI preserves draft and reload recovers","640px narrow screen fits existing shell without horizontal overflow","English locale"],"errors":[]}

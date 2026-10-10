@@ -1,0 +1,10 @@
+{
+  "read_only_browser_check": true,
+  "reply_visible": true,
+  "linked_session_visible": true,
+  "status": "doing",
+  "detail_reload_preserved": true,
+  "browser": "146.0.7680.177",
+  "user_focused_tab": "not navigated or modified by this read-only check",
+  "model_requests_sent": 0
+}

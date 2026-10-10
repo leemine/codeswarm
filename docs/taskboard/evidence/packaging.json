@@ -1,0 +1,14 @@
+{
+  "wheel": "/home/leewanlong/work_leewanlong/code-projects/artifacts/taskboard-mvp-demo/.taskboard-demo/dist/workswarm-0.2.5b1-py3-none-any.whl",
+  "sha256": "e65e6c43718a2a920ae5e8035ef4e83f02ef2f0951b67c90686898dc2ab32eb8",
+  "size_bytes": 32844245,
+  "required_paths": [
+    "jiuwenswarm/extensions/taskboard/extension.yaml",
+    "jiuwenswarm/extensions/taskboard/backend/store.py",
+    "jiuwenswarm/server/runtime/gateway_adapter/taskboard_adapter.py",
+    "jiuwenswarm/channels/web/frontend/dist/index.html"
+  ],
+  "bundled_taskboard_rpc_and_ui": true,
+  "installed_wheel_swarm_import": "/home/leewanlong/work_leewanlong/code-projects/artifacts/taskboard-mvp-demo/.taskboard-demo/wheel-site/jiuwenswarm/__init__.py",
+  "installed_wheel_plugin_and_persistence_smoke": true
+}

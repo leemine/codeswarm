@@ -32,6 +32,7 @@ from jiuwenswarm.server.runtime.gateway_adapter.config_adapter import ConfigAdap
 
 __all__ = [
     "AdapterRegistry",
+    "TaskboardAdapter",
     "GatewayAdapter",
     "SessionAdapter",
     "MemoryAdapter",
@@ -40,3 +41,5 @@ __all__ = [
     "HarmonyOSAdapter",
     "ConfigAdapter",
 ]
+
+from .taskboard_adapter import TaskboardAdapter

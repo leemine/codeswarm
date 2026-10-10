@@ -1,0 +1,30 @@
+
+> openjiuwen-web@0.1.0 test:taskboard
+> esbuild src/multi-session/routing/route.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/taskboard-routing/route.mjs && node --test tests/taskboardRouting.test.mjs
+
+
+  node_modules/.cache/taskboard-routing/route.mjs  981b
+
+⚡ Done in 3ms
+TAP version 13
+# Subtest: taskboard deep links round-trip and preserve existing chat routes
+ok 1 - taskboard deep links round-trip and preserve existing chat routes
+  ---
+  duration_ms: 1.897251
+  type: 'test'
+  ...
+# Subtest: invalid task paths do not become a chat session or silently open a board
+ok 2 - invalid task paths do not become a chat session or silently open a board
+  ---
+  duration_ms: 0.264677
+  type: 'test'
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 2
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 74.14348
