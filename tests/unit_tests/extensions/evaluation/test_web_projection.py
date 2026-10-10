@@ -135,3 +135,20 @@ async def test_plugin_cancel_notifies_code_only_after_descendant_exit(confirmed)
         })
     else:
         push.assert_not_awaited()
+
+
+@pytest.mark.parametrize("other,error,expected", [
+    (State.SUCCEEDED, None, State.CANCELLED),
+    (State.FAILED, "failed", State.FAILED),
+    (State.SUCCEEDED, "untyped error", State.FAILED),
+])
+def test_cancel_diagnostic_does_not_hide_other_failure(other, error, expected):
+    from jiuwenswarm.runtime.session.model import SessionExecutionHandle
+
+    root = SessionExecutionHandle("a", "s", "r", 1, SessionWorkKind.CHAT_STREAM,
+                                  state=State.CANCELLED, error="chat.error")
+    child = SessionExecutionHandle("b", "s", "r2", 1, SessionWorkKind.CONTROL_INPUT,
+                                   state=other, error=error)
+    port = RuntimeExecution(NS(get_session_request_executions=lambda *args, **kwargs:
+                               (root.snapshot(), child.snapshot())))
+    assert port.snapshot("s", "r").state is expected

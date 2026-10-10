@@ -1568,3 +1568,59 @@ async def test_stream_reports_producer_close_error_after_draining_buffer():
         assert values == [1, 2, 3]
     finally:
         await coordinator.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("waiting", [False, True])
+@pytest.mark.parametrize("completion,expected", [
+    ("cancelled", SessionExecutionState.CANCELLED),
+    ("failed", SessionExecutionState.FAILED),
+    ("unknown", SessionExecutionState.FAILED),
+])
+async def test_external_terminal_settles_after_producer_exit(completion, expected, waiting):
+    coordinator = RuntimeSessionCoordinator()
+    await coordinator.register_session("s", "web", SessionPersistencePolicy.PERSISTENT)
+    seen, release = asyncio.Event(), asyncio.Event()
+
+    async def operation():
+        owner = coordinator.external_execution_owner("s", "r")
+        await coordinator.acquire_external_execution(owner, goal=False)
+        if waiting:
+            coordinator.record_interaction("s", "r", "question")
+        yield RuntimeEvent("r", "web", "s", {
+            "event_type": "chat.error", "terminal_status": completion,
+        }, runtime_completion=completion)
+        seen.set()
+        await release.wait()
+
+    async def consume():
+        return [event async for event in coordinator.run_stream(
+            "s", "r", SessionWorkKind.CHAT_STREAM, operation,
+        )]
+
+    consumer = asyncio.create_task(consume())
+    await seen.wait()
+    assert not coordinator.snapshot_session("s").executions[0].state.terminal
+    release.set()
+    await consumer
+    receipt = coordinator.snapshot_session("s").executions[0]
+    assert receipt.state is expected
+    assert receipt.waiting_control_ids == ()
+
+
+@pytest.mark.asyncio
+async def test_wire_cancel_marker_cannot_settle_runtime():
+    coordinator = RuntimeSessionCoordinator()
+    await coordinator.register_session("s", "web", SessionPersistencePolicy.PERSISTENT)
+
+    async def operation():
+        owner = coordinator.external_execution_owner("s", "r")
+        await coordinator.acquire_external_execution(owner, goal=False)
+        yield RuntimeEvent("r", "web", "s", {
+            "event_type": "chat.error", "terminal_status": "cancelled",
+        })
+
+    assert len([event async for event in coordinator.run_stream(
+        "s", "r", SessionWorkKind.CHAT_STREAM, operation,
+    )]) == 1
+    assert coordinator.snapshot_session("s").executions[0].state is SessionExecutionState.SUCCEEDED

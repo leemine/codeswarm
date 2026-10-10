@@ -1096,7 +1096,9 @@ class RuntimeSessionCoordinator:
                 )
                 terminal_item = _StreamItem(error=exc, done=True)
             else:
-                if handle.waiting_control_id:
+                if handle._provider_terminal is not None:
+                    self._registry.mark_terminal(handle, handle._provider_terminal)
+                elif handle.waiting_control_id:
                     self._registry.mark_waiting(handle)
                 else:
                     self._registry.mark_terminal(
@@ -1491,6 +1493,19 @@ class RuntimeSessionCoordinator:
             if not isinstance(payload, dict):
                 continue
             event_type = str(payload.get("event_type") or "")
+            record = self._sessions.get(handle.session_id)
+            if record is not None and record.external_owner == handle.execution_id:
+                # This in-process marker comes from the original provider reader;
+                # wire payload fields cannot settle a Runtime execution.
+                completion = getattr(item, "runtime_completion", None)
+                terminal = {
+                    "completed": SessionExecutionState.SUCCEEDED,
+                    "cancelled": SessionExecutionState.CANCELLED,
+                    "failed": SessionExecutionState.FAILED,
+                    "unknown": SessionExecutionState.FAILED,
+                }.get(completion)
+                if terminal is not None:
+                    handle._provider_terminal = terminal
             # Keep terminal error observations on this existing receipt even
             # when a resumed transport ends normally. Do not end its producer.
             from jiuwenswarm.runtime.events import TERMINAL_ERROR_EVENT_TYPES

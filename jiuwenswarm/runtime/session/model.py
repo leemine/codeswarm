@@ -140,6 +140,7 @@ class SessionExecutionHandle:
     waiting_control_ids: set[str] = field(default_factory=set, repr=False)
     _execution_authority: object | None = field(default=None, repr=False, compare=False)
     _native_admission: object | None = field(default=None, repr=False, compare=False)
+    _provider_terminal: SessionExecutionState | None = field(default=None, repr=False)
 
     def awaits_control(self, control_id: str) -> bool:
         return control_id == self.waiting_control_id or control_id in self.waiting_control_ids

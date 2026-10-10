@@ -217,7 +217,8 @@ class RuntimeExecution:
             state = (State.WAITING_FOR_CONTROL
                      if any(item.state is State.WAITING_FOR_CONTROL for item in live)
                      else State.RUNNING)
-        elif any(item.state is State.FAILED or item.error for item in executions):
+        elif any(item.state is State.FAILED or (item.error and item.state is not State.CANCELLED)
+                 for item in executions):
             state = State.FAILED
         elif any(item.state is State.CANCELLED for item in executions):
             state = State.CANCELLED
