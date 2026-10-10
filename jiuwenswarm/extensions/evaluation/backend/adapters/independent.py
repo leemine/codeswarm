@@ -37,6 +37,12 @@ def checked(): count[0]+=1
 class Instrument(ast.NodeTransformer):
  def visit_Assert(self,node):
   return [ast.copy_location(ast.Expr(ast.Call(ast.Name('__evaluation_check__',ast.Load()),[],[])),node),node]
+def delivery_fault(exc):
+ if not isinstance(exc,Exception) or isinstance(exc,ImportError): return False
+ filenames=[frame.filename for frame in traceback.extract_tb(exc.__traceback__)]
+ if isinstance(exc,SyntaxError) and exc.filename: filenames.append(exc.filename)
+ return any(pathlib.Path(name).is_absolute() and pathlib.Path(name).resolve().is_relative_to('/work') for name in filenames)
+kind=None
 code=2
 try:
  tree=ast.parse(pathlib.Path('/authority/test.py').read_text())
@@ -44,11 +50,14 @@ try:
  exec(compile(tree,'/authority/test.py','exec'),{'__name__':'__main__','__evaluation_check__':checked})
  code=0 if count[0]>0 else 2
  if count[0]==0: print('No authoritative assertion executed')
-except AssertionError:
+except AssertionError as exc:
  traceback.print_exc();code=1
-except BaseException:
- traceback.print_exc();code=2
-print('EVALUATION_AUTHORITY_REPORT='+json.dumps({'assertions':count[0],'returncode':code}),flush=True)
+ if delivery_fault(exc): kind='delivery_exception'
+except BaseException as exc:
+ traceback.print_exc()
+ if delivery_fault(exc): code=1;kind='delivery_exception'
+ else: code=2
+print('EVALUATION_AUTHORITY_REPORT='+json.dumps({'assertions':count[0],'returncode':code,'failure_kind':kind}),flush=True)
 sys.exit(code)
 """
 
@@ -416,10 +425,24 @@ for path in source.rglob('*'):
                         report = json.loads(reports[0]) if len(reports) == 1 else {}
                     except ValueError:
                         report = {}
+                    # Pre-assert delivery errors have a truthful zero count.
+                    # Legacy reports still require an executed assertion.
                     valid = (
-                        type(report.get("assertions")) is int
-                        and report["assertions"] > 0
-                        and report.get("returncode") == execution.returncode
+                        isinstance(report, dict)
+                        and type(report.get("assertions")) is int
+                        and report["assertions"] >= 0
+                        and type(report.get("returncode")) is int
+                        and report["returncode"] == execution.returncode
+                        and (
+                            (
+                                report.get("failure_kind") is None
+                                and report["assertions"] > 0
+                            )
+                            or (
+                                report.get("failure_kind") == "delivery_exception"
+                                and execution.returncode == 1
+                            )
+                        )
                     )
                     outcome = (
                         "verification_timeout"
@@ -434,7 +457,10 @@ for path in source.rglob('*'):
                         outcome=outcome,
                         returncode=execution.returncode,
                         test_output=output,
-                        authoritative_assertions=report.get("assertions", 0),
+                        authoritative_assertions=(
+                            report.get("assertions", 0)
+                            if isinstance(report, dict) else 0
+                        ),
                     )
                 finally:
                     await environment.stop()

@@ -6,10 +6,14 @@ from .model import SessionWorkKind
 def project_interaction_state(snapshot, records):
     live = [item for item in snapshot.executions
             if not item.state.terminal and item.generation == snapshot.generation]
+    # A streaming answer retains its parent's control until delivery settles.
+    # It is owned by that in-flight child and must not be offered again on reload.
+    answering = {item.request_id for item in live
+                 if item.work_kind is SessionWorkKind.CONTROL_INPUT}
     controls = {}
     for item in live:
         for control_id in (*item.waiting_control_ids, item.waiting_control_id):
-            if control_id:
+            if control_id and control_id not in answering:
                 controls[control_id] = item.created_at
     questions = {}
     for record in records or ():

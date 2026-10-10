@@ -24,7 +24,7 @@
     "test:qwen-barge-in": "esbuild ../../../extensions/video_duplex/frontend/VideoLivePanel/qwenOmniSession.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/realtime-duplex/realtimeDuplex.mjs --define:import.meta.env.DEV=false && esbuild src/utils/speechDetection/speechGate.ts src/utils/speechDetection/sileroVad.ts --bundle --platform=node --format=esm --outdir=node_modules/.cache/realtime-duplex --out-extension:.js=.mjs && node --test ../../../extensions/video_duplex/tests/frontend/realtimeDuplex.test.mjs ../../../extensions/video_duplex/tests/frontend/speechDetection.test.mjs",
     "test:i18n-locales": "node --test tests/i18nLocales.test.mjs",
     "test:auth-store": "node --test tests/authStore.test.mjs",
-    "test:chat-error": "node --test tests/chatError.test.mjs",
+    "test:chat-error": "node --test tests/chatError.test.mjs tests/terminalChatError.test.mjs",
     "test:quota-reset": "node --test tests/quotaReset.test.mjs",
     "test:frontend-platform": "tsc src/utils/frontendPlatform.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/frontend-platform --skipLibCheck --noEmitOnError && node --test tests/frontendPlatform.test.mjs",
     "test:ime-composition": "tsc src/components/ChatPanel/imeComposition.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/ime-composition --skipLibCheck --noEmitOnError && node --test tests/imeComposition.test.mjs",
@@ -131,6 +131,7 @@
     "test:codex-governed-availability": "esbuild src/components/ExternalCliAgentsSection.tsx src/features/settings/modules/experimental/ExperimentalSettings.tsx src/features/settings/services/SettingsServicesProvider.tsx src/features/settings/services/SettingsSourceProvider.tsx --bundle --splitting --packages=external --platform=node --format=esm --outdir=node_modules/.cache/codex-governed-availability --loader:.css=empty --loader:.svg=dataurl --loader:.png=dataurl --define:import.meta.env={} && node --test tests/codexGovernedAvailability.test.mjs",
     "test:owner-artifact-download": "node scripts/test-owner-artifact-download.mjs",
     "test:cli-auth-modal": "node --test tests/cliAuthModal.test.mjs",
+    "test:reasoning-display": "node --test tests/reasoningDisplayText.test.mjs",
     "test:taskboard": "esbuild src/multi-session/routing/route.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/taskboard-routing/route.mjs && node --test tests/taskboardRouting.test.mjs"
   },
   "dependencies": {

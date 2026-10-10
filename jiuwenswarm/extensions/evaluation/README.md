@@ -132,3 +132,9 @@ The original Runtime remains the sole execution/control authority. This plugin
 limits submissions to the experiment concurrency and at most four in this service;
 unconfirmed exit retains capacity until cancellation confirms exit. This is a
 single-service limit, not a distributed worker quota. RSI internals are unchanged.
+
+The business `last_event_type` hint is persisted only when it changes. Consecutive
+reasoning/text fragments still flow through the original Runtime/Web projection;
+the evaluation database is not a second event store. Error diagnostics remain
+persisted even for repeated error types, and terminal settlement still requires
+the original Runtime receipt and consumer exit.

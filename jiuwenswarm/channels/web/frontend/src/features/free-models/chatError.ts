@@ -13,6 +13,9 @@ export function describeChatError(
   t: Translate,
 ): string {
   const code = typeof payload.code === 'string' ? payload.code : '';
+  if (code === 'interaction_declined') return t('chat.executionInteractionDeclined');
+  if (code === 'model_output_limit_exceeded') return t('chat.executionModelOutputLimit');
+  if (code === 'turn_event_limit') return t('chat.executionEventDataLimit');
   if (code === 'model_not_configured') return t('chat.modelNotConfigured');
   const hintKey = UPSTREAM_HINT_KEYS[code];
   if (!hintKey) return rawErrorMsg;

@@ -11,9 +11,26 @@ from jiuwenswarm.runtime.session.model import SessionExecutionState as State, Se
 
 
 def execution(state=State.WAITING_FOR_CONTROL, generation=2, ids=("live",),
-              work_kind=SessionWorkKind.CHAT_STREAM):
+              work_kind=SessionWorkKind.CHAT_STREAM, request_id="producer"):
     return NS(state=state, generation=generation, waiting_control_ids=ids,
-              waiting_control_id=ids[0] if ids else None, created_at=10, work_kind=work_kind)
+              waiting_control_id=ids[0] if ids else None, created_at=10, work_kind=work_kind,
+              request_id=request_id)
+
+
+def test_refresh_hides_answer_in_flight_but_preserves_next_question_and_retry():
+    parent = execution(State.RUNNING, ids=("answered",))
+    child = execution(State.RUNNING, ids=("next",),
+                      work_kind=SessionWorkKind.CONTROL_INPUT, request_id="answered")
+    records = [dict(event_type="chat.ask_user_question", request_id=value,
+                    timestamp=11, questions=[]) for value in ("answered", "next")]
+    snapshot = NS(generation=2, executions=[parent, child])
+    assert [q["request_id"] for q in project_interaction_state(snapshot, records)["pending_interactions"]] == ["next"]
+    # Rejected/failed delivery releases the claim; the original question is resumable.
+    child.state = State.FAILED
+    assert [q["request_id"] for q in project_interaction_state(snapshot, records)["pending_interactions"]] == ["answered"]
+    # A child from another generation cannot hide a current question.
+    child.state, child.generation = State.RUNNING, 1
+    assert [q["request_id"] for q in project_interaction_state(snapshot, records)["pending_interactions"]] == ["answered"]
 
 
 @pytest.mark.parametrize("state", [State.QUEUED, State.RUNNING, State.WAITING_FOR_CONTROL])
@@ -71,11 +88,16 @@ def test_reconnect_never_makes_old_resolved_or_cancelled_history_actionable():
 async def test_single_observer_projects_original_wire_identity_and_controls(tmp_path):
     events = [RuntimeEvent("attempt", "web", "session", {"event_type": "chat.tool_call", "tool_call_id": "call"}),
               RuntimeEvent("attempt", "web", "session", {"event_type": "chat.ask_user_question", "request_id": "control", "questions": []})]
+    deltas = [RuntimeEvent("attempt", "web", "session", {
+        "event_type": "chat.reasoning", "content": str(index)
+    }) for index in range(1_000)]
     pushes, observed, stream_calls = [], [], []
 
     async def stream(request, *, on_control_event):
         stream_calls.append(request)
         yield events[0]
+        for event in deltas:
+            yield event
         await on_control_event(events[1])
 
     async def push(value): pushes.append(value)
@@ -85,10 +107,11 @@ async def test_single_observer_projects_original_wire_identity_and_controls(tmp_
         definition=NS(model="m#0", execution_profile_id="native"),
         task=NS(instruction="ask first"), workspace=tmp_path, on_event=observer)
     assert len(stream_calls) == 1
-    assert observed == events
-    assert pushes[1]["payload"] is events[1].payload
-    assert pushes[1]["payload"]["request_id"] == "control"
-    assert pushes[1]["request_id"] == "attempt"
+    assert observed == [events[0], *deltas, events[1]]
+    assert [push["payload"] for push in pushes] == [event.payload for event in observed]
+    assert pushes[-1]["payload"] is events[1].payload
+    assert pushes[-1]["payload"]["request_id"] == "control"
+    assert pushes[-1]["request_id"] == "attempt"
     assert stream_calls[0].params["work_mode"] == "code"
 
 

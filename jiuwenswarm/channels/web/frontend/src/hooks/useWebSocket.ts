@@ -56,6 +56,7 @@ import {
   bindPendingPermissionCard,
   pendingQuestionIdentity,
   normalizeQuestionPayload,
+  questionResolvedByToolResult,
   shouldClearPermissionQuestionsForLifecycleEvent,
 } from '../stores/pendingQuestionQueue';
 import { requestLogin } from '../stores/authStore';
@@ -3765,6 +3766,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('chat.tool_result', payload)) return;
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
         const toolResult = normalizeToolResultPayload(payload);
+        for (const question of useChatStore.getState().getRuntime(sessionId)?.pendingQuestions ?? []) {
+          if (questionResolvedByToolResult(question, toolResult.toolCallId ?? '', payload.source)) {
+            useChatStore.getState().consumePendingQuestion(sessionId, question);
+          }
+        }
         const pendingSubagentQuery = toolResult.toolCallId
           ? pendingSubagentQueryRef.current.get(toolResult.toolCallId)
           : undefined;
@@ -4262,17 +4268,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.error', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
+        const submittedRequestId = submittedChatRequestsRef.current.get(sessionId);
+        const errorRequestId = getPayloadRequestId(payload);
         clearSubmittedChatRequest(sessionId, payload);
         if (pendingAgentGroupBindingRef.current.has(sessionId)) {
           void reconcileAgentGroupBinding(sessionId);
         }
         if (shouldDropDuplicatedEvent('chat.error', payload)) return;
-        useChatStore.getState().setThinking(sessionId, false);
-        // 任何 chat.error 都应解除历史加载态：faas 侧 history.get 流超时
-        // （旧 session runtime 过 TTL 被回收、init 超时）只回发 chat.error
-        // 而非结束帧，若不清 isLoadingHistory 会永久吞掉后续
-        // chat.processing_status(is_processing=false)，表现为「一直加载中」。
-        useChatStore.getState().setLoadingHistory(sessionId, false);
         const rawErrorMsg =
           typeof payload.error === 'string' ? payload.error : t('network.unknownError');
         const errorMsg = describeChatError(payload, rawErrorMsg, t);
@@ -4284,6 +4286,34 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             : undefined;
         const terminalErrorCode =
           typeof payload.code === 'string' ? payload.code : undefined;
+        if (submittedRequestId && errorRequestId && submittedRequestId !== errorRequestId) {
+          // Preserve a late failure in history without altering the newer turn.
+          useChatStore.getState().addMessage(sessionId, {
+            id: prefixedMessageId('error-'),
+            role: 'system',
+            content: t('network.errorPrefix', { message: errorMsg }),
+            timestamp: new Date().toISOString(),
+            ...(terminalStatus ? { terminalStatus } : {}),
+            ...(terminalErrorCode ? { errorCode: terminalErrorCode } : {}),
+          });
+          return;
+        }
+        useChatStore.getState().setThinking(sessionId, false);
+        // 任何 chat.error 都应解除历史加载态：faas 侧 history.get 流超时
+        // （旧 session runtime 过 TTL 被回收、init 超时）只回发 chat.error
+        // 而非结束帧，若不清 isLoadingHistory 会永久吞掉后续
+        // chat.processing_status(is_processing=false)，表现为「一直加载中」。
+        useChatStore.getState().setLoadingHistory(sessionId, false);
+        if (terminalStatus === 'failed') {
+          // A typed failure ends this request even without processing_status(false).
+          // A delayed failure from an older request must not close a newer turn.
+          flushPendingStreamDelta(sessionId);
+          const chatStore = useChatStore.getState();
+          chatStore.setProcessing(sessionId, false);
+          chatStore.closeReasoning(sessionId);
+          chatStore.stopStreaming(sessionId);
+          localSendPendingRef.current.delete(sessionId);
+        }
         if (payload.code === 'AGENT_GROUP_NOT_INSTALLED') {
           const chatStore = useChatStore.getState();
           chatStore.setAgentGroupUnavailable(sessionId, true);

@@ -121,6 +121,55 @@ async def finish(trials, exp):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
+async def test_long_reasoning_burst_does_not_rewrite_status_per_delta(
+    tmp_path, monkeypatch, failed
+):
+    class BurstPort(Port):
+        async def observe(self, **kwargs):
+            self.calls += 1
+            for _ in range(10_000):
+                await kwargs["on_event"](SimpleNamespace(
+                    ok=True, event_type="chat.reasoning", payload={"content": "x"}
+                ))
+            await kwargs["on_event"](SimpleNamespace(
+                ok=True, event_type="chat.ask_user_question", payload={}
+            ))
+            if failed:
+                # Same event type must not suppress later error diagnostics.
+                for error in ("first failure", "second failure"):
+                    await kwargs["on_event"](SimpleNamespace(
+                        ok=False, event_type="chat.error", payload={"error": error}
+                    ))
+            self.finished = True
+
+    trials, exp = setup(tmp_path, monkeypatch, port=BurstPort())
+    writes = []
+    update = trials.store.update_attempt
+
+    def counted(*args, **kwargs):
+        writes.append(kwargs)
+        return update(*args, **kwargs)
+
+    monkeypatch.setattr(trials.store, "update_attempt", counted)
+    try:
+        await trials.start(ACTOR, exp["id"])
+        result = await finish(trials, exp)
+        assert len(writes) < 25
+        assert result["body"]["exit_confirmed"]
+        if failed:
+            assert result["body"]["outcome"] == "execution_failed"
+            assert result["body"]["runtime_error"] == "second failure"
+            assert result["body"]["last_event_type"] == "chat.error"
+        else:
+            assert result["body"]["outcome"] == "passed"
+            assert result["body"]["last_event_type"] == "chat.ask_user_question"
+    finally:
+        await trials.close()
+        trials.store.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("script", "outcome"),
     [
@@ -286,10 +335,21 @@ async def test_failed_runtime_never_runs_passing_acceptance(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_timeout_requires_original_cancel_exit_before_settlement(tmp_path, monkeypatch):
+@pytest.mark.parametrize("waiting_for_control", [False, True])
+async def test_timeout_requires_original_cancel_exit_before_settlement(tmp_path, monkeypatch, waiting_for_control):
     import time
     from jiuwenswarm.extensions.evaluation.backend import trials as module
     trials, exp = setup(tmp_path, monkeypatch, port=Port(wait=True))
+    original_snapshot = trials.execution.snapshot
+
+    def snapshot(*args):
+        value = original_snapshot(*args)
+        if waiting_for_control and not trials.execution.finished:
+            value.state = SessionExecutionState.WAITING_FOR_CONTROL
+            value.waiting_control_ids = ("approval-fixture",)
+        return value
+
+    monkeypatch.setattr(trials.execution, "snapshot", snapshot)
     now = [0.0]
     monkeypatch.setattr(module, "time", SimpleNamespace(time=time.time, monotonic=lambda: now[0]))
     try:

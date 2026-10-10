@@ -114,6 +114,13 @@ jobs:
       - name: Verify Taskboard routing
         working-directory: jiuwenswarm/channels/web/frontend
         run: npm run test:taskboard
+      - name: Verify Code questions, terminal errors and restored history
+        working-directory: jiuwenswarm/channels/web/frontend
+        run: |
+          npm run test:pending-question-queue
+          npm run test:chat-error
+          npm run test:reasoning-display
+          npm run test:subagent-history
       - name: Build instance login and sharing UI
         working-directory: jiuwenswarm/channels/web/frontend
         env:

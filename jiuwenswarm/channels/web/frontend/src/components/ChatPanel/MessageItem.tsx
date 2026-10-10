@@ -16,6 +16,7 @@ import {
   Volume2,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { describeChatError } from '../../features/free-models/chatError';
 import { contextCompressionRunningText } from '../../utils/contextCompression';
 import {
   Message,
@@ -360,7 +361,7 @@ export const MessageItem = memo(function MessageItem({
   const {
     id,
     role,
-    content,
+    content: rawContent,
     timestamp,
     isStreaming,
     toolCall,
@@ -377,6 +378,12 @@ export const MessageItem = memo(function MessageItem({
     agentTemplateName,
     crossSession,
   } = message;
+  const isInteractionDeclined = role === 'system' && message.errorCode === 'interaction_declined';
+  const isEventDataLimit = role === 'system' && message.errorCode === 'turn_event_limit';
+  const isModelOutputLimit = role === 'system' && message.errorCode === 'model_output_limit_exceeded';
+  const content = isInteractionDeclined || isEventDataLimit || isModelOutputLimit
+    ? describeChatError({ code: message.errorCode }, rawContent, t)
+    : rawContent;
   const [hasAutoSpoken, setHasAutoSpoken] = useState(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
@@ -557,7 +564,7 @@ export const MessageItem = memo(function MessageItem({
   }
 
   // 系统消息
-  if (role === 'system') {
+  if (role === 'system' && !isInteractionDeclined) {
     // slash 命令输出按命令类型路由：compact 使用时间线分隔条，
     // 其余命令退回通用文本；isCommandOutput 标记不会影响其他 system 消息。
     if (isCommandOutput) {
