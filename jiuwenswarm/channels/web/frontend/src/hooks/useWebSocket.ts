@@ -56,6 +56,7 @@ import {
   bindPendingPermissionCard,
   pendingQuestionIdentity,
   normalizeQuestionPayload,
+  questionResolvedByToolResult,
   shouldClearPermissionQuestionsForLifecycleEvent,
 } from '../stores/pendingQuestionQueue';
 import { requestLogin } from '../stores/authStore';
@@ -3765,6 +3766,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('chat.tool_result', payload)) return;
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
         const toolResult = normalizeToolResultPayload(payload);
+        for (const question of useChatStore.getState().getRuntime(sessionId)?.pendingQuestions ?? []) {
+          if (questionResolvedByToolResult(question, toolResult.toolCallId ?? '', payload.source)) {
+            useChatStore.getState().consumePendingQuestion(sessionId, question);
+          }
+        }
         const pendingSubagentQuery = toolResult.toolCallId
           ? pendingSubagentQueryRef.current.get(toolResult.toolCallId)
           : undefined;

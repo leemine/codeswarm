@@ -8,8 +8,20 @@ import {
   enqueuePendingQuestions,
   pendingQuestionIdentity,
   normalizeQuestionPayload,
+  questionResolvedByToolResult,
   shouldClearPermissionQuestionsForLifecycleEvent,
 } from '../node_modules/.cache/pending-question-queue/pendingQuestionQueue.mjs';
+
+test('resumed Native results resolve only the exact legacy interruption', () => {
+  const question = {request_id: 'ask', source: 'ask_user_interrupt', questions: []};
+  assert.equal(questionResolvedByToolResult(question, 'ask', 'ask_user_interrupt'), true);
+  assert.equal(questionResolvedByToolResult(question, 'other', 'ask_user_interrupt'), false);
+  assert.equal(questionResolvedByToolResult(question, 'ask', 'permission_interrupt'), false);
+  assert.equal(questionResolvedByToolResult(question, 'ask', undefined), false);
+  const legacy = {request_id: 'read', source: 'permission_interrupt', questions: [{question: 'read?'}]};
+  assert.equal(questionResolvedByToolResult(legacy, 'read', 'permission_interrupt'), true);
+  assert.equal(questionResolvedByToolResult({...legacy, questions: [{card_id: 'new-card'}]}, 'read', 'permission_interrupt'), false);
+});
 
 function permission(cardId, text = cardId) {
   return {

@@ -77,6 +77,16 @@ export function consumePendingQuestion(
   return [...queue.slice(0, index), ...queue.slice(index + 1)];
 }
 
+/** A Native resumed tool result confirms this exact interruption was consumed. */
+export function questionResolvedByToolResult(
+  question: AskUserQuestionPayload, toolCallId: string, source: unknown,
+): boolean {
+  return Boolean(toolCallId) && question.request_id === toolCallId &&
+    (source === 'ask_user_interrupt' || source === 'permission_interrupt') &&
+    question.source === source &&
+    (source !== 'permission_interrupt' || permissionQuestionKind(question.questions) === 'legacy');
+}
+
 export function bindPendingPermissionCard(
   answers: UserAnswer[],
   questions: AskUserQuestionPayload['questions'],

@@ -11,9 +11,26 @@ from jiuwenswarm.runtime.session.model import SessionExecutionState as State, Se
 
 
 def execution(state=State.WAITING_FOR_CONTROL, generation=2, ids=("live",),
-              work_kind=SessionWorkKind.CHAT_STREAM):
+              work_kind=SessionWorkKind.CHAT_STREAM, request_id="producer"):
     return NS(state=state, generation=generation, waiting_control_ids=ids,
-              waiting_control_id=ids[0] if ids else None, created_at=10, work_kind=work_kind)
+              waiting_control_id=ids[0] if ids else None, created_at=10, work_kind=work_kind,
+              request_id=request_id)
+
+
+def test_refresh_hides_answer_in_flight_but_preserves_next_question_and_retry():
+    parent = execution(State.RUNNING, ids=("answered",))
+    child = execution(State.RUNNING, ids=("next",),
+                      work_kind=SessionWorkKind.CONTROL_INPUT, request_id="answered")
+    records = [dict(event_type="chat.ask_user_question", request_id=value,
+                    timestamp=11, questions=[]) for value in ("answered", "next")]
+    snapshot = NS(generation=2, executions=[parent, child])
+    assert [q["request_id"] for q in project_interaction_state(snapshot, records)["pending_interactions"]] == ["next"]
+    # Rejected/failed delivery releases the claim; the original question is resumable.
+    child.state = State.FAILED
+    assert [q["request_id"] for q in project_interaction_state(snapshot, records)["pending_interactions"]] == ["answered"]
+    # A child from another generation cannot hide a current question.
+    child.state, child.generation = State.RUNNING, 1
+    assert [q["request_id"] for q in project_interaction_state(snapshot, records)["pending_interactions"]] == ["answered"]
 
 
 @pytest.mark.parametrize("state", [State.QUEUED, State.RUNNING, State.WAITING_FOR_CONTROL])
