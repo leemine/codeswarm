@@ -54,5 +54,11 @@ test('event data budget failure is distinct from model output and does not stack
   for (const raw of ['OpenCode execution failed', '<chat.executionEventDataLimit>']) {
     assert.equal(describeChatError({ code: 'turn_event_limit' }, raw, t), '<chat.executionEventDataLimit>');
   }
-  assert.equal(describeChatError({ code: 'model_output_limit_exceeded' }, RAW, t), RAW);
+  assert.equal(describeChatError({ code: 'model_output_limit_exceeded' }, RAW, t), '<chat.executionModelOutputLimit>');
+});
+
+test('model output limit is readable for live and restored generic failures', () => {
+  for (const raw of ['OpenCode execution failed', '<chat.executionModelOutputLimit>']) {
+    assert.equal(describeChatError({ code: 'model_output_limit_exceeded' }, raw, t), '<chat.executionModelOutputLimit>');
+  }
 });

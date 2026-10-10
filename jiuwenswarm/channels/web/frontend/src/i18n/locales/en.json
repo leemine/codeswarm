@@ -787,6 +787,7 @@
     "placeholder": "What can I do for you? Type \"/\" to quickly reference skills and commands",
     "placeholderCompacting": "Context compression in progress. Messages are temporarily disabled",
     "executionInteractionDeclined": "The interaction request was declined and execution has ended. Review the approval or question history.",
+    "executionModelOutputLimit": "The model reached the execution engine's current output limit. This run did not complete.",
     "executionEventDataLimit": "The execution engine reached the plan's streaming event data limit and stopped. Adjust the event transport budget before creating a new experiment.",
     "modelNotConfigured": "No model is configured yet. Configure one in Settings → Models, or sign in to get the limited-time free models.",
     "placeholderAwaitingApproval": "Please respond to the pending confirmation above",
