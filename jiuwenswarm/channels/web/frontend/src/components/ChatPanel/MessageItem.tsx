@@ -379,7 +379,8 @@ export const MessageItem = memo(function MessageItem({
     crossSession,
   } = message;
   const isInteractionDeclined = role === 'system' && message.errorCode === 'interaction_declined';
-  const content = isInteractionDeclined
+  const isEventDataLimit = role === 'system' && message.errorCode === 'turn_event_limit';
+  const content = isInteractionDeclined || isEventDataLimit
     ? describeChatError({ code: message.errorCode }, rawContent, t)
     : rawContent;
   const [hasAutoSpoken, setHasAutoSpoken] = useState(false);

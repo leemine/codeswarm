@@ -762,13 +762,15 @@ test('history recovery ignores unknown states and failed close calls', () => {
   assert.equal(missingSuccessClose[0].subagent.closed_reason, null);
 });
 
-test('old OpenCode refusal history preserves the code used for localized display', () => {
-  const [message] = parseHistoryJsonFileToPreviewMessages([{
-    id: 'refusal', role: 'assistant', event_type: 'chat.error',
-    error: 'OpenCode execution failed', code: 'interaction_declined',
-    terminal_status: 'failed', timestamp: 1,
-  }], sessionId);
-  assert.equal(message.errorCode, 'interaction_declined');
-  assert.equal(message.terminalStatus, 'failed');
-  assert.equal(message.content, 'OpenCode execution failed');
+test('old OpenCode failure history preserves codes used for localized display', () => {
+  for (const code of ['interaction_declined', 'turn_event_limit']) {
+    const [message] = parseHistoryJsonFileToPreviewMessages([{
+      id: code, role: 'assistant', event_type: 'chat.error',
+      error: 'OpenCode execution failed', code,
+      terminal_status: 'failed', timestamp: 1,
+    }], sessionId);
+    assert.equal(message.errorCode, code);
+    assert.equal(message.terminalStatus, 'failed');
+    assert.equal(message.content, 'OpenCode execution failed');
+  }
 });
