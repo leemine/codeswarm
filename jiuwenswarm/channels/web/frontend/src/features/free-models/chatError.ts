@@ -13,6 +13,7 @@ export function describeChatError(
   t: Translate,
 ): string {
   const code = typeof payload.code === 'string' ? payload.code : '';
+  if (code === 'interaction_declined') return t('chat.executionInteractionDeclined');
   if (code === 'model_not_configured') return t('chat.modelNotConfigured');
   const hintKey = UPSTREAM_HINT_KEYS[code];
   if (!hintKey) return rawErrorMsg;

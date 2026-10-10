@@ -335,10 +335,21 @@ async def test_failed_runtime_never_runs_passing_acceptance(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_timeout_requires_original_cancel_exit_before_settlement(tmp_path, monkeypatch):
+@pytest.mark.parametrize("waiting_for_control", [False, True])
+async def test_timeout_requires_original_cancel_exit_before_settlement(tmp_path, monkeypatch, waiting_for_control):
     import time
     from jiuwenswarm.extensions.evaluation.backend import trials as module
     trials, exp = setup(tmp_path, monkeypatch, port=Port(wait=True))
+    original_snapshot = trials.execution.snapshot
+
+    def snapshot(*args):
+        value = original_snapshot(*args)
+        if waiting_for_control and not trials.execution.finished:
+            value.state = SessionExecutionState.WAITING_FOR_CONTROL
+            value.waiting_control_ids = ("approval-fixture",)
+        return value
+
+    monkeypatch.setattr(trials.execution, "snapshot", snapshot)
     now = [0.0]
     monkeypatch.setattr(module, "time", SimpleNamespace(time=time.time, monotonic=lambda: now[0]))
     try:

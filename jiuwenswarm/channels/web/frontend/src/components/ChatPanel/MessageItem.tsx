@@ -16,6 +16,7 @@ import {
   Volume2,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { describeChatError } from '../../features/free-models/chatError';
 import { contextCompressionRunningText } from '../../utils/contextCompression';
 import {
   Message,
@@ -738,7 +739,9 @@ export const MessageItem = memo(function MessageItem({
     return (
       <div className="flex justify-center my-4 animate-fade-in" data-testid="chat-panel-system-message-bubble">
         <div className="px-4 py-2 rounded-full bg-secondary border border-border text-text-muted text-sm">
-          {content}
+          {message.errorCode === 'interaction_declined'
+            ? describeChatError({ code: message.errorCode }, content, t)
+            : content}
         </div>
       </div>
     );

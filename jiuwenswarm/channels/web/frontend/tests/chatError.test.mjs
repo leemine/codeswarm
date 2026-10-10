@@ -41,3 +41,11 @@ test('errors without a known code are shown as-is', () => {
   assert.equal(describeChatError({}, RAW, t), RAW);
   assert.equal(describeChatError({ code: 'something_else', upstream: true }, RAW, t), RAW);
 });
+
+// Live events and restored history carry the same stable code. The latter may
+// contain only the old generic text; repeated formatting must not stack hints.
+test('declined interactions explain the terminal cause for live and old history', () => {
+  for (const raw of ['OpenCode execution failed', '错误: OpenCode execution failed', '<chat.executionInteractionDeclined>']) {
+    assert.equal(describeChatError({ code: 'interaction_declined' }, raw, t), '<chat.executionInteractionDeclined>');
+  }
+});
