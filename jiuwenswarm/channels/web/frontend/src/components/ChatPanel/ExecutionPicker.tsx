@@ -238,13 +238,7 @@ export function ExecutionPicker({
                 >
                   <span className="chat-execution-option__copy">
                     <span>{executionProviderLabel(option.provider_id)}</span>
-                    <small>
-                      {option.available
-                        ? option.execution_profile_id?.startsWith('builtin:')
-                          ? t('executionPicker.engineDefaults')
-                          : option.execution_profile_id || t('executionPicker.builtin')
-                        : t(`executionPicker.reason.${option.reason}`)}
-                    </small>
+                    {!option.available && <small>{t(`executionPicker.reason.${option.reason}`)}</small>}
                   </span>
                   {selectedId === option.execution_profile_id && <Check size={14} aria-hidden="true" />}
                 </button>
