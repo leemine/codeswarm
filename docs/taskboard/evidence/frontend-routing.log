@@ -3,7 +3,7 @@
 > esbuild src/multi-session/routing/route.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/taskboard-routing/route.mjs && node --test tests/taskboardRouting.test.mjs
 
 
-  node_modules/.cache/taskboard-routing/route.mjs  981b 
+  node_modules/.cache/taskboard-routing/route.mjs  981b
 
 ⚡ Done in 3ms
 TAP version 13

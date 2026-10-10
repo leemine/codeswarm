@@ -42,7 +42,7 @@ collected 139 items
 tests/unit_tests/test_application_plugins.py::test_application_plugin_core_services_are_explicitly_injected PASSED [  0%]
 tests/unit_tests/test_application_plugins.py::test_registry_binds_local_methods_and_blocks_disabled_plugins PASSED [  1%]
 tests/unit_tests/test_application_plugins.py::test_websocket_routes_use_the_registered_runtime_plugin_id PASSED [  2%]
-tests/unit_tests/test_application_plugins.py::test_manifest_only_iframe_plugin_requires_no_python_entry 
+tests/unit_tests/test_application_plugins.py::test_manifest_only_iframe_plugin_requires_no_python_entry
 -------------------------------- live log call ---------------------------------
 2026-10-10 22:55:48 [INFO] HTTP Request: GET http://testserver/api/application-plugins/hello-plugin/assets/index.html "HTTP/1.1 200 OK"
 PASSED                                                                   [  2%]

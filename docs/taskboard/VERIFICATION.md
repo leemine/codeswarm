@@ -1,6 +1,6 @@
 # Taskboard MVP Demo 验证记录
 
-日期：2026-10-10；执行者：Codex。本记录针对本分支实际实现与隔离 Demo，不沿用正式3bbcacda的旧CI结果作为本次改动成功证据。
+日期：2026-10-10；执行者：Codex。产品代码提交：`eb7697a03644e444c507d7e05d69d4a1db2a03ff`（后续交付证据整理不改产品代码）。本记录针对本分支实际实现与隔离 Demo，不沿用正式3bbcacda的旧CI结果作为本次改动成功证据。
 
 ## 基线、锁和隔离
 
@@ -68,3 +68,14 @@
 ## 清理与交付
 
 本地Demo保留运行供体验；停止用README命令。专属容器验证后已核对任务标签并回收（[cleanup.json](evidence/cleanup.json)），持久化目录保留于被忽略的 `.taskboard-containers/`。源码、脚本、截图和本记录纳入独立Swarm分支提交；原checkout、配置与在线部署保留。回退只需停止本任务Demo并回到原入口，不涉及远端合并或线上回滚。
+
+## 证据复现说明
+
+受影响测试、构建与浏览器命令见README；容器验证使用下列实际脚本，前提是本机已有报告中固定digest的镜像和未占用的19252／19262端口：
+
+```bash
+.venv/bin/python scripts/taskboard_container_start.py
+.venv/bin/python scripts/taskboard_container_check.py
+```
+
+重建验证在核对`codex.task=taskboard-mvp-demo`标签后，仅删除`codex-taskboard-mvp-alice`／`codex-taskboard-mvp-bob`容器，保留`.taskboard-containers/`数据，再重复上述命令；逐项比较重建前后task对象及version。日志文本仅去除行尾空白，未删除失败、警告或测试结果。源文件与交付资料`git diff --check`通过。
