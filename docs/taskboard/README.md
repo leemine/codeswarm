@@ -27,7 +27,7 @@ cd ../../../..
 
 停止脚本只处理清单里且命令行与本 worktree 一致的进程。启动前检查端口，首次进程初始化约20～45秒；`start` 返回代表已发起启动，使用 `status` 和日志检查就绪。数据不会随停止删除。进程工作目录也固定到数据目录，运行缓存不写源码根。任务库在 `.taskboard-demo/agent/taskboard.sqlite3`；仅修改主题或语言不改变数据。
 
-Demo 默认不配置模型，关闭自动心跳、定时任务和多模态模型探测；Taskboard CRUD 不依赖 Provider。如需真实执行，通过现有设置页配置模型/执行 Provider，然后使用原会话入口发消息。配置文件含凭据时不纳入 Git。不要把无模型会话关联测试描述成真实模型执行成功。
+首次生成 Demo 配置默认不配置模型，关闭自动心跳、定时任务和多模态模型探测；Taskboard CRUD 不依赖 Provider。如需真实执行，通过现有设置页配置模型/执行 Provider，然后使用原会话入口发消息。配置文件含凭据时不纳入 Git。不要把无模型会话关联测试描述成真实模型执行成功。
 
 ## 使用闭环
 
@@ -61,6 +61,6 @@ PLAYWRIGHT_MODULE=/path/to/playwright node scripts/taskboard_browser_demo.cjs
 PLAYWRIGHT_MODULE=/path/to/playwright node scripts/taskboard_browser_followup.cjs
 ```
 
-可选 `REAL_PROVIDER=1` 需要按现有模型/资源/权限机制提供可用配置；本轮真实Native请求被运行时授权181006拒绝，未作为成功，未放宽权限。首次复制的私有模型配置已从Demo移除。
+可选 `REAL_PROVIDER=1` 需要按现有模型/资源/权限机制提供可用配置。首次交付的无显式profile Native请求被181006拒绝，失败保留。随后用户指定火山后，本机隔离Demo已配置火山glm-5.2、显式Native profile及精确项目模型资源，真实Native回复通过；TB-002已关联成功会话。参见验证报告末节。新建安装不会带有本机密钥或资源登记。
 
 截图和机器结果位于 [evidence](evidence/)。准确结果与未验证范围见 [验证报告](VERIFICATION.md)。容器验证只使用任务专属容器和挂载目录，未覆盖默认运行时镜像，也未接入或修改原元戎在线部署。

@@ -38,9 +38,9 @@
 | 容器重建持久化 | 删除并重建本任务两个容器，沿用各自数据挂载；task_id、version和完整task对象一致；[container-after-rebuild.json](evidence/container-after-rebuild.json)、[container-persistence.json](evidence/container-persistence.json) |
 | 容器实际来源 | 现有镜像sha256:5b8f6fc8aeb62b51124d52874324ec662d9e624022e1a4f6d761eb91b3430a99，源码只读挂载本候选；Core实际direct_url为91943c6b，Swarm导入/app/swarm/jiuwenswarm。镜像标签保持原值 |
 
-真实Provider尝试被现有Native运行时模型授权拒绝（181006），**真实Provider E2E未通过，环境阻塞**；[provider-attempt.json](evidence/provider-attempt.json)、[provider-attempt.log](evidence/provider-attempt.log)。没有放宽权限、改Core或静默切引擎，私有Demo已恢复无模型默认配置。
+首次交付时，真实Provider尝试被现有Native运行时模型授权拒绝（181006），**该次未通过**；[provider-attempt.json](evidence/provider-attempt.json)、[provider-attempt.log](evidence/provider-attempt.log)。没有放宽权限、改Core或静默切引擎，当时私有Demo恢复为无模型默认配置；后续用户指定火山后的成功补验见文末。
 
-最终补验已通过：[followup-result.json](evidence/followup-result.json)，本地三进程重启、第二真实RPC写者导致冲突及UI恢复、640px窄屏无水平溢出、英文；浏览器未捕获异常0。真实Provider另记阻塞。
+最终补验已通过：[followup-result.json](evidence/followup-result.json)，本地三进程重启、第二真实RPC写者导致冲突及UI恢复、640px窄屏无水平溢出、英文；浏览器未捕获异常0。该轮真实Provider阻塞，后续火山成功补验见文末。
 
 ## 未运行与限制
 
@@ -79,3 +79,16 @@
 ```
 
 重建验证在核对`codex.task=taskboard-mvp-demo`标签后，仅删除`codex-taskboard-mvp-alice`／`codex-taskboard-mvp-bob`容器，保留`.taskboard-containers/`数据，再重复上述命令；逐项比较重建前后task对象及version。日志文本仅去除行尾空白，未删除失败、警告或测试结果。源文件与交付资料`git diff --check`通过。
+
+## 火山真实模型补验（2026-10-10）
+
+用户确认“是火山”，指定复用“分析元戎启动配置”的配置来源。仅读取用户既有api-key文件中的火山段，将地址／密钥写入本任务被忽略的0600私有配置；不改19100、原用户配置、Core或依赖锁，不新增请求次数／有效期预算或转发。当前本机Demo的模型为glm-5.2、别名火山，已保留供继续使用。
+
+先仅添加模型配置，两次未配置显式执行profile的Native请求返回181006：第一次尚无项目模型资源，第二次在精确资源登记后仍被拒绝。[失败记录](evidence/volcano-native-preflight.json)保留。随后补齐参考配置中的显式Native profile，在新会话中真实调用成功；此次是配置补齐，不宣称修复了无profile的Legacy Native路径。
+
+- 宿主资源登记沿用ProjectAccessStore.register_resource，先确认项目owner等于本地安装可信身份、admin授权通过；仅给该主体登记单一火山credential的use动作，不可委托，不授予其他资源或关闭检查。[资源证据](evidence/volcano-resource.json)与[实际宿主登记脚本](evidence/volcano-host-provision.py)。脚本是本次部署配置证据，不是新RPC。
+- 显式Native profile为taskboard-volcano-v1；新会话web_1a12685c46c_15752f4e09a0真实页面输入／发送，约8.24秒返回TASKBOARD_VOLCANO_OK；历史中保留同样的assistant回复和执行配置指纹。无mock、无响应替换。[结果](evidence/volcano-provider-result.json)、[真实回复截图](evidence/08-volcano-reply.png)。
+- TB-002通过现有会话选择器关联“火山 Native · Taskboard 联调”，已从任务打开该会话并显示返回任务入口；状态仍为doing。独立只读浏览器确认回复可恢复、详情刷新后关联与状态保留。[页面补验](evidence/volcano-ui-result.json)、[关联截图](evidence/09-volcano-linked-task.png)。未自动完成人工任务。
+- 私有配置还准备了同源OpenCode direct profile及独立runtime_root，本次没有切到OpenCode执行，未宣称其本地真实验证通过。原有会话与失败记录保留。
+
+产品代码仍为eb7697a0，新增改动仅配置／隔离数据及本轮证据文档；无需重复记一轮未运行的139项测试。先前组织双用户完整路由、Chrome107实机等未验证范围保持不变。
