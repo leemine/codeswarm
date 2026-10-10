@@ -361,7 +361,7 @@ export const MessageItem = memo(function MessageItem({
   const {
     id,
     role,
-    content,
+    content: rawContent,
     timestamp,
     isStreaming,
     toolCall,
@@ -378,6 +378,10 @@ export const MessageItem = memo(function MessageItem({
     agentTemplateName,
     crossSession,
   } = message;
+  const isInteractionDeclined = role === 'system' && message.errorCode === 'interaction_declined';
+  const content = isInteractionDeclined
+    ? describeChatError({ code: message.errorCode }, rawContent, t)
+    : rawContent;
   const [hasAutoSpoken, setHasAutoSpoken] = useState(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
@@ -558,7 +562,7 @@ export const MessageItem = memo(function MessageItem({
   }
 
   // 系统消息
-  if (role === 'system') {
+  if (role === 'system' && !isInteractionDeclined) {
     // slash 命令输出按命令类型路由：compact 使用时间线分隔条，
     // 其余命令退回通用文本；isCommandOutput 标记不会影响其他 system 消息。
     if (isCommandOutput) {
@@ -739,9 +743,7 @@ export const MessageItem = memo(function MessageItem({
     return (
       <div className="flex justify-center my-4 animate-fade-in" data-testid="chat-panel-system-message-bubble">
         <div className="px-4 py-2 rounded-full bg-secondary border border-border text-text-muted text-sm">
-          {message.errorCode === 'interaction_declined'
-            ? describeChatError({ code: message.errorCode }, content, t)
-            : content}
+          {content}
         </div>
       </div>
     );
