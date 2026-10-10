@@ -86,6 +86,23 @@ jobs:
             "$GITHUB_WORKSPACE/tests/unit_tests/test_updater_authority.py" \
             "$GITHUB_WORKSPACE/tests/unit_tests/test_updater_install_mode.py" \
             "$GITHUB_WORKSPACE/tests/unit_tests/gateway/test_channel_manager_config.py"
+      - name: Verify Code approvals and targeted cancellation
+        env:
+          JIUWENSWARM_HOME: ${{ runner.temp }}/evaluation-code-home
+          JIUWENSWARM_DATA_DIR: ${{ runner.temp }}/evaluation-code-data
+          JIUWENSWARM_CONFIG_URL: "off"
+        run: |
+          .venv/bin/python -m pytest --override-ini addopts='' -o asyncio_mode=auto --timeout=30 -q \
+            tests/unit_tests/agentserver/test_interrupt_helpers.py \
+            tests/unit_tests/agentserver/test_interrupt_history.py \
+            tests/unit_tests/agentserver/test_interrupt_output_handoff.py \
+            tests/unit_tests/runtime/harness/test_external_goal_projection.py \
+            tests/unit_tests/agentserver/test_interface_interrupts.py \
+            tests/unit_tests/runtime/harness/test_native_detached_projection.py \
+            tests/unit_tests/runtime/test_runtime_session_coordinator.py \
+            tests/unit_tests/runtime/harness/test_output_budget.py \
+            tests/unit_tests/runtime/harness/test_stop_terminal_delivery.py \
+            tests/unit_tests/extensions/evaluation/test_trials.py
       - name: Upload test archive
         if: always()
         uses: actions/upload-artifact@v7.0.1
