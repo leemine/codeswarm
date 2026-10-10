@@ -380,7 +380,8 @@ export const MessageItem = memo(function MessageItem({
   } = message;
   const isInteractionDeclined = role === 'system' && message.errorCode === 'interaction_declined';
   const isEventDataLimit = role === 'system' && message.errorCode === 'turn_event_limit';
-  const content = isInteractionDeclined || isEventDataLimit
+  const isModelOutputLimit = role === 'system' && message.errorCode === 'model_output_limit_exceeded';
+  const content = isInteractionDeclined || isEventDataLimit || isModelOutputLimit
     ? describeChatError({ code: message.errorCode }, rawContent, t)
     : rawContent;
   const [hasAutoSpoken, setHasAutoSpoken] = useState(false);
