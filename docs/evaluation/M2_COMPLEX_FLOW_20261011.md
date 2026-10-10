@@ -23,6 +23,10 @@ retaining both reasoning-display and Taskboard scripts.
   errors, missing dependencies, non-Exception base exceptions and invalid reports
   remain environment errors or fail closed. Existing timeout/cancel/cleanup
   ownership and legacy positive-assertion report compatibility remain.
+  Integration review also covered an explicit AssertionError raised by delivery
+  import before any authority assertion. It now carries delivery provenance and
+  remains test_failed with zero assertions; an authority-only explicit
+  AssertionError with zero assertions still fails closed as environment_error.
 
 ## Evidence and limits
 

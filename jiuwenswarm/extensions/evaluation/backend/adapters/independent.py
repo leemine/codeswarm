@@ -50,8 +50,9 @@ try:
  exec(compile(tree,'/authority/test.py','exec'),{'__name__':'__main__','__evaluation_check__':checked})
  code=0 if count[0]>0 else 2
  if count[0]==0: print('No authoritative assertion executed')
-except AssertionError:
+except AssertionError as exc:
  traceback.print_exc();code=1
+ if delivery_fault(exc): kind='delivery_exception'
 except BaseException as exc:
  traceback.print_exc()
  if delivery_fault(exc): code=1;kind='delivery_exception'
