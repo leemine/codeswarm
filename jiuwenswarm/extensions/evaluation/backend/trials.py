@@ -332,22 +332,26 @@ class Trials:
             identity, experiment_id, attempt_id, "observing", status="submitted"
         )
         errors = []
+        last_event_type = None
 
         async def observed(event):
             from jiuwenswarm.runtime.events import TERMINAL_ERROR_EVENT_TYPES
 
+            nonlocal last_event_type
+            changes = {}
             if not event.ok or event.event_type in TERMINAL_ERROR_EVENT_TYPES:
                 errors.append(event.event_type or "runtime.error")
                 if isinstance(event.payload, dict) and event.payload.get("error"):
-                    self._patch(
-                        identity,
-                        experiment_id,
-                        attempt_id,
-                        runtime_error=safe_diagnostic(event.payload["error"]),
-                    )
-            self._patch(
-                identity, experiment_id, attempt_id, last_event_type=event.event_type
-            )
+                    changes["runtime_error"] = safe_diagnostic(event.payload["error"])
+            # This is a business status hint, not the event/history store. Rewriting
+            # the whole experiment synchronously for every reasoning delta stalls
+            # the sole Runtime consumer and delays Code controls under long output.
+            # All events still reach the original Web projection in observe().
+            if event.event_type != last_event_type:
+                changes["last_event_type"] = event.event_type
+            if changes:
+                self._patch(identity, experiment_id, attempt_id, **changes)
+                last_event_type = event.event_type
 
         observation = asyncio.create_task(
             self.execution.observe(

@@ -121,6 +121,55 @@ async def finish(trials, exp):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
+async def test_long_reasoning_burst_does_not_rewrite_status_per_delta(
+    tmp_path, monkeypatch, failed
+):
+    class BurstPort(Port):
+        async def observe(self, **kwargs):
+            self.calls += 1
+            for _ in range(10_000):
+                await kwargs["on_event"](SimpleNamespace(
+                    ok=True, event_type="chat.reasoning", payload={"content": "x"}
+                ))
+            await kwargs["on_event"](SimpleNamespace(
+                ok=True, event_type="chat.ask_user_question", payload={}
+            ))
+            if failed:
+                # Same event type must not suppress later error diagnostics.
+                for error in ("first failure", "second failure"):
+                    await kwargs["on_event"](SimpleNamespace(
+                        ok=False, event_type="chat.error", payload={"error": error}
+                    ))
+            self.finished = True
+
+    trials, exp = setup(tmp_path, monkeypatch, port=BurstPort())
+    writes = []
+    update = trials.store.update_attempt
+
+    def counted(*args, **kwargs):
+        writes.append(kwargs)
+        return update(*args, **kwargs)
+
+    monkeypatch.setattr(trials.store, "update_attempt", counted)
+    try:
+        await trials.start(ACTOR, exp["id"])
+        result = await finish(trials, exp)
+        assert len(writes) < 25
+        assert result["body"]["exit_confirmed"]
+        if failed:
+            assert result["body"]["outcome"] == "execution_failed"
+            assert result["body"]["runtime_error"] == "second failure"
+            assert result["body"]["last_event_type"] == "chat.error"
+        else:
+            assert result["body"]["outcome"] == "passed"
+            assert result["body"]["last_event_type"] == "chat.ask_user_question"
+    finally:
+        await trials.close()
+        trials.store.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("script", "outcome"),
     [

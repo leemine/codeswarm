@@ -71,11 +71,16 @@ def test_reconnect_never_makes_old_resolved_or_cancelled_history_actionable():
 async def test_single_observer_projects_original_wire_identity_and_controls(tmp_path):
     events = [RuntimeEvent("attempt", "web", "session", {"event_type": "chat.tool_call", "tool_call_id": "call"}),
               RuntimeEvent("attempt", "web", "session", {"event_type": "chat.ask_user_question", "request_id": "control", "questions": []})]
+    deltas = [RuntimeEvent("attempt", "web", "session", {
+        "event_type": "chat.reasoning", "content": str(index)
+    }) for index in range(1_000)]
     pushes, observed, stream_calls = [], [], []
 
     async def stream(request, *, on_control_event):
         stream_calls.append(request)
         yield events[0]
+        for event in deltas:
+            yield event
         await on_control_event(events[1])
 
     async def push(value): pushes.append(value)
@@ -85,10 +90,11 @@ async def test_single_observer_projects_original_wire_identity_and_controls(tmp_
         definition=NS(model="m#0", execution_profile_id="native"),
         task=NS(instruction="ask first"), workspace=tmp_path, on_event=observer)
     assert len(stream_calls) == 1
-    assert observed == events
-    assert pushes[1]["payload"] is events[1].payload
-    assert pushes[1]["payload"]["request_id"] == "control"
-    assert pushes[1]["request_id"] == "attempt"
+    assert observed == [events[0], *deltas, events[1]]
+    assert [push["payload"] for push in pushes] == [event.payload for event in observed]
+    assert pushes[-1]["payload"] is events[1].payload
+    assert pushes[-1]["payload"]["request_id"] == "control"
+    assert pushes[-1]["request_id"] == "attempt"
     assert stream_calls[0].params["work_mode"] == "code"
 
 
