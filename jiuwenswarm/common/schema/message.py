@@ -54,6 +54,10 @@ class ReqMethod(Enum):
     LOCALE_SET_CONF = "locale.set_conf"
     CHANNEL_GET = "channel.get"
 
+    TASKBOARD_CREATE = "taskboard.create"
+    TASKBOARD_LIST = "taskboard.list"
+    TASKBOARD_GET = "taskboard.get"
+    TASKBOARD_UPDATE = "taskboard.update"
     SESSION_LIST = "session.list"
     SESSION_SHARE_CONTINUATION_OPTIONS = "session.share.continuation.options"
     SESSION_SHARE_CONTINUE = "session.share.continue"

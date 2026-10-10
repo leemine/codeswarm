@@ -1,0 +1,5 @@
+Using CPython 3.13.15 interpreter at: .venv/bin/python3
+Resolved 1 package in 6ms
+Prepared 1 package in 279ms
+Installed 1 package in 41ms
+ + workswarm==0.2.5b1 (from file:///home/leewanlong/work_leewanlong/code-projects/artifacts/taskboard-mvp-demo/.taskboard-demo/dist/workswarm-0.2.5b1-py3-none-any.whl)

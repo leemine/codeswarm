@@ -1,0 +1,27 @@
+{
+  "base": "http://127.0.0.1:19240",
+  "checks": [
+    "create persisted task via browser",
+    "edit task",
+    "link existing real Web Code session",
+    "open actual session and return to task",
+    "save result and deep-link reload",
+    "manual completion",
+    "reopen and manually complete again",
+    "search and project filter",
+    "drag status update",
+    "draft survives browser navigation",
+    "no uncaught browser errors"
+  ],
+  "tasks": [
+    "d8f34ac8-636b-48bc-84c3-91fcc3365eef",
+    "301aa5de-8025-4966-be4e-47b887ad8375",
+    "5b38a947-6b82-4640-be6f-d87d92d0e384"
+  ],
+  "refs": {
+    "project": "proj_7f6f3ee7",
+    "session": "web_1a126498cb0_8872992c3f76"
+  },
+  "errors": [],
+  "initial_narrow_capture": "390px exceeded existing host html min-width 584px; not a supported mobile result; retest at640px in followup-result.json"
+}

@@ -1,0 +1,4 @@
+PASS persisted local restart
+PASS concurrent writer conflict recovery
+Error: [{"type":"event","event":"chat.error","payload":{"event_type":"chat.error","error":"[181006] model request authorization denied, reason: model request authority denied the request","is_complete":true,"session_id":"web_1a126498cb0_8872992c3f76","request_id":"req_mv2ja46b_45"}}]
+    at /home/leewanlong/work_leewanlong/code-projects/artifacts/taskboard-mvp-demo/scripts/taskboard_browser_followup.cjs:15:79

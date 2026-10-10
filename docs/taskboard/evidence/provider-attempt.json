@@ -1,0 +1,12 @@
+{
+  "attempted": true,
+  "passed": false,
+  "provider": "Native",
+  "model": "glm-5.2",
+  "request_id": "req_mv2ja46b_45",
+  "session_id": "web_1a126498cb0_8872992c3f76",
+  "error_code": "181006",
+  "error": "model request authorization denied; model request authority denied the request",
+  "http_success_not_proven": true,
+  "action": "kept existing runtime authorization; restored isolated demo models.defaults=[]; no Core or Provider code changes"
+}

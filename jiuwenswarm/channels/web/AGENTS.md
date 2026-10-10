@@ -151,3 +151,5 @@
 
 | `../../../extensions/evaluation/frontend` | `evaluation` | 评测任务库、实验与结果证据 |
 | `features/rsi` | `rsi` | RSI 实验列表、创建、执行、产物与安装 |
+
+| `extensions/taskboard/frontend`（包内前端） | `taskboard` | 任务看板、详情与会话关联 |

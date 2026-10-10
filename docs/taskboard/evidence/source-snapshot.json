@@ -1,0 +1,28 @@
+{
+  "branch": "codex/taskboard-mvp-demo",
+  "swarm_base": "3bbcacdae3c44aba74263040550c770019795c63",
+  "remote_develop": "3bbcacdae3c44aba74263040550c770019795c63",
+  "core_locked": "91943c6b6d2aa518eb8c5cd03a382c5afdc38e06",
+  "core_actual_direct_url": {
+    "url": "https://github.com/leemine/code-core.git",
+    "vcs_info": {
+      "vcs": "git",
+      "commit_id": "91943c6b6d2aa518eb8c5cd03a382c5afdc38e06",
+      "requested_revision": "91943c6b6d2aa518eb8c5cd03a382c5afdc38e06"
+    }
+  },
+  "core_import": "/home/leewanlong/work_leewanlong/code-projects/artifacts/taskboard-mvp-demo/.venv/lib/python3.13/site-packages/openjiuwen/__init__.py",
+  "uv_lock_sha256": "c8dacc8b525d7d81d94debbb0737451f033e4895965dcfe0bea161587bd6f353",
+  "npm_lock_sha256": "954ebfd1b077f5bebae38b865b0d0f212eefcaa2e3ecbb66b300f06b41d7898b",
+  "original_swarm_sha": "78c4529719932b785437747d0c2794d429ec4440",
+  "original_swarm_status": "",
+  "original_core_sha": "9b41889a5d8cd3b8bd11376e1c41a5892c51fe57",
+  "original_core_status": "",
+  "baseline_reason": "Remote develop latest equals current formal deployment/image labels; carries PR45 picker and Web handshake fixes; locked noneditable Core, no local Core override.",
+  "environment": {
+    "python": "3.13.15",
+    "core_package_version": "0.1.18",
+    "node": "v22.22.2"
+  },
+  "test_scope": "current branch worktree, not remote CI; no claim from earlier SHA stable CI"
+}

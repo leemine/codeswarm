@@ -114,7 +114,7 @@ export function SessionSidebar({
     item.labelKey ? t(item.labelKey) : item.label || item.key
   );
   const applicationPluginItems: NavItem[] = applicationPlugins
-    .filter((plugin) => plugin.enabled !== false && plugin.nav_group !== 'experiments')
+    .filter((plugin) => plugin.enabled !== false && plugin.nav_group !== 'experiments' && plugin.nav_group !== 'tasks')
     .map((plugin) => ({
       key: plugin.nav_key as MainNavKey,
       labelKey: plugin.title_i18n_key,

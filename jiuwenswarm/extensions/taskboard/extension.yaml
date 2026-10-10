@@ -1,0 +1,7 @@
+id: taskboard
+name: Taskboard
+version: 1.0.0
+description: Manual task board linked to existing Code conversations
+min_jiuwenswarm_version: "0.2.5"
+package_type: application
+dependencies: {}

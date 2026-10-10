@@ -1642,3 +1642,19 @@ class ProjectAdapter(GatewayAdapter):
         return build_error_response(
             request, f"unsupported method: {method}", code="BAD_REQUEST"
         )
+
+
+def readable_reference_snapshot(actor_id: str) -> tuple[list, list[dict]]:
+    """Host-only reference inventory, under the existing project read authority.
+
+    Consumers must additionally enforce Session ownership; visibility alone is
+    not execution or sharing authority. No request user_id is used here.
+    """
+    token = _actor.set(actor_id)
+    try:
+        with ProjectAccessStore()._locked():
+            projects = [p for p in project_store.list_projects(cache_bust=True)
+                        if _can_read_project(p.project_id)]
+            return projects, _visible_sessions()
+    finally:
+        _actor.reset(token)

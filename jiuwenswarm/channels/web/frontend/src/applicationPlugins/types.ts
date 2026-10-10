@@ -57,3 +57,10 @@ export interface ApplicationPluginTaskRuntimeProps {
   onToolResult: (sessionId: string, toolResult: ToolResult, updatedAt?: string) => void;
   onFileItems: (sessionId: string, files: FileDownloadItem[], timestampIso?: string) => void;
 }
+
+/** Narrow page navigation; the host retains Session restoration authority. */
+export interface ApplicationPluginPageProps {
+  taskId?: string;
+  onOpenTask?: (taskId?: string) => void;
+  onOpenSession?: (sessionId: string, taskId: string) => Promise<void>;
+}

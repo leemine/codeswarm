@@ -1,0 +1,8 @@
+{
+  "removed_task_containers": [
+    "codex-taskboard-mvp-alice",
+    "codex-taskboard-mvp-bob"
+  ],
+  "data_retained": ".taskboard-containers/",
+  "local_demo": "running; retained for user"
+}

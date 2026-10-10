@@ -1,0 +1,8 @@
+{
+  "same_tasks_and_versions_after_container_recreation": true,
+  "task_ids": [
+    "ab9d1bc6-6c05-4fe6-ac94-281248228514",
+    "67beee21-b1c1-49c1-aec7-ee92000a2b99"
+  ],
+  "gateway_organization_routing": "not run; direct E2A container scope only"
+}
