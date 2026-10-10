@@ -32,6 +32,7 @@ class AgentOSRouter(AgentServerClientExtension, ThirdAgentExtension):
         self._yuanrong_client = YuanrongFrontendAgentClient(
             frontend_endpoint=config.frontend_endpoint,
             function_version_urn=config.function_version_urn,
+            require_function_urn=False,
             concurrency=config.concurrency,
             invoke_timeout_s=config.invoke_timeout_s,
             agent_timeout_s=config.agent_timeout_s,
@@ -56,6 +57,7 @@ class AgentOSRouter(AgentServerClientExtension, ThirdAgentExtension):
             ssh_relay=self._ssh_relay,
             ssh_channel_endpoint=config.ssh_channel,
             workspace_root=config.workspace_root,
+            builtin_ws_readiness=config.builtin_ws_readiness,
             sandbox_idle_timeout_seconds=config.sandbox_idle_timeout_seconds,
             sandbox_idle_check_interval_seconds=(
                 config.sandbox_idle_check_interval_seconds

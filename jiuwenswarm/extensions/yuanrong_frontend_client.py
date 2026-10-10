@@ -19,7 +19,7 @@ import urllib.parse
 import urllib.request
 import contextvars
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Mapping, TypedDict
+from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, TypedDict
 
 TRACE_ID_HEADER = "X-Trace-Id"
 _TRACE_ID_MAX_LEN = 128
@@ -437,12 +437,14 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         agent_timeout_s: float = 300.0,
         agent_namespace: str = "default",
         session_ttl_s: int = 900,
+        require_function_urn: bool = True,
         probe_settings: RuntimeProbeSettings | None = None,
         wait_running_timeout_s: float | None = None,
         wait_running_interval_s: float | None = None,
     ) -> None:
         self._frontend_endpoint = (frontend_endpoint or "").rstrip("/")
         self._function_version_urn = (function_version_urn or "").strip()
+        self._require_function_urn = require_function_urn
         self._concurrency = max(int(concurrency), 1)
         self._invoke_timeout_s = float(invoke_timeout_s)
         self._agent_timeout_s = float(agent_timeout_s)
@@ -488,7 +490,7 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             self._frontend_endpoint = endpoint.rstrip("/")
         if not self._frontend_endpoint:
             raise ValueError("frontend_endpoint cannot be empty")
-        if not self._function_version_urn:
+        if self._require_function_urn and not self._function_version_urn:
             raise ValueError("function_version_urn cannot be empty")
         self._connected = True
         self._server_ready = True
@@ -694,7 +696,11 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         return _merge_agent_instance_payload(parsed)
 
     async def wait_until_running(
-        self, instance_id: str, *, trace_id: str | None = None
+        self,
+        instance_id: str,
+        *,
+        trace_id: str | None = None,
+        readiness_probe: Callable[[], Awaitable[bool]] | None = None,
     ) -> dict[str, Any]:
         """Poll GET /api/agent/:id until ``status`` is explicitly ``running``.
 
@@ -703,6 +709,9 @@ class YuanrongFrontendAgentClient(AgentServerClient):
 
         Missing ``status`` is not treated as ready: keep polling. Only an
         explicit ``running`` (or a failed status / timeout) ends the loop.
+        An explicitly supplied application probe may establish readiness for
+        a matching instance whose successful GET response lacks status.
+        The response is returned unchanged; no synthetic status is added.
         """
         normalized_id = str(instance_id or "").strip()
         if not normalized_id:
@@ -751,6 +760,29 @@ class YuanrongFrontendAgentClient(AgentServerClient):
                 )
                 return instance
             remaining = deadline - asyncio.get_running_loop().time()
+            if (
+                readiness_probe is not None
+                and last_error is None
+                and not status
+                and instance.get("instance_id") == normalized_id
+                and remaining > 0
+            ):
+                try:
+                    ready = await asyncio.wait_for(
+                        readiness_probe(), min(5.0, remaining)
+                    )
+                except Exception as exc:
+                    last_error = exc
+                else:
+                    if ready is True:
+                        logger.info(
+                            "[YuanrongFrontendAgentClient] application readiness verified: "
+                            "instance_id=%s trace_id=%s",
+                            normalized_id,
+                            poll_trace_id,
+                        )
+                        return instance
+                remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 detail = (
                     str(last_error)
@@ -1547,6 +1579,8 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         )
 
     def _invoke_url(self) -> str:
+        if not self._function_version_urn:
+            raise ValueError("function_version_urn cannot be empty for function invocation")
         urn = urllib.parse.quote(self._function_version_urn, safe="")
         return f"{self._frontend_endpoint}/serverless/v1/functions/{urn}/invocations"
 
