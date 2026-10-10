@@ -191,7 +191,9 @@ class ExecutionSession:
                 router.start()
             except BaseException as router_error:
                 try:
-                    await self._stop_owned_resources(router=router)
+                    await self._stop_owned_resources(
+                        router=router, drain_output=binding.provider_id != "native",
+                    )
                 except ExecutionExitUnconfirmedError as cleanup_error:
                     raise cleanup_error from router_error
                 raise
@@ -326,10 +328,13 @@ class ExecutionSession:
                     provider_budget = max(0.0, provider_budget - (asyncio.get_running_loop().time() - began))
                 if ownership_check is None:
                     router, recovery = self._output_router, self._recovery
-                    await self._stop_owned_resources(router=router)
+                    await self._stop_owned_resources(
+                        router=router, drain_output=binding.provider_id != "native",
+                    )
                 else:
                     await self._stop_owned_resources(
                         router=router, ownership_check=check, provider_timeout=provider_budget,
+                        drain_output=binding.provider_id != "native",
                     )
                 check()
                 if recovery is not None:
@@ -352,6 +357,7 @@ class ExecutionSession:
         router: TurnOutputRouter | None,
         ownership_check: Callable[[], None] | None = None,
         provider_timeout: float | None = None,
+        drain_output: bool = False,
     ) -> None:
         failures: list[tuple[str, Exception]] = []
         # Capture before the first await. A replacement never becomes this stop's resource.
@@ -373,9 +379,13 @@ class ExecutionSession:
                 failures.append((name, exc))
             check()
 
-        if router is not None:
+        # The original router must observe terminals emitted during Provider
+        # teardown. Closing it first turns a confirmed abort into unknown EOF.
+        if router is not None and not drain_output:
             await stop_one("output_router", router.stop)
         await stop_one("provider", io.stop)
+        if router is not None and drain_output:
+            await stop_one("output_router", lambda: router.stop(drain=not failures))
         if transport is not None:
             await stop_one("product_mcp", transport.stop)
             if getattr(transport, "exit_confirmed", False) is not True:
