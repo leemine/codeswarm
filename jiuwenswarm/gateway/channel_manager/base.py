@@ -276,9 +276,9 @@ class BaseWebChannel(BaseChannel):
         channel: str = "",
     ) -> bool:
         """Return True when handshake auth is set and rejected the upgrade."""
-        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        from jiuwenswarm.governance.organization_auth import configured_gateway_authenticator
         from jiuwenswarm.extensions.agentos.auth.credential_authenticator import AuthContext
-        auth = configured_authenticator()
+        auth = configured_gateway_authenticator()
         if auth is not None and not (await auth.authenticate(AuthContext(headers=headers))).success:
             return True
         hook = self._handshake_auth

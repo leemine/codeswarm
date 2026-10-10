@@ -4294,9 +4294,11 @@ class MessageHandler(ABC):
                 msg = await self.consume_user_messages(timeout=None)
                 if msg is None:
                     continue
-                from jiuwenswarm.governance.organization_auth import authenticated_scope, configured_authenticator
+                from jiuwenswarm.governance.organization_auth import (
+                    authenticated_scope, configured_authenticator, configured_gateway_authenticator,
+                )
                 principal = getattr(msg, "_queued_organization_principal", None)
-                if configured_authenticator() is not None:
+                if configured_gateway_authenticator() is not None:
                     if principal is None:
                         raise PermissionError("authenticated queue principal required")
                     principal.identity()  # Re-read revocation after waiting.

@@ -571,9 +571,9 @@ class BaseWsChannel(BaseWebChannel):
                     delivery_guard = frame.guard
                     frame = frame.data
                 try:
-                    from jiuwenswarm.governance.organization_auth import connection_principal
+                    from jiuwenswarm.governance.organization_auth import connection_principal, configured_authenticator
                     principal = connection_principal(ws)  # Recheck after queue/backpressure.
-                    if principal is not None and (delivery_guard is None or delivery_guard() is not True):
+                    if configured_authenticator() is not None and principal is not None and (delivery_guard is None or delivery_guard() is not True):
                         if receipt is not None and not receipt.done():
                             receipt.set_result(False)
                         continue

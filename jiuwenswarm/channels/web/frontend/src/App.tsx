@@ -3960,9 +3960,9 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                         isProcessing={isProcessing}
                         onUserAnswer={handleUserAnswer}
                         onExportShare={handleExportShare}
-                        shareActionLabel={organizationAuth ? t('sessionSharing.title') : undefined}
+                        shareActionLabel={!sharingEnabled ? t('sessionSharing.crossInstanceUnavailable') : organizationAuth ? t('sessionSharing.title') : undefined}
                         isExportingShare={isExportingShare}
-                        canExportShare={Boolean(sessionId && sessionId !== NEW_CONVERSATION_ID && (organizationAuth ? sharingEnabled : !isProcessing || isPaused))}
+                        canExportShare={sharingEnabled && Boolean(sessionId && sessionId !== NEW_CONVERSATION_ID && (organizationAuth ? sharingEnabled : !isProcessing || isPaused))}
                         sessionTitle={sessionTitle}
                         sessionProjectName={sessionProjectName}
                         sessionProject={sessionProject}
@@ -4464,6 +4464,7 @@ function AppWithAuth({
   const [authStatus, setAuthStatus] = useState<'checking' | 'loggedOut' | 'loggedIn' | 'noIam'>('checking');
   const [remote, setRemote] = useState(false);
   const [organization, setOrganization] = useState(false);
+  const [instanceExecution, setInstanceExecution] = useState(false);
   const [sharingEnabled, setSharingEnabled] = useState(false);
 
   useEffect(() => {
@@ -4475,6 +4476,7 @@ function AppWithAuth({
         if (cancelled) return null;
         if (status.enabled) {
           setOrganization(true);
+          setInstanceExecution(status.execution_mode === 'user_instance');
           setSharingEnabled(status.sharing_enabled === true);
           setAuthStatus(status.authenticated ? 'loggedIn' : 'loggedOut');
           return null;
@@ -4542,8 +4544,8 @@ function AppWithAuth({
     <>
       {(remote || organization) && <LogoutButton organization={organization} />}
       <App
-        organizationAuth={organization}
-        sharingEnabled={sharingEnabled}
+        organizationAuth={organization && !instanceExecution}
+        sharingEnabled={instanceExecution ? false : !organization || sharingEnabled}
         onOpenSharedSession={onOpenSharedSession}
         settingsPageDefinition={settingsPageDefinition}
         resolveSettingsRequest={resolveSettingsRequest}

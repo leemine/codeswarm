@@ -537,7 +537,14 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
     def _reject_organization_local_files(self) -> bool:
         """Legacy installation-wide paths are not organization-authorized resources."""
-        from jiuwenswarm.governance.organization_auth import configured_authenticator
+        from jiuwenswarm.governance.organization_auth import configured_authenticator, gateway_login_only
+        if gateway_login_only() and self._is_file_api_route():
+            # Reuse the original AgentOS file proxy; never read frontend HOME.
+            self._proxy_http()
+            return True
+        if gateway_login_only() and self._is_share_api_route():
+            self._write_json(501, {"error": "Cross-instance sharing is not supported", "code": "NOT_SUPPORTED"})
+            return True
         if configured_authenticator() is not None and (self._is_file_api_route() or self._is_share_api_route()):
             parsed = urlparse(self.path)
             if parsed.path == '/file-api/download' and self.command in {'GET', 'HEAD'}:

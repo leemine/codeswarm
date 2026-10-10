@@ -13,7 +13,8 @@ from starlette.datastructures import Headers
 from jiuwenswarm.governance.organization_auth import (
     COOKIE,
     authenticated_scope,
-    configured_authenticator,
+    configured_gateway_authenticator,
+    gateway_login_only,
 )
 
 PREFIX = "/api/v1/auth/organization"
@@ -24,7 +25,7 @@ class OrganizationAuthenticationMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        auth = configured_authenticator()
+        auth = configured_gateway_authenticator()
         if auth is None or scope["type"] not in {"http", "websocket"}:
             return await self.app(scope, receive, send)
         if scope["type"] == "http" and scope.get("path") in {
@@ -42,6 +43,11 @@ class OrganizationAuthenticationMiddleware:
                     {"error": "organization authentication required"}, status_code=401
                 )(scope, receive, send)
             return
+        if gateway_login_only() and scope["type"] == "http" and scope.get("path", "").startswith("/share-api/"):
+            return await JSONResponse(
+                {"error": "Cross-instance sharing is not supported", "code": "NOT_SUPPORTED"},
+                status_code=501,
+            )(scope, receive, send)
         ended = False
         started = False
 
@@ -117,7 +123,7 @@ def register_organization_auth(app: FastAPI) -> None:
 
     @app.get(PREFIX + "/status")
     async def status(request: Request):
-        auth = configured_authenticator()
+        auth = configured_gateway_authenticator()
         if auth is None:
             return {"enabled": False, "authenticated": False}
         try:
@@ -126,14 +132,15 @@ def register_organization_auth(app: FastAPI) -> None:
                 "enabled": True,
                 "authenticated": True,
                 "actor_id": identity.actor_id,
-                "sharing_enabled": auth._config().get("sharing_enabled", True) is True,
+                "sharing_enabled": not gateway_login_only() and auth._config().get("sharing_enabled", True) is True,
+                **({"execution_mode": "user_instance"} if gateway_login_only() else {}),
             }
         except Exception:
             return {"enabled": True, "authenticated": False}
 
     @app.post(PREFIX + "/login")
     async def login(request: Request, body: LoginBody):
-        auth = configured_authenticator()
+        auth = configured_gateway_authenticator()
         if auth is None:
             return JSONResponse(
                 {"error": "organization authentication disabled"}, status_code=404
@@ -159,7 +166,7 @@ def register_organization_auth(app: FastAPI) -> None:
 
     @app.post(PREFIX + "/logout")
     async def logout(request: Request):
-        auth = configured_authenticator()
+        auth = configured_gateway_authenticator()
         if auth is None:
             return JSONResponse(
                 {"error": "organization authentication disabled"}, status_code=404

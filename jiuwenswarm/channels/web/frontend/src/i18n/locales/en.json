@@ -3288,6 +3288,7 @@
     }
   },
   "sessionSharing": {
+    "crossInstanceUnavailable": "Cross-instance sharing is not supported yet",
     "extraPermissions": "Other permissions and availability",
     "permissionStatus": {
       "discuss": "Not available yet",

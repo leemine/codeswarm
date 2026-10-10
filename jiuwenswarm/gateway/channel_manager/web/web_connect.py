@@ -1518,6 +1518,12 @@ class WebChannel(BaseWsChannel):
         if not isinstance(params, dict):
             params = {}
 
+        from jiuwenswarm.governance.organization_auth import gateway_login_only
+        if gateway_login_only() and method.startswith("session.share."):
+            await self.send_response(ws, req_id, ok=False,
+                error="Cross-instance sharing is not supported", code="NOT_SUPPORTED")
+            return
+
         from jiuwenswarm.governance.organization_auth import configured_authenticator, connection_principal
         from jiuwenswarm.governance.session_boundary import (
             organization_sharing_host, SHARE_METHODS,
