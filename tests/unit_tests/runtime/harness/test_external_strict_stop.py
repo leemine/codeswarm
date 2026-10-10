@@ -319,7 +319,7 @@ class _AbortNativeTransport:
         self.history, self.mode = history, mode
         self.queue = asyncio.Queue()
         self.prompted, self.aborting = asyncio.Event(), asyncio.Event()
-        self.closed = False
+        self.closed = asyncio.Event()
         self.requests = []
         self.on_abort = None
 
@@ -351,6 +351,9 @@ class _AbortNativeTransport:
                 await asyncio.Event().wait()
             if self.mode == 'no_idle':
                 return True
+            # Native abort is idempotent after the assistant has completed.
+            if self.history:
+                return True
             message = {'id': 'msg_original', 'role': 'assistant',
                        'parentID': self.user_id, 'sessionID': 'ses_original',
                        'time': {'completed': 1},
@@ -373,14 +376,15 @@ class _AbortNativeTransport:
         return value
 
     async def close(self):
-        self.closed = True
+        self.closed.set()
         await self.queue.put(None)
 
 
 class _AbortNativeHarness(OpenCodeHarness):
     def __init__(self, history, mode='idle'):
         super().__init__(OpenCodeHarnessConfig(model=OpenCodeModelConfig(
-            'fixture', 'http://127.0.0.1:1/v1', 'synthetic-key'), turn_timeout_s=30))
+            'fixture', 'http://127.0.0.1:1/v1', 'synthetic-key'),
+            turn_timeout_s=30, shutdown_timeout_s=.02))
         self.fixture_transport = _AbortNativeTransport(history, mode)
 
     async def _open_session(self, ctx):
@@ -418,7 +422,7 @@ async def test_real_opencode_abort_idle_checkpoint_then_strict_stop_cold_resume(
     await x.native.prompted.wait()
     assert (await x.harness.export_checkpoint()).data['state'] == 'turn_active'
     assert await x.adapter.stop_existing_session_adapter('session-1')
-    assert x.native.closed and x.session.exit_state is ExecutionExitState.EXIT_CONFIRMED
+    assert x.native.closed.is_set() and x.session.exit_state is ExecutionExitState.EXIT_CONFIRMED
     assert ('POST', '/session/ses_original/abort') in x.native.requests
     assert ('GET', '/session/ses_original/message/msg_original') in x.native.requests
     resumed = _native_abort_tree(tmp_path, history)
@@ -443,7 +447,7 @@ async def test_abort_failure_still_strict_stops_but_never_certifies_resume(tmp_p
     await x.session.send(HarnessInput('slow'))
     await x.native.prompted.wait()
     assert await x.adapter.stop_existing_session_adapter('session-1')
-    assert x.native.closed and x.session.exit_state is ExecutionExitState.EXIT_CONFIRMED
+    assert x.native.closed.is_set() and x.session.exit_state is ExecutionExitState.EXIT_CONFIRMED
     resumed = _native_abort_tree(tmp_path, history)
     with pytest.raises(HarnessProtocolError, match='confirmed idle'):
         await resumed.session.start(resumed.context)
@@ -460,11 +464,13 @@ async def test_abort_cancellation_cleans_original_and_propagates_unknown(tmp_pat
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert x.native.closed
+    assert x.native.closed.is_set()
     assert x.adapter._session is x.session
     assert x.session.exit_state is ExecutionExitState.EXIT_UNCONFIRMED
     assert await x.adapter.stop_existing_session_adapter('session-1')
-    assert x.native.requests.count(('POST', '/session/ses_original/abort')) == 1
+    # Runtime cancellation and native graceful close each issue one abort;
+    # the later strict-stop retry reuses the already closed transport.
+    assert x.native.requests.count(('POST', '/session/ses_original/abort')) == 2
 
 
 @pytest.mark.asyncio
@@ -481,7 +487,7 @@ async def test_abort_owner_drift_does_not_stop_replacement(tmp_path, recovery_en
     with pytest.raises(RuntimeError, match='resources changed'):
         await x.adapter.stop_existing_session_adapter('session-1')
     replacement.stop.assert_not_awaited()
-    assert not x.native.closed
+    assert not x.native.closed.is_set()
     assert x.adapter._session is x.session
     x.session.io = original_io
     await x.session.stop()
@@ -501,7 +507,7 @@ async def test_native_idle_does_not_override_failed_durable_checkpoint(tmp_path,
         return original_save(checkpoint, reason, expected_revision)
     x.recovery._save_sync = fail_terminal
     assert await x.adapter.stop_existing_session_adapter('session-1')
-    assert x.native.closed and x.session.exit_state is ExecutionExitState.EXIT_CONFIRMED
+    assert x.native.closed.is_set() and x.session.exit_state is ExecutionExitState.EXIT_CONFIRMED
     assert (await x.harness.export_checkpoint()).data['state'] == 'idle'
     resumed = _native_abort_tree(tmp_path, history)
     with pytest.raises(HarnessProtocolError, match='confirmed idle'):
@@ -581,7 +587,7 @@ async def test_ordinary_cancel_drains_terminal_before_strict_exit_and_cold_resum
         assert result.ok
         assert any(item.terminal is TurnEventKind.ABORTED for item in output)
         assert released == [owner]
-        assert x.native.closed
+        assert x.native.closed.is_set()
         x.session.abandon_output(receipt.turn_id)  # safe after the router has exited
         resumed = _native_abort_tree(tmp_path, history)
         try:
