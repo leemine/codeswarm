@@ -1169,6 +1169,11 @@ class AgentWebSocketServer:
             ConfigAdapter(),
         ):
             self._adapter_registry.register(adapter)
+        from jiuwenswarm.server.runtime.gateway_adapter.taskboard_adapter import TaskboardAdapter
+        self._adapter_registry.register(TaskboardAdapter(
+            identity_resolver=self._resolve_trusted_identity,
+            session_host=self._organization_session_host,
+        ))
         self._install_sharing_adapters()
         # AgentServer-side tokenizer cache/download service. The Gateway only
         # persists model profiles and notifies this process to refresh them.

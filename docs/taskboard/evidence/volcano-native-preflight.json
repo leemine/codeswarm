@@ -1,0 +1,14 @@
+{
+  "provider": "native (legacy unprofiled route)",
+  "model": "glm-5.2",
+  "session_id": "web_1a1267fff45_4a5dee0a139c",
+  "attempts": 2,
+  "passed": false,
+  "error_code": "181006",
+  "errors": [
+    "[181006] model request authorization denied, reason: model request authority denied the request",
+    "[181006] model request authorization denied, reason: model request authority denied the request"
+  ],
+  "second_attempt_after_exact_credential_resource_provisioning": true,
+  "product_code_changed": false
+}

@@ -1,0 +1,18 @@
+{
+  "project_id": "proj_7f6f3ee7",
+  "resource_id": "taskboard-volcano-model",
+  "kind": "credential",
+  "reference": "model-catalog:0960cd04815f4946bf634d0004c55f2dd2281f35ef645a273a30de746c53b19a",
+  "actions": [
+    "use"
+  ],
+  "subject": "current local installation owner",
+  "resource_revision": 1,
+  "delegable": false,
+  "interface": "ProjectAccessStore.register_resource (host provisioning)",
+  "model": "glm-5.2",
+  "api_base": "https://st8tp3ajl0df3n8b8l8qu.apigateway-cn-beijing.volceapi.com/v1",
+  "authorization": "user requested existing Volcano configuration; exact owner and project admin checked; no wire registration or policy bypass",
+  "native_first_attempt": "denied 181006 before model credential was provisioned",
+  "native_first_session": "web_1a1267fff45_4a5dee0a139c"
+}

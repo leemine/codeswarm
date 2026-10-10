@@ -1,0 +1,43 @@
+{
+  "checks": [
+    "alice create through real container AgentServer E2A",
+    "bob create through real container AgentServer E2A",
+    "alice cannot read other instance task",
+    "bob cannot read other instance task"
+  ],
+  "tasks": [
+    {
+      "number": 1,
+      "task_id": "ab9d1bc6-6c05-4fe6-ac94-281248228514",
+      "title": "alice container task",
+      "description": "",
+      "status": "todo",
+      "priority": "normal",
+      "project_id": null,
+      "linked_session_id": null,
+      "result_note": "",
+      "version": 1,
+      "created_at": 1791644057749,
+      "updated_at": 1791644057749,
+      "project": null,
+      "linked_session": null
+    },
+    {
+      "number": 1,
+      "task_id": "67beee21-b1c1-49c1-aec7-ee92000a2b99",
+      "title": "bob container task",
+      "description": "",
+      "status": "todo",
+      "priority": "normal",
+      "project_id": null,
+      "linked_session_id": null,
+      "result_note": "",
+      "version": 1,
+      "created_at": 1791644057809,
+      "updated_at": 1791644057809,
+      "project": null,
+      "linked_session": null
+    }
+  ],
+  "scope": "two independent container AgentServers; not organization Gateway routing"
+}

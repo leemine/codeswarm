@@ -131,7 +131,8 @@
     "test:codex-governed-availability": "esbuild src/components/ExternalCliAgentsSection.tsx src/features/settings/modules/experimental/ExperimentalSettings.tsx src/features/settings/services/SettingsServicesProvider.tsx src/features/settings/services/SettingsSourceProvider.tsx --bundle --splitting --packages=external --platform=node --format=esm --outdir=node_modules/.cache/codex-governed-availability --loader:.css=empty --loader:.svg=dataurl --loader:.png=dataurl --define:import.meta.env={} && node --test tests/codexGovernedAvailability.test.mjs",
     "test:owner-artifact-download": "node scripts/test-owner-artifact-download.mjs",
     "test:cli-auth-modal": "node --test tests/cliAuthModal.test.mjs",
-    "test:reasoning-display": "node --test tests/reasoningDisplayText.test.mjs"
+    "test:reasoning-display": "node --test tests/reasoningDisplayText.test.mjs",
+    "test:taskboard": "esbuild src/multi-session/routing/route.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/taskboard-routing/route.mjs && node --test tests/taskboardRouting.test.mjs"
   },
   "dependencies": {
     "@a2ui/react": "0.8.0",

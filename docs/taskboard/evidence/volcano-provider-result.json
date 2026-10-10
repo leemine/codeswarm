@@ -1,0 +1,17 @@
+{
+  "model": "glm-5.2",
+  "alias": "火山",
+  "provider": "native",
+  "execution_profile_id": "native",
+  "execution_config_revision": "taskboard-volcano-v1",
+  "execution_config_fingerprint": "574e6de1c8c9b1fa1243a91e67d88846c974a533f7fece785d4a38332e25c09f",
+  "session_id": "web_1a12685c46c_15752f4e09a0",
+  "project_id": "proj_7f6f3ee7",
+  "reply_marker": "TASKBOARD_VOLCANO_OK",
+  "reply_persisted": true,
+  "real_browser_send": true,
+  "mock_interception": false,
+  "profileless_native_preflight": "failed 181006; retained separately",
+  "configuration": "exact credential resource provisioned through host API; explicit Native profile; original runtime authority retained",
+  "core_or_product_code_changed": false
+}

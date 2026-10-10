@@ -97,6 +97,8 @@ interface ConversationSidebarProps {
   onSelect: (session: Session) => void;
   /** 跳转到"定时任务"主面板；该入口原来在最左侧图标栏，现移到工作小窗口的"新建任务"下方 */
   onOpenCron: () => void;
+  onOpenTaskboard?: () => void;
+  isTaskboardActive?: boolean;
   onOpenSharedSessions?: () => void;
   onSessionDeleted?: (sessionId: string) => void;
   /** 当前是否正停留在定时任务面板，用于给下面这个入口按钮加选中态 */
@@ -867,6 +869,8 @@ export function ConversationSidebar({
   onNew,
   onSelect,
   onOpenCron,
+  onOpenTaskboard,
+  isTaskboardActive = false,
   onOpenSharedSessions,
   onSessionDeleted,
   isCronActive,
@@ -1730,6 +1734,7 @@ export function ConversationSidebar({
           <NewTaskIcon aria-hidden />
           <span data-testid="multi-session-new-conversation-label">{t('multiSession.newConversation')}</span>
         </button>
+        {workMode === 'code' && onOpenTaskboard && <button type="button" className={`conversation-sidebar__new${isTaskboardActive ? ' is-active' : ''}`} onClick={onOpenTaskboard} data-testid="multi-session-taskboard-nav"><Workflow size={17}/><span>{t('taskboard.title')}</span></button>}
         <button
           type="button"
           className={`conversation-sidebar__new${isCronActive ? ' is-active' : ''}`}

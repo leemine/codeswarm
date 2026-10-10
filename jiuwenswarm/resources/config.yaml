@@ -30,6 +30,10 @@ a2ui:
 rsi:
   enabled: true
 
+# Manual Taskboard application; data stays in the current AgentServer instance.
+taskboard:
+  enabled: true
+
 # Evaluation application; independent of the RSI tab.
 evaluation:
   enabled: true

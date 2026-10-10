@@ -1,0 +1,12 @@
+{
+  "source_thread": "分析元戎启动配置",
+  "source_file": "/home/leewanlong/work_leewanlong/api-key/api_key",
+  "source_section": "火山",
+  "model": "glm-5.2",
+  "alias": "火山",
+  "api_base": "https://st8tp3ajl0df3n8b8l8qu.apigateway-cn-beijing.volceapi.com/v1",
+  "credential": "copied only to ignored isolated Demo config; not recorded",
+  "config_mode": "0o600",
+  "scope": "local Taskboard Demo only; existing online deployment unchanged",
+  "time_utc": "2026-10-10T15:46:45.146810+00:00"
+}

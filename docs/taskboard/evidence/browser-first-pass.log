@@ -1,0 +1,12 @@
+PASS create persisted task via browser
+PASS edit task
+PASS link existing real Web Code session
+PASS open actual session and return to task
+PASS save result and deep-link reload
+PASS manual completion
+PASS reopen and manually complete again
+PASS search and project filter
+PASS drag status update
+PASS draft survives browser navigation
+PASS mobile layout
+PASS no uncaught browser errors

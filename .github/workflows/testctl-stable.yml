@@ -82,6 +82,38 @@ jobs:
             "$GITHUB_WORKSPACE/tests/unit_tests/extensions/test_yuanrong_application_readiness.py" \
             "$GITHUB_WORKSPACE/tests/unit_tests/governance/test_gateway_login_only.py" \
             "$GITHUB_WORKSPACE/tests/unit_tests/governance/test_organization_auth.py"
+      - name: Verify Web proxy handshake and file serving
+        env:
+          HOME: ${{ runner.temp }}/web-proxy-home
+          TMPDIR: ${{ runner.temp }}/web-proxy-tmp
+          PYTHONPATH: ${{ github.workspace }}
+          JIUWENSWARM_DATA_DIR: ${{ runner.temp }}/web-proxy-data
+        run: |
+          mkdir -p "$HOME" "$TMPDIR"
+          cd "$TMPDIR"
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest --override-ini addopts='' --timeout=20 -q \
+            "$GITHUB_WORKSPACE/tests/unit_tests/test_app_web_raw_file.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/test_app_web_ws_handshake.py"
+      - name: Verify Taskboard persistence and application boundaries
+        env:
+          HOME: ${{ runner.temp }}/taskboard-home
+          TMPDIR: ${{ runner.temp }}/taskboard-tmp
+          PYTHONPATH: ${{ github.workspace }}
+          JIUWENSWARM_DATA_DIR: ${{ runner.temp }}/taskboard-data
+          JIUWENSWARM_CONFIG_URL: "off"
+        run: |
+          mkdir -p "$HOME" "$TMPDIR"
+          cd "$TMPDIR"
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest --override-ini addopts='' -o asyncio_mode=auto --timeout=30 -q \
+            "$GITHUB_WORKSPACE/tests/unit_tests/test_application_plugins.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/server/taskboard" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/governance/test_application_boundary.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/gateway/test_e2a_proxy.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/server/test_project_governance_boundary.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/server/test_project_access.py"
+      - name: Verify Taskboard routing
+        working-directory: jiuwenswarm/channels/web/frontend
+        run: npm run test:taskboard
       - name: Build instance login and sharing UI
         working-directory: jiuwenswarm/channels/web/frontend
         env:
