@@ -769,17 +769,37 @@ class EngineAgentAdapter:
             )
         )
         completed = False
+        failed = False
+        route = self._route
         stream = self._process_message_stream_impl(request, inputs, model_authority=model_authority,
                                                     continuation_context=continuation)
         try:
             async for chunk in stream:
                 if chunk.runtime_completion == "completed":
                     completed = True
+                elif chunk.runtime_completion == "failed":
+                    failed = True
                 yield chunk
         finally:
             try:
                 await stream.aclose()
             finally:
+                if failed:
+                    # A FAILED event is not process-exit proof. Retire the exact
+                    # failed execution through the existing strict cleanup before
+                    # releasing its Runtime permit or admitting same-session input.
+                    def check_failed_owner():
+                        if self._session is not session or self._route is not route:
+                            raise RuntimeError("External failed execution owner changed")
+
+                    try:
+                        await self._stop_owned_execution_once(
+                            session, ownership_check=check_failed_owner,
+                        )
+                    finally:
+                        # An explicit cancel may retry an unconfirmed stop; the
+                        # output reader itself has already closed above.
+                        self._ordinary_reader_done.set()
                 if owns_heartbeat and not completed:
                     # A detached Web reader is intentionally different from a
                     # cancelled Runtime-owned Heartbeat. Neither reader EOF nor

@@ -674,9 +674,7 @@ async def test_detached_chat_accepted_before_receipt_blocks_goal_begin(
     assert len(provider.sent) == 3
 
 
-async def test_failed_ordinary_turn_requires_explicit_stop_before_goal(
-    chain, monkeypatch
-):
+async def test_failed_ordinary_turn_confirms_stop_before_same_session_followup(chain, monkeypatch):
     from openjiuwen.harness_protocol import TurnError
 
     provider = chain.providers[0]
@@ -688,24 +686,62 @@ async def test_failed_ordinary_turn_requires_explicit_stop_before_goal(
         )
 
     monkeypatch.setattr(provider, "_execute_turn", failed)
+    provider.close_release.clear()
     chat = request("failed-chat")
     chat.req_method = ReqMethod.CHAT_SEND
     chat.params = {"mode": "agent"}
-    await run(chain, chat, SessionWorkKind.CHAT_STREAM)
-    goal = asyncio.create_task(run(chain, request()))
-    for _ in range(30):
-        await asyncio.sleep(0)
-    assert chain.adapter._goal_runtime.manager.peek().attempt_count == 0
+    first = asyncio.create_task(run(chain, chat, SessionWorkKind.CHAT_STREAM))
+    await provider.close_entered.wait()
+    owner = chain.adapter._ordinary_owner
+    assert chain.runtime.holds_external_execution(owner)
+    assert not first.done()
+    # Queue the next original Runtime request while teardown is still pending.
+    followup = request("after-failure")
+    followup.req_method = ReqMethod.CHAT_SEND
+    followup.params = {"mode": "agent"}
+    second = asyncio.create_task(run(chain, followup, SessionWorkKind.CHAT_STREAM))
+    await asyncio.sleep(0)
+    assert not second.done() and len(provider.sent) == 1
+    provider.close_release.set()
+    await asyncio.wait_for(asyncio.gather(first, second), 3)
+    assert provider.closed_count == 1
+    assert not chain.runtime.holds_external_execution(owner)
+    assert len(chain.providers) == 2 and len(chain.providers[1].sent) == 1
+    assert chain.adapter._ordinary_owner is None
+
+
+async def test_failed_ordinary_turn_unconfirmed_stop_retains_owner_for_explicit_retry(chain, monkeypatch):
+    from openjiuwen.harness_protocol import TurnError
+
+    provider = chain.providers[0]
+
+    async def failed(turn):
+        return TurnEventKind.FAILED, TurnResult(
+            status=TurnStatus.FAILED, error=TurnError(message="controlled failure")
+        )
+
+    monkeypatch.setattr(provider, "_execute_turn", failed)
+    provider.fail_close = True
+    chat = request("failed-chat")
+    chat.req_method = ReqMethod.CHAT_SEND
+    chat.params = {"mode": "agent"}
+    with pytest.raises(Exception, match="exit|Exit|stop|cleanup"):
+        await run(chain, chat, SessionWorkKind.CHAT_STREAM)
+    owner = chain.adapter._ordinary_owner
+    assert chain.runtime.holds_external_execution(owner)
+    assert chain.adapter._ordinary_reader_done.is_set()
+    assert not chain.adapter._session.closed
+    provider.fail_close = False
     interrupt = request("explicit-stop")
     interrupt.params = {"intent": "cancel"}
     assert (await chain.adapter.process_interrupt(interrupt)).ok
-    await asyncio.gather(goal, return_exceptions=True)
-    assert provider.closed_count == 1
+    assert not chain.runtime.holds_external_execution(owner)
     assert chain.adapter._ordinary_owner is None
-    resumed = request("resume", action="resume")
-    await run(chain, resumed)
-    assert len(chain.providers) == 2
-    assert chain.adapter._goal_runtime.manager.peek().status is GoalStatus.COMPLETED
+    followup = request("after-retry")
+    followup.req_method = ReqMethod.CHAT_SEND
+    followup.params = {"mode": "agent"}
+    await asyncio.wait_for(run(chain, followup, SessionWorkKind.CHAT_STREAM), 3)
+    assert len(chain.providers) == 2 and len(chain.providers[1].sent) == 1
 
 
 @pytest.mark.parametrize("token_budget", [None, 100])
