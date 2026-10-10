@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -496,7 +497,9 @@ class AgentOSRouterClient(AgentServerClient):
         auth_client: AgentOSAuthenticator | None = None,
         ws_client_factory: Callable[[], WebSocketAgentServerClient] | None = None,
         probe_settings: RuntimeProbeSettings | None = None,
+        builtin_ws_readiness: bool = False,
     ) -> None:
+        self._builtin_ws_readiness = builtin_ws_readiness
         self._yuanrong = yuanrong
         self._registry = registry
         self._agent_manager = agent_manager
@@ -1347,6 +1350,24 @@ class AgentOSRouterClient(AgentServerClient):
                 )
                 await asyncio.sleep(sleep_for)
 
+    async def _probe_builtin_readiness(self, instance_id: str) -> bool:
+        """Verify an actual application ack through the configured instance proxy."""
+        import websockets
+
+        async with websockets.connect(
+            self._agent_ws_url(instance_id, 18092),
+            open_timeout=3,
+            close_timeout=1,
+        ) as ws:
+            ack = json.loads(await ws.recv())
+            return (
+                isinstance(ack, dict)
+                and ack.get("type") == "event"
+                and ack.get("event") == "connection.ack"
+                and isinstance(ack.get("payload"), dict)
+                and ack["payload"].get("status") == "ready"
+            )
+
     async def _wait_yuanrong_running(
         self,
         instance_id: str,
@@ -1381,6 +1402,16 @@ class AgentOSRouterClient(AgentServerClient):
             instance=instance_id,
             trace_id=poll_trace_id,
         )
+        if self._builtin_ws_readiness and agent_type == BUILTIN_AGENT_TYPE:
+            # Opt-in compatibility for runtimes with no lifecycle status field.
+            # Do not swallow TypeError here: the configured waiter must support
+            # the explicit probe and cannot silently fall back to GET-only.
+            info = await waiter(
+                instance_id,
+                trace_id=poll_trace_id,
+                readiness_probe=lambda: self._probe_builtin_readiness(instance_id),
+            )
+            return info if isinstance(info, dict) else {}
         try:
             info = await waiter(instance_id, trace_id=poll_trace_id)
         except TypeError:

@@ -531,6 +531,19 @@ def attach_container_file_routes(app: FastAPI, channel: WebChannel) -> None:
         return response
 
     async def _authenticate_file_api(request: Request) -> JSONResponse | None:
+        from jiuwenswarm.governance.organization_auth import (
+            configured_gateway_authenticator, gateway_login_only,
+        )
+        if gateway_login_only():
+            try:
+                identity = configured_gateway_authenticator().principal(request.headers).identity()
+            except Exception:
+                return _error_json(error="authentication required", code="UNAUTHORIZED", status_code=401)
+            # Feed the original file routing's verified identity/mismatch check;
+            # a query/header hint cannot select a different user's directory.
+            request.state.agentos_iam_user_id = identity.actor_id
+            request.state.agentos_username = identity.actor_id
+            return _user_id_mismatch_against_token(request)
         path = str(request.url.path or "")
         full_path = f"{path}?{request.url.query}" if request.url.query else path
         result = await client.authenticate_http(

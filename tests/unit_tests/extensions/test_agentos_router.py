@@ -2964,3 +2964,12 @@ async def test_register_agent_skips_when_runtime_already_cleaned() -> None:
         assert len(registry.registered) == 1  # 无新增
     finally:
         await client.shutdown()
+
+
+def test_router_config_allows_agent_api_without_function_registration() -> None:
+    config = load_router_config({"gateway": {"agent_client": {
+        "type": "agentos_router", "frontend_endpoint": "http://127.0.0.1:18888",
+    }}})
+    assert config.function_version_urn == ""
+    with pytest.raises(ValueError, match="frontend_endpoint"):
+        load_router_config({"gateway": {"agent_client": {"type": "agentos_router"}}})

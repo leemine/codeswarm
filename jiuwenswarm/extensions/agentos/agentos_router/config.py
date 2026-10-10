@@ -60,6 +60,7 @@ class RouterConfig:
     agent_timeout_s: float = 300.0
     creating_timeout_seconds: float = 60.0
     agent_key_fields: tuple[str, ...] = DEFAULT_AGENT_KEY_FIELDS
+    builtin_ws_readiness: bool = False
     workspace_root: str = DEFAULT_AGENT_WORKSPACE_ROOT
     # Idle sandbox reclamation: delete the YuanRong instance once an agent
     # has no held tasks (chat/SSH) for this long. <= 0 disables reclamation.
@@ -331,10 +332,9 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
     function_version_urn = str(
         agent_client.get("function_version_urn") or ""
     ).strip()
-    if not frontend_endpoint or not function_version_urn:
+    if not frontend_endpoint:
         raise ValueError(
-            "gateway.agent_client.frontend_endpoint and function_version_urn "
-            "are required in agentos_router mode"
+            "gateway.agent_client.frontend_endpoint is required in agentos_router mode"
         )
 
     auth_service_url = str(agentos.get("auth_service_url") or "").strip()
@@ -374,6 +374,7 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
         agent_key_fields=normalize_agent_key_fields(
             agentos.get("agent_key_fields")
         ),
+        builtin_ws_readiness=_read_bool(agentos, "builtin_ws_readiness", False),
         workspace_root=str(
             agentos.get("workspace_root") or DEFAULT_AGENT_WORKSPACE_ROOT
         ).strip()

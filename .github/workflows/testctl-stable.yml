@@ -67,6 +67,27 @@ jobs:
         run: |
           npm run test:cli-auth-modal
           npm run test:codex-governed-availability
+      - name: Verify Agent API and instance login compatibility
+        env:
+          HOME: ${{ runner.temp }}/instance-login-home
+          TMPDIR: ${{ runner.temp }}/instance-login-tmp
+          PYTHONPATH: ${{ github.workspace }}
+          JIUWENSWARM_DATA_DIR: ${{ runner.temp }}/instance-login-data
+        run: |
+          mkdir -p "$HOME" "$TMPDIR"
+          cd "$TMPDIR"
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest --override-ini addopts='' -o asyncio_mode=auto --timeout=30 -q \
+            "$GITHUB_WORKSPACE/tests/unit_tests/extensions/test_agentos_router.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/extensions/test_yuanrong_frontend_client.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/extensions/test_yuanrong_application_readiness.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/governance/test_gateway_login_only.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/governance/test_organization_auth.py"
+      - name: Build instance login and sharing UI
+        working-directory: jiuwenswarm/channels/web/frontend
+        env:
+          HOME: ${{ runner.temp }}/instance-web-home
+          JIUWENSWARM_DATA_DIR: ${{ runner.temp }}/instance-web-data
+        run: npm run build
       - name: Run stable regression
         env:
           TESTCTL_RETENTION_DAYS: ${{ github.event_name == 'schedule' && '90' || '30' }}

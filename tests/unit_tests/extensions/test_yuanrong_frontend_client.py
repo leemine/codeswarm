@@ -1181,3 +1181,28 @@ async def test_mkdir_agent_dir_rejects_nul_path(client: YuanrongFrontendAgentCli
     with pytest.raises(YuanrongAgentFileError) as exc:
         await client.mkdir_agent_dir("inst-1", "/home/agentos/foo\x00bar")
     assert exc.value.error_code == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_agent_api_connection_does_not_require_registered_function() -> None:
+    client = YuanrongFrontendAgentClient(
+        frontend_endpoint="http://127.0.0.1:18888",
+        function_version_urn="",
+        require_function_urn=False,
+    )
+    await client.connect("")
+    assert client.server_ready
+    with pytest.raises(ValueError, match="function invocation"):
+        client._invoke_url()
+    await client.disconnect()
+    assert not client.server_ready
+
+
+@pytest.mark.asyncio
+async def test_function_connection_still_requires_registered_function() -> None:
+    client = YuanrongFrontendAgentClient(
+        frontend_endpoint="http://127.0.0.1:18888", function_version_urn="",
+    )
+    with pytest.raises(ValueError, match="function_version_urn"):
+        await client.connect("")
+    assert not client.server_ready

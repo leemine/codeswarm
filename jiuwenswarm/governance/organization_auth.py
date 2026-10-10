@@ -34,6 +34,7 @@ from jiuwenswarm.extensions.agentos.auth.credential_authenticator import (
 )
 
 CONFIG_ENV = "JIUWENSWARM_ORGANIZATION_AUTH_FILE"
+GATEWAY_AUTH_ENV = "JIUWENSWARM_GATEWAY_AUTH_FILE"
 COOKIE = "jiuwenswarm_organization"
 ASSERTION = "_organization_assertion"
 _current: contextvars.ContextVar[AuthenticatedPrincipal | None] = (
@@ -289,6 +290,28 @@ def configured_authenticator() -> OrganizationAuthenticator | None:
     return _instances[resolved]
 
 
+def configured_gateway_authenticator() -> OrganizationAuthenticator | None:
+    """Reuse login credentials without installing shared-execution governance.
+
+    The instance deployment configures this only in Gateway. The original
+    organization configuration remains available for existing deployments.
+    Never distribute this file or its signing key into user instances.
+    """
+    path = os.environ.get(GATEWAY_AUTH_ENV, "")
+    if not path:
+        return configured_authenticator()
+    if os.environ.get(CONFIG_ENV):
+        raise PermissionError("gateway login and shared execution configuration cannot be combined")
+    resolved = str(Path(path).resolve())
+    if resolved not in _instances:
+        _instances[resolved] = OrganizationAuthenticator(resolved)
+    return _instances[resolved]
+
+
+def gateway_login_only() -> bool:
+    return bool(os.environ.get(GATEWAY_AUTH_ENV))
+
+
 def current_principal() -> AuthenticatedPrincipal | None:
     """Capture an opaque host principal for an existing asynchronous queue."""
     principal = _current.get()
@@ -312,7 +335,7 @@ def authenticated_scope(principal: AuthenticatedPrincipal | None):
 
 
 def connection_principal(ws: Any) -> AuthenticatedPrincipal | None:
-    auth = configured_authenticator()
+    auth = configured_gateway_authenticator()
     if auth is None:
         return None
     cached = getattr(ws, "_jiuwen_organization_principal", None)
