@@ -574,6 +574,45 @@ def test_non_permission_interrupt_does_not_project_tool_payload() -> None:
     assert "tool_payload" not in result["questions"][0]
 
 
+def test_protocol_tool_approval_preserves_sanitized_arguments_and_scope() -> None:
+    interaction = SimpleNamespace(id="opencode-approval:request", value={
+        "kind": "tool_approval", "tool_name": "bash",
+        "arguments": {"command": "find . -type f | sort", "api_key": "secret"},
+        "provider_data": {"opencode": {
+            "request_id": "internal", "patterns": ["find . -type f", "sort"],
+            "always": ["find *", "sort"],
+        }},
+    })
+    result = convert_interactions_to_ask_user_question([interaction])
+    assert result["request_id"] == interaction.id
+    assert result["questions"][0]["tool_payload"] == {
+        "arguments": {"command": "find . -type f | sort", "api_key": "[REDACTED]"},
+        "patterns": ["find . -type f", "sort"],
+        "always": ["find *", "sort"],
+    }
+    assert "internal" not in json.dumps(result)
+
+
+def test_protocol_tool_approval_empty_metadata_still_shows_native_scope() -> None:
+    interaction = SimpleNamespace(id="opencode-approval:scope", value={
+        "kind": "tool_approval", "tool_name": "bash", "arguments": {},
+        "provider_data": {"opencode": {"patterns": ["python3 -m unittest discover -s tests"]}},
+    })
+    result = convert_interactions_to_ask_user_question([interaction])
+    assert result["questions"][0]["tool_payload"] == {
+        "arguments": {}, "patterns": ["python3 -m unittest discover -s tests"],
+    }
+
+
+def test_protocol_arguments_do_not_override_native_permission_tool_args() -> None:
+    interaction = SimpleNamespace(id="native", value={
+        "tool_name": "bash", "tool_args": {"command": "original"},
+        "arguments": {"command": "wrong"},
+    })
+    result = convert_interactions_to_ask_user_question([interaction])
+    assert result["questions"][0]["tool_payload"] == {"command": "original"}
+
+
 def test_permission_interrupt_projects_only_opaque_live_card_id() -> None:
     interaction = SimpleNamespace(
         id="tool-call-17",

@@ -33,7 +33,7 @@ class EvaluationStore:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in {0, 1}:
+        if version not in {0, 1, 2}:
             self.db.close()
             raise CatalogError("UNSUPPORTED_STORE_SCHEMA")
         if version == 0:
@@ -61,6 +61,26 @@ class EvaluationStore:
                 PRAGMA user_version=1;
                 COMMIT;
             """)
+        if version in {0, 1}:
+            # Rebuild only the business Trial table to extend its immutable key.
+            # Attempt IDs and all old records stay unchanged; rollback is atomic.
+            self.db.execute("PRAGMA foreign_keys=OFF")
+            try:
+                with self.transaction():
+                    self.db.execute("""CREATE TABLE trials_v2 (
+                        id TEXT PRIMARY KEY,
+                        experiment_id TEXT NOT NULL REFERENCES experiments(id),
+                        task_id TEXT NOT NULL, task_revision INTEGER NOT NULL,
+                        repeat_index INTEGER NOT NULL, plan_index INTEGER NOT NULL DEFAULT 0,
+                        UNIQUE(experiment_id,task_id,task_revision,plan_index,repeat_index))""")
+                    self.db.execute("INSERT INTO trials_v2 SELECT *,0 FROM trials")
+                    self.db.execute("DROP TABLE trials")
+                    self.db.execute("ALTER TABLE trials_v2 RENAME TO trials")
+                    if self.db.execute("PRAGMA foreign_key_check").fetchone():
+                        raise CatalogError("STORE_MIGRATION_FAILED")
+                    self.db.execute("PRAGMA user_version=2")
+            finally:
+                self.db.execute("PRAGMA foreign_keys=ON")
         path.chmod(0o600)
 
     def close(self):
@@ -175,7 +195,10 @@ class EvaluationStore:
         definition = decode(ExperimentDraft, value)
         if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 128:
             raise CatalogError("INVALID_IDEMPOTENCY_KEY")
-        fingerprint = digest(definition.model_dump(mode="json"))
+        serialized = definition.model_dump(mode="json")
+        if not definition.plans:
+            serialized.pop("plans")  # Preserve v1 idempotency fingerprints.
+        fingerprint = digest(serialized)
         with self.transaction():
             old = self.db.execute(
                 "SELECT id,fingerprint FROM experiments WHERE owner=? AND idempotency_key=?",
@@ -205,7 +228,7 @@ class EvaluationStore:
             identifier = uuid.uuid4().hex
             body = {
                 "schema_version": 1,
-                "definition": definition.model_dump(mode="json"),
+                "definition": serialized,
                 "tasks": snapshots,
                 "versions": versions,
                 "seed_support": "unsupported",
@@ -223,11 +246,12 @@ class EvaluationStore:
                 ),
             )
             for ref in definition.tasks:
-                for repeat in range(definition.repeats):
+                for sample in range(len(definition.execution_plans) * definition.repeats):
+                    plan_index, repeat = divmod(sample, definition.repeats)
                     trial = uuid.uuid4().hex
                     self.db.execute(
-                        "INSERT INTO trials VALUES(?,?,?,?,?)",
-                        (trial, identifier, ref.task_id, ref.revision, repeat),
+                        "INSERT INTO trials VALUES(?,?,?,?,?,?)",
+                        (trial, identifier, ref.task_id, ref.revision, repeat, plan_index),
                     )
                     self.db.execute(
                         "INSERT INTO attempts VALUES(?,?,0,0,'pending',?)",

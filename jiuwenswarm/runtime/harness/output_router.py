@@ -31,6 +31,8 @@ class _Mailbox:
     reader_idle: asyncio.Event = field(default_factory=asyncio.Event)
     drained: asyncio.Event = field(default_factory=asyncio.Event)
     drain_task: asyncio.Task[None] | None = None
+    consumer_done: asyncio.Event = field(default_factory=asyncio.Event)
+    consuming: bool = False
 
     def __post_init__(self) -> None:
         self.idle.set()
@@ -137,6 +139,7 @@ class TurnOutputRouter:
         mailbox = self._mailboxes.get(turn_id)
         if mailbox is None:
             raise ValueError("turn output has no registered owner")
+        mailbox.consuming = True
         try:
             while True:
                 item = await self._next(mailbox)
@@ -144,7 +147,10 @@ class TurnOutputRouter:
                 if item.terminal is not None:
                     return
         finally:
-            await self._release_mailbox(turn_id, mailbox)
+            try:
+                await self._release_mailbox(turn_id, mailbox)
+            finally:
+                mailbox.consumer_done.set()
 
     def abandon(self, turn_id: str) -> None:
         """Release a registered Turn even if its iterator was never started."""
@@ -195,9 +201,19 @@ class TurnOutputRouter:
         mailbox = self._mailboxes.get(turn_id)
         return mailbox is not None and not mailbox.closed.is_set()
 
-    async def stop(self) -> None:
+    async def stop(self, *, drain: bool = False) -> None:
         if self._closed:
             return
+        if drain:
+            # Provider output is already closed. Preserve its real terminal
+            # for active readers before transferring any abandoned mailboxes.
+            if self._task is not None:
+                await asyncio.shield(self._task)
+            await asyncio.gather(*(
+                mailbox.consumer_done.wait()
+                for mailbox in tuple(self._mailboxes.values())
+                if mailbox.consuming
+            ))
         self._closed = True
         for turn_id, mailbox in list(self._mailboxes.items()):
             self._schedule_release(turn_id, mailbox)

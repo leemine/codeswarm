@@ -50,7 +50,7 @@ def delivery_evidence(workspace: Path, task):
     return files
 
 
-def statistics(experiment):
+def statistics(experiment, *, grouped=True):
     # Independent Trial denominator is frozen; retries never replace the first sample.
     counts = {}
     for trial in experiment["trials"]:
@@ -60,7 +60,7 @@ def statistics(experiment):
             result = "unknown"
         counts[result] = counts.get(result, 0) + 1
     total = len(experiment["trials"])
-    return {
+    result = {
         "planned_trials": total,
         "first_attempt_outcomes": counts,
         "passed": counts.get("passed", 0),
@@ -72,6 +72,16 @@ def statistics(experiment):
         "usage_coverage": "unknown",
         "cost": None,
     }
+    if grouped:
+        from .models import ExperimentDraft, decode
+        definition = decode(ExperimentDraft, experiment["definition"])
+        result["plans"] = [
+            {"plan_index": index, "plan": plan.model_dump(mode="json"),
+             **statistics({"trials": [trial for trial in experiment["trials"]
+                                      if trial.get("plan_index", 0) == index]}, grouped=False)}
+            for index, plan in enumerate(definition.execution_plans)
+        ]
+    return result
 
 
 def safe_diagnostic(message):

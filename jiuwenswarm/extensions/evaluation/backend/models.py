@@ -136,14 +136,21 @@ class DatasetDraft(DTO):
         return self
 
 
+class ExecutionPlan(DTO):
+    model: str = Field(min_length=1, max_length=256)
+    execution_profile_id: str = Field(min_length=1, max_length=128)
+    provider_id: Literal["native", "opencode"] = "native"
+
+
 class ExperimentDraft(DTO):
     name: str = Field(min_length=1, max_length=160)
     tasks: tuple[TaskRef, ...] = Field(min_length=1, max_length=100)
-    model: str = Field(min_length=1, max_length=256)
-    execution_profile_id: str = Field(min_length=1, max_length=128)
-    provider_id: Literal["native"] = "native"
+    model: str = Field(default="", max_length=256)
+    execution_profile_id: str = Field(default="", max_length=128)
+    provider_id: Literal["native", "opencode"] = "native"
+    plans: tuple[ExecutionPlan, ...] = Field(default=(), max_length=8)
     repeats: int = Field(default=1, ge=1, le=5)
-    concurrency: Literal[1] = 1
+    concurrency: int = Field(default=1, ge=1, le=4)
     timeout_seconds: int = Field(default=300, ge=10, le=1800)
     acceptance_policy: Literal["shared-environment-v1", "independent-container-v1"] = (
         "shared-environment-v1"
@@ -154,11 +161,35 @@ class ExperimentDraft(DTO):
 
     @model_validator(mode="after")
     def references(self):
+        if self.plans:
+            if self.model or self.execution_profile_id or self.provider_id != "native":
+                raise ValueError("use plans or legacy single-plan fields, not both")
+            if len(set(self.plans)) != len(self.plans):
+                raise ValueError("duplicate execution plan; use independent repeats")
+        elif not self.model.strip() or not self.execution_profile_id.strip():
+            raise ValueError("model and execution profile are required")
+        if len(self.tasks) * len(self.execution_plans) * self.repeats > 500:
+            raise ValueError("experiment exceeds 500 trials")
         if len(set(self.tasks)) != len(self.tasks):
             raise ValueError("duplicate task reference")
         if (self.dataset_id is None) != (self.dataset_revision is None):
             raise ValueError("dataset ID and revision must be specified together")
         return self
+
+    @property
+    def execution_plans(self):
+        return self.plans or (ExecutionPlan(
+            model=self.model, execution_profile_id=self.execution_profile_id,
+            provider_id=self.provider_id,
+        ),)
+
+    def for_plan(self, index):
+        plan = self.execution_plans[index]
+        return self.model_copy(update={
+            "plans": (), "model": plan.model,
+            "execution_profile_id": plan.execution_profile_id,
+            "provider_id": plan.provider_id,
+        })
 
 
 def decode(model, value):

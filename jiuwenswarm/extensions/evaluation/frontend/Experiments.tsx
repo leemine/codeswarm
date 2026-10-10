@@ -4,10 +4,20 @@ import {
   useRef,
   useState,
   useTranslation,
-} from '../../../channels/web/frontend/src/applicationPlugins/ui';
-import { Button, Input, Select } from '../../../channels/web/frontend/src/components/ui';
-import { evaluationRequest as request } from './client';
-import type { Catalog, Experiment, Options, TaskRef } from './types';
+} from "../../../channels/web/frontend/src/applicationPlugins/ui";
+import {
+  Button,
+  Input,
+  Select,
+} from "../../../channels/web/frontend/src/components/ui";
+import { evaluationRequest as request } from "./client";
+import type {
+  Catalog,
+  Experiment,
+  Options,
+  TaskRef,
+  ExecutionPlan,
+} from "./types";
 
 export default function Experiments({
   catalog,
@@ -22,19 +32,23 @@ export default function Experiments({
 }) {
   const { t } = useTranslation();
   const [step, setStep] = useState<number | null>(null);
-  const [detailTab, setDetailTab] = useState('run');
-  const selectedId = useRef(sessionStorage.getItem('evaluation:selected-experiment'));
+  const [detailTab, setDetailTab] = useState("run");
+  const selectedId = useRef(
+    sessionStorage.getItem("evaluation:selected-experiment"),
+  );
   const [options, setOptions] = useState<Options>();
-  const [model, setModel] = useState('');
-  const [profile, setProfile] = useState('');
-  const [name, setName] = useState('');
-  const [timeout, setTimeout] = useState('300');
-  const [repeats, setRepeats] = useState('1');
-  const [policy, setPolicy] = useState('shared-environment-v1');
+  const [model, setModel] = useState("");
+  const [profile, setProfile] = useState("");
+  const [plans, setPlans] = useState<ExecutionPlan[]>([]);
+  const [concurrency, setConcurrency] = useState("1");
+  const [name, setName] = useState("");
+  const [timeout, setTimeout] = useState("300");
+  const [repeats, setRepeats] = useState("1");
+  const [policy, setPolicy] = useState("shared-environment-v1");
   const [acknowledged, setAcknowledged] = useState(false);
   const [experiments, setExperiments] = useState<Experiment[]>([]);
   const [detail, setDetail] = useState<Experiment>();
-  const [error, setError] = useState('');
+  const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const key = useRef(crypto.randomUUID());
   const mounted = useRef(true);
@@ -43,14 +57,19 @@ export default function Experiments({
     const revision = ++refreshRevision.current;
     const { experiments: values } = await request<{
       experiments: Experiment[];
-    }>('experiment.list');
+    }>("experiment.list");
     if (!mounted.current || revision !== refreshRevision.current) return;
     setExperiments(values);
-    setDetail((current) => values.find((item) => item.id === (current?.id || selectedId.current)) || values[0]);
+    setDetail(
+      (current) =>
+        values.find(
+          (item) => item.id === (current?.id || selectedId.current),
+        ) || values[0],
+    );
   }, []);
   const act = async (operation: () => Promise<void>) => {
     setBusy(true);
-    setError('');
+    setError("");
     try {
       await operation();
     } catch (err) {
@@ -61,12 +80,12 @@ export default function Experiments({
   };
   useEffect(() => {
     mounted.current = true;
-    void request<Options>('options')
+    void request<Options>("options")
       .then((value) => {
         if (!mounted.current) return;
         setOptions(value);
-        setModel(value.models[0]?.selection_key || '');
-        setProfile(value.profiles[0]?.id || '');
+        setModel(value.models[0]?.selection_key || "");
+        setProfile(value.profiles[0]?.id || "");
       })
       .catch((err) => {
         if (mounted.current) setError(err.code || err.message);
@@ -78,7 +97,8 @@ export default function Experiments({
       } catch (err) {
         if (mounted.current) setError((err as Error).message);
       }
-      if (mounted.current) timer = globalThis.setTimeout(() => void poll(), 2000);
+      if (mounted.current)
+        timer = globalThis.setTimeout(() => void poll(), 2000);
     };
     void poll();
     return () => {
@@ -90,17 +110,37 @@ export default function Experiments({
   useEffect(() => {
     if (detail) {
       selectedId.current = detail.id;
-      sessionStorage.setItem('evaluation:selected-experiment', detail.id);
+      sessionStorage.setItem("evaluation:selected-experiment", detail.id);
     }
   }, [detail?.id]);
+  const selectedProfile = options?.profiles.find((item) => item.id === profile);
+  const currentPlan: ExecutionPlan = {
+    model,
+    execution_profile_id: profile,
+    provider_id: selectedProfile?.provider_id || "native",
+  };
+  const allowedModels =
+    options?.models.filter(
+      (item) =>
+        !selectedProfile?.model_selection_keys ||
+        selectedProfile.model_selection_keys.includes(item.selection_key),
+    ) || [];
+  const currentPlanValid =
+    !!model &&
+    !!profile &&
+    selectedProfile?.available !== false &&
+    allowedModels.some((item) => item.selection_key === model);
+  const frozenPlans = plans.length ? plans : [currentPlan];
+  const planLabel = (plan: ExecutionPlan) =>
+    `${plan.provider_id === "opencode" ? "OpenCode" : "Deepagent"} · ${plan.model} · ${plan.execution_profile_id}`;
   const create = async () => {
-    const result = await request<Experiment>('experiment.create', {
+    const result = await request<Experiment>("experiment.create", {
       idempotency_key: key.current,
       experiment: {
         name,
         tasks: selected,
-        model,
-        execution_profile_id: profile,
+        plans: frozenPlans,
+        concurrency: Number(concurrency),
         repeats: Number(repeats),
         timeout_seconds: Number(timeout),
         shared_environment_acknowledged: acknowledged,
@@ -109,33 +149,47 @@ export default function Experiments({
     });
     // The create response confirms the freeze even if the following list read fails.
     refreshRevision.current += 1;
-    setExperiments((current) => [result, ...current.filter((item) => item.id !== result.id)]);
+    setExperiments((current) => [
+      result,
+      ...current.filter((item) => item.id !== result.id),
+    ]);
     setDetail(result);
     setStep(null);
-    setDetailTab('config');
+    setDetailTab("config");
     key.current = crypto.randomUUID();
     await refresh();
   };
   const exportEvidence = async (experiment: Experiment) => {
     // Fetch again through the authenticated host channel; cached UI is not authority.
-    const fresh = await request<Experiment>('evidence', {
+    const fresh = await request<Experiment>("evidence", {
       experiment_id: experiment.id,
     });
-    const url = URL.createObjectURL(new Blob([JSON.stringify(fresh, null, 2)], { type: 'application/json' }));
-    const anchor = document.createElement('a');
+    const url = URL.createObjectURL(
+      new Blob([JSON.stringify(fresh, null, 2)], { type: "application/json" }),
+    );
+    const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = `evaluation-${experiment.id}.json`;
     anchor.click();
     globalThis.setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
-  const firstAttempts = detail?.trials.map((trial) => trial.attempts[0]).filter(Boolean) || [];
+  const firstAttempts =
+    detail?.trials.map((trial) => trial.attempts[0]).filter(Boolean) || [];
   const validAcceptance = firstAttempts.filter(
-    (attempt) => attempt.body.outcome === 'passed' || attempt.body.outcome === 'test_failed',
+    (attempt) =>
+      attempt.body.outcome === "passed" ||
+      attempt.body.outcome === "test_failed",
   ).length;
-  const unfinished = firstAttempts.filter((attempt) => attempt.phase !== 'settled').length;
-  const status = (value: string) => t(`evaluation.status.${value}`, { defaultValue: value });
+  const unfinished = firstAttempts.filter(
+    (attempt) => attempt.phase !== "settled",
+  ).length;
+  const status = (value: string) =>
+    t(`evaluation.status.${value}`, { defaultValue: value });
   return (
-    <section className="evaluation-panel evaluation-experiments" data-testid="evaluation-experiments">
+    <section
+      className="evaluation-panel evaluation-experiments"
+      data-testid="evaluation-experiments"
+    >
       <div className="evaluation-actions">
         <Button
           variant="primary"
@@ -146,40 +200,58 @@ export default function Experiments({
             setAcknowledged(false);
           }}
         >
-          {t('evaluation.newExperiment')}
+          {t("evaluation.newExperiment")}
         </Button>
-        <Button data-testid="evaluation-run-refresh" disabled={busy} onClick={() => void act(refresh)}>
-          {t('evaluation.refresh')}
+        <Button
+          data-testid="evaluation-run-refresh"
+          disabled={busy}
+          onClick={() => void act(refresh)}
+        >
+          {t("evaluation.refresh")}
         </Button>
       </div>
       {error && (
-        <p role="alert" className="evaluation-error" data-testid="evaluation-experiment-error">
+        <p
+          role="alert"
+          className="evaluation-error"
+          data-testid="evaluation-experiment-error"
+        >
           {error}
         </p>
       )}
       {step !== null && (
         <section className="evaluation-wizard" data-testid="evaluation-wizard">
           <div className="evaluation-wizard-heading">
-            <h2 data-testid="evaluation-wizard-title">{t('evaluation.newExperiment')}</h2>
-            <Button data-testid="evaluation-wizard-close" disabled={busy} onClick={() => setStep(null)}>
-              {t('evaluation.close')}
+            <h2 data-testid="evaluation-wizard-title">
+              {t("evaluation.newExperiment")}
+            </h2>
+            <Button
+              data-testid="evaluation-wizard-close"
+              disabled={busy}
+              onClick={() => setStep(null)}
+            >
+              {t("evaluation.close")}
             </Button>
           </div>
           <ol className="evaluation-steps" data-testid="evaluation-steps">
-            {['chooseTasks', 'configure', 'confirmFreeze'].map((label, index) => (
-              <li
-                key={label}
-                aria-current={step === index + 1 ? 'step' : undefined}
-                data-testid="evaluation-step"
-                data-variant={index + 1}
-              >
-                {index + 1}. {t(`evaluation.${label}`)}
-              </li>
-            ))}
+            {["chooseTasks", "configure", "confirmFreeze"].map(
+              (label, index) => (
+                <li
+                  key={label}
+                  aria-current={step === index + 1 ? "step" : undefined}
+                  data-testid="evaluation-step"
+                  data-variant={index + 1}
+                >
+                  {index + 1}. {t(`evaluation.${label}`)}
+                </li>
+              ),
+            )}
           </ol>
           {step === 1 && (
             <div data-testid="evaluation-wizard-tasks">
-              <p data-testid="evaluation-task-choice-hint">{t('evaluation.taskChoiceHint')}</p>
+              <p data-testid="evaluation-task-choice-hint">
+                {t("evaluation.taskChoiceHint")}
+              </p>
               <div className="evaluation-actions">
                 {catalog.datasets.map((dataset) => (
                   <Button
@@ -191,11 +263,17 @@ export default function Experiments({
                     {dataset.value.name} · v{dataset.revision}
                   </Button>
                 ))}
-                <Button data-testid="evaluation-wizard-library" onClick={onLibrary}>
-                  {t('evaluation.library')}
+                <Button
+                  data-testid="evaluation-wizard-library"
+                  onClick={onLibrary}
+                >
+                  {t("evaluation.library")}
                 </Button>
               </div>
-              <ul className="evaluation-list" data-testid="evaluation-wizard-task-list">
+              <ul
+                className="evaluation-list"
+                data-testid="evaluation-wizard-task-list"
+              >
                 {catalog.tasks.map((version) => (
                   <li
                     key={`${version.id}:${version.revision}`}
@@ -207,13 +285,21 @@ export default function Experiments({
                         type="checkbox"
                         data-testid="evaluation-wizard-task-select"
                         checked={selected.some(
-                          (item) => item.task_id === version.id && item.revision === version.revision,
+                          (item) =>
+                            item.task_id === version.id &&
+                            item.revision === version.revision,
                         )}
                         onChange={() =>
                           onSelect(
-                            selected.some((item) => item.task_id === version.id && item.revision === version.revision)
+                            selected.some(
+                              (item) =>
+                                item.task_id === version.id &&
+                                item.revision === version.revision,
+                            )
                               ? selected.filter(
-                                  (item) => item.task_id !== version.id || item.revision !== version.revision,
+                                  (item) =>
+                                    item.task_id !== version.id ||
+                                    item.revision !== version.revision,
                                 )
                               : [
                                   ...selected,
@@ -231,45 +317,70 @@ export default function Experiments({
                     </label>
                     <span>
                       {t(
-                        version.value.acceptance?.kind !== 'python'
-                          ? 'evaluation.manualHint'
-                          : 'evaluation.automaticAcceptance',
+                        version.value.acceptance?.kind !== "python"
+                          ? "evaluation.manualHint"
+                          : "evaluation.automaticAcceptance",
                       )}
                     </span>
                     <details data-testid="evaluation-task-preview">
-                      <summary data-testid="evaluation-task-preview-toggle">{t('evaluation.view')}</summary>
-                      <p data-testid="evaluation-task-preview-instruction">{version.value.instruction}</p>
+                      <summary data-testid="evaluation-task-preview-toggle">
+                        {t("evaluation.view")}
+                      </summary>
+                      <p data-testid="evaluation-task-preview-instruction">
+                        {version.value.instruction}
+                      </p>
                       <p data-testid="evaluation-task-preview-deliverables">
-                        {t('evaluation.deliverables')}: {(version.value.deliverables || []).join(', ') || '—'}
+                        {t("evaluation.deliverables")}:{" "}
+                        {(version.value.deliverables || []).join(", ") || "—"}
                       </p>
                       <pre data-testid="evaluation-task-preview-acceptance">
-                        {version.value.acceptance?.script || t('evaluation.manualHint')}
+                        {version.value.acceptance?.script ||
+                          t("evaluation.manualHint")}
                       </pre>
                     </details>
                   </li>
                 ))}
               </ul>
-              {!catalog.tasks.length && <p data-testid="evaluation-no-tasks">{t('evaluation.noTasks')}</p>}
+              {!catalog.tasks.length && (
+                <p data-testid="evaluation-no-tasks">
+                  {t("evaluation.noTasks")}
+                </p>
+              )}
             </div>
           )}
-          <div hidden={step !== 2} data-testid="evaluation-wizard-configuration">
-            <h2 data-testid="evaluation-config-title">{t('evaluation.configure')}</h2>
+          <div
+            hidden={step !== 2}
+            data-testid="evaluation-wizard-configuration"
+          >
+            <h2 data-testid="evaluation-config-title">
+              {t("evaluation.configure")}
+            </h2>
             <p data-testid="evaluation-selected-tasks">
-              {t('evaluation.selected', { count: selected.length })}:{' '}
-              {selected.map((item) => `${item.task_id} v${item.revision}`).join(', ')}
+              {t("evaluation.selected", { count: selected.length })}:{" "}
+              {selected
+                .map((item) => `${item.task_id} v${item.revision}`)
+                .join(", ")}
             </p>
-            <fieldset disabled={busy} className="evaluation-config" data-testid="evaluation-config-fields">
+            <fieldset
+              disabled={busy}
+              className="evaluation-config"
+              data-testid="evaluation-config-fields"
+            >
               <label>
-                {t('evaluation.name')}
-                <Input data-testid="evaluation-experiment-name" value={name} onChange={setName} />
+                {t("evaluation.name")}
+                <Input
+                  data-testid="evaluation-experiment-name"
+                  value={name}
+                  onChange={setName}
+                />
               </label>
               <label>
-                {t('evaluation.model')}
+                {t("evaluation.model")}
                 <Select
                   data-testid="evaluation-model"
                   value={model}
                   options={
-                    options?.models.map((item) => ({
+                    allowedModels.map((item) => ({
                       value: item.selection_key,
                       label: item.display_name,
                     })) || []
@@ -278,21 +389,83 @@ export default function Experiments({
                 />
               </label>
               <label>
-                {t('evaluation.profile')}
+                {t("evaluation.profile")}
                 <Select
                   data-testid="evaluation-profile"
                   value={profile}
                   options={
                     options?.profiles.map((item) => ({
                       value: item.id,
-                      label: `${item.id} · ${item.revision}`,
+                      label: `${item.provider_id === "opencode" ? "OpenCode" : "Deepagent"} · ${item.id}`,
+                      disabled: item.available === false,
+                      disabledReason: item.reason
+                        ? t(`evaluation.optionReasons.${item.reason}`)
+                        : undefined,
                     })) || []
                   }
-                  onChange={setProfile}
+                  onChange={(value) => {
+                    setProfile(value);
+                    const keys = options?.profiles.find(
+                      (item) => item.id === value,
+                    )?.model_selection_keys;
+                    if (keys && !keys.includes(model)) setModel(keys[0] || "");
+                  }}
+                />
+              </label>
+              <div data-testid="evaluation-plan-editor">
+                <Button
+                  data-testid="evaluation-add-plan"
+                  disabled={
+                    !currentPlanValid ||
+                    plans.length >= 8 ||
+                    plans.some(
+                      (item) =>
+                        item.model === model &&
+                        item.execution_profile_id === profile,
+                    )
+                  }
+                  onClick={() => setPlans((items) => [...items, currentPlan])}
+                >
+                  {t("evaluation.addPlan")}
+                </Button>
+                <ul data-testid="evaluation-plan-list">
+                  {plans.map((plan, index) => (
+                    <li
+                      key={`${plan.execution_profile_id}:${plan.model}`}
+                      data-testid="evaluation-plan"
+                      data-variant={`${plan.execution_profile_id}:${plan.model}`}
+                    >
+                      {planLabel(plan)}{" "}
+                      <Button
+                        data-testid="evaluation-remove-plan"
+                        onClick={() =>
+                          setPlans((items) =>
+                            items.filter((_, i) => i !== index),
+                          )
+                        }
+                      >
+                        {t("evaluation.remove")}
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+                <p data-testid="evaluation-plan-hint">
+                  {t("evaluation.planHint")}
+                </p>
+              </div>
+              <label>
+                {t("evaluation.concurrency")}
+                <Input
+                  type="number"
+                  min={1}
+                  max={4}
+                  data-testid="evaluation-concurrency"
+                  value={concurrency}
+                  onChange={setConcurrency}
                 />
               </label>
               <label>
-                {t('evaluation.repeats')}
+                {t("evaluation.repeats")}
                 <Input
                   type="number"
                   min={1}
@@ -303,7 +476,7 @@ export default function Experiments({
                 />
               </label>
               <label>
-                {t('evaluation.timeout')}
+                {t("evaluation.timeout")}
                 <Input
                   type="number"
                   min={10}
@@ -314,11 +487,13 @@ export default function Experiments({
                 />
               </label>
               <label>
-                {t('evaluation.policy')}
+                {t("evaluation.policy")}
                 <Select
                   data-testid="evaluation-acceptance-policy"
                   value={policy}
-                  options={(options?.acceptance_policies || ['shared-environment-v1']).map((value) => ({
+                  options={(
+                    options?.acceptance_policies || ["shared-environment-v1"]
+                  ).map((value) => ({
                     value,
                     label: t(`evaluation.policies.${value}`),
                   }))}
@@ -330,19 +505,28 @@ export default function Experiments({
           <div hidden={step !== 3} data-testid="evaluation-wizard-confirmation">
             <h3 data-testid="evaluation-confirm-name">{name}</h3>
             <p data-testid="evaluation-confirm-plan">
-              {t('evaluation.confirmPlan', {
+              {t("evaluation.confirmPlan", {
                 tasks: selected.length,
                 repeats,
-                total: selected.length * Number(repeats),
+                plans: frozenPlans.length,
+                total: selected.length * frozenPlans.length * Number(repeats),
               })}
             </p>
             <p data-testid="evaluation-confirm-model">
-              Deepagent · {model} · {profile} · {timeout}s
+              {frozenPlans.map(planLabel).join(" / ")} · {timeout}s
             </p>
-            <p data-testid="evaluation-confirm-policy">{t(`evaluation.policies.${policy}`)}</p>
-            <p data-testid="evaluation-confirm-frozen">{t('evaluation.freezeOnCreate')}</p>
+            <p data-testid="evaluation-confirm-policy">
+              {t(`evaluation.policies.${policy}`)}
+            </p>
+            <p data-testid="evaluation-confirm-frozen">
+              {t("evaluation.freezeOnCreate")}
+            </p>
             <p data-testid="evaluation-policy-hint">
-              {t(policy === 'independent-container-v1' ? 'evaluation.independentHint' : 'evaluation.shared')}
+              {t(
+                policy === "independent-container-v1"
+                  ? "evaluation.independentHint"
+                  : "evaluation.shared",
+              )}
             </p>
             <label className="evaluation-ack">
               <input
@@ -351,11 +535,13 @@ export default function Experiments({
                 checked={acknowledged}
                 onChange={(event) => setAcknowledged(event.target.checked)}
               />
-              <span>{t('evaluation.acknowledge')}</span>
+              <span>{t("evaluation.acknowledge")}</span>
             </label>
-            <p data-testid="evaluation-cost-hint">{t('evaluation.costHint')}</p>
+            <p data-testid="evaluation-cost-hint">{t("evaluation.costHint")}</p>
             {options && !options.execution_available && (
-              <p data-testid="evaluation-execution-unavailable">{t('evaluation.localOnly')}</p>
+              <p data-testid="evaluation-execution-unavailable">
+                {t("evaluation.localOnly")}
+              </p>
             )}
             <Button
               variant="primary"
@@ -364,20 +550,26 @@ export default function Experiments({
                 busy ||
                 !selected.length ||
                 !name.trim() ||
-                !model ||
-                !profile ||
+                (!plans.length && !currentPlanValid) ||
+                !Number.isInteger(Number(concurrency)) ||
+                Number(concurrency) < 1 ||
+                Number(concurrency) > 4 ||
                 !acknowledged ||
                 !options?.execution_available
               }
               onClick={() => void act(create)}
             >
-              {t('evaluation.create')}
+              {t("evaluation.create")}
             </Button>
           </div>
           <div className="evaluation-actions">
             {step > 1 && (
-              <Button data-testid="evaluation-wizard-back" disabled={busy} onClick={() => setStep(step - 1)}>
-                {t('evaluation.back')}
+              <Button
+                data-testid="evaluation-wizard-back"
+                disabled={busy}
+                onClick={() => setStep(step - 1)}
+              >
+                {t("evaluation.back")}
               </Button>
             )}
             {step < 3 && (
@@ -389,8 +581,10 @@ export default function Experiments({
                   !selected.length ||
                   (step === 2 &&
                     (!name.trim() ||
-                      !model ||
-                      !profile ||
+                      (!plans.length && !currentPlanValid) ||
+                      !Number.isInteger(Number(concurrency)) ||
+                      Number(concurrency) < 1 ||
+                      Number(concurrency) > 4 ||
                       !options?.execution_available ||
                       !Number.isInteger(Number(repeats)) ||
                       Number(repeats) < 1 ||
@@ -400,39 +594,50 @@ export default function Experiments({
                 }
                 onClick={() => setStep(step + 1)}
               >
-                {t('evaluation.next')}
+                {t("evaluation.next")}
               </Button>
             )}
           </div>
         </section>
       )}
-      <h2 data-testid="evaluation-runs-title">{t('evaluation.runs')}</h2>
+      <h2 data-testid="evaluation-runs-title">{t("evaluation.runs")}</h2>
       <div className="evaluation-run-layout">
         <ul className="evaluation-list" data-testid="evaluation-run-list">
           {experiments.map((experiment) => (
-            <li key={experiment.id} data-testid="evaluation-run" data-variant={experiment.id}>
+            <li
+              key={experiment.id}
+              data-testid="evaluation-run"
+              data-variant={experiment.id}
+            >
               <Button
                 data-testid="evaluation-run-open"
                 aria-pressed={detail?.id === experiment.id}
                 onClick={() => {
                   setDetail(experiment);
-                  setDetailTab('run');
+                  setDetailTab("run");
                 }}
               >
                 {experiment.definition.name}
               </Button>
               <span>
-                {experiment.statistics?.passed || 0}/{experiment.statistics?.planned_trials || experiment.trials.length}
+                {experiment.statistics?.passed || 0}/
+                {experiment.statistics?.planned_trials ||
+                  experiment.trials.length}
               </span>
             </li>
           ))}
         </ul>
-        {!detail && <p data-testid="evaluation-no-runs">{t('evaluation.noRuns')}</p>}
+        {!detail && (
+          <p data-testid="evaluation-no-runs">{t("evaluation.noRuns")}</p>
+        )}
         {detail && (
           <article data-testid="evaluation-run-detail">
             <h3 data-testid="evaluation-run-name">{detail.definition.name}</h3>
             <p data-testid="evaluation-frozen-hint">
-              {t('evaluation.frozen')} · {detail.definition.model} ·{' '}
+              {t("evaluation.frozen")} ·{" "}
+              {detail.definition.plans?.map(planLabel).join(" / ") ||
+                detail.definition.model}{" "}
+              ·{" "}
               {t(`evaluation.policies.${detail.definition.acceptance_policy}`)}
             </p>
             <div className="evaluation-actions">
@@ -442,12 +647,16 @@ export default function Experiments({
                 disabled={
                   busy ||
                   detail.active ||
-                  !detail.trials.some((trial) => trial.attempts.some((attempt) => attempt.phase === 'pending'))
+                  !detail.trials.some((trial) =>
+                    trial.attempts.some(
+                      (attempt) => attempt.phase === "pending",
+                    ),
+                  )
                 }
                 onClick={() =>
                   void act(async () => {
                     setDetail(
-                      await request('experiment.start', {
+                      await request("experiment.start", {
                         experiment_id: detail.id,
                       }),
                     );
@@ -455,17 +664,22 @@ export default function Experiments({
                   })
                 }
               >
-                {t('evaluation.start')}
+                {t("evaluation.start")}
               </Button>
               <Button
                 data-testid="evaluation-cancel"
                 disabled={
-                  busy || detail.trials.every((trial) => trial.attempts.every((attempt) => attempt.phase === 'settled'))
+                  busy ||
+                  detail.trials.every((trial) =>
+                    trial.attempts.every(
+                      (attempt) => attempt.phase === "settled",
+                    ),
+                  )
                 }
                 onClick={() =>
                   void act(async () => {
                     setDetail(
-                      await request('experiment.cancel', {
+                      await request("experiment.cancel", {
                         experiment_id: detail.id,
                       }),
                     );
@@ -473,23 +687,35 @@ export default function Experiments({
                   })
                 }
               >
-                {t('evaluation.cancel')}
+                {t("evaluation.cancel")}
               </Button>
               <Button
                 data-testid="evaluation-export"
                 disabled={busy}
                 onClick={() => void act(() => exportEvidence(detail))}
               >
-                {t('evaluation.export')}
+                {t("evaluation.export")}
               </Button>
               <Button
                 data-testid="evaluation-copy"
                 disabled={busy}
                 onClick={() => {
                   onSelect(detail.definition.tasks);
-                  setName(`${detail.definition.name} — ${t('evaluation.copy')}`);
-                  setModel(detail.definition.model);
-                  setProfile(detail.definition.execution_profile_id);
+                  setName(
+                    `${detail.definition.name} — ${t("evaluation.copy")}`,
+                  );
+                  setPlans(detail.definition.plans || []);
+                  setConcurrency(String(detail.definition.concurrency || 1));
+                  setModel(
+                    detail.definition.model ||
+                      detail.definition.plans?.[0]?.model ||
+                      "",
+                  );
+                  setProfile(
+                    detail.definition.execution_profile_id ||
+                      detail.definition.plans?.[0]?.execution_profile_id ||
+                      "",
+                  );
                   setTimeout(String(detail.definition.timeout_seconds));
                   setRepeats(String(detail.definition.repeats));
                   setPolicy(detail.definition.acceptance_policy);
@@ -498,11 +724,15 @@ export default function Experiments({
                   setStep(1);
                 }}
               >
-                {t('evaluation.copy')}
+                {t("evaluation.copy")}
               </Button>
             </div>
-            <div className="evaluation-actions" role="tablist" data-testid="evaluation-detail-tabs">
-              {['run', 'results', 'config'].map((tab) => (
+            <div
+              className="evaluation-actions"
+              role="tablist"
+              data-testid="evaluation-detail-tabs"
+            >
+              {["run", "results", "config"].map((tab) => (
                 <Button
                   key={tab}
                   role="tab"
@@ -515,58 +745,114 @@ export default function Experiments({
                 </Button>
               ))}
             </div>
-            <div hidden={detailTab === 'config'} data-testid="evaluation-detail-outcomes">
+            <div
+              hidden={detailTab === "config"}
+              data-testid="evaluation-detail-outcomes"
+            >
               <p data-testid="evaluation-summary">
-                {t(detail.statistics?.all_settled ? 'evaluation.finalRatio' : 'evaluation.partialRatio', {
-                  passed: detail.statistics?.passed || 0,
-                  total: detail.trials.length,
-                })}
+                {t(
+                  detail.statistics?.all_settled
+                    ? "evaluation.finalRatio"
+                    : "evaluation.partialRatio",
+                  {
+                    passed: detail.statistics?.passed || 0,
+                    total: detail.trials.length,
+                  },
+                )}
               </p>
               <p data-testid="evaluation-valid-samples">
-                {t('evaluation.validSamples', {
+                {t("evaluation.validSamples", {
                   passed: detail.statistics?.passed || 0,
                   valid: validAcceptance,
                   excluded: detail.trials.length - validAcceptance,
                   unfinished,
                 })}
               </p>
-              <p data-testid="evaluation-usage">{t('evaluation.unknownUsage')}</p>
-              <div className="evaluation-actions" data-testid="evaluation-outcome-counts">
-                {Object.entries(detail.statistics?.first_attempt_outcomes || {}).map(([outcome, count]) => (
-                  <span key={outcome} data-testid="evaluation-outcome-count" data-variant={outcome}>
-                    {outcome === 'passed' && detail.definition.acceptance_policy === 'independent-container-v1'
-                      ? t('evaluation.independentPassed')
-                      : status(outcome)}: {count}
+              <p data-testid="evaluation-usage">
+                {t("evaluation.unknownUsage")}
+              </p>
+              <div
+                className="evaluation-actions"
+                data-testid="evaluation-outcome-counts"
+              >
+                {Object.entries(
+                  detail.statistics?.first_attempt_outcomes || {},
+                ).map(([outcome, count]) => (
+                  <span
+                    key={outcome}
+                    data-testid="evaluation-outcome-count"
+                    data-variant={outcome}
+                  >
+                    {outcome === "passed" &&
+                    detail.definition.acceptance_policy ===
+                      "independent-container-v1"
+                      ? t("evaluation.independentPassed")
+                      : status(outcome)}
+                    : {count}
                   </span>
                 ))}
               </div>
+              <ul data-testid="evaluation-plan-comparison">
+                {detail.statistics?.plans?.map((item) => (
+                  <li
+                    key={item.plan_index}
+                    data-testid="evaluation-plan-result"
+                    data-variant={String(item.plan_index)}
+                  >
+                    {planLabel(item.plan)} ·{" "}
+                    {t(
+                      item.all_settled
+                        ? "evaluation.finalRatio"
+                        : "evaluation.partialRatio",
+                      { passed: item.passed, total: item.denominator },
+                    )}
+                  </li>
+                ))}
+              </ul>
               <ul className="evaluation-trials" data-testid="evaluation-trials">
                 {detail.trials.map((trial) => (
-                  <li key={trial.id} data-testid="evaluation-trial" data-variant={trial.id}>
+                  <li
+                    key={trial.id}
+                    data-testid="evaluation-trial"
+                    data-variant={trial.id}
+                  >
                     <h3>
-                      {trial.task_id} ·{' '}
-                      {t('evaluation.repeatIndex', {
+                      {trial.task_id} ·{" "}
+                      {detail.definition.plans?.[trial.plan_index || 0]
+                        ? planLabel(
+                            detail.definition.plans[trial.plan_index || 0],
+                          )
+                        : detail.definition.model}{" "}
+                      ·{" "}
+                      {t("evaluation.repeatIndex", {
                         index: trial.repeat_index + 1,
                       })}
                     </h3>
                     {trial.attempts.map((attempt) => (
-                      <div key={attempt.id} data-testid="evaluation-attempt" data-variant={attempt.id}>
+                      <div
+                        key={attempt.id}
+                        data-testid="evaluation-attempt"
+                        data-variant={attempt.id}
+                      >
                         <p data-testid="evaluation-attempt-status">
-                          {t('evaluation.executionState')}:{' '}
+                          {t("evaluation.executionState")}:{" "}
                           {status(
-                            attempt.body.status === 'stopping'
-                              ? 'stopping'
-                              : attempt.body.status === 'recovery_required'
-                                ? 'recovery_required'
-                                : attempt.body.runtime?.state || attempt.body.status || attempt.phase,
-                          )}{' '}
+                            attempt.body.status === "stopping"
+                              ? "stopping"
+                              : attempt.body.status === "recovery_required"
+                                ? "recovery_required"
+                                : attempt.body.runtime?.state ||
+                                  attempt.body.status ||
+                                  attempt.phase,
+                          )}{" "}
                         </p>
                         <p data-testid="evaluation-attempt-outcome">
-                          {t('evaluation.acceptanceResult')}:{' '}
-                          {attempt.body.outcome === 'passed' &&
-                          detail.definition.acceptance_policy === 'independent-container-v1'
-                            ? t('evaluation.independentPassed')
-                            : status(attempt.body.outcome || 'not_evaluated')}
+                          {t("evaluation.acceptanceResult")}:{" "}
+                          {attempt.body.outcome === "passed" &&
+                          detail.definition.acceptance_policy ===
+                            "independent-container-v1"
+                            ? t("evaluation.independentPassed")
+                            : status(attempt.body.outcome || "not_evaluated")}
                         </p>
                         {attempt.body.session_id && (
                           <a
@@ -575,54 +861,80 @@ export default function Experiments({
                             target="_blank"
                             rel="noreferrer"
                           >
-                            {t('evaluation.session')}
+                            {t("evaluation.session")}
                           </a>
                         )}
                         {attempt.body.error_code && (
-                          <p data-testid="evaluation-attempt-error">{attempt.body.error_code}</p>
+                          <p data-testid="evaluation-attempt-error">
+                            {attempt.body.error_code}
+                          </p>
                         )}
                         <details
-                          hidden={detailTab !== 'results'}
+                          hidden={detailTab !== "results"}
                           data-testid="evaluation-evidence"
-                          open={detailTab === 'results'}
+                          open={detailTab === "results"}
                         >
-                          <summary data-testid="evaluation-evidence-toggle">{t('evaluation.evidence')}</summary>
+                          <summary data-testid="evaluation-evidence-toggle">
+                            {t("evaluation.evidence")}
+                          </summary>
                           <p data-testid="evaluation-exit">
-                            {t('evaluation.exitConfirmed')}:{' '}
-                            {t(attempt.body.exit_confirmed ? 'evaluation.yes' : 'evaluation.no')}
+                            {t("evaluation.exitConfirmed")}:{" "}
+                            {t(
+                              attempt.body.exit_confirmed
+                                ? "evaluation.yes"
+                                : "evaluation.no",
+                            )}
                           </p>
-                          <p data-testid="evaluation-workspace">{attempt.body.workspace}</p>
+                          <p data-testid="evaluation-workspace">
+                            {attempt.body.workspace}
+                          </p>
                           {attempt.body.verification_environment && (
                             <div data-testid="evaluation-independent-evidence">
                               <p data-testid="evaluation-verifier-image">
-                                {t('evaluation.verifierImage')}: {attempt.body.verification_environment.image_id}
+                                {t("evaluation.verifierImage")}:{" "}
+                                {attempt.body.verification_environment.image_id}
                               </p>
                               <p data-testid="evaluation-authority-digest">
-                                {t('evaluation.authorityDigest')}: {attempt.body.authority_sha256}
+                                {t("evaluation.authorityDigest")}:{" "}
+                                {attempt.body.authority_sha256}
                               </p>
                               <p data-testid="evaluation-assertion-count">
-                                {t('evaluation.assertions')}: {attempt.body.authoritative_assertions ?? '—'}
+                                {t("evaluation.assertions")}:{" "}
+                                {attempt.body.authoritative_assertions ?? "—"}
                               </p>
                               <p data-testid="evaluation-verifier-cleanup">
-                                {t('evaluation.verifierCleanup')}:{' '}
-                                {t(attempt.body.verifier_removed ? 'evaluation.yes' : 'evaluation.no')}
+                                {t("evaluation.verifierCleanup")}:{" "}
+                                {t(
+                                  attempt.body.verifier_removed
+                                    ? "evaluation.yes"
+                                    : "evaluation.no",
+                                )}
                               </p>
                             </div>
                           )}
                           {attempt.body.test_output !== undefined && (
                             <pre data-testid="evaluation-test-output">
-                              {attempt.body.test_output || t('evaluation.emptyOutput')}
+                              {attempt.body.test_output ||
+                                t("evaluation.emptyOutput")}
                             </pre>
                           )}
                           {attempt.body.files?.map((file) => (
-                            <div key={file.path} data-testid="evaluation-delivery" data-variant={file.path}>
+                            <div
+                              key={file.path}
+                              data-testid="evaluation-delivery"
+                              data-variant={file.path}
+                            >
                               <p>
                                 {file.path} · {file.status} · {file.sha256}
                               </p>
-                              <pre data-testid="evaluation-diff">{file.diff}</pre>
+                              <pre data-testid="evaluation-diff">
+                                {file.diff}
+                              </pre>
                             </div>
                           ))}
-                          <pre data-testid="evaluation-attempt-json">{JSON.stringify(attempt.body, null, 2)}</pre>
+                          <pre data-testid="evaluation-attempt-json">
+                            {JSON.stringify(attempt.body, null, 2)}
+                          </pre>
                         </details>
                       </div>
                     ))}
@@ -630,10 +942,20 @@ export default function Experiments({
                 ))}
               </ul>
             </div>
-            <details hidden={detailTab !== 'config'} open={detailTab === 'config'} data-testid="evaluation-snapshot">
-              <summary data-testid="evaluation-snapshot-toggle">{t('evaluation.snapshot')}</summary>
+            <details
+              hidden={detailTab !== "config"}
+              open={detailTab === "config"}
+              data-testid="evaluation-snapshot"
+            >
+              <summary data-testid="evaluation-snapshot-toggle">
+                {t("evaluation.snapshot")}
+              </summary>
               <pre data-testid="evaluation-snapshot-json">
-                {JSON.stringify({ definition: detail.definition, versions: detail.versions }, null, 2)}
+                {JSON.stringify(
+                  { definition: detail.definition, versions: detail.versions },
+                  null,
+                  2,
+                )}
               </pre>
             </details>
           </article>

@@ -86,6 +86,28 @@ jobs:
             "$GITHUB_WORKSPACE/tests/unit_tests/test_updater_authority.py" \
             "$GITHUB_WORKSPACE/tests/unit_tests/test_updater_install_mode.py" \
             "$GITHUB_WORKSPACE/tests/unit_tests/gateway/test_channel_manager_config.py"
+      - name: Verify Code approvals and targeted cancellation
+        env:
+          HOME: ${{ runner.temp }}/evaluation-code-home
+          TMPDIR: ${{ runner.temp }}/evaluation-code-tmp
+          PYTHONPATH: ${{ github.workspace }}
+          JIUWENSWARM_HOME: ${{ runner.temp }}/evaluation-code-home
+          JIUWENSWARM_DATA_DIR: ${{ runner.temp }}/evaluation-code-data
+          JIUWENSWARM_CONFIG_URL: "off"
+        run: |
+          mkdir -p "$HOME" "$TMPDIR"
+          cd "$TMPDIR"
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest --override-ini addopts='' -o asyncio_mode=auto --timeout=30 -q \
+            "$GITHUB_WORKSPACE/tests/unit_tests/agentserver/test_interrupt_helpers.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/agentserver/test_interrupt_history.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/agentserver/test_interrupt_output_handoff.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/runtime/harness/test_external_goal_projection.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/agentserver/test_interface_interrupts.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/runtime/harness/test_native_detached_projection.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/runtime/test_runtime_session_coordinator.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/runtime/harness/test_output_budget.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/runtime/harness/test_stop_terminal_delivery.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/extensions/evaluation/test_trials.py"
       - name: Upload test archive
         if: always()
         uses: actions/upload-artifact@v7.0.1

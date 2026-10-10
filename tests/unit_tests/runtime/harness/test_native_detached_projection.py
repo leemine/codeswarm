@@ -374,3 +374,63 @@ async def test_late_detached_terminal_during_stop_does_not_admit_work_or_report_
     finally:
         await projection.close()
         await runtime._session_coordinator.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after_exit", [False, True])
+async def test_targeted_cancel_rejects_late_detached_output_without_new_owner(
+    monkeypatch, after_exit,
+):
+    from jiuwenswarm.runtime.service import AgentRuntime
+    from jiuwenswarm.runtime.session import RuntimeSessionCoordinator, SessionWorkKind
+
+    runtime = object.__new__(AgentRuntime)
+    runtime._session_coordinator = coordinator = RuntimeSessionCoordinator()
+    runtime._admission_controller = None
+    await coordinator.register_session("s", "web")
+    started, cancelling, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def producer():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelling.set()
+            await release.wait()
+            raise
+
+    original = coordinator.submit_unary("s", "original-request", SessionWorkKind.CHAT_UNARY, producer)
+    await started.wait()
+    cancellation = asyncio.create_task(coordinator.cancel_execution("s", request_id="original-request"))
+    await cancelling.wait()
+    if after_exit:
+        release.set()
+        await cancellation
+    push = AsyncMock(return_value=True)
+    monkeypatch.setattr(mod, "send_runtime_push", push)
+    monkeypatch.setattr(mod, "build_server_push_message", lambda **kwargs: kwargs)
+    monkeypatch.setattr(mod, "get_session_delivery_context", lambda _sid: {})
+    monkeypatch.setattr(mod, "get_session_metadata", lambda *_args, **_kwargs: {})
+    parser = MagicMock()
+    projection = mod.NativeDetachedProjection(
+        "s", SimpleNamespace(_parse_stream_chunk=parser), runtime=runtime,
+        request_id_for_turn=lambda _turn_id: "original-request",
+    )
+    try:
+        late = ProjectedOutput("late", chunk=OutputSchema(type="llm_output", index=1, payload={"content": "late"}))
+        await projection(late)
+        await projection(late)
+        await projection(ProjectedOutput("late", terminal=TurnEventKind.ABORTED))
+        parser.assert_not_called()
+        push.assert_not_awaited()
+        assert projection._turns == {}
+        assert [e.execution_id for e in coordinator.snapshot_session("s").executions] == [original.execution_id]
+        release.set()
+        await cancellation
+        # A targeted cancellation must not close the Session to a different Turn.
+        assert runtime.begin_detached_native_turn("s", "fresh", "fresh-request") is not None
+    finally:
+        release.set()
+        await cancellation
+        await projection.close()
+        await coordinator.close()

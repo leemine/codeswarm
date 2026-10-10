@@ -1125,6 +1125,15 @@ class AgentRuntime:
             # Stop can release a provider that emits its final detached event.
             # Observation must not admit new work through that existing fence.
             return None
+        if snapshot is not None and request_id and any(
+            execution.request_id == request_id
+            and (execution.cancellation_requested
+                 or execution.state is SessionExecutionState.CANCELLED)
+            for execution in snapshot.executions
+        ):
+            # A targeted cancel leaves the Session open. Draining that request's
+            # late output must not register its already-cancelled work again.
+            return None
         return self._session_coordinator.begin_detached_turn(
             session_id, request_id or f"native-turn-{turn_id}"
         )
