@@ -24,6 +24,7 @@ import { filterPublishedHistoryBatch } from '../../features/historyPagination';
 import { projectTimelineItems, type TimelineDisplayItem } from '../../features/chatTimeline/projectTimelineItems';
 import { VirtualTimeline, type TimelineViewportState } from './VirtualTimeline';
 import { TimelineRowStateProvider, useTimelineRowState } from './timelineRowState';
+import { useReasoningDisplayText } from './useReasoningDisplayText';
 import {
   buildTimelineItems,
   buildRenderItems,
@@ -422,7 +423,8 @@ function ReasoningSegmentBlock({
     return undefined;
   }, [segment.closed, setOpen]);
 
-  const body = segment.text.replace(/\n{3,}/g, '\n\n').trim();
+  const displayText = useReasoningDisplayText(segment.id, segment.text, segment.closed);
+  const body = useMemo(() => displayText.replace(/\n{3,}/g, '\n\n').trim(), [displayText]);
 
   useEffect(() => {
     if (!open || segment.closed) {
