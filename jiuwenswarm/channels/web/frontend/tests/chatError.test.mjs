@@ -49,3 +49,10 @@ test('declined interactions explain the terminal cause for live and old history'
     assert.equal(describeChatError({ code: 'interaction_declined' }, raw, t), '<chat.executionInteractionDeclined>');
   }
 });
+
+test('event data budget failure is distinct from model output and does not stack hints', () => {
+  for (const raw of ['OpenCode execution failed', '<chat.executionEventDataLimit>']) {
+    assert.equal(describeChatError({ code: 'turn_event_limit' }, raw, t), '<chat.executionEventDataLimit>');
+  }
+  assert.equal(describeChatError({ code: 'model_output_limit_exceeded' }, RAW, t), RAW);
+});
