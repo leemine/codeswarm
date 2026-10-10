@@ -944,6 +944,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             return
 
         try:
+            # The short TCP retry timeout must not limit the HTTP upgrade.
+            upstream.settimeout(self._WS_CONNECT_TIMEOUT)
             if parsed.scheme in ("wss", "https"):
                 ctx = ssl.create_default_context() if _get_ssl_verify() else _get_insecure_ssl_context()
                 upstream = ctx.wrap_socket(upstream, server_hostname=upstream_host)
