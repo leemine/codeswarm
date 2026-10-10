@@ -14,7 +14,7 @@ Task and dataset versions are immutable. Editing a draft and publishing produces
 a new revision; experiment snapshots preserve the old content and material digest.
 Each experiment contains independent Trial IDs; retries create Attempt IDs in the
 same Trial. Pending/unknown outcomes are never automatically retried after restart.
-Metadata schema 1 lives in one SQLite database; newer schemas fail closed.
+Metadata schema 2 (with transactional migration of schema 1) lives in one SQLite database; newer schemas fail closed.
 
 JSONL contains one schema-1 TaskDraft per nonempty line, with `task_id`, `name`,
 `instruction`, optional `files` (`path`, `content`), `deliverables`, and `acceptance`.
@@ -28,11 +28,12 @@ configuration; experiments freeze model/profile references, never key values.
 
 ## Run from the existing Web UI
 
-1. Open **Evaluation experiments / 评测实验** in the application sidebar.
+1. Open **Experiments / 实验 → Evaluation experiments / 评测实验**.
 2. Load the bundled micro dataset, select a subset, or enter a task and publish it.
    Published versions are read-only; **Edit as new version** preserves earlier runs.
    JSONL import previews every line before saving drafts.
-3. Choose a configured model and a Native execution profile, repeats and timeout.
+3. Choose an engine/profile and its matching configured model. Add comparison plans,
+   then choose independent repeats, concurrency (1–4) and timeout.
    Acknowledge shared-host execution, freeze the experiment, then explicitly start.
 4. Follow each attempt's **Open original session** link for Code tools, questions
    and approvals. Answers stay in the original controls; refreshing restores only
@@ -92,7 +93,7 @@ removing a container; uncertain cleanup remains unknown. Old shared-environment
 experiments retain their policy and immutable digests.
 
 This is reproducibility isolation for trusted personal tasks, not a hostile-host
-or arbitrary malicious-Python security boundary. Organization execution, EVAL-06,
+or arbitrary malicious-Python security boundary. Organization execution,
 Team evaluation and remote Workers remain outside this implementation. Management
 `EVALUATION_EXPERIMENT/eval05` evidence includes real Docker/pip negative fixtures
 and separately identified real Native/Code UI verification.
@@ -110,3 +111,24 @@ Starting an old pending experiment after a code/dependency change is rejected wi
 new experiment. Old results remain readable, and cancellation remains available.
 Relocating an identical installation or reorganizing commits does not change code
 identity. Each submitted attempt records its actual execution source separately.
+
+## Single-engine plan matrix (EVAL-06)
+
+A frozen experiment can contain up to eight distinct Deepagent/OpenCode plans,
+with up to 500 planned Trials. Each task × plan × repeat owns a fresh Session and
+workspace; retries remain Attempts of the original Trial. The database adds an
+immutable plan index while retaining old experiment IDs, fingerprints and records.
+Comparison reports use first attempts and all planned Trials per plan as the
+fixed denominator. Unknown costs stay unknown; the UI warning is not a hard budget.
+
+Use the existing host execution profiles. Installed OpenCode defaults are discovered
+through the ordinary configuration catalog. For evaluation, its actual configured
+model and endpoint must match a host model selection; an unspecified CLI model or
+mismatched selection is rejected before provisioning. For another OpenCode model,
+configure another ordinary profile; the evaluation plugin never rewrites runtime
+model configuration or silently substitutes a model. Credentials are not exported.
+
+The original Runtime remains the sole execution/control authority. This plugin
+limits submissions to the experiment concurrency and at most four in this service;
+unconfirmed exit retains capacity until cancellation confirms exit. This is a
+single-service limit, not a distributed worker quota. RSI internals are unchanged.

@@ -222,9 +222,77 @@ test('three-step creation freezes a single configuration and never starts execut
     await act(async () => find('evaluation-create').click());
     assert.equal(Boolean(find('evaluation-wizard')), false);
     assert.deepEqual(created.definition.tasks, [{ task_id: 'task', revision: 1 }]);
-    assert.equal(created.definition.execution_profile_id, 'native');
+    assert.deepEqual(created.definition.plans, [{ model: 'model', execution_profile_id: 'native', provider_id: 'native' }]);
     assert.equal(created.definition.name, 'Frozen UI');
     assert.equal(calls.filter((call) => call.method === 'evaluation.experiment.create').length, 1);
+    assert.equal(calls.filter((call) => call.method === 'evaluation.experiment.start').length, 0);
+  } finally {
+    webClient.request = originalRequest;
+  }
+});
+
+test('matrix creation freezes two engine plans and filters external model choices', async () => {
+  sessionStorage.clear();
+  const originalRequest = webClient.request;
+  let created;
+  webClient.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === 'evaluation.options')
+      return {
+        models: [{ selection_key: 'model', display_name: 'Model' }],
+        profiles: [{ id: 'native', revision: 'v1', provider_id: 'native' }, { id: 'oc', revision: 'v2', provider_id: 'opencode', model_selection_keys: ['model'], available: true }],
+        execution_available: true,
+        acceptance_policies: ['shared-environment-v1', 'independent-container-v1'],
+      };
+    if (method === 'evaluation.catalog')
+      return {
+        tasks: [
+          { id: 'task', revision: 1, value: { name: 'Task', instruction: 'Do it', acceptance: { kind: 'manual' } } },
+        ],
+        drafts: [],
+        datasets: [],
+      };
+    if (method === 'evaluation.experiment.list') return { experiments: created ? [created] : [] };
+    if (method === 'evaluation.experiment.create') {
+      created = { id: 'created', definition: params.experiment, trials: [] };
+      return created;
+    }
+    throw new Error(`unexpected ${method}`);
+  };
+  try {
+    await mount();
+    await act(async () => find('evaluation-new-experiment').click());
+    assert.ok(find('evaluation-wizard-next').disabled);
+    await act(async () => find('evaluation-wizard-task-select').click());
+    await act(async () => find('evaluation-wizard-next').click());
+    assert.equal(find('evaluation-wizard-configuration').hidden, false);
+    assert.ok(find('evaluation-wizard-next').disabled);
+    await act(async () => {
+      const input = find('evaluation-experiment-name');
+      Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set.call(input, 'Frozen UI');
+      input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+      input.dispatchEvent(new dom.window.FocusEvent('focusout', { bubbles: true }));
+    });
+    await act(async () => find('evaluation-add-plan').click());
+    assert.ok(find('evaluation-add-plan').disabled);
+    await act(async () => {
+      const select = find('evaluation-profile'); select.value = 'oc';
+      select.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    });
+    await act(async () => find('evaluation-add-plan').click());
+    assert.equal(document.querySelectorAll('[data-testid="evaluation-plan"]').length, 2);
+    await act(async () => find('evaluation-wizard-next').click());
+    assert.equal(find('evaluation-wizard-confirmation').hidden, false);
+    assert.match(find('evaluation-confirm-model').textContent, /OpenCode/);
+    assert.match(find('evaluation-confirm-frozen').textContent, /Creating the experiment freezes this configuration/);
+    assert.ok(find('evaluation-create').disabled);
+    await act(async () => find('evaluation-acknowledge').click());
+    await act(async () => find('evaluation-create').click());
+    assert.equal(Boolean(find('evaluation-wizard')), false);
+    assert.deepEqual(created.definition.tasks, [{ task_id: 'task', revision: 1 }]);
+    assert.deepEqual(created.definition.plans, [{ model: 'model', execution_profile_id: 'native', provider_id: 'native' }, { model: 'model', execution_profile_id: 'oc', provider_id: 'opencode' }]);
+    assert.equal(created.definition.name, 'Frozen UI');
+    assert.equal(created.definition.plans.length, 2);
     assert.equal(calls.filter((call) => call.method === 'evaluation.experiment.start').length, 0);
   } finally {
     webClient.request = originalRequest;

@@ -6,12 +6,12 @@ export interface Task {
   files?: { path: string; content: string; executable?: boolean }[];
   deliverables?: string[];
   acceptance?: {
-    kind: 'manual' | 'python';
+    kind: "manual" | "python";
     script?: string;
     timeout_seconds?: number;
     dependency_lock?: string | null;
   };
-  environment?: 'shared-host-v1';
+  environment?: "shared-host-v1";
 }
 export interface TaskVersion {
   id: string;
@@ -43,7 +43,14 @@ export interface ImportPreview {
 }
 export interface Options {
   models: { selection_key: string; display_name: string }[];
-  profiles: { id: string; revision: string }[];
+  profiles: {
+    id: string;
+    revision: string;
+    provider_id?: "native" | "opencode";
+    available?: boolean;
+    reason?: string;
+    model_selection_keys?: string[] | null;
+  }[];
   execution_available: boolean;
   acceptance_policies?: string[];
 }
@@ -67,11 +74,19 @@ export interface Attempt {
     files?: { path: string; status: string; sha256?: string; diff?: string }[];
   };
 }
+export interface ExecutionPlan {
+  model: string;
+  execution_profile_id: string;
+  provider_id: "native" | "opencode";
+}
 export interface Experiment {
   id: string;
   active?: boolean;
   definition: {
     name: string;
+    plans?: ExecutionPlan[];
+    provider_id?: "native" | "opencode";
+    concurrency?: number;
     model: string;
     execution_profile_id: string;
     timeout_seconds: number;
@@ -85,11 +100,19 @@ export interface Experiment {
     planned_trials: number;
     all_settled: boolean;
     first_attempt_outcomes?: Record<string, number>;
+    plans?: {
+      plan_index: number;
+      plan: ExecutionPlan;
+      passed: number;
+      denominator: number;
+      all_settled: boolean;
+    }[];
   };
   trials: {
     id: string;
     task_id: string;
     repeat_index: number;
+    plan_index?: number;
     attempts: Attempt[];
   }[];
 }

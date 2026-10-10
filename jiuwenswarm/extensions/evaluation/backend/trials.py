@@ -30,6 +30,8 @@ class Trials:
         self.observations = {}
         self.stopping = set()
         self.closed = False
+        self.capacity = asyncio.Semaphore(4)
+        self.retained_slots = set()
 
     @staticmethod
     def require_execution(identity):
@@ -58,10 +60,16 @@ class Trials:
             raise CatalogError("DEPENDENCY_CHANGED")
         return current
 
+    async def _configuration(self, definition):
+        if not definition.plans:
+            return await self.execution.configuration(definition)
+        return {"plans": [await self.execution.configuration(definition.for_plan(index))
+                          for index in range(len(definition.plans))]}
+
     async def create(self, identity, value, key):
         self.require_execution(identity)
         definition = decode(ExperimentDraft, value)
-        configuration = await self.execution.configuration(definition)
+        configuration = await self._configuration(definition)
         versions = {
             "plugin": "1.0.0",
             **self._sources(),
@@ -105,7 +113,7 @@ class Trials:
             raise CatalogError("UNRESOLVED_ATTEMPT")
         definition = decode(ExperimentDraft, experiment["definition"])
         if (
-            await self.execution.configuration(definition)
+            await self._configuration(definition)
             != experiment["versions"]["configuration"]
         ):
             raise CatalogError("CONFIGURATION_CHANGED")
@@ -156,10 +164,12 @@ class Trials:
     async def _run(self, identity, experiment_id):
         experiment = self.store.experiment(identity, experiment_id)
         definition = decode(ExperimentDraft, experiment["definition"])
-        for trial in experiment["trials"]:
+        slots = asyncio.Semaphore(definition.concurrency)
+
+        async def run_trial(trial):
             attempt = trial["attempts"][-1]
             if attempt["phase"] != "pending":
-                continue
+                return
             if experiment_id in self.stopping:
                 self._patch(
                     identity,
@@ -171,7 +181,7 @@ class Trials:
                     exit_confirmed=True,
                     submitted=False,
                 )
-                continue
+                return
             try:
                 # No await between read and CAS: the winner is durable before any side effect.
                 self.store.update_attempt(
@@ -183,7 +193,7 @@ class Trials:
                     body={"started_at": time.time(), "status": "submitting"},
                 )
             except CatalogError:
-                continue
+                return
             try:
                 task = decode(
                     TaskDraft,
@@ -195,7 +205,8 @@ class Trials:
                     ),
                 )
                 await self._run_attempt(
-                    identity, experiment_id, definition, task, attempt["id"]
+                    identity, experiment_id, definition.for_plan(trial.get("plan_index", 0)),
+                    task, attempt["id"], plan_index=trial.get("plan_index", 0)
                 )
             except Exception as exc:
                 current = self._attempt(identity, experiment_id, attempt["id"])
@@ -235,7 +246,33 @@ class Trials:
                     self._attempt(identity, experiment_id, attempt["id"])["phase"]
                     == "unknown"
                 ):
+                    self.stopping.add(experiment_id)
                     return
+
+
+        async def limited(trial):
+            async with slots:
+                while True:
+                    if experiment_id in self.stopping:
+                        await run_trial(trial)
+                        return
+                    try:
+                        await asyncio.wait_for(self.capacity.acquire(), timeout=0.25)
+                        break
+                    except TimeoutError:
+                        continue
+                attempt_id = trial["attempts"][-1]["id"]
+                try:
+                    await run_trial(trial)
+                finally:
+                    if self._attempt(identity, experiment_id, attempt_id)["phase"] == "unknown":
+                        # Unknown exit still owns capacity until explicit reconciliation.
+                        self.retained_slots.add(attempt_id)
+                    else:
+                        self.capacity.release()
+
+        # Bounded business submissions; each Session still has its original Runtime.
+        await asyncio.gather(*(limited(trial) for trial in experiment["trials"]))
 
     def _cancel_unsubmitted(self, identity, experiment_id, attempt_id):
         if experiment_id not in self.stopping:
@@ -247,9 +284,11 @@ class Trials:
         )
         return True
 
-    async def _run_attempt(self, identity, experiment_id, definition, task, attempt_id):
+    async def _run_attempt(self, identity, experiment_id, definition, task, attempt_id, *, plan_index=0):
         versions = self.store.experiment(identity, experiment_id)["versions"]
         expected = versions["configuration"]
+        if "plans" in expected:
+            expected = expected["plans"][plan_index]
         if await self.execution.configuration(definition) != expected:
             raise CatalogError("CONFIGURATION_CHANGED")
         if self._cancel_unsubmitted(identity, experiment_id, attempt_id):
@@ -516,6 +555,11 @@ class Trials:
                     status="settled",
                     exit_confirmed=True,
                 )
+        for trial in self.store.experiment(identity, experiment_id)["trials"]:
+            attempt = trial["attempts"][-1]
+            if attempt["phase"] == "settled" and attempt["id"] in self.retained_slots:
+                self.retained_slots.remove(attempt["id"])
+                self.capacity.release()
         return self.get(identity, experiment_id)
 
     async def close(self):
