@@ -841,6 +841,20 @@ def _read_interrupt_fields(value_obj: Any) -> tuple[str, str, dict | None]:
         )
         if tool_args is None:
             tool_args = _normalize_tool_args(value_obj.get("tool_args"))
+        if tool_args is None and value_obj.get("kind") == "tool_approval":
+            # The original harness IO adapter uses `arguments`, whereas Native
+            # permission interrupts use `tool_args`. Preserve its display facts
+            # through the existing sanitized permission card, not a new prompt.
+            tool_args = _normalize_tool_args(value_obj.get("arguments"))
+            provider_data = value_obj.get("provider_data")
+            opencode = provider_data.get("opencode") if isinstance(provider_data, dict) else None
+            if isinstance(opencode, dict):
+                scope = {key: opencode[key] for key in ("patterns", "always")
+                         if isinstance(opencode.get(key), list)}
+                if scope:
+                    # OpenCode may omit metadata. Scope is not a reconstructed
+                    # command; retain the native field names without inventing it.
+                    tool_args = {"arguments": tool_args or {}, **scope}
 
     return tool_name, message, tool_args
 
